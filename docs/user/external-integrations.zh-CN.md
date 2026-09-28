@@ -10,11 +10,13 @@ CPA（CLI Proxy API）是本机订阅运行时。Open Console Gateway 可管理�
 
 只支持以下本机部署：
 
-- **Windows x64、macOS 或 Linux x64 的桌面版或 CLI：** OCG 可以下载对应该操作系统和 CPU 的官方 CLIProxyAPI 资源，放在 OCG 数据目录下，并作为 OCG 拥有的子进程启动。启动只能手动；OCG 退出时子进程停止。OCG 从不停止它没有启动的 CPA。其他操作系统/CPU 没有官方资源，安装会以明确原因失败。
+- **Windows x64、macOS 或 Linux x64 的桌面版或 CLI：** OCG 可以下载对应该操作系统和 CPU 的官方 CLIProxyAPI 资源，放在 OCG 数据目录下，并作为 OCG 拥有的子进程启动。安装或手动启动成功后，OCG 会记住 CPA 应当运行。OCG 退出时子进程仍会停止，下次 OCG 启动时会在后台恢复。点击**停止**会取消启动恢复；恢复失败后也可以这样取消。OCG 从不停止它没有启动的 CPA。其他操作系统/CPU 没有官方资源，安装会以明确原因失败。
 - **桌面版或 CLI：** 在同一台机器运行 CPA，并配置回环地址，例如 `http://127.0.0.1:8317`。
 - **Docker：** 启用 [Docker](docker.zh-CN.md) 中的可选 Compose 并列服务。OCG 使用只读的 `http://cpa:8317` 服务地址；面板不接受局域网、互联网或跨节点 CPA 地址。
 
 包含内嵌凭据、query、fragment、重定向或非回环主机的 URL 会被拒绝。不要把 Open Console Gateway Key 复用为任一 CPA Key。
+
+启动恢复复用已安装的 CPA 版本、配置和登录状态。每次 OCG 进程启动只尝试一次；失败会显示在 CPA 页面上，不阻塞 OCG，也不会循环重启。没有保存运行意图的旧安装保持停止，手动启动一次后才会自动恢复。外部 CPA 连接（包括 Docker 并列服务）仍自行管理生命周期。
 
 ### 连接与运维
 

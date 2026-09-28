@@ -2877,6 +2877,9 @@ pub struct CpaRuntime {
     pub unavailable_reason: Option<String>,
     pub installed: bool,
     pub running: bool,
+    /// Last explicit Start/Stop intent for the OCG-owned child. True means the
+    /// next Open Console Gateway process should restore that child once.
+    pub desired_running: bool,
     pub owned: bool,
     pub current_version: Option<String>,
     pub previous_version: Option<String>,

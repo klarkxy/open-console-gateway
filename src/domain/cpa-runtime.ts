@@ -212,12 +212,19 @@ export function cpaRuntimeControls(state: CpaRuntimeControlState): Record<CpaRun
   return {
     install: !runtime.installed,
     start: runtime.installed && !runtime.running,
-    stop: runtime.installed && runtime.running,
+    stop: runtime.installed && (runtime.running || runtime.desiredRunning),
     checkUpdate: true,
     update: runtime.installed && updateCheck?.updateAvailable === true,
     rollback: runtime.installed && !!runtime.previousVersion,
     remove: runtime.installed,
   };
+}
+
+/** Owned install with persisted run intent will restore on the next OCG process start. */
+export function cpaStartupRestorePending(
+  runtime: Pick<CpaRuntime, "installed" | "owned" | "desiredRunning"> | null,
+): boolean {
+  return !!runtime && runtime.installed && runtime.owned && runtime.desiredRunning;
 }
 
 /** Client-side bound for the rendered log tail; the backend tail is bounded too. */

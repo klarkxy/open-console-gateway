@@ -90,6 +90,10 @@ pub fn run() {
             host::register_dock_visibility(core, app);
             updater::configure(app.handle(), core.clone())?;
             host::gateway::start_on_configured_port(core)?;
+            let restorer = core.clone();
+            tauri::async_runtime::spawn(async move {
+                restorer.restore_owned_cpa_runtime_on_startup().await;
+            });
             if !autostart::is_startup_launch() {
                 tray::open_dashboard(app.handle());
             }

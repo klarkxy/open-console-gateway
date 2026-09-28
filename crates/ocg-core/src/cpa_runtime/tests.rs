@@ -4,7 +4,9 @@ use crate::db::{CpaCatalogModel, Database};
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Write};
 use std::sync::Arc;
+use std::sync::Barrier;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
@@ -150,6 +152,7 @@ fn managed_json_roundtrip_omits_pid_and_secrets() {
             previous_version: Some("7.2.140".into()),
             asset_sha256: "a".repeat(64),
             port: 8317,
+            desired_running: false,
         },
     )
     .unwrap();
@@ -157,9 +160,14 @@ fn managed_json_roundtrip_omits_pid_and_secrets() {
     assert!(!encoded.contains("pid"));
     assert!(!encoded.contains("secret"));
     assert!(!encoded.contains("key"));
+    assert!(
+        !encoded.contains("desiredRunning") && !encoded.contains("desired_running"),
+        "false intent must stay omitted so older manifests keep loading"
+    );
     let loaded = load_managed(&dir).unwrap().unwrap();
     assert_eq!(loaded.port, 8317);
     assert_eq!(loaded.current_version, "7.2.147");
+    assert!(!loaded.desired_running);
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -350,6 +358,7 @@ fn update_secrets_require_readable_valid_config_and_preserve_extras() {
             previous_version: None,
             asset_sha256: "a".repeat(64),
             port: 8317,
+            desired_running: false,
         },
     )
     .unwrap();
@@ -525,6 +534,7 @@ fn snapshot_owned_follows_managed_json_not_process() {
             previous_version: None,
             asset_sha256: "b".repeat(64),
             port: 8317,
+            desired_running: false,
         },
     )
     .unwrap();
@@ -532,6 +542,7 @@ fn snapshot_owned_follows_managed_json_not_process() {
     assert!(snapshot.installed);
     assert!(snapshot.owned);
     assert!(!snapshot.running);
+    assert!(!snapshot.desired_running);
     drop(state);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -624,6 +635,7 @@ async fn stopped_managed_runtime_lists_configured_client_keys() {
             previous_version: None,
             asset_sha256: "b".repeat(64),
             port: 8317,
+            desired_running: false,
         },
     )
     .unwrap();
@@ -733,6 +745,7 @@ async fn occupied_managed_port_never_stops_an_unknown_process() {
             previous_version: None,
             asset_sha256: "a".repeat(64),
             port,
+            desired_running: false,
         },
     )
     .unwrap();
@@ -910,6 +923,7 @@ async fn failed_rollback_restores_config_manifest_and_former_running_version() {
             previous_version: Some("7.2.140".into()),
             asset_sha256: "a".repeat(64),
             port,
+            desired_running: false,
         },
     )
     .unwrap();
@@ -1016,6 +1030,7 @@ async fn assert_successful_rollback_catalog(label: &str, expected_models: Vec<St
             previous_version: Some("7.2.140".into()),
             asset_sha256: "a".repeat(64),
             port,
+            desired_running: true,
         },
     )
     .unwrap();
@@ -1049,6 +1064,7 @@ async fn assert_successful_rollback_catalog(label: &str, expected_models: Vec<St
     assert_eq!(managed.current_version, "7.2.140");
     assert_eq!(managed.previous_version.as_deref(), Some("7.2.147"));
     assert_eq!(managed.asset_sha256, "b".repeat(64));
+    assert!(managed.desired_running, "{label}");
     drop(state);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -1189,6 +1205,7 @@ async fn remove_deletes_owned_auth_before_managed_json_and_is_retryable() {
             previous_version: None,
             asset_sha256: "a".repeat(64),
             port: 8317,
+            desired_running: false,
         },
     )
     .unwrap();
@@ -1221,6 +1238,7 @@ async fn remove_deletes_owned_auth_before_managed_json_and_is_retryable() {
             previous_version: None,
             asset_sha256: "a".repeat(64),
             port: 8317,
+            desired_running: false,
         },
     )
     .unwrap();
@@ -1391,6 +1409,7 @@ fn prepare_managed_runtime(dir: &std::path::Path, state: &CoreStateInner, port: 
             previous_version: None,
             asset_sha256: "a".repeat(64),
             port,
+            desired_running: false,
         },
     )
     .unwrap();
@@ -1425,6 +1444,8 @@ async fn successful_start_bumps_revision_and_rejects_stale_stop() {
     assert_eq!(host.starts.load(Ordering::SeqCst), 1);
     assert!(host.owned_running());
     assert_eq!(state.settings_revision(), revision + 1);
+    assert!(load_managed(&dir).unwrap().unwrap().desired_running);
+    assert!(state.cpa_runtime_snapshot().desired_running);
 
     assert_revision_conflict(
         state
@@ -1447,7 +1468,7 @@ async fn successful_start_bumps_revision_and_rejects_stale_stop() {
 }
 
 #[tokio::test]
-async fn already_running_start_does_not_bump_but_stop_does() {
+async fn already_running_start_persists_intent_then_stop_bumps() {
     let dir = temp_dir("start-noop-cas");
     save_managed(
         &dir,
@@ -1456,6 +1477,7 @@ async fn already_running_start_does_not_bump_but_stop_does() {
             previous_version: None,
             asset_sha256: "a".repeat(64),
             port: 8317,
+            desired_running: false,
         },
     )
     .unwrap();
@@ -1468,13 +1490,23 @@ async fn already_running_start_does_not_bump_but_stop_does() {
     let generation = state.process_generation();
 
     state.start_cpa_runtime(revision, generation).await.unwrap();
-    assert_eq!(state.settings_revision(), revision);
+    assert_eq!(state.settings_revision(), revision + 1);
+    assert_eq!(host.starts.lock().len(), 0);
+    assert!(load_managed(&dir).unwrap().unwrap().desired_running);
+
+    let after_start = state.settings_revision();
+    state
+        .start_cpa_runtime(after_start, generation)
+        .await
+        .unwrap();
+    assert_eq!(state.settings_revision(), after_start);
     assert_eq!(host.starts.lock().len(), 0);
 
-    state.stop_cpa_runtime(revision, generation).unwrap();
+    state.stop_cpa_runtime(after_start, generation).unwrap();
     assert_eq!(host.stops.load(Ordering::SeqCst), 1);
     assert!(!host.owned_running());
-    assert_eq!(state.settings_revision(), revision + 1);
+    assert!(!load_managed(&dir).unwrap().unwrap().desired_running);
+    assert_eq!(state.settings_revision(), after_start + 1);
 
     assert_revision_conflict(
         state
@@ -1491,6 +1523,732 @@ async fn already_running_start_does_not_bump_but_stop_does() {
     );
     assert_eq!(host.starts.lock().len(), 0);
 
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn launch_start_bumps_revision_when_desired_already_true() {
+    let port = free_loopback_port();
+    let dir = temp_dir("launch-already-desired");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    prepare_managed_runtime(&dir, &state, port);
+    mark_desired_running(&dir, true);
+    let host = Arc::new(ProbeHost::new(port));
+    state.set_cpa_runtime_host(host.clone());
+    let revision = state.settings_revision();
+    let generation = state.process_generation();
+
+    state.start_cpa_runtime(revision, generation).await.unwrap();
+    assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+    assert!(host.owned_running());
+    assert_eq!(state.settings_revision(), revision + 1);
+    assert!(load_managed(&dir).unwrap().unwrap().desired_running);
+
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn stop_running_child_bumps_revision_when_desired_already_false() {
+    let dir = temp_dir("stop-legacy-false");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    prepare_managed_runtime(&dir, &state, free_loopback_port());
+    let host = Arc::new(RecordingHost::new(true));
+    state.set_cpa_runtime_host(host.clone());
+    assert!(!load_managed(&dir).unwrap().unwrap().desired_running);
+    let revision = state.settings_revision();
+
+    state
+        .stop_cpa_runtime(revision, state.process_generation())
+        .unwrap();
+    assert_eq!(host.stops.load(Ordering::SeqCst), 1);
+    assert!(!host.owned_running());
+    assert!(!load_managed(&dir).unwrap().unwrap().desired_running);
+    assert_eq!(state.settings_revision(), revision + 1);
+
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn stale_stop_does_not_clear_failure_logs_or_intent() {
+    let dir = temp_dir("stale-stop-logs");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    prepare_managed_runtime(&dir, &state, free_loopback_port());
+    mark_desired_running(&dir, true);
+    let host = Arc::new(RecordingHost::new(true));
+    state.set_cpa_runtime_host(host.clone());
+    let cached = CpaRuntimeLogTail {
+        stdout: "cached-stdout".into(),
+        stderr: "cached-stderr".into(),
+    };
+    state.cpa_runtime.cache_failure_logs(cached.clone());
+    let revision = state.settings_revision();
+    assert_revision_conflict(
+        state
+            .stop_cpa_runtime(revision.wrapping_add(1), state.process_generation())
+            .expect_err("stale stop must not mutate runtime"),
+    );
+    assert_eq!(state.cpa_runtime.failure_logs(), Some(cached));
+    assert_eq!(host.stops.load(Ordering::SeqCst), 0);
+    assert!(host.owned_running());
+    assert!(load_managed(&dir).unwrap().unwrap().desired_running);
+    assert_eq!(state.settings_revision(), revision);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn mark_desired_running(dir: &std::path::Path, desired: bool) {
+    let mut managed = load_managed(dir).unwrap().unwrap();
+    managed.desired_running = desired;
+    save_managed(dir, &managed).unwrap();
+}
+
+async fn wait_until(pred: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !pred() {
+        if Instant::now() >= deadline {
+            panic!("timeout waiting for CPA startup restore");
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+struct FailingStartHost {
+    starts: AtomicUsize,
+    stops: AtomicUsize,
+    running: AtomicBool,
+}
+
+impl FailingStartHost {
+    fn new() -> Self {
+        Self {
+            starts: AtomicUsize::new(0),
+            stops: AtomicUsize::new(0),
+            running: AtomicBool::new(false),
+        }
+    }
+}
+
+impl CpaRuntimeProcessHost for FailingStartHost {
+    fn start_owned(&self, _spec: &CpaRuntimeProcessSpec) -> Result<(), CpaRuntimeError> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        Err(CpaRuntimeError::Failed(
+            "owned CPA child refused to start".into(),
+        ))
+    }
+
+    fn stop_owned(&self) -> Result<(), CpaRuntimeError> {
+        self.stops.fetch_add(1, Ordering::SeqCst);
+        self.running.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn owned_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    fn logs(&self) -> CpaRuntimeLogTail {
+        CpaRuntimeLogTail {
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
+    fn add_log_secret(&self, _secret: &CpaRuntimeSecret) {}
+}
+
+#[test]
+fn old_managed_json_defaults_desired_running_false() {
+    let dir = temp_dir("old-manifest");
+    fs::create_dir_all(runtime_dir(&dir)).unwrap();
+    fs::write(
+        managed_path(&dir),
+        format!(
+            "{{\"currentVersion\":\"7.2.147\",\"assetSha256\":\"{}\",\"port\":8317}}",
+            "a".repeat(64)
+        ),
+    )
+    .unwrap();
+    let loaded = load_managed(&dir).unwrap().unwrap();
+    assert!(!loaded.desired_running);
+    assert_eq!(loaded.current_version, "7.2.147");
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn fresh_install_records_run_intent_and_update_preserves_it() {
+    assert!(inherited_desired_running(None));
+    let stopped = ManagedCpa {
+        current_version: "7.2.147".into(),
+        previous_version: None,
+        asset_sha256: "a".repeat(64),
+        port: 8317,
+        desired_running: false,
+    };
+    assert!(!inherited_desired_running(Some(&stopped)));
+    let running = ManagedCpa {
+        desired_running: true,
+        ..stopped
+    };
+    assert!(inherited_desired_running(Some(&running)));
+}
+
+#[tokio::test]
+async fn explicit_start_and_stop_persist_across_core_state_recreation() {
+    let port = free_loopback_port();
+    let dir = temp_dir("intent-recreate");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state = CoreStateInner::new(
+        Database::open(dir.clone()).unwrap(),
+        dir.clone(),
+        cipher.clone(),
+    )
+    .unwrap();
+    prepare_managed_runtime(&dir, &state, port);
+    state.set_cpa_runtime_host(Arc::new(ProbeHost::new(port)));
+    state
+        .start_cpa_runtime(state.settings_revision(), state.process_generation())
+        .await
+        .unwrap();
+    assert!(load_managed(&dir).unwrap().unwrap().desired_running);
+    drop(state);
+
+    let reopened = CoreStateInner::new(
+        Database::open(dir.clone()).unwrap(),
+        dir.clone(),
+        cipher.clone(),
+    )
+    .unwrap();
+    assert!(load_managed(&dir).unwrap().unwrap().desired_running);
+    assert!(reopened.cpa_runtime_snapshot().desired_running);
+    assert!(!reopened.cpa_runtime_snapshot().running);
+    reopened.set_cpa_runtime_host(Arc::new(StoppedHost));
+    reopened
+        .stop_cpa_runtime(reopened.settings_revision(), reopened.process_generation())
+        .unwrap();
+    assert!(!load_managed(&dir).unwrap().unwrap().desired_running);
+    drop(reopened);
+
+    let after_stop =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    assert!(!after_stop.cpa_runtime_snapshot().desired_running);
+    drop(after_stop);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn host_shutdown_stops_child_but_preserves_run_intent() {
+    let port = free_loopback_port();
+    let dir = temp_dir("shutdown-intent");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    prepare_managed_runtime(&dir, &state, port);
+    let host = Arc::new(ProbeHost::new(port));
+    state.set_cpa_runtime_host(host.clone());
+    state
+        .start_cpa_runtime(state.settings_revision(), state.process_generation())
+        .await
+        .unwrap();
+    assert!(host.owned_running());
+    state.stop_owned_cpa_runtime();
+    assert!(!host.owned_running());
+    assert!(load_managed(&dir).unwrap().unwrap().desired_running);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn startup_restore_runs_once_in_the_background() {
+    let dir = temp_dir("restore-once");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state = Arc::new(
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap(),
+    );
+    prepare_managed_runtime(&dir, &state, free_loopback_port());
+    mark_desired_running(&dir, true);
+    let host = Arc::new(FailingStartHost::new());
+    state.set_cpa_runtime_host(host.clone());
+
+    let scheduled = Instant::now();
+    let once = state.clone();
+    tokio::spawn(async move {
+        once.restore_owned_cpa_runtime_on_startup().await;
+    });
+    let again = state.clone();
+    tokio::spawn(async move {
+        again.restore_owned_cpa_runtime_on_startup().await;
+    });
+    assert!(
+        scheduled.elapsed() < Duration::from_millis(200),
+        "startup restore must not block host startup"
+    );
+    wait_until(|| state.cpa_runtime.snapshot_machine().0 == CpaRuntimePhase::Failed).await;
+    assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn queued_restore_rereads_intent_so_manual_stop_wins() {
+    let dir = temp_dir("stop-vs-restore");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state = Arc::new(
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap(),
+    );
+    prepare_managed_runtime(&dir, &state, free_loopback_port());
+    mark_desired_running(&dir, true);
+    let host = Arc::new(RecordingHost::new(false));
+    state.set_cpa_runtime_host(host.clone());
+
+    let hold = state.cpa_operations.lock().await;
+    let worker = state.clone();
+    let restore = tokio::spawn(async move {
+        worker.restore_owned_cpa_runtime_on_startup().await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    state
+        .stop_cpa_runtime(state.settings_revision(), state.process_generation())
+        .unwrap();
+    assert!(!load_managed(&dir).unwrap().unwrap().desired_running);
+    drop(hold);
+    restore.await.unwrap();
+    assert_eq!(host.starts.lock().len(), 0);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_during_queued_restore_does_not_start_the_child() {
+    let dir = temp_dir("shutdown-vs-restore");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state = Arc::new(
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap(),
+    );
+    prepare_managed_runtime(&dir, &state, free_loopback_port());
+    mark_desired_running(&dir, true);
+    let host = Arc::new(RecordingHost::new(false));
+    state.set_cpa_runtime_host(host.clone());
+
+    let hold = state.cpa_operations.lock().await;
+    let worker = state.clone();
+    let restore = tokio::spawn(async move {
+        worker.restore_owned_cpa_runtime_on_startup().await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    state.stop_owned_cpa_runtime();
+    drop(hold);
+    restore.await.unwrap();
+    assert_eq!(host.starts.lock().len(), 0);
+    assert!(load_managed(&dir).unwrap().unwrap().desired_running);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn failed_restore_stays_visible_is_not_retried_and_remains_stoppable() {
+    let dir = temp_dir("restore-fail");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state = Arc::new(
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap(),
+    );
+    prepare_managed_runtime(&dir, &state, free_loopback_port());
+    mark_desired_running(&dir, true);
+    let host = Arc::new(FailingStartHost::new());
+    state.set_cpa_runtime_host(host.clone());
+
+    let worker = state.clone();
+    tokio::spawn(async move {
+        worker.restore_owned_cpa_runtime_on_startup().await;
+    });
+    wait_until(|| state.cpa_runtime.snapshot_machine().0 == CpaRuntimePhase::Failed).await;
+    assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+    assert!(load_managed(&dir).unwrap().unwrap().desired_running);
+    let error = state.cpa_runtime_snapshot().error;
+    assert!(error.is_some());
+
+    let worker = state.clone();
+    tokio::spawn(async move {
+        worker.restore_owned_cpa_runtime_on_startup().await;
+    });
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        state.cpa_runtime.snapshot_machine().0,
+        CpaRuntimePhase::Failed
+    );
+    assert_eq!(state.cpa_runtime_snapshot().error, error);
+
+    state
+        .stop_cpa_runtime(state.settings_revision(), state.process_generation())
+        .unwrap();
+    assert!(!load_managed(&dir).unwrap().unwrap().desired_running);
+    assert!(!state.cpa_runtime_snapshot().desired_running);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn failed_initial_manual_start_does_not_invent_run_intent() {
+    let dir = temp_dir("failed-start-intent");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    prepare_managed_runtime(&dir, &state, free_loopback_port());
+    state.set_cpa_runtime_host(Arc::new(FailingStartHost::new()));
+    let error = state
+        .start_cpa_runtime(state.settings_revision(), state.process_generation())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, CpaRuntimeError::Failed(_)));
+    assert!(!load_managed(&dir).unwrap().unwrap().desired_running);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn restore_skips_old_manifest_and_missing_install() {
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+
+    let missing = temp_dir("restore-missing");
+    let missing_state = CoreStateInner::new(
+        Database::open(missing.clone()).unwrap(),
+        missing.clone(),
+        cipher.clone(),
+    )
+    .unwrap();
+    let missing_host = Arc::new(RecordingHost::new(false));
+    missing_state.set_cpa_runtime_host(missing_host.clone());
+    missing_state.restore_owned_cpa_runtime_on_startup().await;
+    assert_eq!(missing_host.starts.lock().len(), 0);
+    drop(missing_state);
+    fs::remove_dir_all(missing).unwrap();
+
+    let old = temp_dir("restore-old");
+    fs::create_dir_all(runtime_dir(&old)).unwrap();
+    fs::write(
+        managed_path(&old),
+        format!(
+            "{{\"currentVersion\":\"7.2.147\",\"assetSha256\":\"{}\",\"port\":8317}}",
+            "a".repeat(64)
+        ),
+    )
+    .unwrap();
+    let old_state =
+        CoreStateInner::new(Database::open(old.clone()).unwrap(), old.clone(), cipher).unwrap();
+    let old_host = Arc::new(RecordingHost::new(false));
+    old_state.set_cpa_runtime_host(old_host.clone());
+    old_state.restore_owned_cpa_runtime_on_startup().await;
+    assert!(!load_managed(&old).unwrap().unwrap().desired_running);
+    assert_eq!(old_host.starts.lock().len(), 0);
+    drop(old_state);
+    fs::remove_dir_all(old).unwrap();
+}
+
+#[tokio::test]
+async fn successful_restore_does_not_bump_revision_or_retry() {
+    let port = free_loopback_port();
+    let dir = temp_dir("restore-success");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state = Arc::new(
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap(),
+    );
+    prepare_managed_runtime(&dir, &state, port);
+    mark_desired_running(&dir, true);
+    let host = Arc::new(ProbeHost::new(port));
+    state.set_cpa_runtime_host(host.clone());
+    let revision = state.settings_revision();
+    state.restore_owned_cpa_runtime_on_startup().await;
+    assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+    assert!(host.owned_running());
+    assert_eq!(state.settings_revision(), revision);
+    assert!(load_managed(&dir).unwrap().unwrap().desired_running);
+    state.restore_owned_cpa_runtime_on_startup().await;
+    assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+struct SpawnBoundary {
+    arrived: Arc<Barrier>,
+    release: Arc<Barrier>,
+}
+
+impl SpawnBoundary {
+    fn new() -> Self {
+        Self {
+            arrived: Arc::new(Barrier::new(2)),
+            release: Arc::new(Barrier::new(2)),
+        }
+    }
+
+    fn pause(&self) -> impl Fn() + Send + Sync + 'static {
+        let arrived = self.arrived.clone();
+        let release = self.release.clone();
+        move || {
+            arrived.wait();
+            release.wait();
+        }
+    }
+
+    fn wait_shutdown_then_release(&self, state: &CoreStateInner) {
+        self.arrived.wait();
+        state.stop_owned_cpa_runtime();
+        self.release.wait();
+    }
+}
+
+struct FailingStopHost {
+    running: AtomicBool,
+    stops: AtomicUsize,
+}
+
+impl CpaRuntimeProcessHost for FailingStopHost {
+    fn start_owned(&self, _spec: &CpaRuntimeProcessSpec) -> Result<(), CpaRuntimeError> {
+        self.running.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn stop_owned(&self) -> Result<(), CpaRuntimeError> {
+        self.stops.fetch_add(1, Ordering::SeqCst);
+        Err(CpaRuntimeError::Failed(
+            "owned CPA child refused to stop".into(),
+        ))
+    }
+
+    fn owned_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    fn logs(&self) -> CpaRuntimeLogTail {
+        CpaRuntimeLogTail {
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
+    fn add_log_secret(&self, _secret: &CpaRuntimeSecret) {}
+}
+
+fn block_on_start(
+    state: Arc<CoreStateInner>,
+    revision: u64,
+    generation: u64,
+) -> Result<CpaRuntimeSnapshot, CpaRuntimeError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(state.start_cpa_runtime(revision, generation))
+}
+
+#[test]
+fn abandoned_host_initialization_does_not_restore_owned_runtime() {
+    let dir = temp_dir("abandoned-init");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    prepare_managed_runtime(&dir, &state, free_loopback_port());
+    mark_desired_running(&dir, true);
+    let host = Arc::new(RecordingHost::new(false));
+    state.set_cpa_runtime_host(host.clone());
+    assert!(!state.cpa_runtime.restore_scheduled.load(Ordering::SeqCst));
+    assert_eq!(host.starts.lock().len(), 0);
+    assert!(!host.owned_running());
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn shutdown_at_launch_spawn_boundary_leaves_no_child() {
+    let dir = temp_dir("spawn-shutdown-launch");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state = Arc::new(
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap(),
+    );
+    prepare_managed_runtime(&dir, &state, free_loopback_port());
+    let host = Arc::new(RecordingHost::new(false));
+    state.set_cpa_runtime_host(host.clone());
+    let gate = SpawnBoundary::new();
+    state.cpa_runtime.set_before_owned_spawn_pause(gate.pause());
+    let revision = state.settings_revision();
+    let generation = state.process_generation();
+    let worker = state.clone();
+    let launch = std::thread::spawn(move || block_on_start(worker, revision, generation));
+    gate.wait_shutdown_then_release(&state);
+    let outcome = launch.join().expect("launch thread");
+    assert!(outcome.is_err());
+    assert_eq!(host.starts.lock().len(), 0);
+    assert!(!host.owned_running());
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn shutdown_at_compensation_spawn_boundary_leaves_no_child() {
+    let dir = temp_dir("spawn-shutdown-compensate");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state = Arc::new(
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap(),
+    );
+    prepare_managed_runtime(&dir, &state, free_loopback_port());
+    let host = Arc::new(RecordingHost::new(true));
+    let process_host: CpaRuntimeHost = host.clone();
+    state.set_cpa_runtime_host(process_host.clone());
+    let managed = load_managed(&dir).unwrap().unwrap();
+    let config_bytes = fs::read(runtime_dir(&dir).join(CONFIG_NAME)).unwrap();
+    let gate = SpawnBoundary::new();
+    state.cpa_runtime.set_before_owned_spawn_pause(gate.pause());
+    let worker = state.clone();
+    let previous = managed.clone();
+    let launch = std::thread::spawn(move || {
+        worker.restore_candidate_failure(
+            &process_host,
+            Some(&previous),
+            Some(&config_bytes),
+            true,
+            "management-key",
+        )
+    });
+    gate.wait_shutdown_then_release(&state);
+    let outcome = launch.join().expect("compensation thread");
+    assert!(outcome.is_err());
+    assert_eq!(host.starts.lock().len(), 0);
+    assert!(!host.owned_running());
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn failed_host_stop_keeps_cleared_intent_and_publishes_error() {
+    let dir = temp_dir("stop-host-fail");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    prepare_managed_runtime(&dir, &state, free_loopback_port());
+    mark_desired_running(&dir, true);
+    let host = Arc::new(FailingStopHost {
+        running: AtomicBool::new(true),
+        stops: AtomicUsize::new(0),
+    });
+    state.set_cpa_runtime_host(host.clone());
+    let revision = state.settings_revision();
+    let error = state
+        .stop_cpa_runtime(revision, state.process_generation())
+        .expect_err("host stop failure must surface");
+    assert!(matches!(error, CpaRuntimeError::Failed(_)));
+    assert_eq!(state.settings_revision(), revision + 1);
+    assert!(!load_managed(&dir).unwrap().unwrap().desired_running);
+    let snapshot = state.cpa_runtime_snapshot();
+    assert!(!snapshot.desired_running);
+    assert!(snapshot.running);
+    assert_eq!(snapshot.phase, CpaRuntimePhase::Failed);
+    assert!(snapshot.error.is_some());
+    assert_eq!(host.stops.load(Ordering::SeqCst), 1);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn manifest_write_failure_does_not_change_intent_or_revision() {
+    let dir = temp_dir("manifest-write-fail");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    prepare_managed_runtime(&dir, &state, free_loopback_port());
+    let host = Arc::new(RecordingHost::new(true));
+    state.set_cpa_runtime_host(host.clone());
+    let revision = state.settings_revision();
+    let generation = state.process_generation();
+
+    {
+        let _fail = FailNextManagedSave::arm(&dir);
+        let start_error = state
+            .start_cpa_runtime(revision, generation)
+            .await
+            .expect_err("start must not record intent when managed.json cannot be written");
+        assert!(matches!(start_error, CpaRuntimeError::Failed(_)));
+    }
+    assert_eq!(state.settings_revision(), revision);
+    assert!(!load_managed(&dir).unwrap().unwrap().desired_running);
+    assert!(host.owned_running());
+    assert_eq!(host.starts.lock().len(), 0);
+
+    mark_desired_running(&dir, true);
+    {
+        let _fail = FailNextManagedSave::arm(&dir);
+        let stop_error = state
+            .stop_cpa_runtime(revision, generation)
+            .expect_err("stop must not clear intent when managed.json cannot be written");
+        assert!(matches!(stop_error, CpaRuntimeError::Failed(_)));
+    }
+    assert_eq!(state.settings_revision(), revision);
+    assert!(load_managed(&dir).unwrap().unwrap().desired_running);
+    assert!(host.owned_running());
+    assert_eq!(host.stops.load(Ordering::SeqCst), 0);
+
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn late_manual_start_commit_after_shutdown_does_not_publish_idle() {
+    let port = free_loopback_port();
+    let dir = temp_dir("late-start-commit");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state = Arc::new(
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap(),
+    );
+    prepare_managed_runtime(&dir, &state, port);
+    let host = Arc::new(ProbeHost::new(port));
+    state.set_cpa_runtime_host(host.clone());
+    let gate = SpawnBoundary::new();
+    state
+        .cpa_runtime
+        .set_before_manual_start_commit_pause(gate.pause());
+    let revision = state.settings_revision();
+    let generation = state.process_generation();
+    let worker = state.clone();
+    let launch = std::thread::spawn(move || block_on_start(worker, revision, generation));
+    gate.wait_shutdown_then_release(&state);
+    let outcome = launch.join().expect("start commit thread");
+    assert!(outcome.is_err());
+    assert!(!host.owned_running());
+    assert!(!load_managed(&dir).unwrap().unwrap().desired_running);
+    assert_eq!(state.settings_revision(), revision);
+    assert_ne!(state.cpa_runtime_snapshot().phase, CpaRuntimePhase::Idle);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn already_running_start_commit_after_shutdown_does_not_publish_idle() {
+    let dir = temp_dir("already-running-shutdown-commit");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    prepare_managed_runtime(&dir, &state, free_loopback_port());
+    let host = Arc::new(RecordingHost::new(true));
+    state.set_cpa_runtime_host(host.clone());
+    state.cpa_runtime.set_phase(CpaRuntimePhase::Starting, None);
+    let revision = state.settings_revision();
+    let generation = state.process_generation();
+    state.stop_owned_cpa_runtime();
+    let error = state
+        .commit_desired_running(revision, generation, true)
+        .expect_err("already-running start must not commit after terminal shutdown");
+    assert!(matches!(error, CpaRuntimeError::Invalid(_)));
+    assert!(!load_managed(&dir).unwrap().unwrap().desired_running);
+    assert_eq!(state.settings_revision(), revision);
+    assert_ne!(state.cpa_runtime_snapshot().phase, CpaRuntimePhase::Idle);
     drop(state);
     fs::remove_dir_all(dir).unwrap();
 }

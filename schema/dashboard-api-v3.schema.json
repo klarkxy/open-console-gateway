@@ -2350,6 +2350,10 @@
             "null"
           ]
         },
+        "desiredRunning": {
+          "description": "Last explicit Start/Stop intent for the OCG-owned child. True means the\nnext Open Console Gateway process should restore that child once.",
+          "type": "boolean"
+        },
         "error": {
           "type": [
             "string",
@@ -2417,6 +2421,7 @@
         "unavailableReason",
         "installed",
         "running",
+        "desiredRunning",
         "owned",
         "currentVersion",
         "previousVersion",

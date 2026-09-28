@@ -17,6 +17,7 @@ import {
   cpaManagedRuntimeConfirmed,
   cpaRuntimeControls,
   cpaRuntimeMode,
+  cpaStartupRestorePending,
   formatCpaQuota,
   groupCpaCatalogModels,
   isCpaOAuthSuccessStatus,
@@ -42,6 +43,7 @@ function runtime(overrides: Partial<CpaRuntime> = {}): CpaRuntime {
     processGeneration: 1,
     revision: 1,
     running: true,
+    desiredRunning: false,
     supported: true,
     unavailableReason: null,
     updateAvailable: false,
@@ -194,6 +196,42 @@ test("control availability follows install/run/version state", () => {
     ...noUpdate,
   });
   assert.ok(installedStopped.start && !installedStopped.stop && installedStopped.rollback);
+
+  const failedRestore = cpaRuntimeControls({
+    runtime: runtime({
+      running: false,
+      desiredRunning: true,
+      phase: "failed",
+      error: "owned CPA child refused to start",
+    }),
+    ...noUpdate,
+  });
+  assert.ok(failedRestore.stop && failedRestore.start && !failedRestore.install);
+
+  const externalInactive = cpaRuntimeControls({
+    runtime: runtime({ owned: false, running: false, desiredRunning: true }),
+    ...noUpdate,
+  });
+  assert.deepEqual(externalInactive, allOff);
+
+  const stoppedNoIntent = cpaRuntimeControls({
+    runtime: runtime({ running: false, desiredRunning: false }),
+    ...noUpdate,
+  });
+  assert.ok(stoppedNoIntent.start && !stoppedNoIntent.stop);
+
+  const busyRestoreIntent = cpaRuntimeControls({
+    runtime: runtime({ running: false, desiredRunning: true, phase: "starting" }),
+    busy: false,
+    updateCheck: null,
+  });
+  assert.deepEqual(busyRestoreIntent, allOff);
+
+  assert.ok(cpaStartupRestorePending(runtime({ desiredRunning: true, running: false })));
+  assert.ok(cpaStartupRestorePending(runtime({ desiredRunning: true, running: true })));
+  assert.ok(!cpaStartupRestorePending(runtime({ desiredRunning: false })));
+  assert.ok(!cpaStartupRestorePending(runtime({ desiredRunning: true, owned: false })));
+  assert.ok(!cpaStartupRestorePending(null));
 
   const withUpdate = cpaRuntimeControls({
     runtime: runtime(),

@@ -299,6 +299,11 @@ async fn start_serve(
         *gateway_lock = Some(handle);
     }
 
+    let restorer = state.clone();
+    tokio::spawn(async move {
+        restorer.restore_owned_cpa_runtime_on_startup().await;
+    });
+
     let _ = state.db.lock().log_gateway(
         "info",
         "gateway",

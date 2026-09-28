@@ -139,6 +139,10 @@
                 <span v-if="runtime.phase === 'failed' && runtime.error" class="cpa-status-detail">{{ runtime.error }}</span>
               </div>
 
+              <p v-if="startupRestoreHint" class="cpa-help cpa-startup-restore-hint">
+                {{ t("下次启动 Open Console Gateway 时将自动恢复 CPA。") }}
+              </p>
+
               <n-alert v-if="runtimePollError" type="error" :title="t('CPA 运行时状态刷新失败：{error}', { error: runtimePollError })">
                 <n-button size="small" secondary @click="retryRuntimePoll">{{ t("重试") }}</n-button>
               </n-alert>
@@ -564,6 +568,7 @@ import {
   cpaManagedRuntimeConfirmed,
   cpaRuntimeControls,
   cpaRuntimeMode,
+  cpaStartupRestorePending,
   formatCpaQuota,
   groupCpaCatalogModels,
   partitionCpaRuntimeKeys,
@@ -671,6 +676,7 @@ const controls = computed(() => cpaRuntimeControls({
   busy: runtimeAction.value !== "",
   updateCheck: runtimeCheck.value,
 }));
+const startupRestoreHint = computed(() => cpaStartupRestorePending(runtime.value));
 const keyPartition = computed(() => partitionCpaRuntimeKeys(runtimeKeys.value));
 const catalogGroups = computed(() => groupCpaCatalogModels(catalogModels.value));
 const catalogSelectedCount = computed(() => catalogModels.value.filter((model) => model.enabled).length);

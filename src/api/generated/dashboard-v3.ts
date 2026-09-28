@@ -1929,6 +1929,11 @@ export interface CpaRuntime {
   baseUrl: string | null;
   currentOperation: string | null;
   currentVersion: string | null;
+  /**
+   * Last explicit Start/Stop intent for the OCG-owned child. True means the
+   * next Open Console Gateway process should restore that child once.
+   */
+  desiredRunning: boolean;
   error: string | null;
   installed: boolean;
   latestVersion: string | null;

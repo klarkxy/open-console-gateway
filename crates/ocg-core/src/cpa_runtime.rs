@@ -24,6 +24,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -160,6 +161,10 @@ pub enum CpaRuntimePhase {
     Failed,
 }
 
+fn desired_running_is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagedCpa {
@@ -168,6 +173,13 @@ pub struct ManagedCpa {
     pub previous_version: Option<String>,
     pub asset_sha256: String,
     pub port: u16,
+    /// Last explicit Start/Stop intent. Absent or false in older manifests.
+    #[serde(default, skip_serializing_if = "desired_running_is_false")]
+    pub desired_running: bool,
+}
+
+fn inherited_desired_running(previous: Option<&ManagedCpa>) -> bool {
+    previous.map(|item| item.desired_running).unwrap_or(true)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,6 +188,7 @@ pub struct CpaRuntimeSnapshot {
     pub unavailable_reason: Option<String>,
     pub installed: bool,
     pub running: bool,
+    pub desired_running: bool,
     pub owned: bool,
     pub current_version: Option<String>,
     pub previous_version: Option<String>,
@@ -259,6 +272,17 @@ pub struct CpaRuntimeCapabilities {
     host: OnceLock<CpaRuntimeHost>,
     status: Mutex<RuntimeStatus>,
     device: Mutex<Option<Arc<device::DeviceSession>>>,
+    shutting_down: AtomicBool,
+    restore_scheduled: AtomicBool,
+    /// Serializes terminal shutdown (mark + owned stop) with `host.start_owned`
+    /// and with manual Start commits (launched and already-running). Never held
+    /// across awaits. Acquired before `settings_update` when both are needed;
+    /// status may follow only to refuse publishing Idle after terminal shutdown.
+    owned_process: Mutex<()>,
+    #[cfg(test)]
+    before_owned_spawn: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    before_manual_start_commit: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 struct RuntimeStatus {
@@ -281,6 +305,13 @@ impl CpaRuntimeCapabilities {
                 current_operation: None,
                 failure_logs: None,
             }),
+            shutting_down: AtomicBool::new(false),
+            restore_scheduled: AtomicBool::new(false),
+            owned_process: Mutex::new(()),
+            #[cfg(test)]
+            before_owned_spawn: Mutex::new(None),
+            #[cfg(test)]
+            before_manual_start_commit: Mutex::new(None),
         }
     }
 
@@ -351,6 +382,35 @@ impl CpaRuntimeCapabilities {
             status.latest_version.clone(),
             status.current_operation.clone(),
         )
+    }
+
+    #[cfg(test)]
+    fn pause_before_owned_spawn(&self) {
+        let pause = self.before_owned_spawn.lock().clone();
+        if let Some(pause) = pause {
+            pause();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_before_owned_spawn_pause(&self, pause: impl Fn() + Send + Sync + 'static) {
+        *self.before_owned_spawn.lock() = Some(Arc::new(pause));
+    }
+
+    #[cfg(test)]
+    fn pause_before_manual_start_commit(&self) {
+        let pause = self.before_manual_start_commit.lock().clone();
+        if let Some(pause) = pause {
+            pause();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_before_manual_start_commit_pause(
+        &self,
+        pause: impl Fn() + Send + Sync + 'static,
+    ) {
+        *self.before_manual_start_commit.lock() = Some(Arc::new(pause));
     }
 }
 
@@ -493,7 +553,36 @@ fn version_dir(data_dir: &Path, version: &str) -> Result<PathBuf, CpaRuntimeErro
     Ok(versions.join(normalized))
 }
 
+#[cfg(test)]
+static FAIL_MANAGED_SAVES: std::sync::LazyLock<Mutex<HashSet<PathBuf>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
+
+#[cfg(test)]
+struct FailNextManagedSave {
+    data_dir: PathBuf,
+}
+
+#[cfg(test)]
+impl FailNextManagedSave {
+    fn arm(data_dir: &Path) -> Self {
+        let data_dir = data_dir.to_path_buf();
+        FAIL_MANAGED_SAVES.lock().insert(data_dir.clone());
+        Self { data_dir }
+    }
+}
+
+#[cfg(test)]
+impl Drop for FailNextManagedSave {
+    fn drop(&mut self) {
+        FAIL_MANAGED_SAVES.lock().remove(&self.data_dir);
+    }
+}
+
 pub fn save_managed(data_dir: &Path, managed: &ManagedCpa) -> Result<(), CpaRuntimeError> {
+    #[cfg(test)]
+    if FAIL_MANAGED_SAVES.lock().remove(data_dir) {
+        return Err(CpaRuntimeError::Failed("managed.json write failed".into()));
+    }
     let encoded = serde_json::to_vec_pretty(managed).map_err(|error| {
         CpaRuntimeError::Failed(format!("failed to encode CPA managed.json: {error}"))
     })?;
@@ -592,6 +681,7 @@ impl CoreStateInner {
             unavailable_reason,
             installed: managed.is_some(),
             running,
+            desired_running: managed.as_ref().is_some_and(|item| item.desired_running),
             owned: managed.is_some(),
             current_version: managed.as_ref().map(|item| item.current_version.clone()),
             previous_version: managed
@@ -628,8 +718,66 @@ impl CoreStateInner {
 
     pub fn stop_owned_cpa_runtime(&self) {
         self.cpa_runtime.cancel_device_login();
+        let _owned = self.cpa_runtime.owned_process.lock();
+        self.cpa_runtime.shutting_down.store(true, Ordering::SeqCst);
         if let Some(host) = self.cpa_runtime.host.get() {
             let _ = host.stop_owned();
+        }
+    }
+
+    /// Once-per-CoreState owned CPA restore. Hosts spawn this on their existing
+    /// Tokio or Tauri runtime after the gateway listener starts successfully.
+    pub async fn restore_owned_cpa_runtime_on_startup(&self) {
+        if self
+            .cpa_runtime
+            .restore_scheduled
+            .swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+        let _operation = self.cpa_operations.lock().await;
+        if self.cpa_runtime.shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
+        if std::env::var_os(crate::cpa::CPA_BASE_URL_ENV).is_some() {
+            return;
+        }
+        if !self.cpa_runtime.supported() {
+            return;
+        }
+        let managed = match load_managed(&self.data_dir) {
+            Ok(Some(managed)) if managed.desired_running => managed,
+            _ => return,
+        };
+        if self
+            .cpa_runtime
+            .host
+            .get()
+            .is_some_and(|host| host.owned_running())
+        {
+            return;
+        }
+        let _runtime_operation = self.cpa_runtime.begin_lifecycle_operation("start");
+        let host = match self.cpa_runtime.host() {
+            Ok(host) => host.clone(),
+            Err(_) => return,
+        };
+        match self.launch_owned_managed_process(&managed).await {
+            Ok(()) => {
+                let _owned = self.cpa_runtime.owned_process.lock();
+                if self.cpa_runtime.shutting_down.load(Ordering::SeqCst) {
+                    let _ = host.stop_owned();
+                    return;
+                }
+                self.cpa_runtime.set_phase(CpaRuntimePhase::Idle, None);
+            }
+            Err(_) if self.cpa_runtime.shutting_down.load(Ordering::SeqCst) => {
+                let _owned = self.cpa_runtime.owned_process.lock();
+                let _ = host.stop_owned();
+            }
+            Err(error) => self
+                .cpa_runtime
+                .set_phase(CpaRuntimePhase::Failed, Some(error.to_string())),
         }
     }
 
@@ -938,6 +1086,7 @@ impl CoreStateInner {
             previous_version,
             asset_sha256: sha256,
             port,
+            desired_running: inherited_desired_running(previous.as_ref()),
         };
         let committed = {
             let _settings = self.settings_update.lock();
@@ -1003,55 +1152,15 @@ impl CoreStateInner {
         let _runtime_operation = self.cpa_runtime.begin_lifecycle_operation("start");
         let host = self.cpa_runtime.host()?.clone();
         if host.owned_running() {
-            return Ok(self.cpa_runtime_snapshot());
+            return self.commit_desired_running(expected_revision, expected_generation, true);
         }
-        if tcp_open(managed.port) {
-            return Err(CpaRuntimeError::Conflict(format!(
-                "loopback port {} is already in use; OCG will not stop an external CPA",
-                managed.port
-            )));
-        }
-        self.cpa_runtime.set_phase(CpaRuntimePhase::Starting, None);
-        let config_path = runtime_dir(&self.data_dir).join(CONFIG_NAME);
-        let secrets = match self.load_saved_secrets() {
-            Ok(secrets) => secrets,
+        match self.launch_owned_managed_process(&managed).await {
+            Ok(()) => self.commit_launched_start(&host, expected_revision, expected_generation),
             Err(error) => {
-                self.cpa_runtime
-                    .set_phase(CpaRuntimePhase::Failed, Some(error.to_string()));
-                return Err(error);
-            }
-        };
-        let started = self.start_version(
-            &host,
-            &managed.current_version,
-            &config_path,
-            &secrets.management_key,
-        );
-        if let Err(error) = started {
-            self.cpa_runtime
-                .set_phase(CpaRuntimePhase::Failed, Some(error.to_string()));
-            return Err(error);
-        }
-        let probe = self
-            .probe_candidate(
-                managed.port,
-                &secrets.management_key,
-                &secrets.inference_key,
-            )
-            .await;
-        match probe {
-            Ok(_) => {
-                if let Err(error) = self.ensure_cas(expected_revision, expected_generation) {
-                    let _ = host.stop_owned();
-                    self.cpa_runtime.set_phase(CpaRuntimePhase::Idle, None);
+                if self.cpa_runtime.shutting_down.load(Ordering::SeqCst) {
+                    let _ = self.stop_owned_serialized(&host);
                     return Err(error);
                 }
-                self.bump_settings_revision();
-                self.cpa_runtime.set_phase(CpaRuntimePhase::Idle, None);
-                Ok(self.cpa_runtime_snapshot())
-            }
-            Err(error) => {
-                let _ = host.stop_owned();
                 self.cpa_runtime
                     .set_phase(CpaRuntimePhase::Failed, Some(error.to_string()));
                 Err(error)
@@ -1065,17 +1174,31 @@ impl CoreStateInner {
         expected_generation: u64,
     ) -> Result<CpaRuntimeSnapshot, CpaRuntimeError> {
         self.require_supported()?;
-        self.ensure_cas(expected_revision, expected_generation)?;
-        let _ = require_managed(&self.data_dir)?;
-        let _runtime_operation = self.cpa_runtime.begin_lifecycle_operation("stop");
-        let host = self.cpa_runtime.host()?;
-        if !host.owned_running() {
-            return Err(CpaRuntimeError::Invalid(
-                "no OCG-owned CPA process is running".into(),
-            ));
+        let host = self.cpa_runtime.host()?.clone();
+        let _owned = self.cpa_runtime.owned_process.lock();
+        {
+            let _settings = self.settings_update.lock();
+            self.ensure_cas(expected_revision, expected_generation)?;
+            let managed = require_managed(&self.data_dir)?;
+            let running = host.owned_running();
+            if !running && !managed.desired_running {
+                return Err(CpaRuntimeError::Invalid(
+                    "no OCG-owned CPA process is running".into(),
+                ));
+            }
+            let changed = self.persist_desired_running(false)?;
+            if changed || running {
+                self.bump_settings_revision();
+            }
         }
-        host.stop_owned()?;
-        self.bump_settings_revision();
+        let _runtime_operation = self.cpa_runtime.begin_lifecycle_operation("stop");
+        if host.owned_running()
+            && let Err(error) = host.stop_owned()
+        {
+            self.cpa_runtime
+                .set_phase(CpaRuntimePhase::Failed, Some(error.to_string()));
+            return Err(error);
+        }
         self.cpa_runtime.set_phase(CpaRuntimePhase::Idle, None);
         Ok(self.cpa_runtime_snapshot())
     }
@@ -1180,6 +1303,7 @@ impl CoreStateInner {
             previous_version: Some(managed.current_version.clone()),
             asset_sha256: previous_sha,
             port: managed.port,
+            desired_running: managed.desired_running,
         };
         let mut persistence_before = Some(self.capture_persistence_backup()?);
         let committed = {
@@ -1409,6 +1533,141 @@ impl CoreStateInner {
         }
     }
 
+    fn persist_desired_running(&self, desired: bool) -> Result<bool, CpaRuntimeError> {
+        let mut managed = require_managed(&self.data_dir)?;
+        if managed.desired_running == desired {
+            return Ok(false);
+        }
+        managed.desired_running = desired;
+        save_managed(&self.data_dir, &managed)?;
+        Ok(true)
+    }
+
+    fn commit_desired_running(
+        &self,
+        expected_revision: u64,
+        expected_generation: u64,
+        desired: bool,
+    ) -> Result<CpaRuntimeSnapshot, CpaRuntimeError> {
+        let _owned = self.cpa_runtime.owned_process.lock();
+        if self.cpa_runtime.shutting_down.load(Ordering::SeqCst) {
+            return Err(Self::shutdown_abort_error());
+        }
+        {
+            let _settings = self.settings_update.lock();
+            self.ensure_cas(expected_revision, expected_generation)?;
+            if self.persist_desired_running(desired)? {
+                self.bump_settings_revision();
+            }
+        }
+        self.cpa_runtime.set_phase(CpaRuntimePhase::Idle, None);
+        Ok(self.cpa_runtime_snapshot())
+    }
+
+    fn commit_launched_start(
+        &self,
+        host: &CpaRuntimeHost,
+        expected_revision: u64,
+        expected_generation: u64,
+    ) -> Result<CpaRuntimeSnapshot, CpaRuntimeError> {
+        #[cfg(test)]
+        self.cpa_runtime.pause_before_manual_start_commit();
+        let _owned = self.cpa_runtime.owned_process.lock();
+        if self.cpa_runtime.shutting_down.load(Ordering::SeqCst) {
+            let _ = host.stop_owned();
+            return Err(Self::shutdown_abort_error());
+        }
+        let committed: Result<(), CpaRuntimeError> = (|| {
+            let _settings = self.settings_update.lock();
+            self.ensure_cas(expected_revision, expected_generation)?;
+            self.persist_desired_running(true)?;
+            self.bump_settings_revision();
+            Ok(())
+        })();
+        match committed {
+            Ok(()) => {
+                self.cpa_runtime.set_phase(CpaRuntimePhase::Idle, None);
+                Ok(self.cpa_runtime_snapshot())
+            }
+            Err(error) => {
+                let _ = host.stop_owned();
+                if matches!(error, CpaRuntimeError::Conflict(_)) {
+                    self.cpa_runtime.set_phase(CpaRuntimePhase::Idle, None);
+                } else {
+                    self.cpa_runtime
+                        .set_phase(CpaRuntimePhase::Failed, Some(error.to_string()));
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn shutdown_abort_error() -> CpaRuntimeError {
+        CpaRuntimeError::Invalid(
+            "CPA runtime restore aborted because Open Console Gateway is shutting down".into(),
+        )
+    }
+
+    fn stop_owned_if_shutting_down(&self, host: &CpaRuntimeHost) -> bool {
+        let _owned = self.cpa_runtime.owned_process.lock();
+        if !self.cpa_runtime.shutting_down.load(Ordering::SeqCst) {
+            return false;
+        }
+        let _ = host.stop_owned();
+        true
+    }
+
+    fn stop_owned_serialized(&self, host: &CpaRuntimeHost) -> Result<(), CpaRuntimeError> {
+        let _owned = self.cpa_runtime.owned_process.lock();
+        host.stop_owned()
+    }
+
+    async fn launch_owned_managed_process(
+        &self,
+        managed: &ManagedCpa,
+    ) -> Result<(), CpaRuntimeError> {
+        let host = self.cpa_runtime.host()?.clone();
+        if host.owned_running() {
+            return Ok(());
+        }
+        if self.cpa_runtime.shutting_down.load(Ordering::SeqCst) {
+            return Err(Self::shutdown_abort_error());
+        }
+        if tcp_open(managed.port) {
+            return Err(CpaRuntimeError::Conflict(format!(
+                "loopback port {} is already in use; OCG will not stop an external CPA",
+                managed.port
+            )));
+        }
+        self.cpa_runtime.set_phase(CpaRuntimePhase::Starting, None);
+        let config_path = runtime_dir(&self.data_dir).join(CONFIG_NAME);
+        let secrets = self.load_saved_secrets()?;
+        self.start_version(
+            &host,
+            &managed.current_version,
+            &config_path,
+            &secrets.management_key,
+        )?;
+        if self.stop_owned_if_shutting_down(&host) {
+            return Err(Self::shutdown_abort_error());
+        }
+        if let Err(error) = self
+            .probe_candidate(
+                managed.port,
+                &secrets.management_key,
+                &secrets.inference_key,
+            )
+            .await
+        {
+            let _ = self.stop_owned_serialized(&host);
+            return Err(error);
+        }
+        if self.stop_owned_if_shutting_down(&host) {
+            return Err(Self::shutdown_abort_error());
+        }
+        Ok(())
+    }
+
     fn start_version(
         &self,
         host: &CpaRuntimeHost,
@@ -1427,14 +1686,21 @@ impl CoreStateInner {
             .chain(std::iter::once(management_password.to_string()))
             .map(CpaRuntimeSecret::new)
             .collect();
-        host.start_owned(&CpaRuntimeProcessSpec {
+        let spec = CpaRuntimeProcessSpec {
             codex_device_login: false,
             executable: executable.clone(),
             config_path: config_path.to_path_buf(),
             working_dir,
             management_password: CpaRuntimeSecret::new(management_password),
             log_secrets,
-        })?;
+        };
+        #[cfg(test)]
+        self.cpa_runtime.pause_before_owned_spawn();
+        let _owned = self.cpa_runtime.owned_process.lock();
+        if self.cpa_runtime.shutting_down.load(Ordering::SeqCst) {
+            return Err(Self::shutdown_abort_error());
+        }
+        host.start_owned(&spec)?;
         Ok(executable)
     }
 

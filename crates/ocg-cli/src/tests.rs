@@ -19,6 +19,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn temp_dir(label: &str) -> PathBuf {
@@ -680,6 +681,40 @@ async fn start_serve_binds_port_persists_override_and_stops_cleanly() {
     let reopened = build_state(dir.clone(), cipher).unwrap();
     assert_eq!(reopened.config().gateway_port, port);
 
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn start_serve_schedules_cpa_restore_without_blocking_gateway() {
+    let dir = temp_dir("serve-cpa-restore");
+    let dash = dir.join("custom-dist");
+    std::fs::create_dir_all(&dash).unwrap();
+    std::fs::create_dir_all(dir.join("cpa")).unwrap();
+    std::fs::write(
+        dir.join("cpa").join("managed.json"),
+        format!(
+            "{{\"currentVersion\":\"7.2.147\",\"assetSha256\":\"{}\",\"port\":8317,\"desiredRunning\":true}}",
+            "a".repeat(64)
+        ),
+    )
+    .unwrap();
+    let port = free_port();
+    let started = Instant::now();
+    let state = start_serve(
+        dir.clone(),
+        test_cipher(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        Some(port),
+        Some(dash),
+    )
+    .await
+    .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "CPA restore must not block native CLI gateway startup"
+    );
+    assert!(std::net::TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port))).is_ok());
+    stop_serve(&state).await;
     let _ = std::fs::remove_dir_all(dir);
 }
 

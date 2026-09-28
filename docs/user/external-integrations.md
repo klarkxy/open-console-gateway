@@ -24,8 +24,11 @@ Use one of these local deployments:
 
 - **Windows x64, macOS, or Linux x64 desktop app or CLI:** OCG can download
   the official CLIProxyAPI asset for that OS and CPU, keep it under the OCG
-  data directory, and start it as an OCG-owned child. Start is manual; the
-  child stops when OCG exits. OCG never stops a CPA process it did not start.
+  data directory, and start it as an OCG-owned child. After a successful installation or manual
+  start, OCG remembers that CPA should run. The child stops when OCG exits,
+  and the next OCG process starts it again in the background. Clicking **Stop**
+  cancels that startup recovery, including after a failed recovery attempt.
+  OCG never stops a CPA process it did not start.
   Other OS/CPU combinations have no official asset and fail the install with
   an explicit reason.
 - **Desktop or CLI:** run CPA on the same machine and configure a loopback URL
@@ -36,6 +39,12 @@ Use one of these local deployments:
 
 URLs with embedded credentials, queries, fragments, redirects, or non-loopback
 hosts are rejected. Do not reuse an Open Console Gateway Key as either CPA key.
+
+Startup recovery reuses the installed CPA version, configuration, and saved
+logins. It attempts startup once per OCG process; a failure remains visible
+on the CPA page and does not block OCG or trigger a restart loop. Existing
+installations without a saved run intent remain stopped until you start CPA.
+External CPA connections, including the Docker sibling, keep their own lifecycle.
 
 ### Connect and operate
 

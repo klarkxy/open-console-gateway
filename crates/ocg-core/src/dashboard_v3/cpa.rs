@@ -951,6 +951,7 @@ fn runtime_view(state: &CoreState, snapshot: cpa_runtime::CpaRuntimeSnapshot) ->
         unavailable_reason: snapshot.unavailable_reason,
         installed: snapshot.installed,
         running: snapshot.running,
+        desired_running: snapshot.desired_running,
         owned: snapshot.owned,
         current_version: snapshot.current_version,
         previous_version: snapshot.previous_version,
@@ -1354,6 +1355,7 @@ mod tests {
                 previous_version: None,
                 asset_sha256: "a".repeat(64),
                 port: 8317,
+                desired_running: false,
             },
         )
         .unwrap();
@@ -1763,6 +1765,7 @@ mod tests {
                 previous_version: None,
                 asset_sha256: "a".repeat(64),
                 port: 8317,
+                desired_running: false,
             },
         )
         .unwrap();
@@ -1771,18 +1774,20 @@ mod tests {
         let generation = state.process_generation();
         let Json(started) = unwrap_ok(
             start_runtime(State(state.clone()), mutation_bytes(&state, json!({}))).await,
-            "already-running start is a no-op",
+            "already-running start persists run intent",
         );
-        assert_eq!(started.revision, before);
+        assert_eq!(started.revision, before + 1);
         assert!(started.running);
+        assert!(started.desired_running);
         assert_eq!(host.starts.load(Ordering::SeqCst), 0);
 
         let Json(stopped) = unwrap_ok(
             stop_runtime(State(state.clone()), mutation_bytes(&state, json!({}))).await,
             "runtime stop should succeed",
         );
-        assert_eq!(stopped.revision, before + 1);
+        assert_eq!(stopped.revision, before + 2);
         assert!(!stopped.running);
+        assert!(!stopped.desired_running);
         assert_eq!(host.stops.load(Ordering::SeqCst), 1);
 
         let error = stop_runtime(

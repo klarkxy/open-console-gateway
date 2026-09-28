@@ -56,6 +56,14 @@ app or another long-lived instance when they must not be interrupted.
 
 `pnpm install` enables `.githooks` (`cargo fmt --all` on staged `*.rs`).
 
+For managed CPA, click **Start** once after upgrading to startup recovery.
+A successful manual start is remembered across Tauri backend rebuilds: each
+new backend restores CPA in the background using its existing configuration
+and auth directory. **Stop** clears that intent. Host exit still cleans up
+its child, and failed recovery is reported once without a restart loop.
+Do not run another CPA instance against the same auth directory to work
+around development restarts.
+
 ## Checks
 
 `package.json` scripts are the names to run. Pick the smallest check that

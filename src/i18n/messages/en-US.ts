@@ -814,6 +814,7 @@ export const enUSMessages = {
   "运行中": "Running",
   "已停止": "Stopped",
   "未安装": "Not installed",
+  "下次启动 Open Console Gateway 时将自动恢复 CPA。": "CPA will start again the next time Open Console Gateway starts.",
   "上一版本": "Previous version",
   "未检查": "Not checked",
   "空闲": "Idle",

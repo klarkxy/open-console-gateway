@@ -110,7 +110,7 @@ function runtime(overrides: Record<string, unknown> = {}) {
   return {
     assetSha256: null, baseUrl: "http://127.0.0.1:8317", currentOperation: null, currentVersion: "1.0.0",
     error: null, installed: true, latestVersion: null, owned: true, phase: "idle", port: 8317,
-    previousVersion: null, processGeneration: 1, revision: 1, running: false, supported: true,
+    previousVersion: null, processGeneration: 1, revision: 1, running: false, desiredRunning: false, supported: true,
     unavailableReason: null, updateAvailable: false, ...overrides,
   };
 }
