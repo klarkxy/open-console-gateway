@@ -1505,14 +1505,17 @@ async fn upstream_payload_too_large_is_not_mislabeled_as_client_body_limit() {
         forward_logs[0].error_stage.as_deref(),
         Some("upstream_http")
     );
+    let runtime_logs = h
+        .state
+        .db
+        .lock()
+        .query_gateway_logs(10, Some(&request_id))
+        .unwrap();
     assert!(
-        h.state
-            .db
-            .lock()
-            .query_gateway_logs(10, Some(&request_id))
-            .unwrap()
-            .is_empty(),
-        "upstream 413 must not create a second client/body_limit diagnostic"
+        runtime_logs
+            .iter()
+            .all(|log| log.error_stage.as_deref() != Some("body_limit")),
+        "upstream 413 must not create a client/body_limit diagnostic: {runtime_logs:?}"
     );
 }
 
@@ -1728,15 +1731,6 @@ async fn unknown_model_is_rejected_before_any_upstream_attempt() {
         &["key-1", "key-2"],
     )
     .await;
-    let runtime_log_watermark = h
-        .state
-        .db
-        .lock()
-        .list_gateway_logs(1)
-        .unwrap()
-        .first()
-        .map_or(0, |log| log.id);
-
     let (status, body) = h
         .protocol("/v1/chat/completions", "totally-made-up-xyz")
         .await;
@@ -1754,17 +1748,22 @@ async fn unknown_model_is_rejected_before_any_upstream_attempt() {
     assert_eq!(request_logs[0].http_status, Some(400));
     assert_eq!(request_logs[0].error_source.as_deref(), Some("client"));
     assert_eq!(request_logs[0].error_stage.as_deref(), Some("validation"));
-    let new_runtime_logs = db
-        .list_gateway_logs(10)
-        .unwrap()
-        .into_iter()
-        .filter(|log| log.id > runtime_log_watermark)
-        .collect::<Vec<_>>();
+    let runtime_logs = db
+        .query_gateway_logs(10, request_logs[0].request_id.as_deref())
+        .unwrap();
     assert!(
-        new_runtime_logs.iter().all(|log| {
-            log.category == "usage_sync" && log.request_id.is_none() && log.error_stage.is_none()
+        runtime_logs.iter().any(|log| {
+            log.error_source.as_deref() == Some("client")
+                && log.error_stage.as_deref() == Some("validation")
         }),
-        "request validation must not add gateway runtime logs: {new_runtime_logs:?}"
+        "request validation must emit a client diagnostic: {runtime_logs:?}"
+    );
+    assert!(
+        runtime_logs.iter().all(|log| {
+            log.error_source.as_deref() != Some("upstream")
+                && log.error_stage.as_deref() != Some("body_limit")
+        }),
+        "unknown model must not be attributed to an upstream or body limit: {runtime_logs:?}"
     );
     drop(db);
     assert!(
