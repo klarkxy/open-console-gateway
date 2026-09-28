@@ -88,9 +88,11 @@ when DSH asks for models or prepares a call. That is the full set of public
 names currently offered to clients,
 including eligible Custom IDs; it is not the narrower dashboard
 `application-models` list. Model visibility changes therefore do not require
-reinstalling the plugin. The `mimo-v2.6-flash` route accepts image attachments
-in DSH; other models remain marked as text-only until their image support is
-verified.
+reinstalling the plugin. Whether a model accepts image attachments in DSH is
+decided entirely by [model metadata](model-metadata.md): only models whose
+catalog discovery or manual declaration lists the `image` input modality are
+marked as image-capable. There are no model-ID exceptions; every other model
+stays marked text-only until its image support is verified.
 
 An **Installed** status proves the package registration and credential handoff
 were prepared. It does not prove that DSH has restarted, loaded the plugin, or

@@ -136,7 +136,7 @@ function applyOnlySource(plugin, bootstrap, extra = "") {
 }
 
 for (const explicitMetadata of [false, true]) {
-test(`generated DSH plugin prepares both provider names with ${explicitMetadata ? "explicit metadata" : "legacy image support"}`, async () => {
+test(`generated DSH plugin prepares both provider names with ${explicitMetadata ? "explicit metadata" : "no explicit metadata"}`, async () => {
   const root = await mkdtemp(join(tmpdir(), "ocg-dsh-plugin-"));
   try {
     const bootstrap = join(root, "credential-handoff");
@@ -201,9 +201,11 @@ test(`generated DSH plugin prepares both provider names with ${explicitMetadata 
         result.routes[provider].models.map(({ id }) => id),
         ["model-a", "org/model-b", "mimo-v2.6-flash"],
       );
+      // No model-id exceptions: undeclared models are text-only until the
+      // gateway reports verified modalities.
       assert.deepEqual(
         result.routes[provider].models.find(({ id }) => id === "mimo-v2.6-flash").inputModalities,
-        explicitMetadata ? ["text"] : ["text", "image"],
+        ["text"],
       );
       if (explicitMetadata) {
         assert.deepEqual(

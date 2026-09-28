@@ -42,7 +42,6 @@ const credentialRef = "OCG_GATEWAY_KEY";
 const credentialBootstrapPath = __OCG_CREDENTIAL_BOOTSTRAP_PATH_JSON__;
 const catalogTtlMs = 5_000;
 const catalogTimeoutMs = 10_000;
-const imageModelIds = new Set(["mimo-v2.6-flash"]);
 
 const HANDOFF_CLAIM_MARKER = ".claimed-";
 
@@ -203,15 +202,6 @@ export async function apply(ctx) {
         );
       }
       const payload = await response.json();
-      if (Array.isArray(payload?.data)) {
-        // Retain the locally verified legacy image capability. Explicit
-        // upstream metadata always takes precedence over this compatibility fallback.
-        payload.data = payload.data.map((row) => (
-          typeof row?.id === "string" && imageModelIds.has(row.id.trim()) && row.ocg === undefined
-            && row.inputModalities == null && row.input == null
-            ? { ...row, inputModalities: ["text", "image"] } : row
-        ));
-      }
       profiles = new Map(providerIds.map((providerId) => {
         let catalog;
         try {

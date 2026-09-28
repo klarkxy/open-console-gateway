@@ -78,7 +78,7 @@ function modelFromRow(row, id, providerId, baseUrl) {
     ...(outputModalities === undefined ? {} : { outputModalities }),
     ...(thinking.declared === undefined || thinking.declared === null ? {} : { reasoning: thinking.declared }),
     ...(thinking.hasEfforts ? { reasoningEfforts: Object.fromEntries(Object.entries(thinking.map).filter(([, v]) => v !== null)) } : {}),
-    ...(Array.isArray(source.sources) ? { sources: source.sources.filter((value) => ["operator", "upstream", "unknown"].includes(value)) } : {}),
+    ...(Array.isArray(source.sources) ? { sources: source.sources.filter((value) => ["operator", "upstream", "modelsdev", "unknown"].includes(value)) } : {}),
     // Only whitelisted boolean facts cross into the runtime metadata object.
     ...Object.fromEntries(["toolCalling", "parallelToolCalls"].filter((k) => typeof source[k] === "boolean").map((k) => [k, source[k]])),
     fallbacks: [contextWindow === undefined ? "contextWindow" : null, maxOutputTokens === undefined ? "maxOutputTokens" : null,
