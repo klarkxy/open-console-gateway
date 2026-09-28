@@ -75,59 +75,18 @@ fn status(state: &CoreState, id: &str) -> Result<BillingStatus, V3ApiError> {
         if revision != state.settings_revision() {
             continue;
         }
-        let descriptor = ProviderRegistry::get(&provider_id);
-        let manual_calibration =
-            credits.is_some() || descriptor.is_some_and(|entry| entry.usage.manual_calibration);
-        let official_refresh = model != BillingModel::Credits
-            && (descriptor.is_some_and(|entry| entry.card_actions.usage_refresh)
-                || (configurable && crate::api_balance::probe_from_endpoint(&endpoint).is_some()));
-        let source = if credits.is_some()
-            || matches!(
-                adapter,
-                AdapterKind::OpencodeGo
-                    | AdapterKind::Goat
-                    | AdapterKind::Ollama
-                    | AdapterKind::Zen
-            ) {
-            BillingSource::LocalEstimate
-        } else if cash
-            .as_ref()
-            .is_some_and(|value| !value.balances.is_empty())
-            || !usage.credit_balances.is_empty()
-            || !usage.quota_windows.is_empty()
-        {
-            BillingSource::Official
-        } else {
-            BillingSource::Unavailable
-        };
-        let unit = if model == BillingModel::Credits && adapter != AdapterKind::Ollama {
-            "credits".to_string()
-        } else if let Some(window) = usage.quota_windows.first() {
-            window.unit.clone()
-        } else if let Some(balance) = usage.credit_balances.first() {
-            balance.unit.clone()
-        } else {
-            "currency".to_string()
-        };
-        return Ok(BillingStatus {
-            account_id: id.into(),
-            model,
-            source,
-            unit,
-            configurable_credits: configurable,
-            manual_calibration,
-            official_refresh,
-            usage: Some(usage),
-            cash,
-            credits,
-            presets: if configurable {
-                stepfun_plan_credits(&endpoint, Utc::now()).unwrap_or_default()
-            } else {
-                Vec::new()
-            },
+        return Ok(project_billing(
+            state,
+            id,
             revision,
-            process_generation: state.process_generation(),
-        });
+            &provider_id,
+            adapter,
+            &endpoint,
+            configurable,
+            credits,
+            usage,
+            cash,
+        ));
     }
     Err(V3ApiError::conflict_at(
         state,
@@ -159,41 +118,163 @@ fn destination(
     .transpose()
 }
 
+fn project_billing(
+    state: &CoreState,
+    id: &str,
+    revision: u64,
+    provider_id: &str,
+    adapter: AdapterKind,
+    endpoint: &str,
+    configurable: bool,
+    credits: Option<crate::billing_types::CreditMeterView>,
+    mut usage: crate::dashboard_v3::ProviderUsage,
+    cash: Option<crate::official_api::OfficialApiStatus>,
+) -> BillingStatus {
+    let model = if credits.is_some() {
+        BillingModel::Credits
+    } else {
+        billing_model_for_destination(adapter, endpoint)
+    };
+    let mut cash = if cash.is_some() && model == BillingModel::Cash {
+        cash
+    } else {
+        None
+    };
+    let descriptor = ProviderRegistry::get(provider_id);
+    let manual_calibration =
+        credits.is_some() || descriptor.is_some_and(|entry| entry.usage.manual_calibration);
+    let official_refresh = model != BillingModel::Credits
+        && (descriptor.is_some_and(|entry| entry.card_actions.usage_refresh)
+            || (configurable && crate::api_balance::probe_from_endpoint(endpoint).is_some()));
+    let source = if credits.is_some()
+        || matches!(
+            adapter,
+            AdapterKind::OpencodeGo | AdapterKind::Goat | AdapterKind::Ollama | AdapterKind::Zen
+        ) {
+        BillingSource::LocalEstimate
+    } else if cash
+        .as_ref()
+        .is_some_and(|value| !value.balances.is_empty())
+        || !usage.credit_balances.is_empty()
+        || !usage.quota_windows.is_empty()
+    {
+        BillingSource::Official
+    } else {
+        BillingSource::Unavailable
+    };
+    let unit = if model == BillingModel::Credits && adapter != AdapterKind::Ollama {
+        "credits".to_string()
+    } else if let Some(window) = usage.quota_windows.first() {
+        window.unit.clone()
+    } else if let Some(balance) = usage.credit_balances.first() {
+        balance.unit.clone()
+    } else {
+        "currency".to_string()
+    };
+    usage.revision = revision;
+    if let Some(cash) = cash.as_mut() {
+        cash.revision = revision;
+    }
+    BillingStatus {
+        account_id: id.into(),
+        model,
+        source,
+        unit,
+        configurable_credits: configurable,
+        manual_calibration,
+        official_refresh,
+        usage: Some(usage),
+        cash,
+        credits,
+        presets: if configurable {
+            stepfun_plan_credits(endpoint, Utc::now()).unwrap_or_default()
+        } else {
+            Vec::new()
+        },
+        revision,
+        process_generation: state.process_generation(),
+    }
+}
+
 fn mutate(
     state: &CoreState,
     id: &str,
     expectation: &MutationExpectation,
     apply: impl FnOnce(&Connection) -> anyhow::Result<()>,
 ) -> Result<BillingStatus, V3ApiError> {
-    {
-        let _settings = state.settings_update.lock();
-        check_expectation(state, expectation)?;
-        let db = state.db.lock();
-        let (adapter, _, legacy) = destination(&db.conn, id)
-            .map_err(V3ApiError::internal)?
-            .ok_or_else(|| V3ApiError::not_found_at(state, "account not found"))?;
-        if adapter != AdapterKind::Http || !matches!(legacy.as_str(), "dynamic" | "custom_account")
-        {
-            return Err(V3ApiError::invalid_request_at(
-                state,
-                "this account uses its provider billing contract",
-            ));
-        }
-        let transaction = db
-            .conn
-            .unchecked_transaction()
-            .map_err(V3ApiError::internal)?;
-        apply(&transaction).map_err(|error| {
-            if error.downcast_ref::<rusqlite::Error>().is_some() {
-                V3ApiError::internal(error)
-            } else {
-                V3ApiError::invalid_request_at(state, error.to_string())
-            }
-        })?;
-        transaction.commit().map_err(V3ApiError::internal)?;
-        state.bump_settings_revision();
+    let _settings = state.settings_update.lock();
+    check_expectation(state, expectation)?;
+    let db = state.db.lock();
+    let (adapter, endpoint, legacy) = destination(&db.conn, id)
+        .map_err(V3ApiError::internal)?
+        .ok_or_else(|| V3ApiError::not_found_at(state, "account not found"))?;
+    if adapter != AdapterKind::Http || !matches!(legacy.as_str(), "dynamic" | "custom_account") {
+        return Err(V3ApiError::invalid_request_at(
+            state,
+            "this account uses its provider billing contract",
+        ));
     }
-    status(state, id)
+    let account = db
+        .get_account(id)
+        .map_err(V3ApiError::internal)?
+        .ok_or_else(|| V3ApiError::not_found_at(state, "account not found"))?;
+    let configurable = true;
+    let official_cash = db
+        .get_dynamic_provider(&account.provider_id)
+        .map_err(V3ApiError::internal)?
+        .as_ref()
+        .and_then(crate::official_api::kind_for_runtime)
+        .is_some();
+    // Usage does not depend on the credit write. Failure here persists nothing.
+    let usage = crate::dashboard_v3::usage::provider_usage_from_db(state, &db, id)?;
+    let transaction = db
+        .conn
+        .unchecked_transaction()
+        .map_err(V3ApiError::internal)?;
+    apply(&transaction).map_err(|error| {
+        if error.downcast_ref::<rusqlite::Error>().is_some() {
+            V3ApiError::internal(error)
+        } else {
+            V3ApiError::invalid_request_at(state, error.to_string())
+        }
+    })?;
+    // Clock must be after apply so a grant bucket that starts at `now` is active.
+    let credits =
+        storage::read_view_on(&transaction, id, Utc::now()).map_err(V3ApiError::internal)?;
+    let model = if credits.is_some() {
+        BillingModel::Credits
+    } else {
+        billing_model_for_destination(adapter, &endpoint)
+    };
+    // GET reads official cash only when that model is selected. Keep the read
+    // inside this transaction so a cash failure rolls the credit write back.
+    let cash = if official_cash && model == BillingModel::Cash {
+        Some(super::official_api::status_locked(state, &db, id)?)
+    } else {
+        None
+    };
+    let mut projected = project_billing(
+        state,
+        id,
+        state.settings_revision(),
+        &account.provider_id,
+        adapter,
+        &endpoint,
+        configurable,
+        credits,
+        usage,
+        cash,
+    );
+    transaction.commit().map_err(V3ApiError::internal)?;
+    let revision = state.bump_settings_revision();
+    projected.revision = revision;
+    if let Some(usage) = projected.usage.as_mut() {
+        usage.revision = revision;
+    }
+    if let Some(cash) = projected.cash.as_mut() {
+        cash.revision = revision;
+    }
+    Ok(projected)
 }
 
 pub(super) async fn configure(
@@ -256,3 +337,6 @@ pub(super) async fn disable(
     })
     .map(Json)
 }
+
+#[cfg(test)]
+mod tests;

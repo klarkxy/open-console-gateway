@@ -491,8 +491,8 @@ pub(crate) fn load_provider_usage(
 }
 
 /// Project provider usage from a database the caller already locked.
-/// Does not acquire `settings_update` or `db`.
-fn provider_usage_from_db(
+/// Does not acquire `settings_update` or `db`; the caller may already hold both.
+pub(crate) fn provider_usage_from_db(
     state: &CoreState,
     db: &Database,
     id: &str,

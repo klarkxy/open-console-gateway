@@ -44,8 +44,17 @@ fn account(db: &Database, id: &str, state: &CoreState) -> Result<Account, V3ApiE
 pub(super) fn status(state: &CoreState, id: &str) -> Result<OfficialApiStatus, V3ApiError> {
     let _settings = state.settings_update.lock();
     let db = state.db.lock();
-    let account = account(&db, id, state)?;
-    let (runtime, kind) = runtime(&db, &account.provider_id, state)?;
+    status_locked(state, &db, id)
+}
+
+/// Local official-cash projection. Caller already holds `settings_update` and `db`.
+pub(super) fn status_locked(
+    state: &CoreState,
+    db: &Database,
+    id: &str,
+) -> Result<OfficialApiStatus, V3ApiError> {
+    let account = account(db, id, state)?;
+    let (runtime, kind) = runtime(db, &account.provider_id, state)?;
     let now = state.usage_sync.now();
     let since = Utc
         .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
