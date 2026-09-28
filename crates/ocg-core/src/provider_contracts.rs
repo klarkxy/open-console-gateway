@@ -1017,7 +1017,7 @@ fn refreshed_catalog(
             } else {
                 String::new()
             },
-            source_url: if fetched && !persisted.is_some_and(|row| row.catalog_source == "manual") {
+            source_url: if fetched && persisted.is_none_or(|row| row.catalog_source != "manual") {
                 persisted
                     .map(|row| row.catalog_source_url.clone())
                     .filter(|url| !url.is_empty())

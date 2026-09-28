@@ -118,6 +118,8 @@ fn destination(
     .transpose()
 }
 
+// Compose the already-read receipt without reacquiring observer or database locks.
+#[allow(clippy::too_many_arguments)]
 fn project_billing(
     state: &CoreState,
     id: &str,

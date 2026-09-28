@@ -327,7 +327,7 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
         }
     }
     // Kick the lazy models.dev refresh; this response still uses the cache.
-    crate::modelsdev::ensure_fresh(&state);
+    crate::modelsdev::ensure_fresh(state);
     let modelsdev = state.modelsdev_catalog();
     if crate::model_metadata::enrich(&state.db.lock(), &modelsdev, &snapshot, &mut data).is_err() {
         return protocol_error_response(
@@ -438,24 +438,24 @@ impl RuntimeCatalogSnapshot {
                 .iter()
                 .map(|m| m.upstream_model.clone())
                 .collect::<Vec<_>>();
-            if d.adapter != AdapterKind::Http && d.adapter != AdapterKind::Cpa {
-                if let ocg_domain::destination::LegacyDestinationRef::Builtin(provider_id) =
+            if d.adapter != AdapterKind::Http
+                && d.adapter != AdapterKind::Cpa
+                && let ocg_domain::destination::LegacyDestinationRef::Builtin(provider_id) =
                     &d.legacy
-                {
-                    let mappings = d
-                        .catalog
-                        .iter()
-                        .filter(|m| m.public_model != m.upstream_model)
-                        .map(|m| (m.public_model.clone(), m.upstream_model.clone()))
-                        .collect::<Vec<_>>();
-                    if !mappings.is_empty() {
-                        result
-                            .builtin_aliases
-                            .push(crate::alias::ExtraProviderCatalog {
-                                provider_id: provider_id.clone(),
-                                mappings,
-                            });
-                    }
+            {
+                let mappings = d
+                    .catalog
+                    .iter()
+                    .filter(|m| m.public_model != m.upstream_model)
+                    .map(|m| (m.public_model.clone(), m.upstream_model.clone()))
+                    .collect::<Vec<_>>();
+                if !mappings.is_empty() {
+                    result
+                        .builtin_aliases
+                        .push(crate::alias::ExtraProviderCatalog {
+                            provider_id: provider_id.clone(),
+                            mappings,
+                        });
                 }
             }
             match d.adapter {

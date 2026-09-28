@@ -1662,10 +1662,9 @@ fn provider_contracts_from_state(
                     .catalog
                     .iter()
                     .find(|m| m.upstream_model.eq_ignore_ascii_case(&model.model_id))
+                    && saved.public_model != saved.upstream_model
                 {
-                    if saved.public_model != saved.upstream_model {
-                        model.alias = saved.public_model.clone();
-                    }
+                    model.alias = saved.public_model.clone();
                 }
             }
         }

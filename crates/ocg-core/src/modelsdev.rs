@@ -67,10 +67,10 @@ pub(crate) fn lookup<'a>(
     if let Some(found) = catalog.models.get(upstream_model) {
         return Some(found);
     }
-    if let Some((_, tail)) = upstream_model.rsplit_once('/') {
-        if let Some(found) = catalog.models.get(tail) {
-            return Some(found);
-        }
+    if let Some((_, tail)) = upstream_model.rsplit_once('/')
+        && let Some(found) = catalog.models.get(tail)
+    {
+        return Some(found);
     }
     catalog.models.get(public_model)
 }
