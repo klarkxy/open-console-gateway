@@ -102,6 +102,16 @@ async function withCas<T>(
   return controlPlane.runMutation(run);
 }
 
+// Short local account writes only: the serial lane orders them on fresh CAS
+// tokens so two quick independent edits cannot self-conflict. Network
+// refreshes/verifications stay on plain withCas and never enter the lane.
+async function withLocalCas<T>(
+  target: string,
+  run: (expectation: { expectedRevision: number; processGeneration: number }) => Promise<T>,
+): Promise<T> {
+  return useControlPlaneStore().runLocalMutation(target, run);
+}
+
 async function mutatedAccount(result: Promise<{ account: Parameters<typeof presentAccount>[0] | null }>): Promise<Account> {
   const mutation = await result;
   if (mutation.account === null) throw new Error("account mutation returned no account");
@@ -161,10 +171,10 @@ export const dashboardApi = {
     (await dashboardV3.listAccounts()).accounts.map(presentAccount),
 
   createAccount: (input: AccountInput): Promise<Account> =>
-    mutatedAccount(withCas((expectation) => dashboardV3.createAccount(accountCreateInput(input), expectation))),
+    mutatedAccount(withLocalCas("account:create", (expectation) => dashboardV3.createAccount(accountCreateInput(input), expectation))),
 
   createManagedAccount: (input: ManagedAccountInput): Promise<Account> =>
-    mutatedAccount(withCas((expectation) => dashboardV3.createManagedAccount({
+    mutatedAccount(withLocalCas("account:create-managed", (expectation) => dashboardV3.createManagedAccount({
       name: input.name,
       username: input.username,
       notes: input.notes,
@@ -183,23 +193,23 @@ export const dashboardApi = {
   )),
 
   updateAccount: (id: string, update: AccountUpdate): Promise<Account> =>
-    mutatedAccount(withCas((expectation) => dashboardV3.updateAccount(id, accountUpdateInput(update), expectation))),
+    mutatedAccount(withLocalCas(`account:${id}`, (expectation) => dashboardV3.updateAccount(id, accountUpdateInput(update), expectation))),
 
   reorderAccounts: async (accountIds: string[]): Promise<Account[]> =>
-    (await withCas((expectation) => dashboardV3.reorderAccounts(accountIds, expectation))).accounts.map(presentAccount),
+    (await withLocalCas("account:reorder", (expectation) => dashboardV3.reorderAccounts(accountIds, expectation))).accounts.map(presentAccount),
 
   deleteAccount: async (id: string): Promise<void> => {
-    await withCas((expectation) => dashboardV3.deleteAccount(id, expectation));
+    await withLocalCas(`account:${id}`, (expectation) => dashboardV3.deleteAccount(id, expectation));
   },
 
   toggleAccount: (id: string): Promise<Account> =>
-    mutatedAccount(withCas((expectation) => dashboardV3.toggleAccount(id, expectation))),
+    mutatedAccount(withLocalCas(`account:${id}`, (expectation) => dashboardV3.toggleAccount(id, expectation))),
 
   resetAccountCooldown: (id: string): Promise<Account> =>
-    mutatedAccount(withCas((expectation) => dashboardV3.resetAccountCooldown(id, expectation))),
+    mutatedAccount(withLocalCas(`account:${id}`, (expectation) => dashboardV3.resetAccountCooldown(id, expectation))),
 
   advanceAccountSetup: (id: string, setupStep: AccountSetupStep): Promise<Account> =>
-    mutatedAccount(withCas((expectation) => dashboardV3.advanceAccountSetup(id, setupStep, expectation))),
+    mutatedAccount(withLocalCas(`account:${id}`, (expectation) => dashboardV3.advanceAccountSetup(id, setupStep, expectation))),
 
   verifyManagedAccountKey: (id: string, key: string): Promise<Account> =>
     mutatedAccount(withCas((expectation) => dashboardV3.verifyManagedAccountKey(id, key, expectation))),
@@ -210,7 +220,7 @@ export const dashboardApi = {
   updateAccountCustomConfig: (
     id: string,
     config: AccountCustomConfigUpdateInput,
-  ): Promise<Account> => mutatedAccount(withCas((expectation) => {
+  ): Promise<Account> => mutatedAccount(withLocalCas(`account:${id}`, (expectation) => {
     const payload = {
       endpointUrl: config.endpoint_url,
       upstreamProtocol: config.upstream_protocol,
@@ -231,7 +241,7 @@ export const dashboardApi = {
   updateAccountModelCapabilities: (
     id: string,
     capabilities: AccountModelCapabilityInput[],
-  ): Promise<Account> => mutatedAccount(withCas((expectation) => dashboardV3.putAccountModelCapabilities(id, {
+  ): Promise<Account> => mutatedAccount(withLocalCas(`account:${id}`, (expectation) => dashboardV3.putAccountModelCapabilities(id, {
     capabilities: capabilities.map((capability) => ({
       publicModel: capability.public_model,
       protocol: capability.protocol,

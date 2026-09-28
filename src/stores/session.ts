@@ -100,6 +100,7 @@ export const useSessionStore = defineStore("session", () => {
    */
   const SESSION_RESETTERS = {
     connection: "clearSecrets",
+    controlPlane: "reset",
     accounts: "clearAccounts",
     platformAccounts: "clear",
     identities: "clear",
@@ -117,7 +118,7 @@ export const useSessionStore = defineStore("session", () => {
     const registry = getActivePinia()?._s;
     for (const [storeId, method] of Object.entries(SESSION_RESETTERS)) {
       const store = registry?.get(storeId) as
-        | { clear?: () => void; clearAccounts?: () => void; clearSecrets?: () => void }
+        | { clear?: () => void; clearAccounts?: () => void; clearSecrets?: () => void; reset?: () => void }
         | undefined;
       store?.[method]?.();
     }

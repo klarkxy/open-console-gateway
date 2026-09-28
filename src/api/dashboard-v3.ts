@@ -134,13 +134,16 @@ export interface ControlPlaneTokens {
 type ControlRevisionSink = (tokens: ControlPlaneTokens) => void;
 
 let controlRevisionSink: ControlRevisionSink | null = null;
+let controlRevisionEpoch = 0;
 
 /** Registered once by the controlPlane store; replaced when a new Pinia activates. */
 export function setControlRevisionSink(sink: ControlRevisionSink | null): void {
+  controlRevisionEpoch += 1;
   controlRevisionSink = sink;
 }
 
-function publishTokens(body: unknown): void {
+function publishTokens(body: unknown, epoch: number): void {
+  if (epoch !== controlRevisionEpoch) return;
   if (!controlRevisionSink || typeof body !== "object" || body === null) return;
   const record = body as Record<string, unknown>;
   if (typeof record.revision === "number" && typeof record.processGeneration === "number") {
@@ -277,6 +280,9 @@ export async function requestDashboard<T>(
   init: RequestInit = {},
   notifyAuthRequired = true,
 ): Promise<T> {
+  // Resetting the session also replaces the revision sink. A receipt or 401
+  // from an earlier session must not alter the newly authenticated session.
+  const epoch = controlRevisionEpoch;
   const headers = new Headers(init.headers);
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
@@ -289,7 +295,9 @@ export async function requestDashboard<T>(
   if (!response.ok) {
     if (response.status === 401 && notifyAuthRequired) {
       const message = t("登录已失效，重新登录");
-      window.dispatchEvent(new CustomEvent(DASHBOARD_AUTH_REQUIRED_EVENT, { detail: message }));
+      if (epoch === controlRevisionEpoch) {
+        window.dispatchEvent(new CustomEvent(DASHBOARD_AUTH_REQUIRED_EVENT, { detail: message }));
+      }
       throw new DashboardAuthError(message);
     }
     let message = `${response.status} ${response.statusText}`;
@@ -306,7 +314,7 @@ export async function requestDashboard<T>(
     const currentRevision = typeof body?.currentRevision === "number" ? body.currentRevision : null;
     const processGeneration = typeof body?.processGeneration === "number" ? body.processGeneration : null;
     if (currentRevision !== null && processGeneration !== null) {
-      publishTokens({ revision: currentRevision, processGeneration });
+      publishTokens({ revision: currentRevision, processGeneration }, epoch);
     }
     const retryAfterHeader = response.headers.get("Retry-After");
     const retryAfterSeconds = retryAfterHeader && /^\d+$/.test(retryAfterHeader)
@@ -318,9 +326,11 @@ export async function requestDashboard<T>(
     }
     if (response.status === 410) {
       const error = new DashboardGoneError(message, path, currentRevision, processGeneration);
-      window.dispatchEvent(new CustomEvent(DASHBOARD_GONE_EVENT, {
-        detail: { message: error.message, guidance: error.guidance, path },
-      }));
+      if (epoch === controlRevisionEpoch) {
+        window.dispatchEvent(new CustomEvent(DASHBOARD_GONE_EVENT, {
+          detail: { message: error.message, guidance: error.guidance, path },
+        }));
+      }
       throw error;
     }
     if (response.status === 429) {
@@ -339,7 +349,7 @@ export async function requestDashboard<T>(
   }
   if (response.status === 204) return undefined as T;
   const body = await response.json() as T;
-  publishTokens(body);
+  publishTokens(body, epoch);
   return body;
 }
 
@@ -740,15 +750,17 @@ export const dashboardV3 = {
       method: "DELETE",
       body: mutation(expectation),
     }),
-  discoverProviderDefinitionModels: (input: ProviderDefinitionDiscoverRequest) =>
+  discoverProviderDefinitionModels: (input: ProviderDefinitionDiscoverRequest, signal?: AbortSignal) =>
     requestV3<ProviderDefinitionDiscoverResponse>("/providers/models/discover", {
       method: "POST",
       body: json(input),
+      signal,
     }),
-  testProviderDefinition: (input: ProviderDefinitionTestRequest) =>
+  testProviderDefinition: (input: ProviderDefinitionTestRequest, signal?: AbortSignal) =>
     requestV3<ProviderDefinitionTestResponse>("/providers/test", {
       method: "POST",
       body: json(input),
+      signal,
     }),
   getZenFreeSettings: () => requestV3<ZenFreeSettings>("/providers/zen-free"),
   patchZenFreeSettings: (enabled: boolean, expectation: MutationExpectation) =>

@@ -15,7 +15,7 @@ export function installWindowDashboard(): void {
 }
 
 export function installFetchMock(
-  responder: (req: RecordedRequest) => Response | object,
+  responder: (req: RecordedRequest) => Response | object | Promise<Response | object>,
 ): RecordedRequest[] {
   installWindowDashboard();
   const requests: RecordedRequest[] = [];
@@ -28,7 +28,7 @@ export function installFetchMock(
         body: init.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null,
       };
       requests.push(request);
-      const result = responder(request);
+      const result = await responder(request);
       return result instanceof Response
         ? result
         : new Response(JSON.stringify(result), { headers: { "Content-Type": "application/json" } });

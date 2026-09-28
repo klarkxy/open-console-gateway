@@ -1,4 +1,9 @@
-import { t } from "../i18n/index.ts";
+import { t, type MessageKey } from "../i18n/index.ts";
+
+export const LOCAL_MUTATION_ERROR_KEYS = {
+  LocalMutationBusyError: "此项操作正在保存，完成后可继续修改。",
+  LocalMutationCancelledError: "登录状态已变化，请重新操作。",
+} as const satisfies Record<string, MessageKey>;
 
 const NETWORK_ERROR_PATTERN = /failed to fetch|network(?:error| request failed)|load failed/i;
 
@@ -11,6 +16,9 @@ export function userFacingError(error: unknown, networkFallback: string): string
 
 /** Error text for dashboard API failures, with the shared network fallback. */
 export function dashboardErrorDetail(error: unknown): string {
+  if (error instanceof Error && Object.hasOwn(LOCAL_MUTATION_ERROR_KEYS, error.name)) {
+    return t(LOCAL_MUTATION_ERROR_KEYS[error.name as keyof typeof LOCAL_MUTATION_ERROR_KEYS]);
+  }
   const detail = userFacingError(error, t("无法连接到本地服务，请确认程序正在运行后重试"));
   switch (detail) {
     case "migration password is incorrect or the backup file is damaged":
