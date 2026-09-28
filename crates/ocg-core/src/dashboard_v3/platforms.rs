@@ -12,7 +12,7 @@ use axum::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PlatformAccounts {
     pub accounts: Vec<PlatformAccount>,
@@ -283,6 +283,11 @@ pub(super) async fn refresh(
             "platform account or Key changed during refresh; retry",
         ));
     }
-    state.bump_settings_revision();
+    // The snapshot is an observation. Inference reads it from SQLite on the
+    // next attempt, and platform_version / link_version already reject a stale
+    // refresh. Leave the configuration CAS token unchanged.
     view(&state).map(Json)
 }
+
+#[cfg(test)]
+mod tests;
