@@ -3,9 +3,11 @@
     <ProviderModelTable
       v-bind="props"
       :model-editable="editor?.editable ?? false"
+      :metadata-editable="metadataEditor?.editable ?? false"
       :editing-disabled="editorDisabled"
       @edit="editor?.openEditor($event)"
-      :action-locked="props.actionLocked || editing"
+      @metadata="metadataEditor?.openEditor($event)"
+      :action-locked="props.actionLocked || editing || metadataEditing"
       @update:overrides="emit('update:overrides', $event)"
       @probe="emit('probe', $event)"
       @remove="emit('remove', $event)"
@@ -18,6 +20,12 @@
           :disabled="editorDisabled"
           @update:busy="editing = $event"
         />
+        <ModelMetadataEditor
+          ref="metadataEditor"
+          :scope="props.scope"
+          :disabled="editorDisabled"
+          @update:busy="metadataEditing = $event"
+        />
       </template>
     </ProviderModelTable>
   </div>
@@ -27,6 +35,7 @@
 import { computed, ref } from "vue";
 import type { ContractScopeKind, ModelProtocolOverrideUpdate } from "../api/providers.ts";
 import type { ProviderScopeView } from "../domain/provider-contracts.ts";
+import ModelMetadataEditor from "./ModelMetadataEditor.vue";
 import ProviderModelEditor from "./ProviderModelEditor.vue";
 import ProviderModelTable from "./ProviderModelTable.vue";
 
@@ -34,6 +43,7 @@ import ProviderModelTable from "./ProviderModelTable.vue";
 // deletion, protocol switches, probes and their optimistic presentation.
 const props = defineProps<{
   scope: ProviderScopeView;
+  targetModel?: string | null;
   optimisticOverrides?: Map<string, boolean>;
   pendingOverrideKeys?: Set<string>;
   probingModels?: Set<string>;
@@ -51,7 +61,9 @@ const emit = defineEmits<{
   (event: "error", message: string): void;
 }>();
 const editor = ref<InstanceType<typeof ProviderModelEditor> | null>(null);
+const metadataEditor = ref<InstanceType<typeof ModelMetadataEditor> | null>(null);
 const editing = ref(false);
+const metadataEditing = ref(false);
 const editorDisabled = computed(() => Boolean(
   props.actionLocked || props.removing
   || props.pendingOverrideKeys?.size || props.probingModels?.size,

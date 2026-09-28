@@ -5,16 +5,19 @@ import { isRevisionConflict } from "../api/dashboard.ts";
 import {
   credentialsApi,
   destinationsApi,
+  modelMetadataApi,
   routingApi,
   routingCardsApi,
   type Destination,
   type DestinationCatalogUpdateInput,
   type DestinationCredential,
+  type DestinationModelMetadataSnapshot,
   type DestinationPatchInput,
   type RoutingCardListSnapshot,
   type RoutingCardView,
   type RoutingExplanationView,
 } from "../api/destinations.ts";
+import type { ModelMetadata } from "../api/generated/dashboard-v4.ts";
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
 import type {
   MappingErrorCodeDto,
@@ -95,6 +98,12 @@ export const useDestinationsStore = defineStore("destinations", () => {
   const explanations = ref<Record<string, RoutingExplanationView>>({});
   const explainLoading = ref<Record<string, boolean>>({});
   const explainErrors = ref<Record<string, string>>({});
+
+  // Per-destination model metadata snapshots, keyed by destination id.
+  const modelMetadata = ref<Record<string, DestinationModelMetadataSnapshot>>({});
+  const modelMetadataLoading = ref<Record<string, boolean>>({});
+  const modelMetadataErrors = ref<Record<string, string>>({});
+  const metadataRequests = new Map<string, number>();
 
   let loadGeneration = 0;
   // Bumped by `clear` so an explanation resolving after logout never commits.
@@ -450,11 +459,81 @@ export const useDestinationsStore = defineStore("destinations", () => {
     }
   }
 
+  /**
+   * On-demand `GET /destinations/{id}/model-metadata`. Only the latest
+   * request per destination commits, and nothing commits after `clear`.
+   */
+  async function loadModelMetadata(id: string): Promise<DestinationModelMetadataSnapshot> {
+    const requestId = (metadataRequests.get(id) ?? 0) + 1;
+    metadataRequests.set(id, requestId);
+    const session = sessionGeneration;
+    const owns = () => session === sessionGeneration && metadataRequests.get(id) === requestId;
+    modelMetadataLoading.value = { ...modelMetadataLoading.value, [id]: true };
+    try {
+      const snapshot = await modelMetadataApi.get(id);
+      if (!owns()) return snapshot;
+      modelMetadata.value = { ...modelMetadata.value, [id]: snapshot };
+      const nextErrors = { ...modelMetadataErrors.value };
+      delete nextErrors[id];
+      modelMetadataErrors.value = nextErrors;
+      return snapshot;
+    } catch (e) {
+      if (owns()) {
+        modelMetadataErrors.value = {
+          ...modelMetadataErrors.value,
+          [id]: e instanceof Error ? e.message : String(e),
+        };
+      }
+      throw e;
+    } finally {
+      if (owns()) {
+        const nextLoading = { ...modelMetadataLoading.value };
+        delete nextLoading[id];
+        modelMetadataLoading.value = nextLoading;
+      }
+    }
+  }
+
+  /**
+   * PUT one model's full metadata declaration (null resets to discovered
+   * facts) and commit the returned entry set in place. Starting the write
+   * invalidates pending loads for the same destination; a CAS conflict
+   * reloads the projection before rethrowing and is never replayed.
+   */
+  async function declareModelMetadata(
+    id: string,
+    publicModel: string,
+    metadata: ModelMetadata | null,
+    capturedExpectation?: MutationExpectation,
+  ): Promise<DestinationModelMetadataSnapshot> {
+    const token = beginDestinationMutation();
+    metadataRequests.set(id, (metadataRequests.get(id) ?? 0) + 1);
+    try {
+      const snapshot = await modelMetadataApi.put(
+        id,
+        publicModel,
+        metadata,
+        capturedExpectation ?? expectation.value ?? undefined,
+      );
+      if (beginMutationCommit(token, snapshot.expectation)) {
+        expectation.value = snapshot.expectation;
+        modelMetadata.value = { ...modelMetadata.value, [id]: snapshot };
+      }
+      return snapshot;
+    } catch (cause) {
+      if (isRevisionConflict(cause) && mutationSessionIsCurrent(token)) {
+        await refreshAfterMutation();
+      }
+      throw cause;
+    }
+  }
+
   /** Drop the cached projection on 401 / logout so the next session reloads fresh. */
   function clear(): void {
     loadGeneration++;
     sessionGeneration++;
     explainRequests.clear();
+    metadataRequests.clear();
     destinations.value = [];
     credentials.value = [];
     cards.value = [];
@@ -466,6 +545,9 @@ export const useDestinationsStore = defineStore("destinations", () => {
     explanations.value = {};
     explainLoading.value = {};
     explainErrors.value = {};
+    modelMetadata.value = {};
+    modelMetadataLoading.value = {};
+    modelMetadataErrors.value = {};
   }
 
   return {
@@ -480,6 +562,9 @@ export const useDestinationsStore = defineStore("destinations", () => {
     explanations: computed(() => explanations.value),
     explainLoading: computed(() => explainLoading.value),
     explainErrors: computed(() => explainErrors.value),
+    modelMetadata: computed(() => modelMetadata.value),
+    modelMetadataLoading: computed(() => modelMetadataLoading.value),
+    modelMetadataErrors: computed(() => modelMetadataErrors.value),
     byId: destinationsById,
     credentialsByLegacyAccountId,
     destinationForAccount,
@@ -495,6 +580,8 @@ export const useDestinationsStore = defineStore("destinations", () => {
     replaceRoutingCardLayout,
     explainKey,
     explainRouting,
+    loadModelMetadata,
+    declareModelMetadata,
     clear,
   };
 });

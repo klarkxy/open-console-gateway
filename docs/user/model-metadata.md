@@ -18,13 +18,17 @@ For catalogs without a known context window, the plugin retains bounded internal
 
 This version captures explicitly supplied metadata during Go/GOAT catalog refresh and saved configurable HTTP destination refresh. It does not infer specifications from a model's name. Other adapter catalogs, and upstreams that return only IDs, need an operator declaration until their metadata ingestion is implemented. Refresh the provider directory to collect new metadata; merely opening DSH does not issue provider-directory requests.
 
-Read a connection's current metadata with the authenticated dashboard endpoint:
+Routes without an operator declaration or upstream-observed facts fall back to the public [models.dev](https://models.dev) catalog. OCG downloads `https://models.dev/api.json` in the background (never inside a `/v1/models` request), caches it locally, and refreshes it about once a day; a failed refresh keeps the previous cache and retries later, so offline use simply stays with the last copy. Matching is by exact upstream model ID, then its last path segment, then the exact public model ID — never a fuzzy name guess. The same model ID under several models.dev providers keeps only the common guarantees (minimum limits, modality intersection), and modalities outside `text`/`image`/`audio`/`video` are dropped at ingestion. Effective facts keep their priority: operator declaration > upstream observation > models.dev (`source: "modelsdev"`) > unknown. A declaration or refresh always overrides the public catalog.
+
+Declare metadata in the dashboard: open **Providers**, select a connection, and use a model row's **Model capabilities** action. The form shows the effective metadata and its source (`operator`, `upstream`, `modelsdev`, or `unknown`), applies the same validation rules as the server, saves the full declaration under CAS, and can clear a manual declaration to reveal discovered facts. Blank fields mean unknown, not false.
+
+The same rules are available to scripts through the authenticated dashboard endpoint:
 
 ```
 GET /dashboard/api/v4/destinations/{id}/model-metadata
 ```
 
-Use the destination ID from `GET /dashboard/api/v4/destinations`. The response includes the current revision, exact public and upstream IDs, effective metadata and its source (`operator`, `upstream`, or `unknown`). No inference Key is accepted in place of the dashboard session.
+Use the destination ID from `GET /dashboard/api/v4/destinations`. The response includes the current revision, exact public and upstream IDs, effective metadata and its source (`operator`, `upstream`, `modelsdev`, or `unknown`). No inference Key is accepted in place of the dashboard session.
 
 Declare metadata through the same route using `PUT` and the latest CAS tokens. The numbers below are examples, not specifications for any real model:
 
@@ -46,7 +50,7 @@ Declare metadata through the same route using `PUT` and the latest CAS tokens. T
 }
 ```
 
-`publicModel` must match the exact saved catalog mapping. A declaration replaces that mapping's entire metadata record, not a global same-name model and not a field-by-field merge. Use `metadata: null` explicitly to remove the declaration and reveal discovered facts; an omitted member is rejected. A stale revision is rejected without changing metadata. This first version exposes the declaration API, not a new dashboard form.
+`publicModel` must match the exact saved catalog mapping. A declaration replaces that mapping's entire metadata record, not a global same-name model and not a field-by-field merge. Use `metadata: null` explicitly to remove the declaration and reveal discovered facts; an omitted member is rejected. A stale revision is rejected without changing metadata. The dashboard form and this endpoint share the same CAS behavior; the form is the default path and the endpoint remains for scripting.
 
 Only declare effective capabilities supported by the actual gateway path. The operation changes no model routing, enabled protocol, credential grant, account status or verification. Unknown optional facts should be omitted. Integers must be positive and safe; output cannot exceed the context window; tier keys must be one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
 

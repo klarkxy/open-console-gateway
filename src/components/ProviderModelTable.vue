@@ -198,6 +198,20 @@
             </td>
             <td class="matrix-cell matrix-cell--actions">
               <div class="matrix-row-actions">
+                <n-tooltip v-if="metadataEditable" trigger="hover">
+                  <template #trigger>
+                    <n-button
+                      text
+                      size="tiny"
+                      :disabled="editingDisabled || rowEditLocked(row.modelId)"
+                      :aria-label="`${t('模型能力')} ${row.modelId}`"
+                      @click="emit('metadata', row.modelId)"
+                    >
+                      <template #icon><n-icon :component="SlidersOutlined" /></template>
+                    </n-button>
+                  </template>
+                  {{ t("模型能力") }}
+                </n-tooltip>
                 <n-tooltip v-if="modelEditable" trigger="hover">
                   <template #trigger>
                     <n-button
@@ -292,7 +306,7 @@ import {
   NTag,
   NTooltip,
 } from "naive-ui";
-import { ApiOutlined, CloseOutlined, DeleteOutlined, EditOutlined } from "@vicons/antd";
+import { ApiOutlined, CloseOutlined, DeleteOutlined, EditOutlined, SlidersOutlined } from "@vicons/antd";
 import type {
   ContractScopeKind,
   ModelProtocolOverrideUpdate,
@@ -314,12 +328,14 @@ import { t } from "../i18n/index.ts";
 
 const props = defineProps<{
   scope: ProviderScopeView;
+  targetModel?: string | null;
   optimisticOverrides?: Map<string, boolean>;
   pendingOverrideKeys?: Set<string>;
   probingModels?: Set<string>;
   actionLocked?: boolean;
   removing?: boolean;
   modelEditable?: boolean;
+  metadataEditable?: boolean;
   editingDisabled?: boolean;
 }>();
 
@@ -336,6 +352,7 @@ const emit = defineEmits<{
   (e: "remove", payload: { modelIds: string[] }): void;
   (e: "error", message: string): void;
   (e: "edit", modelId: string): void;
+  (e: "metadata", modelId: string): void;
 }>();
 
 function enableUnverifiedProtocol(modelId: string, protocol: ProviderProtocol): void {
@@ -443,6 +460,9 @@ const filteredRows = computed(() => {
   return matrixRows.value.filter((row) => {
     if (enabledOnly.value && !rowEnabled(row)) return false;
     if (!needle) return true;
+    if (props.targetModel && modelQuery.value === props.targetModel) {
+      return row.modelId === props.targetModel || row.alias === props.targetModel;
+    }
     return row.searchable.includes(needle);
   });
 });
@@ -462,12 +482,12 @@ const probeSupported = computed(() => (
   props.scope.card.protocol_probe && props.scope.provider_id !== CPA_PROVIDER_ID
 ));
 
-watch(() => props.scope.key, () => {
+watch(() => [props.scope.key, props.targetModel] as const, () => {
   selectedIds.value = new Set();
-  modelQuery.value = "";
+  modelQuery.value = props.targetModel ?? "";
   enabledOnly.value = false;
   showAllRows.value = false;
-});
+}, { immediate: true });
 
 watch([modelQuery, enabledOnly], () => {
   showAllRows.value = false;

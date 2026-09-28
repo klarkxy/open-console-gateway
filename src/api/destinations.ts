@@ -27,9 +27,11 @@ import type {
   DestinationCredentialDto,
   DestinationDto,
   DestinationList,
+  DestinationModelMetadata,
   DestinationOnboardingTaskDto,
   DestinationPatchRequest,
   LegacyDestinationRefDto,
+  ModelMetadata,
   ModelScope,
   QuotaRecoveryDto,
   PlanDto,
@@ -191,6 +193,33 @@ export interface DestinationCredential {
 
 export interface DestinationListSnapshot {
   destinations: Destination[];
+  expectation: MutationExpectation;
+}
+
+/** Effective per-route model facts; null means unknown, never guessed. */
+export interface ModelMetadataView {
+  name: string | null;
+  context_window: number | null;
+  max_output_tokens: number | null;
+  input_modalities: string[] | null;
+  output_modalities: string[] | null;
+  reasoning: boolean | null;
+  reasoning_efforts: Record<string, string> | null;
+  tool_calling: boolean | null;
+  parallel_tool_calls: boolean | null;
+}
+
+export interface DestinationModelMetadataEntryView {
+  public_model: string;
+  upstream_model: string;
+  metadata: ModelMetadataView;
+  /** operator | upstream | unknown */
+  source: string;
+}
+
+export interface DestinationModelMetadataSnapshot {
+  destination_id: string;
+  models: DestinationModelMetadataEntryView[];
   expectation: MutationExpectation;
 }
 
@@ -680,6 +709,59 @@ async function fetchRoutingCardSnapshot(): Promise<RoutingCardListSnapshot> {
   const value = await dashboardV4.getRoutingCards();
   return presentRoutingCardListSnapshot(value);
 }
+
+function presentModelMetadata(value: ModelMetadata): ModelMetadataView {
+  return {
+    name: value.name ?? null,
+    context_window: value.contextWindow ?? null,
+    max_output_tokens: value.maxOutputTokens ?? null,
+    input_modalities: value.inputModalities ? [...value.inputModalities] : null,
+    output_modalities: value.outputModalities ? [...value.outputModalities] : null,
+    reasoning: value.reasoning ?? null,
+    reasoning_efforts: value.reasoningEfforts ? { ...value.reasoningEfforts } : null,
+    tool_calling: value.toolCalling ?? null,
+    parallel_tool_calls: value.parallelToolCalls ?? null,
+  };
+}
+
+export function presentDestinationModelMetadata(
+  value: DestinationModelMetadata,
+): DestinationModelMetadataSnapshot {
+  return {
+    destination_id: value.destinationId,
+    models: value.models.map((entry) => ({
+      public_model: entry.publicModel,
+      upstream_model: entry.upstreamModel,
+      metadata: presentModelMetadata(entry.metadata),
+      source: entry.source,
+    })),
+    expectation: {
+      expectedRevision: value.revision.revision,
+      processGeneration: value.revision.processGeneration,
+    },
+  };
+}
+
+export const modelMetadataApi = {
+  get: async (id: string): Promise<DestinationModelMetadataSnapshot> =>
+    presentDestinationModelMetadata(await dashboardV4.getDestinationModelMetadata(id)),
+  /**
+   * Declare (or with `null`, reset) the full metadata of one exact public
+   * model under CAS. The receipt replaces the whole destination entry set.
+   */
+  put: async (
+    id: string,
+    publicModel: string,
+    metadata: ModelMetadata | null,
+    expectation?: MutationExpectation,
+  ): Promise<DestinationModelMetadataSnapshot> => {
+    const value = await withCas(
+      (tokens) => dashboardV4.putDestinationModelMetadata(id, { publicModel, metadata }, tokens),
+      expectation,
+    );
+    return presentDestinationModelMetadata(value);
+  },
+};
 
 export const routingCardsApi = {
   /** One atomic snapshot of cards and the resources they show. */
