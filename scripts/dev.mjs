@@ -13,6 +13,13 @@ export function devEnvironment(source = process.env) {
   };
 }
 
+/// Extra arguments after the script name are forwarded to the Tauri CLI, so
+/// `pnpm run dev -- --no-watch` disables the Rust watcher while keeping this
+/// script's port, logging, and request-capture environment.
+export function tauriDevArgs(argv = process.argv.slice(2)) {
+  return ["dev", ...argv];
+}
+
 const isMain = process.argv[1]
   && fileURLToPath(import.meta.url).toLowerCase() === process.argv[1].toLowerCase();
 
@@ -23,7 +30,7 @@ if (isMain) {
   console.log(`Runtime log level: ${env.OCG_LOG_LEVEL}`);
   console.log(`Request capture: ${env.OCG_DEBUG_REQUESTS === "1" ? env.OCG_DEBUG_DIR : "disabled"}`);
 
-  const child = spawn(process.execPath, [tauriCli, "dev"], {
+  const child = spawn(process.execPath, [tauriCli, ...tauriDevArgs()], {
     cwd: process.cwd(),
     env,
     stdio: "inherit",

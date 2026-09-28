@@ -23,6 +23,14 @@ pnpm run dev
 WebSocket）代理到该 Gateway 端口。启动前设置 `OCG_GATEWAY_PORT` 可同时覆盖
 Tauri 与 Vite；变量生效时，设置页以只读方式显示实际端口。
 
+### 选择开发模式
+
+- `pnpm run dev`（默认）：Tauri 监视 Rust workspace，源码变更时重新编译并重启整个桌面应用，进程内网关和所有在途请求都会中断。额外参数会透传给 Tauri CLI：`pnpm run dev -- --no-watch` 关闭 Rust 监视器，已启动的开发构建会持续服务，直到你手动重启；Dashboard 的 Vite HMR 仍然生效，而已保存的 Rust 改动在下一次手动重启时才生效。
+- `pnpm run dev:split`：无头 `ocg-manager-cli` 网关 + Vite，不启动 Tauri 进程。适合 Dashboard、HTTP API、路由与协议开发。网关监听 `OCG_GATEWAY_PORT`（默认 `19042`），使用隔离数据目录（`tmp/dev-data`，可用 `OCG_DEV_DATA_DIR` 覆盖），因此可以和已安装的应用并行运行。没有任何 Rust 源码监视：修改网关相关 crate 后，停止脚本并重新运行以重新编译 `ocg-manager-cli`。`http://127.0.0.1:30001/dashboard/` 的 Dashboard 代理到拆分网关，Vue 改动仍然热更新。首次使用全新数据目录时，在私有终端用 `target/debug/ocg-manager-cli --data-dir tmp/dev-data status --show-key` 获取开发 Gateway Key。
+- 桌面宿主开发（托盘、自启动、原生浏览器、更新器）仍需 `pnpm run dev`：CLI 不注册这些宿主能力。
+
+拆分网关与 agent 正在使用的任何网关都是独立进程。重启它仍会中断自身的在途流；如果 agent 不能被打断，让它们继续连已安装的应用或另一个常驻实例。
+
 `pnpm install` 会启用 `.githooks`（暂存 `*.rs` 时运行 `cargo fmt --all`）。
 
 ## 检查

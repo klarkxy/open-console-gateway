@@ -9,6 +9,8 @@
     "hooks:install": "node scripts/install-git-hooks.mjs",
     "predev": "node scripts/free-dev-port.mjs",
     "dev": "node scripts/dev.mjs",
+    "predev:split": "node scripts/free-dev-port.mjs",
+    "dev:split": "node scripts/dev-split.mjs",
     "build": "node scripts/release.mjs",
     "build:web": "vue-tsc && vite build",
     "release:check": "node scripts/release.mjs --check",

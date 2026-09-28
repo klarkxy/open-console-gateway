@@ -27,6 +27,33 @@ WebSockets) to that gateway port. Override both Tauri and Vite with
 `OCG_GATEWAY_PORT` before starting; Settings shows the effective port as
 read-only while the variable is set.
 
+### Choosing a dev mode
+
+- `pnpm run dev` (default): Tauri watches the Rust workspace and rebuilds and
+  restarts the whole desktop app on change, which drops the in-process
+  gateway and every in-flight request. Extra arguments forward to the Tauri
+  CLI: `pnpm run dev -- --no-watch` disables the Rust watcher so a running
+  dev build keeps serving until you restart it manually; Vite HMR for the
+  dashboard still applies, and saved Rust changes take effect only on the
+  next manual restart.
+- `pnpm run dev:split`: a headless `ocg-manager-cli` gateway plus Vite, with
+  no Tauri process. This is the mode for dashboard, HTTP API, and
+  routing/protocol work. The gateway listens on `OCG_GATEWAY_PORT` (default
+  `19042`) against an isolated data directory (`tmp/dev-data`, override with
+  `OCG_DEV_DATA_DIR`), so it can run alongside the installed app. Nothing
+  watches Rust sources: after changing gateway crates, stop the script and
+  rerun it to rebuild `ocg-manager-cli`. The dashboard at
+  `http://127.0.0.1:30001/dashboard/` proxies to the split gateway, and Vue
+  changes still hot-reload. On the first run against a fresh data directory,
+  retrieve the development Gateway Key from a private terminal with
+  `target/debug/ocg-manager-cli --data-dir tmp/dev-data status --show-key`.
+- Desktop host work (tray, autostart, native browser, updater) still needs
+  `pnpm run dev`: the CLI does not register those host capabilities.
+
+The split gateway is a separate process from any gateway your agents use.
+Restarting it still ends its in-flight streams; keep agents on the installed
+app or another long-lived instance when they must not be interrupted.
+
 `pnpm install` enables `.githooks` (`cargo fmt --all` on staged `*.rs`).
 
 ## Checks
