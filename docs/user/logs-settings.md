@@ -83,7 +83,11 @@ The **Settings** view holds the gateway's persistent configuration:
   pricing refreshes, release checks, and signed desktop installer downloads;
   authenticated `GET /v1/models` and protected
   `GET /dashboard/api/v4/application-models` are local lists and do not use
-  this outbound path. The browser sidecar is outside its scope. **Test
+  this outbound path. The browser sidecar is outside its scope. A managed CPA
+  runtime follows the same policy: manual mode becomes its `requests.proxy-url`,
+  force direct becomes `"direct"`, automatic leaves it on environment proxies,
+  and per-model list applies the direction's default leg; changing the policy
+  rewrites the CPA config and restarts a running managed CPA. **Test
   connection** uses the unsaved form values against the sealed OpenCode Go
   origin. Any
   HTTP status proves network reachability, without running model inference or

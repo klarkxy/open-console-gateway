@@ -91,6 +91,23 @@ async fn update_settings(
         (previous_config, config, committed_revision)
     };
 
+    // A changed outbound proxy policy must reach the managed CPA process too;
+    // sync failure leaves the settings commit intact and is surfaced in
+    // Runtime Logs instead of rolling back unrelated fields.
+    if crate::cpa_runtime::cpa_requests_proxy_url(&previous_config)
+        != crate::cpa_runtime::cpa_requests_proxy_url(&config)
+        && let Err(error) = state.sync_cpa_proxy_settings().await
+    {
+        state.log_runtime_event(
+            "error",
+            "settings",
+            &format!(
+                "event=cpa_proxy_sync_failed fields={changed_fields} revision={} reason={error}",
+                state.settings_revision()
+            ),
+        );
+    }
+
     if let Err(error) = state
         .rebind_listener_after_settings_commit(previous_config, config, committed_revision, false)
         .await

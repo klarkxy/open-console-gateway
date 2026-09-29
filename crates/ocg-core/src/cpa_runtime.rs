@@ -11,7 +11,10 @@ pub mod host;
 use crate::cpa::{CpaClient, CpaError};
 use crate::db::{CpaCatalogModel, CpaCatalogRecord, CpaIntegrationRecord};
 use crate::http_client;
-use crate::models::{Account as ModelAccount, AccountSetupStep, AccountType, AppConfig};
+use crate::models::{
+    Account as ModelAccount, AccountSetupStep, AccountType, AppConfig, ProxyListDirection,
+    ProxyMode,
+};
 use crate::provider::{
     CPA_ACCOUNT_ID, CPA_ACCOUNT_NAME, CPA_PROVIDER_ID, CredentialKind, QuotaScope,
 };
@@ -716,6 +719,56 @@ impl CoreStateInner {
         Ok(host.logs())
     }
 
+    /// Re-assert the persisted outbound proxy policy on a managed CPA install:
+    /// rewrites config.yaml when the rendered content drifted and restarts an
+    /// OCG-owned running process so the new `requests.proxy-url` takes effect.
+    /// No-op without a process host, without a managed install, or when the
+    /// rendered config already matches.
+    pub async fn sync_cpa_proxy_settings(&self) -> Result<(), CpaRuntimeError> {
+        if self.cpa_runtime.host.get().is_none() {
+            return Ok(());
+        }
+        if load_managed(&self.data_dir)?.is_none() {
+            return Ok(());
+        }
+        let _operation = self.cpa_operations.lock().await;
+        self.sync_cpa_proxy_settings_locked().await
+    }
+
+    /// `cpa_operations` must already be held. Shared by the settings hook and
+    /// startup restore, which serializes on that same lock.
+    async fn sync_cpa_proxy_settings_locked(&self) -> Result<(), CpaRuntimeError> {
+        let managed = require_managed(&self.data_dir)?;
+        let requests_proxy_url = cpa_requests_proxy_url(&self.config()).map(str::to_owned);
+        let config_path = runtime_dir(&self.data_dir).join(CONFIG_NAME);
+        let secrets = self.load_saved_secrets()?;
+        let current = fs::read(&config_path).map_err(fs_error)?;
+        let extra_keys = config_extras(&current, &secrets.inference_key)?;
+        let auth_dir = runtime_dir(&self.data_dir).join("auth");
+        let desired = render_config_yaml(
+            managed.port,
+            &auth_dir,
+            &secrets.inference_key,
+            &extra_keys,
+            requests_proxy_url.as_deref(),
+        )?;
+        if current == desired.as_bytes() {
+            return Ok(());
+        }
+        atomic_write(&config_path, desired.as_bytes())?;
+        let previous_config_path = runtime_dir(&self.data_dir).join(PREVIOUS_CONFIG_NAME);
+        if previous_config_path.exists() {
+            atomic_write(&previous_config_path, desired.as_bytes())?;
+        }
+        let host = self.cpa_runtime.host()?.clone();
+        if !host.owned_running() {
+            return Ok(());
+        }
+        let _runtime_operation = self.cpa_runtime.begin_lifecycle_operation("restart");
+        self.stop_owned_serialized(&host)?;
+        self.launch_owned_managed_process(&managed).await
+    }
+
     pub fn stop_owned_cpa_runtime(&self) {
         self.cpa_runtime.cancel_device_login();
         let _owned = self.cpa_runtime.owned_process.lock();
@@ -749,6 +802,17 @@ impl CoreStateInner {
             Ok(Some(managed)) if managed.desired_running => managed,
             _ => return,
         };
+        // Reconcile config.yaml with the persisted outbound proxy policy
+        // before launch; a drifted file must not keep the restored process on
+        // a stale requests.proxy-url. Sync failure is not fatal to the
+        // restore: the existing config still launches.
+        if let Err(error) = self.sync_cpa_proxy_settings_locked().await {
+            self.log_runtime_event(
+                "error",
+                "cpa",
+                &format!("event=cpa_proxy_sync_failed context=startup reason={error}"),
+            );
+        }
         if self
             .cpa_runtime
             .host
@@ -1004,6 +1068,7 @@ impl CoreStateInner {
             &root.join("auth"),
             &inference_key,
             &extra_keys,
+            cpa_requests_proxy_url(&self.config()),
         )?;
 
         let host = self.cpa_runtime.host()?.clone();
@@ -2013,12 +2078,15 @@ impl CoreStateInner {
             let _settings = self.settings_update.lock();
             self.ensure_cas(expected_revision, expected_generation)
                 .and_then(|_| {
+                    let requests_proxy_url =
+                        cpa_requests_proxy_url(&self.config()).map(str::to_owned);
                     write_config_yaml(
                         &config_path,
                         managed.port,
                         &runtime_dir(&self.data_dir).join("auth"),
                         &protected,
                         &extras,
+                        requests_proxy_url.as_deref(),
                     )?;
                     if previous_config_path.exists()
                         && let Err(error) = write_config_yaml(
@@ -2027,6 +2095,7 @@ impl CoreStateInner {
                             &runtime_dir(&self.data_dir).join("auth"),
                             &protected,
                             &extras,
+                            requests_proxy_url.as_deref(),
                         )
                     {
                         let _ = atomic_write(&config_path, &config_before);
@@ -2457,7 +2526,42 @@ fn write_config_yaml(
     auth_dir: &Path,
     inference_key: &str,
     extra_keys: &[String],
+    requests_proxy_url: Option<&str>,
 ) -> Result<(), CpaRuntimeError> {
+    let body = render_config_yaml(
+        port,
+        auth_dir,
+        inference_key,
+        extra_keys,
+        requests_proxy_url,
+    )?;
+    atomic_write(path, body.as_bytes())
+}
+
+/// The effective CPA `requests.proxy-url` for the persisted outbound proxy
+/// policy. `None` leaves the key unset so CPA follows environment proxies,
+/// matching the gateway's automatic mode. List mode maps to the direction's
+/// default leg because CPA egress is not model-scoped: the per-model
+/// exceptions stay inside the gateway's own forwarding path.
+pub(crate) fn cpa_requests_proxy_url(config: &AppConfig) -> Option<&str> {
+    match config.proxy_mode {
+        ProxyMode::Auto => None,
+        ProxyMode::Manual => Some(config.proxy_url.as_str()),
+        ProxyMode::Direct => Some("direct"),
+        ProxyMode::List => match config.proxy_list_direction {
+            ProxyListDirection::Whitelist => Some("direct"),
+            ProxyListDirection::Blacklist => Some(config.proxy_url.as_str()),
+        },
+    }
+}
+
+fn render_config_yaml(
+    port: u16,
+    auth_dir: &Path,
+    inference_key: &str,
+    extra_keys: &[String],
+    requests_proxy_url: Option<&str>,
+) -> Result<String, CpaRuntimeError> {
     validate_managed_secret(inference_key)?;
     let mut seen = HashSet::new();
     if !seen.insert(inference_key) {
@@ -2480,10 +2584,13 @@ fn write_config_yaml(
         keys.push_str(&yaml_escape(key));
         keys.push_str("\"\n");
     }
-    let body = format!(
-        "host: \"127.0.0.1\"\nport: {port}\nauth-dir: \"{auth_dir}\"\ndebug: false\nlogging-to-file: false\nremote-management:\n  allow-remote: false\n  secret-key: \"\"\n  disable-control-panel: true\n  disable-auto-update-panel: true\napi-keys:\n{keys}"
-    );
-    atomic_write(path, body.as_bytes())
+    let requests = match requests_proxy_url {
+        Some(proxy_url) => format!("requests:\n  proxy-url: \"{}\"\n", yaml_escape(proxy_url)),
+        None => String::new(),
+    };
+    Ok(format!(
+        "host: \"127.0.0.1\"\nport: {port}\nauth-dir: \"{auth_dir}\"\ndebug: false\nlogging-to-file: false\nremote-management:\n  allow-remote: false\n  secret-key: \"\"\n  disable-control-panel: true\n  disable-auto-update-panel: true\n{requests}api-keys:\n{keys}"
+    ))
 }
 
 fn remove_known_path(path: &Path) -> Result<(), CpaRuntimeError> {

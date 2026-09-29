@@ -323,6 +323,7 @@ fn config_yaml_is_loopback_only_and_lists_protected_key() {
         &dir.join("auth"),
         "infer",
         &["extra".into()],
+        None,
     )
     .unwrap();
     let text = fs::read_to_string(dir.join("config.yaml")).unwrap();
@@ -334,6 +335,50 @@ fn config_yaml_is_loopback_only_and_lists_protected_key() {
     assert!(text.contains("extra"));
     assert_eq!(parse_api_keys_from_yaml(&text).unwrap(), ["infer", "extra"]);
     fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn config_yaml_writes_requests_proxy_url_only_when_set() {
+    let with_proxy = render_config_yaml(
+        8317,
+        Path::new("auth"),
+        "infer",
+        &[],
+        Some("http://127.0.0.1:7890"),
+    )
+    .unwrap();
+    assert!(with_proxy.contains("requests:\n  proxy-url: \"http://127.0.0.1:7890\"\n"));
+    assert_eq!(parse_api_keys_from_yaml(&with_proxy).unwrap(), ["infer"]);
+
+    let without_proxy = render_config_yaml(8317, Path::new("auth"), "infer", &[], None).unwrap();
+    assert!(!without_proxy.contains("requests:"));
+    assert!(!without_proxy.contains("proxy-url"));
+}
+
+#[test]
+fn cpa_requests_proxy_url_maps_the_outbound_proxy_policy_default_leg() {
+    let mut config = AppConfig::default();
+    config.proxy_mode = ProxyMode::Auto;
+    assert_eq!(cpa_requests_proxy_url(&config), None);
+
+    config.proxy_mode = ProxyMode::Manual;
+    config.proxy_url = "http://127.0.0.1:7890".into();
+    assert_eq!(
+        cpa_requests_proxy_url(&config),
+        Some("http://127.0.0.1:7890")
+    );
+
+    config.proxy_mode = ProxyMode::Direct;
+    assert_eq!(cpa_requests_proxy_url(&config), Some("direct"));
+
+    config.proxy_mode = ProxyMode::List;
+    config.proxy_list_direction = ProxyListDirection::Whitelist;
+    assert_eq!(cpa_requests_proxy_url(&config), Some("direct"));
+    config.proxy_list_direction = ProxyListDirection::Blacklist;
+    assert_eq!(
+        cpa_requests_proxy_url(&config),
+        Some("http://127.0.0.1:7890")
+    );
 }
 
 #[test]
@@ -386,6 +431,7 @@ fn update_secrets_require_readable_valid_config_and_preserve_extras() {
         &runtime_dir(&dir).join("auth"),
         "protected-key",
         &["extra-one".into(), "extra-two".into()],
+        None,
     )
     .unwrap();
     let secrets = state.managed_secrets(InstallMode::Update, &config).unwrap();
@@ -645,6 +691,7 @@ async fn stopped_managed_runtime_lists_configured_client_keys() {
         &runtime_dir(&dir).join("auth"),
         "protected-key",
         &["extra-key".into()],
+        None,
     )
     .unwrap();
     state
@@ -905,6 +952,7 @@ async fn failed_rollback_restores_config_manifest_and_former_running_version() {
         &root.join("auth"),
         "inference-key",
         &["current-extra".into()],
+        None,
     )
     .unwrap();
     let current_config = fs::read(root.join(CONFIG_NAME)).unwrap();
@@ -914,6 +962,7 @@ async fn failed_rollback_restores_config_manifest_and_former_running_version() {
         &root.join("auth"),
         "inference-key",
         &["previous-extra".into()],
+        None,
     )
     .unwrap();
     save_managed(
@@ -1013,6 +1062,7 @@ async fn assert_successful_rollback_catalog(label: &str, expected_models: Vec<St
         &root.join("auth"),
         "inference-key",
         &["current-extra".into()],
+        None,
     )
     .unwrap();
     write_config_yaml(
@@ -1021,6 +1071,7 @@ async fn assert_successful_rollback_catalog(label: &str, expected_models: Vec<St
         &root.join("auth"),
         "inference-key",
         &["previous-extra".into()],
+        None,
     )
     .unwrap();
     save_managed(
@@ -1196,6 +1247,7 @@ async fn remove_deletes_owned_auth_before_managed_json_and_is_retryable() {
         &root.join("auth"),
         "inference-key",
         &[],
+        None,
     )
     .unwrap();
     save_managed(
@@ -1400,6 +1452,7 @@ fn prepare_managed_runtime(dir: &std::path::Path, state: &CoreStateInner, port: 
         &root.join("auth"),
         "inference-key",
         &[],
+        None,
     )
     .unwrap();
     save_managed(
