@@ -787,10 +787,8 @@ async function load(): Promise<void> {
       runtimeError.value = dashboardErrorDetail(error);
     }
     if (value.configured) {
-      await loadAccounts();
-      await loadCatalog();
-      // Discovery failures surface inline and never break the page or OAuth.
-      await loadCliImports();
+      // These reads populate independent sections and must not form a waterfall.
+      await Promise.all([loadAccounts(), loadCatalog(), loadCliImports()]);
     } else {
       cpaAccounts.value = [];
       resetCatalog();
@@ -1405,9 +1403,7 @@ async function refreshAfterRuntimeSettled(): Promise<void> {
     return;
   }
   if (integration.value.configured) {
-    await loadAccounts();
-    await loadCatalog();
-    await loadCliImports();
+    await Promise.all([loadAccounts(), loadCatalog(), loadCliImports()]);
   } else {
     cpaAccounts.value = [];
     resetCatalog();

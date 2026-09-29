@@ -156,6 +156,12 @@ export function findPlanDefinition(
   providerId: string,
   catalog?: readonly ProviderCatalogEntry[] | null,
 ): ProviderSurface | undefined {
+  // Convert only the matching catalog entry. Rebuilding every surface first
+  // copied the full alias and protocol arrays on every lookup.
+  if (catalog != null) {
+    const entry = findCatalogEntry(catalog, providerId);
+    return entry ? providerSurfaceFromCatalog(entry) : undefined;
+  }
   return providerSurfaces(catalog).find((surface) => surface.provider_id === providerId);
 }
 

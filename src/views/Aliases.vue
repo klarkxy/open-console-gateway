@@ -161,7 +161,8 @@ import { CPA_PROVIDER_ID } from "../domain/destination-providers.ts";
 import {
   aliasOverlapFlags,
   aliasRowPlatformLabel,
-  aliasRowRoutingRanks,
+  aliasRoutingRankIndex,
+  aliasRoutingRanksFromIndex,
   isPublicModelPublished,
   mergeProviderAliasRows,
   publicModelPublicationKey,
@@ -235,8 +236,9 @@ const aliasRows = computed(() => (
 const overlapFlags = computed(() => aliasOverlapFlags(aliasRows.value));
 const routingRanks = computed(() => {
   const ranks = new Map<string, number[]>();
+  const index = aliasRoutingRankIndex(accounts.value, identitiesStore.identities);
   for (const row of aliasRows.value) {
-    ranks.set(row.key, aliasRowRoutingRanks(row, accounts.value, identitiesStore.identities));
+    ranks.set(row.key, aliasRoutingRanksFromIndex(row, index));
   }
   return ranks;
 });

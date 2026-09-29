@@ -8,6 +8,8 @@ import {
   aliasModelScopeAllows,
   aliasOverlapFlags,
   aliasRowPlatformLabel,
+  aliasRoutingRankIndex,
+  aliasRoutingRanksFromIndex,
   aliasRowRoutingRanks,
   cpaAliasRows,
   cpaPublicModelName,
@@ -536,6 +538,27 @@ test("Alias model scope allows everything or listed names case-insensitively", (
   assert.equal(aliasModelScopeAllows({ kind: "all" }, "anything"), true);
   assert.equal(aliasModelScopeAllows({ kind: "only", models: ["GPT-5.6"] }, "gpt-5.6"), true);
   assert.equal(aliasModelScopeAllows({ kind: "only", models: ["gpt-5.6"] }, "grok-4"), false);
+});
+
+test("one Alias routing index serves every row without changing rank selection", () => {
+  const routableScope = {
+    ...customScope,
+    models: [{ ...customScope.models[0], routable: true }],
+  } as ProviderScopeView;
+  const routableAccount = { ...customAccount, setup_step: "ready" } as Account;
+  const rows = providerAliasRows([routableScope, builtinScope], [routableAccount, goAccount]);
+  const identities = [identityWithCredentials([
+    { accountId: "custom-1", rank: 4 },
+    { accountId: "go-1", rank: 2 },
+  ])];
+  const accounts = [routableAccount, goAccount];
+  const index = aliasRoutingRankIndex(accounts, identities);
+  for (const row of rows) {
+    assert.deepEqual(
+      aliasRoutingRanksFromIndex(row, index),
+      aliasRowRoutingRanks(row, accounts, identities),
+    );
+  }
 });
 
 test("Alias rows sort by first serving rank with unrouted rows last in original order", () => {

@@ -342,10 +342,10 @@ export const dashboardApi = {
   installUpdate: async (expectedVersion: string) =>
     presentUpdateStatus(await withCas((expectation) => dashboardV3.installUpdate(expectedVersion, expectation))),
 
-  getGatewayLogs: async (query: GatewayLogQuery = {}) =>
-    (await dashboardV3.getGatewayLogs(query)).items.map(presentGatewayLog),
-  getForwardLogs: async (query: ForwardLogQuery = {}) =>
-    presentForwardLogs(await dashboardV3.getForwardLogs(forwardLogQuery(query))),
+  getGatewayLogs: async (query: GatewayLogQuery = {}, signal?: AbortSignal) =>
+    (await dashboardV3.getGatewayLogs(query, signal)).items.map(presentGatewayLog),
+  getForwardLogs: async (query: ForwardLogQuery = {}, signal?: AbortSignal) =>
+    presentForwardLogs(await dashboardV3.getForwardLogs(forwardLogQuery(query), signal)),
   getForwardLogModels: async () => (await dashboardV3.getForwardLogModels()).models,
   getForwardLogKeys: async () => (await dashboardV3.getForwardLogKeys()).keys,
   getDashboardSummary: async () => presentDashboardSummary(await dashboardV3.getDashboardSummary()),

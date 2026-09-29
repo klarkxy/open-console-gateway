@@ -718,9 +718,19 @@ const updateDownloadPercentage = computed(() => {
   return Math.min(100, Math.max(0, Math.round((status.downloaded / status.total) * 100)));
 });
 
+let settingsLoadInFlight: Promise<boolean> | null = null;
 async function loadSettings(): Promise<boolean> {
+  if (settingsLoadInFlight) return settingsLoadInFlight;
   const generation = ++settingsLoadGeneration;
   settingsLoadError.value = "";
+  const pending = loadSettingsOnce(generation).finally(() => {
+    if (settingsLoadInFlight === pending) settingsLoadInFlight = null;
+  });
+  settingsLoadInFlight = pending;
+  return pending;
+}
+
+async function loadSettingsOnce(generation: number): Promise<boolean> {
   try {
     const nextConfig = await settingsStore.loadPresented();
     if (generation !== settingsLoadGeneration) return false;

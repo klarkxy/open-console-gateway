@@ -59,11 +59,19 @@ const prefetchLoaders: ViewLoader[] = [
  * to each page does not wait on the network.
  */
 export function prefetchAppViews(): void {
+  // A remote-browser window has no shell navigation, so warming every business
+  // view only competes with the noVNC session.
+  if (window.location.hash.startsWith("#/browser")) return;
   const schedule = window.requestIdleCallback
     ?? ((callback: () => void) => { window.setTimeout(callback, 2000); });
-  schedule(() => {
-    for (const loader of prefetchLoaders) void loader();
-  });
+  let index = 0;
+  const loadNext = () => {
+    const loader = prefetchLoaders[index];
+    index += 1;
+    if (!loader) return;
+    void loader().finally(() => schedule(loadNext));
+  };
+  schedule(loadNext);
 }
 
 export function createAppRouter(): Router {

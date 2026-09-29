@@ -232,7 +232,7 @@ test("connection store: regeneratePrimaryKey commits the rotated key despite a p
   // The API helper reads the connection once for its return value…
   await waitForCalls(calls, 3);
   calls[2]!.resolve(connectionBody("new-primary", 8));
-  // …and the store refreshes its cached resource through the guarded reload.
+  // No cached connection exists yet, so the store performs its guarded reload.
   await waitForCalls(calls, 4);
   calls[3]!.resolve(connectionBody("new-primary", 8));
   const rotated = await rotation;

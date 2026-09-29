@@ -137,11 +137,9 @@ import {
 } from "../views/account-status-text.ts";
 import { t } from "../i18n/index.ts";
 
-// NDatePicker only renders inside the purchase-date popover, so load it on
-// demand instead of pulling the date picker into the accounts chunk.
-const NDatePicker = defineAsyncComponent(() =>
-  import("naive-ui").then((m) => m.NDatePicker),
-);
+// The date picker only renders inside the purchase-date popover. Load its
+// dedicated module rather than the naive-ui barrel.
+const NDatePicker = defineAsyncComponent(() => import("./LazyDatePicker.vue"));
 
 const props = withDefaults(
   defineProps<{

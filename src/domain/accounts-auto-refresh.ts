@@ -26,10 +26,25 @@ export interface AccountRefreshTarget {
   refresh: (isCurrent: () => boolean) => Promise<void>;
 }
 
+export interface AccountRefreshTargets {
+  ids(): readonly string[];
+  current(id: string): AccountRefreshTarget | undefined;
+}
+
 /** One serial, lazy pass over all eligible accounts, independent of filters. */
+function normalizeTargets(
+  source: AccountRefreshTarget[] | AccountRefreshTargets,
+): AccountRefreshTargets {
+  if (!Array.isArray(source)) return source;
+  return {
+    ids: () => source.map((target) => target.id),
+    current: (id) => source.find((target) => target.id === id),
+  };
+}
+
 export function createAccountsAutoRefresh(options: {
   allowed: () => boolean;
-  targets: () => AccountRefreshTarget[];
+  targets: () => AccountRefreshTarget[] | AccountRefreshTargets;
   now?: () => number;
   afterRefresh?: () => Promise<void>;
 }) {
@@ -44,13 +59,15 @@ export function createAccountsAutoRefresh(options: {
     const captured = generation;
     const current = () => captured === generation && options.allowed();
     try {
-      const ids = options.targets().map(target => target.id);
+      let targets = normalizeTargets(options.targets());
+      const ids = targets.ids();
       const retained = new Set(ids);
       for (const id of attempts.keys()) if (!retained.has(id)) attempts.delete(id);
       for (const id of ids) {
         if (!current()) break;
         // Previous I/O may have deleted, rebound, disabled, or refreshed this row.
-        const target = options.targets().find(row => row.id === id);
+        targets = normalizeTargets(options.targets());
+        const target = targets.current(id);
         if (!target || target.busy) continue;
         const attempt = attempts.get(id);
         const lastAttempt = attempt?.binding === target.binding ? attempt.at : 0;
@@ -58,8 +75,10 @@ export function createAccountsAutoRefresh(options: {
         if (target.nextAllowedAt > at) continue;
         if (Math.max(target.observedAt, lastAttempt) + ACCOUNT_AUTO_REFRESH_MS > at) continue;
         attempts.set(id, { binding: target.binding, at });
-        const isCurrent = () => current()
-          && options.targets().some(row => row.id === id && row.binding === target.binding);
+        const isCurrent = () => {
+          const currentTarget = normalizeTargets(options.targets()).current(id);
+          return current() && currentTarget?.binding === target.binding;
+        };
         try {
           await target.refresh(isCurrent);
         } catch {

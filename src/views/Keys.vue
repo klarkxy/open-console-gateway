@@ -304,7 +304,11 @@ async function runKeyMutation(
       mutationError = error;
     }
     try {
-      const latest = await connectionStore.load();
+      // A successful mutation already reloads plaintext. Reload here only when
+      // that read failed, or when a conflict may have changed another Key.
+      const latest = connectionStore.info && mutationError === null && !isConflict(mutationError)
+        ? connectionStore.info
+        : await connectionStore.load();
       if (generation !== loadGeneration) return false;
       applyConnection(latest);
       if (mutationError === null) {

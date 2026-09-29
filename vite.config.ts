@@ -24,7 +24,7 @@ export default defineConfig({
   },
   clearScreen: false,
   server: {
-    port: 30001,
+    port: Number(process.env.OCG_VITE_PORT) || 30001,
     strictPort: true,
     host: "127.0.0.1",
     proxy: {

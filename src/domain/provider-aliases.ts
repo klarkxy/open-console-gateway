@@ -306,33 +306,84 @@ export function aliasModelScopeAllows(scope: ModelScope, publicModel: string): b
  * public name. Non-routable rows serve nothing. Runtime state (cooldowns,
  * quota) is not reflected, so this is the configured order, not a live pick.
  */
+interface AliasRankBinding {
+  rank: number;
+  scope: ModelScope;
+}
+
+interface AliasRoutingRankIndex {
+  enabledAccountIds: ReadonlySet<string>;
+  providerAccountIds: ReadonlyMap<string, ReadonlySet<string>>;
+  bindingsByAccountId: ReadonlyMap<string, readonly AliasRankBinding[]>;
+}
+
+/**
+ * Account and credential facts shared by every row. Building this once keeps
+ * a full Alias table from rescanning every identity for each model.
+ */
+export function aliasRoutingRankIndex(
+  accounts: readonly Account[],
+  identities: readonly Identity[],
+): AliasRoutingRankIndex {
+  const enabledAccountIds = new Set<string>();
+  const providerAccountIds = new Map<string, Set<string>>();
+  for (const account of accounts) {
+    if (!account.enabled) continue;
+    enabledAccountIds.add(account.id);
+    const ids = providerAccountIds.get(account.provider_id);
+    if (ids) ids.add(account.id);
+    else providerAccountIds.set(account.provider_id, new Set([account.id]));
+  }
+  const bindingsByAccountId = new Map<string, AliasRankBinding[]>();
+  for (const identity of identities) {
+    for (const credential of identity.credentials) {
+      if (credential.legacy.kind !== "account" || !enabledAccountIds.has(credential.legacy.id)) continue;
+      if (credential.credential.purpose !== "inference" || !credential.credential.enabled) continue;
+      const bindings = credential.bindings.flatMap((binding) => (
+        binding.enabled ? [{ rank: binding.routing_rank, scope: binding.model_scope }] : []
+      ));
+      if (bindings.length === 0) continue;
+      const existing = bindingsByAccountId.get(credential.legacy.id);
+      if (existing) existing.push(...bindings);
+      else bindingsByAccountId.set(credential.legacy.id, bindings);
+    }
+  }
+  return { enabledAccountIds, providerAccountIds, bindingsByAccountId };
+}
+
+function ranksForAccounts(
+  accountIds: ReadonlySet<string> | undefined,
+  bindingsByAccountId: ReadonlyMap<string, readonly AliasRankBinding[]>,
+  publicModel: string,
+): number[] {
+  if (!accountIds || accountIds.size === 0) return [];
+  const ranks = new Set<number>();
+  for (const accountId of accountIds) {
+    for (const binding of bindingsByAccountId.get(accountId) ?? []) {
+      if (aliasModelScopeAllows(binding.scope, publicModel)) ranks.add(binding.rank);
+    }
+  }
+  return [...ranks].sort((left, right) => left - right);
+}
+
+/** Routing ranks for one row using an index shared by the whole Alias table. */
+export function aliasRoutingRanksFromIndex(
+  row: ProviderAliasRow,
+  index: AliasRoutingRankIndex,
+): number[] {
+  if (!row.routable) return [];
+  const accountIds = row.custom_account_id
+    ? (index.enabledAccountIds.has(row.custom_account_id) ? new Set([row.custom_account_id]) : undefined)
+    : index.providerAccountIds.get(row.provider_id);
+  return ranksForAccounts(accountIds, index.bindingsByAccountId, row.public_model);
+}
+
 export function aliasRowRoutingRanks(
   row: ProviderAliasRow,
   accounts: readonly Account[],
   identities: readonly Identity[],
 ): number[] {
-  if (!row.routable) return [];
-  const accountIds = new Set(
-    accounts
-      .filter((account) => (row.custom_account_id
-        ? account.id === row.custom_account_id
-        : account.provider_id === row.provider_id))
-      .filter((account) => account.enabled)
-      .map((account) => account.id),
-  );
-  const ranks = new Set<number>();
-  for (const identity of identities) {
-    for (const credential of identity.credentials) {
-      if (credential.legacy.kind !== "account" || !accountIds.has(credential.legacy.id)) continue;
-      if (credential.credential.purpose !== "inference" || !credential.credential.enabled) continue;
-      for (const binding of credential.bindings) {
-        if (!binding.enabled) continue;
-        if (!aliasModelScopeAllows(binding.model_scope, row.public_model)) continue;
-        ranks.add(binding.routing_rank);
-      }
-    }
-  }
-  return [...ranks].sort((left, right) => left - right);
+  return aliasRoutingRanksFromIndex(row, aliasRoutingRankIndex(accounts, identities));
 }
 
 /** Order one group's rows by first serving rank; unrouted rows keep their relative order at the end. */

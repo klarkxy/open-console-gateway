@@ -562,12 +562,13 @@ import { runAccountSaveFollowup } from "../domain/account-save-followup.ts";
 import type { OnboardingIntent } from "../domain/onboarding-draft.ts";
 import type { PlatformAccount, PlatformLink } from "../api/platform-accounts.ts";
 import { useAccountUsage, type UsageLimitView } from "../domain/useAccountUsage.ts";
-import { createAccountsAutoRefresh, type AccountRefreshTarget } from "../domain/accounts-auto-refresh.ts";
+import { createAccountsAutoRefresh, type AccountRefreshTarget, type AccountRefreshTargets } from "../domain/accounts-auto-refresh.ts";
 import { createAccountRefreshQueue, platformRefreshBinding, waitForAccountRefreshIdle, type AccountRefreshState } from "../domain/account-refresh-queue.ts";
 import { accountInferenceEndpointUrl, officialBalanceSupported } from "../domain/upstream-balance.ts";
 import { useRoutingCardLayout } from "./useRoutingCardLayout.ts";
 import { MotionConfig, motion } from "motion-v";
 import {
+  accountStatusKey,
   filterAccounts,
   plansInUse,
   type AccountPlanFilter,
@@ -1081,7 +1082,13 @@ const canCreateManagedDraft = computed(() => (
   && !managedInvitePreview.value.status
 ));
 
-const visibleAccountIds = computed(() => new Set(
+let previousVisibleIds = new Set<string>();
+let previousStatusSignature = "";
+const visibleAccountIds = computed(() => {
+  const signature = accounts.value.map((account) => (
+    `${account.id}:${accountStatusKey(account, now.value, providerCatalog.value, destinationsStore.destinationForAccount(account.id))}`
+  )).join("\n");
+  const ids = new Set(
   filterAccounts(
     accounts.value,
     effectivePlanFilter.value,
@@ -1089,8 +1096,12 @@ const visibleAccountIds = computed(() => new Set(
     now.value,
     providerCatalog.value,
     destinationsStore.destinationForAccount,
-  ).map((account) => account.id),
-));
+  ).map((account) => account.id));
+  if (signature === previousStatusSignature) return previousVisibleIds;
+  previousStatusSignature = signature;
+  previousVisibleIds = ids;
+  return ids;
+});
 
 const displayedGroups = computed(() => {
   const visibleIds = visibleAccountIds.value;
@@ -1145,6 +1156,7 @@ const displayedGroupViews = computed((): DisplayedGroupView[] => {
   return views;
 });
 
+let previousPlatformRefreshing: Record<string, boolean> = {};
 const platformRefreshing = computed(() => {
   const refreshing = { ...platformStore.refreshing };
   for (const id of Object.keys(refreshStates.value)) {
@@ -1154,6 +1166,12 @@ const platformRefreshing = computed(() => {
       if (link) refreshing[`${link.platformAccountId}:${id}`] = true;
     }
   }
+  const previousKeys = Object.keys(previousPlatformRefreshing);
+  const nextKeys = Object.keys(refreshing);
+  if (previousKeys.length === nextKeys.length && nextKeys.every((key) => previousPlatformRefreshing[key] === refreshing[key])) {
+    return previousPlatformRefreshing;
+  }
+  previousPlatformRefreshing = refreshing;
   return refreshing;
 });
 const platformPendingLink = computed(() => platformStore.pendingLink);
@@ -1420,7 +1438,7 @@ function rowMenuOptionsFor(
     identityForCard(overlayId),
     destinationForAccountId(overlayId),
     providersStore.connections ?? null,
-    now.value,
+    overlay ? accountStatusKey(overlay, now.value, providerCatalog.value, destinationForAccountId(overlay.id)) : "",
   ], () => rowMenuOptions(group, credential, index, parent));
 }
 
@@ -2646,7 +2664,8 @@ async function initializeAccounts() {
   const registrationOptions = loadRegistrationOptions();
   await Promise.allSettled([loadProviderCatalog(), loadQuotaLimits()]);
   await loadAccounts();
-  await providersStore.loadConnections().catch(() => undefined);
+  // loadAccounts already waits for the first connections snapshot.
+  if (!providersStore.connections) await providersStore.loadConnections().catch(() => undefined);
   // Usage is the primary entry task. Registration/browser capabilities must
   // not delay the first stale-usage pass or block account configuration.
   void automaticRefresh.run();
@@ -3033,31 +3052,37 @@ const automaticRefresh = createAccountsAutoRefresh({
     && !showTransfer.value && !showManagedWizard.value,
   // Automatic writes advance CAS; keep the next card-layout edit on current tokens.
   afterRefresh: () => destinationsStore.load().then(() => undefined),
-  targets: () => accounts.value.flatMap((account): AccountRefreshTarget[] => {
-    if (!account.enabled || !accountIsReady(account)) return [];
-    const link = platformStore.linkForAccount(account.id);
-    if (link) {
-      const parent = platformStore.parents.find(row => row.id === link.platformAccountId);
-      if (!parent) return [];
-      return [{
-        id: account.id,
-        binding: `${account.updated_at}\0${parent.id}\0${parent.version}`,
-        observedAt: (link.snapshot?.observedAt ?? 0) * 1000,
-        nextAllowedAt: 0,
-        busy: platformStore.loading || Boolean(platformStore.refreshing[`${parent.id}:${account.id}`])
-          || Boolean(platformStore.refreshing[parent.id]),
-        refresh: async (isCurrent) => {
-          await refreshQueue.enqueue(account.id, isCurrent, async current => {
-            if (await waitForPlatformRefresh(account.id, parent.id, current)) await platformStore.refreshChild(parent.id, account.id);
-          });
-        },
-      }];
+  targets: (): AccountRefreshTargets => {
+    const parentsById = new Map(platformStore.parents.map((parent) => [parent.id, parent]));
+    const byId = new Map<string, AccountRefreshTarget>();
+    for (const account of accounts.value) {
+      if (!account.enabled || !accountIsReady(account)) continue;
+      const link = platformStore.linkForAccount(account.id);
+      if (link) {
+        const parent = parentsById.get(link.platformAccountId);
+        if (!parent) continue;
+        byId.set(account.id, {
+          id: account.id,
+          binding: `${account.updated_at}\0${parent.id}\0${parent.version}`,
+          observedAt: (link.snapshot?.observedAt ?? 0) * 1000,
+          nextAllowedAt: 0,
+          busy: platformStore.loading || Boolean(platformStore.refreshing[`${parent.id}:${account.id}`])
+            || Boolean(platformStore.refreshing[parent.id]),
+          refresh: async (isCurrent) => {
+            await refreshQueue.enqueue(account.id, isCurrent, async current => {
+              if (await waitForPlatformRefresh(account.id, parent.id, current)) await platformStore.refreshChild(parent.id, account.id);
+            });
+          },
+        });
+        continue;
+      }
+      const target = automaticRefreshTarget(account);
+      if (target) byId.set(account.id, { ...target, refresh: (isCurrent) => refreshQueue.enqueue(
+        account.id, isCurrent, current => target.refresh(current),
+      ) });
     }
-    const target = automaticRefreshTarget(account);
-    return target ? [{ ...target, refresh: (isCurrent) => refreshQueue.enqueue(
-      account.id, isCurrent, current => target.refresh(current),
-    ) }] : [];
-  }),
+    return { ids: () => [...byId.keys()], current: (id) => byId.get(id) };
+  },
 });
 
 const projectionRefresh = createAccountsProjectionRefresh({

@@ -68,6 +68,30 @@ test("gateway filter reload keeps the previous snapshot and discards an older re
   assert.equal(store.gatewayLoaded, true);
 });
 
+test("a newer log filter aborts the request it replaces", async () => {
+  const pinia = createPinia();
+  setActivePinia(pinia);
+  installWindowDashboard();
+  const signals: AbortSignal[] = [];
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: (_input: string, init: RequestInit = {}) => new Promise<Response>((_resolve, reject) => {
+      signals.push(init.signal!);
+      init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    }),
+  });
+  const store = useObservabilityStore(pinia);
+  const first = store.loadGateway({ limit: 200, level: "INFO" });
+  const second = store.loadGateway({ limit: 200, level: "DEBUG" });
+  assert.equal(signals[0]?.aborted, true);
+  assert.equal(signals[1]?.aborted, false);
+  assert.equal(await first, undefined);
+  store.clear();
+  assert.equal(signals[1]?.aborted, true);
+  assert.equal(await second, undefined);
+  assert.equal(store.gatewayError, "");
+});
+
 test("session teardown clears both log snapshots and rejects late forward responses", async () => {
   const pinia = createPinia();
   setActivePinia(pinia);

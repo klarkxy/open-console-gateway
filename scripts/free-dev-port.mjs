@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { cwd } from "node:process";
 import net from "node:net";
 
-const port = 30001;
+const port = Number(process.env.OCG_VITE_PORT) || 30001;
 
 if (process.platform !== "win32") {
   process.exit(0);

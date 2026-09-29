@@ -814,14 +814,14 @@ export const dashboardV3 = {
   getDashboardSummary: () => requestV3<DashboardSummary>("/dashboard/summary"),
   getDailyTokensByModel: (days?: number) =>
     requestV3<DailyTokensByModel>(`/dashboard/daily-tokens-by-model?days=${days ?? 30}`),
-  getGatewayLogs: (query: GatewayLogQuery = {}) => {
+  getGatewayLogs: (query: GatewayLogQuery = {}, signal?: AbortSignal) => {
     const params = new URLSearchParams({ limit: String(query.limit ?? 100) });
     if (query.requestId) params.set("requestId", query.requestId);
     if (query.level) params.set("level", query.level);
     if (query.category) params.set("category", query.category);
-    return requestV3<GatewayLogs>(`/logs/gateway?${params}`);
+    return requestV3<GatewayLogs>(`/logs/gateway?${params}`, { signal });
   },
-  getForwardLogs: (query: ForwardLogQuery = {}) => {
+  getForwardLogs: (query: ForwardLogQuery = {}, signal?: AbortSignal) => {
     // Filters lead the query string; the backend applies them before paging.
     const params = new URLSearchParams();
     if (query.status) params.set("status", query.status);
@@ -838,7 +838,7 @@ export const dashboardV3 = {
     if (query.sortOrder) params.set("sortOrder", query.sortOrder);
     params.set("limit", String(query.limit ?? 20));
     params.set("offset", String(query.offset ?? 0));
-    return requestV3<ForwardLogs>(`/logs/forward?${params}`);
+    return requestV3<ForwardLogs>(`/logs/forward?${params}`, { signal });
   },
   getForwardLogModels: () => requestV3<ForwardLogModels>("/logs/forward/models"),
   getForwardLogKeys: () => requestV3<ForwardLogKeys>("/logs/forward/keys"),

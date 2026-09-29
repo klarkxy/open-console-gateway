@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { devEnvironment } from "./dev.mjs";
 
-export const VITE_DEV_PORT = 30001;
+export const VITE_DEV_PORT = process.env.OCG_VITE_PORT?.trim() || "30001";
 
 export function splitEnvironment(source = process.env) {
   return {

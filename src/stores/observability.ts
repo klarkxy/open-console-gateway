@@ -31,23 +31,28 @@ export const useObservabilityStore = defineStore("observability", () => {
   const models = ref<string[]>([]);
   const clientKeys = ref<ForwardLogClientKey[]>([]);
   let gatewayGeneration = 0;
+  let gatewayAbort: AbortController | null = null;
   let forwardGeneration = 0;
+  let forwardAbort: AbortController | null = null;
   let modelsGeneration = 0;
   let keysGeneration = 0;
 
   async function loadGateway(query: GatewayLogQuery): Promise<string | null | undefined> {
     const generation = ++gatewayGeneration;
+    gatewayAbort?.abort();
+    const abort = new AbortController();
+    gatewayAbort = abort;
     gatewayLoading.value = true;
     gatewayError.value = "";
     try {
-      const result = await dashboardApi.getGatewayLogs(query);
+      const result = await dashboardApi.getGatewayLogs(query, abort.signal);
       if (generation !== gatewayGeneration) return;
       gatewayLogs.value = result;
       gatewayLoaded.value = true;
       gatewayLoadedAt.value = Date.now();
       return null;
     } catch (error) {
-      if (generation !== gatewayGeneration) return;
+      if (generation !== gatewayGeneration || abort.signal.aborted) return;
       gatewayError.value = dashboardErrorDetail(error);
       return gatewayError.value;
     } finally {
@@ -57,10 +62,13 @@ export const useObservabilityStore = defineStore("observability", () => {
 
   async function loadForward(query: ForwardLogQuery): Promise<string | null | undefined> {
     const generation = ++forwardGeneration;
+    forwardAbort?.abort();
+    const abort = new AbortController();
+    forwardAbort = abort;
     forwardLoading.value = true;
     forwardError.value = "";
     try {
-      const result = await dashboardApi.getForwardLogs(query);
+      const result = await dashboardApi.getForwardLogs(query, abort.signal);
       if (generation !== forwardGeneration) return;
       forwardLogs.value = result.items;
       forwardTotals.value = result.summary;
@@ -68,7 +76,7 @@ export const useObservabilityStore = defineStore("observability", () => {
       forwardLoadedAt.value = Date.now();
       return null;
     } catch (error) {
-      if (generation !== forwardGeneration) return;
+      if (generation !== forwardGeneration || abort.signal.aborted) return;
       forwardError.value = dashboardErrorDetail(error);
       return forwardError.value;
     } finally {
@@ -102,7 +110,11 @@ export const useObservabilityStore = defineStore("observability", () => {
 
   function clear(): void {
     gatewayGeneration++;
+    gatewayAbort?.abort();
+    gatewayAbort = null;
     forwardGeneration++;
+    forwardAbort?.abort();
+    forwardAbort = null;
     modelsGeneration++;
     keysGeneration++;
     gatewayLogs.value = [];

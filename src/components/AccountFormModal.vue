@@ -349,11 +349,9 @@ import CreditSetupFields from "./CreditSetupFields.vue";
 import { useProvidersStore } from "../stores/providers.ts";
 import type { CreditSetupInput } from "../domain/credit-setup.ts";
 
-// NDatePicker is a heavy component only needed while the form is open; load it
-// on demand so the accounts chunk stays free of the date picker.
-const NDatePicker = defineAsyncComponent(() =>
-  import("naive-ui").then((m) => m.NDatePicker),
-);
+// The date picker is only needed while the form is open. Load its dedicated
+// module rather than the naive-ui barrel, which would pull unrelated components.
+const NDatePicker = defineAsyncComponent(() => import("./LazyDatePicker.vue"));
 
 export type AccountFormPayload = {
   credits?: CreditSetupInput | null;

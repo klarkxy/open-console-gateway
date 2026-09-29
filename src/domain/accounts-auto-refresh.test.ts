@@ -19,6 +19,25 @@ function fixture() {
   };
 }
 
+test("indexed targets are scanned once and rechecked individually after I/O", async () => {
+  let scans = 0;
+  let lookups = 0;
+  const targets = ["a", "b"].map((id) => ({
+    id, binding: "v1", observedAt: 0, nextAllowedAt: 0, busy: false,
+    refresh: async () => {},
+  }));
+  const controller = createAccountsAutoRefresh({
+    allowed: () => true,
+    targets: () => ({
+      ids: () => { scans += 1; return targets.map((target) => target.id); },
+      current: (id) => { lookups += 1; return targets.find((target) => target.id === id); },
+    }),
+  });
+  await controller.run();
+  assert.equal(scans, 1);
+  assert.equal(lookups, 2);
+});
+
 test("all due accounts refresh once; entry and timer ticks share freshness", async () => {
   const f = fixture();
   await f.controller.run(); await f.controller.run();

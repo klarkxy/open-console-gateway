@@ -257,13 +257,22 @@ async function loadDashboard() {
   dashboardRequestActive = true;
   loading.value = true;
   dashboardError.value = false;
-  const [loadedAccounts, connection, loadedSummary, tokens, catalog, destinations] = await Promise.allSettled([
-    accountsStore.loadPresented(), connectionStore.load(), dashboardApi.getDashboardSummary(),
-    dashboardApi.getDailyTokensByModel(30), providersStore.loadCatalog(), destinationsStore.load(),
-  ]);
-  if (loadedSummary.status === "fulfilled") { summary.value = loadedSummary.value; summaryLoaded.value = true; }
-  if (tokens.status === "fulfilled") { dailyTokens.value = tokens.value; tokensLoaded.value = true; }
-  dashboardError.value = [loadedAccounts, connection, loadedSummary, tokens, catalog, destinations].some((result) => result.status === "rejected");
+  const loadedAccounts = accountsStore.loadPresented();
+  const connection = connectionStore.load();
+  const loadedSummary = dashboardApi.getDashboardSummary().then((value) => {
+    summary.value = value;
+    summaryLoaded.value = true;
+    return value;
+  });
+  const tokens = dashboardApi.getDailyTokensByModel(30).then((value) => {
+    dailyTokens.value = value;
+    tokensLoaded.value = true;
+    return value;
+  });
+  const catalog = providersStore.loadCatalog();
+  const destinations = destinationsStore.load();
+  const results = await Promise.allSettled([loadedAccounts, connection, loadedSummary, tokens, catalog, destinations]);
+  dashboardError.value = results.some((result) => result.status === "rejected");
   if (!dashboardError.value) dashboardLoadedAt = Date.now();
   if (dashboardError.value) message.error(t("部分仪表盘数据加载失败"));
   loading.value = false;

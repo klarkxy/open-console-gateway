@@ -796,7 +796,12 @@ watch(gatewayCategoryFilter, () => {
   }, 300);
 });
 
-watch(activeTab, syncQueryState);
+watch(activeTab, (tab) => {
+  syncQueryState();
+  // The shared request ID may have changed while this tab was hidden.
+  if (tab === "gateway") void loadGatewayLogs();
+  if (tab === "forward") void loadForwardLogs();
+});
 watch(
   [statusFilter, accountFilter, modelFilter, keyFilter, providerFilter, routeAccountFilter, credentialAccountFilter, timeRange, activePreset, sortBy, sortOrder],
   () => {
@@ -831,10 +836,10 @@ onActivated(() => {
   if (activatedOnce) {
     // Only the automatic refresh is gated; user actions (search, filters,
     // paging, refresh buttons) call the loaders directly and stay immediate.
-    if (!gatewayLoading.value && Date.now() - gatewayLoadedAt.value >= ACTIVATED_REFRESH_FRESHNESS_MS) {
+    if (activeTab.value === "gateway" && !gatewayLoading.value && Date.now() - gatewayLoadedAt.value >= ACTIVATED_REFRESH_FRESHNESS_MS) {
       void loadGatewayLogs();
     }
-    if (!forwardLoading.value && Date.now() - forwardLoadedAt.value >= ACTIVATED_REFRESH_FRESHNESS_MS) {
+    if (activeTab.value === "forward" && !forwardLoading.value && Date.now() - forwardLoadedAt.value >= ACTIVATED_REFRESH_FRESHNESS_MS) {
       void loadForwardLogs();
     }
   } else {
@@ -844,8 +849,8 @@ onActivated(() => {
 
 onMounted(() => {
   syncQueryState();
-  void loadGatewayLogs();
-  void loadForwardLogs();
+  if (activeTab.value === "gateway") void loadGatewayLogs();
+  if (activeTab.value === "forward") void loadForwardLogs();
   void loadAccounts();
   void loadForwardLogModels();
   void loadForwardLogKeys();
