@@ -191,7 +191,7 @@ async fn standalone_update_flow(app: &AppHandle, config: &AppConfig) {
         Err(error) => return fail_standalone_update(&format!("{error:#}")),
     };
     if let Err(error) = update.install(&bytes) {
-        return fail_standalone_update(&format!("{error:#}"));
+        fail_standalone_update(&format!("{error:#}"));
     }
     // The spawned installer waits for this process to exit; the caller exits now.
 }
