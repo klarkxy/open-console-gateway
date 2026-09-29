@@ -1,4 +1,5 @@
 import type { PricingAdjustment, PricingModel } from "../api/dashboard";
+import { numberFormatter } from "../utils/intl-cache.ts";
 
 export interface FormattedPricingRate {
   label: string;
@@ -37,7 +38,7 @@ export function formatPricingRate(
 ): FormattedPricingRate {
   if (value === null || !Number.isFinite(value)) return { label: "—", exact: null };
   if (value !== 0 && Math.abs(value) < 0.01) {
-    const exact = new Intl.NumberFormat(locale, {
+    const exact = numberFormatter(locale, {
       style: "currency",
       currency: "USD",
       currencyDisplay: "narrowSymbol",
@@ -47,7 +48,7 @@ export function formatPricingRate(
     return { label: value > 0 ? "<$0.01" : ">-$0.01", exact };
   }
   return {
-    label: new Intl.NumberFormat(locale, {
+    label: numberFormatter(locale, {
       style: "currency",
       currency: "USD",
       currencyDisplay: "narrowSymbol",
@@ -59,7 +60,7 @@ export function formatPricingRate(
 }
 
 export function formatPricingMultiplier(value: number): string {
-  return `×${new Intl.NumberFormat("en-US", { maximumFractionDigits: 4 }).format(value)}`;
+  return `×${numberFormatter("en-US", { maximumFractionDigits: 4 }).format(value)}`;
 }
 
 function variantLabel(displayName: string): string {

@@ -10,6 +10,7 @@ import type {
 } from "../api/platform-accounts.ts";
 import type { Account, AccountModelCapabilityInput, AccountProtocol } from "../api/dashboard.ts";
 import type { MessageKey } from "../i18n/index.ts";
+import { dateTimeFormatter, numberFormatter } from "../utils/intl-cache.ts";
 
 /**
  * Presentation logic for New API / Sub2API platform accounts. Pure helpers
@@ -488,7 +489,7 @@ export function formatQuotaAmount(value: number, unit: string, locale: string): 
   const code = unit.trim();
   if (/^[A-Za-z]{3}$/u.test(code)) {
     try {
-      return new Intl.NumberFormat(locale, {
+      return numberFormatter(locale, {
         style: "currency",
         currency: code.toUpperCase(),
         minimumFractionDigits: 2,
@@ -498,13 +499,13 @@ export function formatQuotaAmount(value: number, unit: string, locale: string): 
       // Non-ISO labels fall through to a plain suffix.
     }
   }
-  const formatted = new Intl.NumberFormat(locale, { maximumFractionDigits: 6 }).format(value);
+  const formatted = numberFormatter(locale, { maximumFractionDigits: 6 }).format(value);
   return code ? `${formatted} ${code}` : formatted;
 }
 
 export function formatPlatformTime(epochSeconds: number, locale: string): string {
   if (!Number.isFinite(epochSeconds) || epochSeconds <= 0) return "";
-  return new Intl.DateTimeFormat(locale, {
+  return dateTimeFormatter(locale, {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -515,7 +516,7 @@ export function formatPlatformTime(epochSeconds: number, locale: string): string
 
 function formatCurrency(value: number, currency: string, locale: string, digits: number): string {
   try {
-    return new Intl.NumberFormat(locale, {
+    return numberFormatter(locale, {
       style: "currency",
       currency,
       currencyDisplay: "narrowSymbol",
@@ -523,7 +524,7 @@ function formatCurrency(value: number, currency: string, locale: string, digits:
     }).format(value);
   } catch {
     // Non-ISO currency labels (points, credits, …) fall back to a plain suffix.
-    return `${new Intl.NumberFormat(locale, { maximumSignificantDigits: digits }).format(value)} ${currency}`;
+    return `${numberFormatter(locale, { maximumSignificantDigits: digits }).format(value)} ${currency}`;
   }
 }
 

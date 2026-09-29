@@ -10,6 +10,8 @@
  * summed across currencies. Pure helpers only; no i18n runtime import.
  */
 
+import { numberFormatter } from "../utils/intl-cache.ts";
+
 export interface NativeCostEstimate {
   /** Finite amount in the platform's original currency; 0 is a real estimate, distinct from null upstream. */
   value: number;
@@ -56,17 +58,17 @@ export function formatNativeCostEstimate(estimate: NativeCostEstimate, locale: s
   let amount: string;
   if (currency) {
     try {
-      amount = new Intl.NumberFormat(locale, {
+      amount = numberFormatter(locale, {
         style: "currency",
         currency,
         currencyDisplay: "narrowSymbol",
         maximumSignificantDigits: 6,
       }).format(value);
     } catch {
-      amount = `${new Intl.NumberFormat(locale, { maximumSignificantDigits: 6 }).format(value)} ${currency}`;
+      amount = `${numberFormatter(locale, { maximumSignificantDigits: 6 }).format(value)} ${currency}`;
     }
   } else {
-    amount = new Intl.NumberFormat(locale, { maximumSignificantDigits: 6 }).format(value);
+    amount = numberFormatter(locale, { maximumSignificantDigits: 6 }).format(value);
   }
   return unit && unit !== currency ? `${amount} ${unit}` : amount;
 }

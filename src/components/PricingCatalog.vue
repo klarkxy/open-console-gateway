@@ -95,6 +95,9 @@
                 <p class="pricing-note">
                   {{ t("未知价格不会参与费用估算") }}
                 </p>
+                <!-- Virtual scroll renders only the visible window of a long
+                 model list; max-height is required by n-data-table for it and
+                 only caps the box, so short tables look unchanged. -->
                 <n-data-table
                   :columns="columns"
                   :data="tableRows"
@@ -102,6 +105,8 @@
                   :row-key="rowKey"
                   :expanded-row-keys="expandedRowKeys"
                   :scroll-x="1310"
+                  :virtual-scroll="true"
+                  max-height="640"
                   size="small"
                   @update:expanded-row-keys="updateExpandedRowKeys"
                 />
@@ -396,6 +401,9 @@ function renderModel(row: PricingTableRow) {
   if (row.kind !== "group") {
     return h("span", {
       "aria-label": row.kind === "variant" ? `${row.model_id} ${row.display_name}` : undefined,
+      // Native hover fallback for the removed per-row NTooltip: when the
+      // ellipsised model name is truncated, the full text stays readable.
+      title: row.display_name || row.model_id,
     }, row.display_name || row.model_id);
   }
   const count = (row.children?.length ?? 0) + 1;
@@ -405,6 +413,7 @@ function renderModel(row: PricingTableRow) {
     class: "pricing-tree-toggle",
     "aria-expanded": rowExpanded(row),
     "aria-label": `${row.display_name}, ${tierCount}`,
+    title: row.display_name || row.model_id,
     onClick: () => toggleRow(row),
   }, {
     icon: () => h(NIcon, {
@@ -606,7 +615,11 @@ const columns = computed<DataTableColumns<PricingTableRow>>(() => [
     key: "model_id",
     width: 190,
     fixed: "left",
-    ellipsis: { tooltip: true },
+    // Plain ellipsis: `ellipsis: { tooltip: true }` mounts an NTooltip →
+    // NPopover → VFollower per row, which is exactly what virtual scroll is
+    // meant to avoid. Truncation is unchanged and the native `title` in
+    // renderModel keeps the full name available on hover.
+    ellipsis: true,
     render: renderModel,
   },
   { title: t("输入"), key: "input", width: 112, align: "right", render: (row) => renderRate(row.input) },

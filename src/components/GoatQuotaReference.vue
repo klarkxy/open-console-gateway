@@ -25,6 +25,8 @@
       :pagination="false"
       :row-key="rowKey"
       :scroll-x="870"
+      :virtual-scroll="true"
+      max-height="640"
       size="small"
     />
   </div>
@@ -38,6 +40,7 @@ import { CheckOutlined, CloseOutlined } from "@vicons/antd";
 import { locale, t } from "../i18n/index.ts";
 import type { ProviderNeutralPricingSnapshot } from "../api/providers.ts";
 import { formatPricingRate } from "../domain/pricing-view.ts";
+import { dateTimeFormatter } from "../utils/intl-cache.ts";
 
 type OfficialRate = number | "free" | null;
 
@@ -92,7 +95,7 @@ const documentUpdatedAt = computed(() => {
 function formatTimestamp(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat(locale.value, {
+  return dateTimeFormatter(locale.value, {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",

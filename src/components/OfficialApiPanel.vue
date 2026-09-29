@@ -98,6 +98,7 @@ import {
 import { formatQuotaAmount } from "../domain/platform-accounts.ts";
 import { locale, t } from "../i18n/index.ts";
 import { useBillingStore } from "../stores/billing.ts";
+import { numberFormatter } from "../utils/intl-cache.ts";
 import type { ApiPriceMeterCell } from "./ApiPriceMeter.vue";
 import ApiPriceMeter from "./ApiPriceMeter.vue";
 
@@ -130,7 +131,7 @@ const stale = computed(() => {
 });
 
 function amount(value: number): string {
-  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 6 }).format(value);
+  return numberFormatter(undefined, { maximumFractionDigits: 6 }).format(value);
 }
 
 function money(value: number, currency: string): string {

@@ -54,20 +54,20 @@
             <n-form-item :label="t('名单内模型')">
               <div class="proxy-model-grid" role="group" :aria-label="t('名单内模型')">
                 <label
-                  v-for="model in config.proxy_supported_models"
+                  v-for="model in proxyModelRows"
                   :key="model.id"
                   class="proxy-model-option"
-                  :class="{ 'proxy-model-free': isZenFreeModel(model.id) }"
+                  :class="{ 'proxy-model-free': model.zenFree }"
                 >
                   <n-checkbox
-                    :checked="config.proxy_list_models.some((id) => proxyModelKey(id) === proxyModelKey(model.id))"
+                    :checked="model.checked"
                     :disabled="!loaded || saving || testingProxy"
                     @update:checked="(checked: boolean) => toggleProxyListModel(model.id, checked)"
                   >
                     {{ model.id }}
                   </n-checkbox>
-                  <span class="proxy-model-hint">{{ protocolLabel(model.preferred_protocol) }}</span>
-                  <span v-if="isZenFreeModel(model.id)" class="proxy-model-free-hint">
+                  <span class="proxy-model-hint">{{ protocolLabel(model.protocol) }}</span>
+                  <span v-if="model.zenFree" class="proxy-model-free-hint">
                     {{ t("Zen free 额度按出口 IP 共享，走代理会改变额度归属") }}
                   </span>
                 </label>
@@ -530,19 +530,53 @@ const proxySupportedIds = computed(() =>
   config.value.proxy_supported_models.map((model) => model.id),
 );
 
+/** Normalized keys of the registry. Replaces the per-row `some()` scans that
+ * made the checkbox grid O(M² + M·K) and re-ran on every proxy-URL keystroke
+ * (the grid shares a render function with `v-model:value="config.proxy_url"`). */
+const proxySupportedKeys = computed(
+  () => new Set(config.value.proxy_supported_models.map((model) => proxyModelKey(model.id))),
+);
+
+/** Selected ids, normalized once instead of per row. */
+const proxyListModelKeys = computed(
+  () => new Set(config.value.proxy_list_models.map((id) => proxyModelKey(id))),
+);
+
+/** Registry keys that sit on the Zen free channel (egress-IP-shared quota). Go
+ * catalog ids may end in `-free` without being on the free channel, so the hint
+ * must follow the registry flag, not the suffix. A key enters the set as soon
+ * as any registry entry with that key is Zen free — same answer the previous
+ * `some(... && model.zen_free)` scan gave, including duplicate-key registries. */
+const proxyZenFreeKeys = computed(() => {
+  const keys = new Set<string>();
+  for (const model of config.value.proxy_supported_models) {
+    if (model.zen_free) keys.add(proxyModelKey(model.id));
+  }
+  return keys;
+});
+
+/** One pre-resolved row per registry model: the checkbox grid renders only
+ * lookups, so render cost no longer scales with registry × selection size. */
+const proxyModelRows = computed(() => {
+  const selected = proxyListModelKeys.value;
+  const zenFree = proxyZenFreeKeys.value;
+  return config.value.proxy_supported_models.map((model) => {
+    const key = proxyModelKey(model.id);
+    return {
+      id: model.id,
+      protocol: model.preferred_protocol,
+      checked: selected.has(key),
+      zenFree: zenFree.has(key),
+    };
+  });
+});
+
 /** Stored ids the current registry no longer knows; inert and dropped on save. */
 const proxyUnknownModels = computed(() => (
   config.value.proxy_mode === "list"
-    ? config.value.proxy_list_models.filter((id) => !proxySupportedIds.value.some((known) => proxyModelKey(known) === proxyModelKey(id)))
+    ? config.value.proxy_list_models.filter((id) => !proxySupportedKeys.value.has(proxyModelKey(id)))
     : []
 ));
-
-/** On the registered Zen free channel (egress-IP-shared quota). Go catalog
- * ids may end in `-free` without being on the free channel, so the hint must
- * follow the registry flag, not the suffix. */
-function isZenFreeModel(id: string): boolean {
-  return config.value.proxy_supported_models.some((model) => proxyModelKey(model.id) === proxyModelKey(id) && model.zen_free);
-}
 
 function protocolLabel(protocol: string): string {
   if (protocol === "chat_completions") return "Chat";
@@ -766,7 +800,7 @@ function normalizeProxyListInput(): boolean {
   const supported = proxySupportedIds.value;
   const knownOnly = config.value.proxy_list_models
     .map((id) => id.trim())
-    .filter((id) => supported.some((known) => proxyModelKey(known) === proxyModelKey(id)));
+    .filter((id) => proxySupportedKeys.value.has(proxyModelKey(id)));
   try {
     config.value.proxy_list_models = validateProxyList(config.value.proxy_mode, knownOnly, supported);
     return true;

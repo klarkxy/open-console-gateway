@@ -181,8 +181,8 @@ onBeforeUnmount(() => {
   cancelPendingTooltip();
 });
 
-function modelColor(model: string, models: string[]): string {
-  const idx = models.indexOf(model);
+function modelColor(model: string): string {
+  const idx = modelIndex.value.get(model) ?? 0;
   return CHART_PALETTE[idx % CHART_PALETTE.length];
 }
 
@@ -238,6 +238,11 @@ const sortedModels = computed(() => {
   }
   return [...totals.keys()].sort((a, b) => (totals.get(b)! - totals.get(a)!));
 });
+
+// Palette index per model. The previous `models.indexOf(model)` lookups ran
+// inside the per-bar and per-tooltip-row loops, so a recompute driven by the
+// ResizeObserver width was O(models²) per bar instead of O(models).
+const modelIndex = computed(() => new Map(sortedModels.value.map((model, i) => [model, i])));
 
 const dates = computed(() => padZeroDates(props.data, props.days));
 
@@ -295,6 +300,7 @@ const barWidth = computed(() => {
 // 每根柱子: [{model, idx, y, h, tokens}]
 const bars = computed(() => {
   const models = sortedModels.value;
+  const index = modelIndex.value;
   const scale = chartH / ceil.value;
   return dates.value.map((d, i) => {
     let cursor = padT + chartH; // 从底往上堆
@@ -306,7 +312,7 @@ const bars = computed(() => {
       const h = tokens * scale;
       cursor -= h;
       segments.push({
-        idx: models.indexOf(model) % CHART_PALETTE.length,
+        idx: (index.get(model) ?? 0) % CHART_PALETTE.length,
         model,
         y: cursor,
         h: Math.max(0.5, h),
@@ -349,7 +355,7 @@ function tooltipRows(bi: number) {
     .map((model) => ({ model, tokens: d.models.get(model) ?? 0 }))
     .filter((row) => row.tokens > 0)
     .sort((a, b) => b.tokens - a.tokens)
-    .map((row) => ({ ...row, color: modelColor(row.model, models) }));
+    .map((row) => ({ ...row, color: modelColor(row.model) }));
 }
 
 // Precomputed per bar so render does not rebuild tooltip rows per column.
