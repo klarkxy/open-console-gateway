@@ -104,19 +104,19 @@
                 :class="{ 'aliases-unpublished': !group.published }"
               >
                 <div class="aliases-name-row">
-                  <n-tooltip trigger="hover">
-                    <template #trigger>
-                      <n-switch
-                        size="small"
-                        :value="group.published"
-                        :disabled="!publicationReady || publicationSaving(group.public_model)"
-                        :loading="publicationSaving(group.public_model)"
-                        :aria-label="t('对下游展示此模型')"
-                        @update:value="(published) => setPublished(group.public_model, published)"
-                      />
-                    </template>
-                    {{ t("关闭后下游不再列出此模型，仍可用该名称调用。") }}
-                  </n-tooltip>
+                  <!-- Hover hints stay native: an NTooltip per group would
+                       instantiate a Popover/Follower chain per row group, which
+                       dominates first paint on large catalogs. Same copy, same
+                       hover affordance, aria-label unchanged. -->
+                  <n-switch
+                    size="small"
+                    :value="group.published"
+                    :disabled="!publicationReady || publicationSaving(group.public_model)"
+                    :loading="publicationSaving(group.public_model)"
+                    :aria-label="t('对下游展示此模型')"
+                    :title="t('关闭后下游不再列出此模型，仍可用该名称调用。')"
+                    @update:value="(published) => setPublished(group.public_model, published)"
+                  />
                   <code>{{ group.public_model }}</code>
                 </div>
                 <p v-if="groupHasOverlap(group.rows)" class="alias-warning">{{ t('名称与其他上游 ID 重叠，请检查调用名称。') }}</p>
@@ -130,20 +130,17 @@
               <td class="aliases-rank">{{ rankText(row) }}</td>
               <td><code>{{ row.upstream_model }}</code></td>
               <td class="aliases-action">
-                <n-tooltip v-if="aliasRowTarget(row)" trigger="hover">
-                  <template #trigger>
-                    <n-button
-                      circle
-                      quaternary
-                      size="small"
-                      :aria-label="row.custom_account_id ? t('打开相关账号') : t('打开相关供应商模型')"
-                      @click="openAliasRowTarget(row)"
-                    >
-                      <template #icon><n-icon :component="LinkOutlined" /></template>
-                    </n-button>
-                  </template>
-                  {{ row.custom_account_id ? t('打开相关账号') : t('打开相关供应商模型') }}
-                </n-tooltip>
+                <n-button
+                  v-if="aliasRowTarget(row)"
+                  circle
+                  quaternary
+                  size="small"
+                  :aria-label="row.custom_account_id ? t('打开相关账号') : t('打开相关供应商模型')"
+                  :title="row.custom_account_id ? t('打开相关账号') : t('打开相关供应商模型')"
+                  @click="openAliasRowTarget(row)"
+                >
+                  <template #icon><n-icon :component="LinkOutlined" /></template>
+                </n-button>
               </td>
             </tr>
           </tbody>
@@ -156,13 +153,13 @@
 <script setup lang="ts">
 import { computed, onActivated, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRouter, type RouteLocationRaw } from "vue-router";
-import { NAlert, NButton, NEmpty, NIcon, NInput, NSpin, NSwitch, NTag, NTooltip } from "naive-ui";
+import { NAlert, NButton, NEmpty, NIcon, NInput, NSpin, NSwitch, NTag } from "naive-ui";
 import { LinkOutlined } from "@vicons/antd";
 import { isDynamicCatalogEntry } from "../domain/dynamic-provider.ts";
 import { flattenProviderScopes, normalizeProviderContractsResponse } from "../domain/provider-contracts.ts";
 import { CPA_PROVIDER_ID } from "../domain/destination-providers.ts";
 import {
-  aliasNameOverlaps,
+  aliasOverlapFlags,
   aliasRowPlatformLabel,
   aliasRowRoutingRanks,
   isPublicModelPublished,
@@ -174,12 +171,14 @@ import {
 import { t } from "../i18n/index.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
 import { appViewRoute } from "./app-navigation.ts";
+import { useDestinationsStore } from "../stores/destinations.ts";
 import { useIdentitiesStore } from "../stores/identities.ts";
 import { useProvidersStore } from "../stores/providers.ts";
 import { useSessionStore } from "../stores/session.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 
 const accountsStore = useAccountsStore();
+const destinationsStore = useDestinationsStore();
 const identitiesStore = useIdentitiesStore();
 const providersStore = useProvidersStore();
 const sessionStore = useSessionStore();
@@ -227,9 +226,13 @@ const aliasRows = computed(() => (
       accounts.value,
       dynamicProviders.value,
       cpaModels.value,
+      destinationsStore.destinations,
     )
     : []
 ));
+// Overlap is a whole-table fact, so it is resolved once per row set instead of
+// rescanning every row for each rendered group.
+const overlapFlags = computed(() => aliasOverlapFlags(aliasRows.value));
 const routingRanks = computed(() => {
   const ranks = new Map<string, number[]>();
   for (const row of aliasRows.value) {
@@ -270,7 +273,7 @@ function rankText(row: ProviderAliasRow): string {
 }
 
 function groupHasOverlap(rows: readonly ProviderAliasRow[]): boolean {
-  return rows.some((row) => aliasNameOverlaps(row, aliasRows.value));
+  return rows.some((row) => overlapFlags.value.has(row.key));
 }
 
 // The store owns the write: per-row duplicate guard, optimistic overlay,
@@ -310,13 +313,16 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
     identitiesLoadError.value = "";
   }
   try {
-    const [contractsResult, catalogResult, accountsResult, cpaResult, identitiesResult] = await Promise.allSettled([
+    const [contractsResult, catalogResult, accountsResult, cpaResult, identitiesResult, destinationsResult] = await Promise.allSettled([
       providersStore.loadContracts(),
       providersStore.loadCatalog(),
       accountsStore.loadPresented(),
       providersStore.loadCpaModels(),
       identitiesStore.loadPresented(),
       providersStore.loadAliasPublication(),
+      // Dynamic Provider rows project through the destination catalog; without
+      // it their enablement is unknown and the rows stay hidden.
+      destinationsStore.load(),
     ]);
     if (generation !== loadGeneration) return;
     if (identitiesResult.status === "fulfilled") {
@@ -341,11 +347,17 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
       if (entries.length === 0) {
         dynamicLoadError.value = "";
       } else {
+        // Destination catalog enablement decides dynamic row routability, so a
+        // projection failure hides those rows and is reported with them.
+        const destinationFailure = destinationsResult.status === "rejected"
+          ? dashboardErrorDetail(destinationsResult.reason)
+          : "";
         const details = await Promise.allSettled(
           entries.map((entry) => providersStore.loadDefinition(entry.provider_id)),
         );
         if (generation !== loadGeneration) return;
         const failures: string[] = [];
+        if (destinationFailure) failures.push(destinationFailure);
         details.forEach(result => {
           if (result.status === "rejected") failures.push(dashboardErrorDetail(result.reason));
         });

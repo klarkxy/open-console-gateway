@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Account } from "../api/dashboard.ts";
+import type { Destination } from "../api/destinations.ts";
 import type { Identity } from "../api/identities.ts";
 import type { ProviderScopeView } from "./provider-contracts.ts";
 import {
   aliasModelScopeAllows,
+  aliasOverlapFlags,
   aliasRowPlatformLabel,
   aliasRowRoutingRanks,
   cpaAliasRows,
@@ -17,6 +19,7 @@ import {
   isPublicModelPublished,
   publicModelPublicationKey,
   sortAliasRowsByRouting,
+  type ProviderAliasRow,
 } from "./provider-aliases.ts";
 
 const protocol = {
@@ -118,6 +121,57 @@ const dynamic = {
   process_generation: 1,
 };
 
+/** Configurable HTTP destination backing `dynamic`, with catalog facts. */
+function dynamicDestination(
+  catalog: Destination["catalog"],
+  overrides: Partial<Destination> = {},
+): Destination {
+  return {
+    account_controls: {
+      toggleWrite: "account",
+      configurationOwner: "destination",
+      consoleLink: null,
+      browserProfile: false,
+    },
+    adapter: "http",
+    auth_scheme: "bearer",
+    base_url: "http://127.0.0.1:9",
+    brand_family: null,
+    capabilities: {
+      billing_tier_required: false,
+      discoverable_models: false,
+      external_integration: false,
+      identity_headers: false,
+      managed_signup: false,
+      observer: false,
+      official_balance_probe: [],
+      redirect_policy: "no_follow",
+      testable: true,
+    },
+    catalog,
+    enabled: true,
+    id: "dest-lab",
+    legacy: { kind: "dynamic", id: dynamic.id },
+    max_credentials: null,
+    name: "Lab",
+    observer_credential_id: null,
+    plan: null,
+    protocols: ["chat_completions"],
+    ...overrides,
+  };
+}
+
+const dynamicOnCatalog = {
+  enabled: true,
+  preferred: "chat_completions" as const,
+  protocols: ["chat_completions" as const],
+  public_model: "lab-opus",
+  upstream_model: "vendor/opus",
+  upstream_override: null,
+};
+
+const dynamicOffCatalog = { ...dynamicOnCatalog, enabled: false };
+
 test("Alias rows combine provider contracts with Custom public-to-upstream mappings", () => {
   assert.deepEqual(providerAliasRows([builtinScope, customScope], [goAccount, customAccount]), [
     {
@@ -180,6 +234,63 @@ test("Alias overlap warning identifies another provider's raw ID without treatin
   assert.equal(aliasNameOverlaps(row, [row, { ...other, public_model: "audit-model" }]), false);
 });
 
+/** Minimal Alias row for overlap-only assertions. */
+function overlapRow(overrides: Partial<ProviderAliasRow> & { key: string }): ProviderAliasRow {
+  return {
+    provider_id: "opencode",
+    public_model: "public-model",
+    provider_plan: "Plan",
+    custom_account: null,
+    upstream_model: "upstream-model",
+    routable: true,
+    custom_account_id: null,
+    ...overrides,
+  };
+}
+
+test("batch Alias overlap flags mark exactly the rows the per-row predicate flags", () => {
+  const rows = [
+    // another provider (k2) serves `audit-model` as its raw upstream ID
+    overlapRow({ key: "k1", provider_id: "opencode", public_model: "audit-model", upstream_model: "vendor/audit" }),
+    overlapRow({ key: "k2", provider_id: "dynamic", public_model: "audit-provider-model", upstream_model: "audit-model" }),
+    // a provider reusing its own raw ID never overlaps itself
+    overlapRow({ key: "k3", provider_id: "opencode", public_model: "solo-model", upstream_model: "solo-model" }),
+    // the same public name under a different case stays a shared alias, not a conflict
+    overlapRow({ key: "k4", provider_id: "cpa", public_model: "Shared-Name", upstream_model: "vendor/cpa-shared" }),
+    overlapRow({ key: "k5", provider_id: "dynamic", public_model: "shared-name", upstream_model: "Shared-Name" }),
+    // `vendor/mixed` is k6's public name and k7's raw upstream ID
+    overlapRow({ key: "k6", provider_id: "custom", public_model: "vendor/mixed", upstream_model: "vendor/customer-side" }),
+    overlapRow({ key: "k7", provider_id: "cpa", public_model: "cpa-side", upstream_model: "vendor/mixed" }),
+  ];
+  const flags = aliasOverlapFlags(rows);
+  assert.deepEqual(
+    rows.filter((row) => flags.has(row.key)).map((row) => row.key),
+    rows.filter((row) => aliasNameOverlaps(row, rows)).map((row) => row.key),
+  );
+  assert.deepEqual([...flags].sort(), ["k1", "k6"]);
+  assert.equal(aliasOverlapFlags([]).size, 0);
+});
+
+test("Alias group overlap is the flagged rows of that group, matching the rendered warning", () => {
+  const rows = [
+    overlapRow({ key: "g1-a", provider_id: "opencode", public_model: "audit-model", upstream_model: "vendor/audit" }),
+    overlapRow({ key: "g2-a", provider_id: "dynamic", public_model: "vendor/audit", upstream_model: "vendor/dyn" }),
+    overlapRow({ key: "g3-a", provider_id: "dynamic", public_model: "other-model", upstream_model: "vendor/other" }),
+    overlapRow({ key: "g3-b", provider_id: "cpa", public_model: "other-model", upstream_model: "vendor/other-cpa" }),
+  ];
+  const flags = aliasOverlapFlags(rows);
+  const groups = [
+    { rows: [rows[0]!] },
+    { rows: [rows[1]!] },
+    { rows: [rows[2]!, rows[3]!] },
+  ];
+  assert.deepEqual(
+    groups.map((group) => group.rows.some((row) => flags.has(row.key))),
+    groups.map((group) => group.rows.some((row) => aliasNameOverlaps(row, rows))),
+  );
+  assert.deepEqual(groups.map((group) => group.rows.some((row) => flags.has(row.key))), [false, true, false]);
+});
+
 test("Custom Alias routeability includes account readiness and built-in raw conflicts", () => {
   const scope = {
     ...customScope,
@@ -224,7 +335,7 @@ test("Custom Alias rows collapse per-protocol capabilities of one mapping", () =
 });
 
 test("user-defined Provider mappings appear as Alias rows labelled by Provider name", () => {
-  assert.deepEqual(dynamicProviderAliasRows([dynamic]), [{
+  assert.deepEqual(dynamicProviderAliasRows([dynamic], [dynamicDestination([dynamicOnCatalog])]), [{
     provider_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     key: "dynamic:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:lab-opus:vendor/opus",
     public_model: "lab-opus",
@@ -234,6 +345,47 @@ test("user-defined Provider mappings appear as Alias rows labelled by Provider n
     routable: true,
     custom_account_id: null,
   }]);
+});
+
+test("a disabled destination catalog model is not a routable Alias row", () => {
+  const rows = dynamicProviderAliasRows([dynamic], [dynamicDestination([dynamicOffCatalog])]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.routable, false);
+  // The production merge keeps only what downstream can actually serve.
+  assert.deepEqual(mergeProviderAliasRows(
+    [],
+    [{ ...customAccount, id: "dyn-1", provider_id: dynamic.id }],
+    [dynamic],
+    [],
+    [dynamicDestination([dynamicOffCatalog])],
+  ), []);
+  assert.deepEqual(
+    mergeProviderAliasRows(
+      [],
+      [{ ...customAccount, id: "dyn-1", provider_id: dynamic.id }],
+      [dynamic],
+      [],
+      [dynamicDestination([dynamicOnCatalog])],
+    ).map((row) => row.key),
+    ["dynamic:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:lab-opus:vendor/opus"],
+  );
+});
+
+test("a disabled destination hides its user-defined Provider Alias rows", () => {
+  assert.deepEqual(
+    dynamicProviderAliasRows(
+      [dynamic],
+      [dynamicDestination([dynamicOnCatalog], { enabled: false })],
+    ).map((row) => row.routable),
+    [false],
+  );
+});
+
+test("a user-defined Provider without a loaded destination yields no Alias rows", () => {
+  assert.deepEqual(dynamicProviderAliasRows([dynamic]), []);
+  assert.deepEqual(dynamicProviderAliasRows([dynamic], [dynamicDestination([dynamicOnCatalog], {
+    legacy: { kind: "dynamic", id: "other-provider" },
+  })]), []);
 });
 
 test("production Alias merge keeps only routable mappings from enabled-account providers and selected CPA models", () => {
@@ -246,6 +398,7 @@ test("production Alias merge keeps only routable mappings from enabled-account p
       { id: "grok-4", enabled: false },
       { id: "grok-3-mini", enabled: true },
     ],
+    [dynamicDestination([dynamicOnCatalog])],
   );
   assert.deepEqual(rows.map((row) => row.key), [
     "provider:go:gpt-5.6:gpt-5.6-upstream",

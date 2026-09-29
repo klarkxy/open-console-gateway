@@ -1,6 +1,8 @@
 import type { Account } from "../api/dashboard.ts";
+import type { Destination } from "../api/destinations.ts";
 import type { Identity, ModelScope } from "../api/identities.ts";
 import type { ProviderDefinitionView } from "../api/providers.ts";
+import { projectDestinationCatalog } from "./destination-catalog.ts";
 import { CPA_PROVIDER_ID } from "./destination-providers.ts";
 import type { ProviderScopeView } from "./provider-contracts.ts";
 
@@ -155,19 +157,50 @@ export function providerAliasRows(
   return rows;
 }
 
+/** The Configurable HTTP destination backing one user-defined Provider, if any. */
+function dynamicDestinationFor(
+  providerId: string,
+  destinations: readonly Destination[],
+): Destination | null {
+  for (const destination of destinations) {
+    if (destination.legacy.kind === "dynamic" && destination.legacy.id === providerId) {
+      return destination;
+    }
+  }
+  return null;
+}
+
+/**
+ * User-defined Provider mappings, projected through the same destination
+ * catalog the Providers page renders, so per-model enablement and protocol
+ * state decide routability here too. A Provider without a loaded destination
+ * has no catalog facts at all, so it yields no rows rather than claiming
+ * routes it cannot prove.
+ */
 export function dynamicProviderAliasRows(
   providers: readonly ProviderDefinitionView[],
+  destinations: readonly Destination[] = [],
 ): ProviderAliasRow[] {
-  return providers.flatMap((provider) => provider.models.map((model) => ({
-    provider_id: provider.id,
-    key: `dynamic:${provider.id}:${model.public_model}:${model.upstream_model}`,
-    public_model: model.public_model,
-    provider_plan: provider.name,
-    custom_account: null,
-    upstream_model: model.upstream_model,
-    routable: true,
-    custom_account_id: null,
-  })));
+  return providers.flatMap((provider) => {
+    const destination = dynamicDestinationFor(provider.id, destinations);
+    if (!destination) return [];
+    const scope = projectDestinationCatalog(destination);
+    return provider.models.map((model) => {
+      const contract = scope.models.find((entry) => entry.model_id === model.public_model);
+      return {
+        provider_id: provider.id,
+        key: `dynamic:${provider.id}:${model.public_model}:${model.upstream_model}`,
+        public_model: model.public_model,
+        provider_plan: provider.name,
+        custom_account: null,
+        upstream_model: model.upstream_model,
+        // `production_inference` is the destination's own enablement, the same
+        // pair the gateway requires before it lists a model downstream.
+        routable: scope.production_inference && Boolean(contract?.routable),
+        custom_account_id: null,
+      };
+    });
+  });
 }
 
 /** Production Alias table: enabled mappings from enabled-account providers and CPA. */
@@ -176,11 +209,12 @@ export function mergeProviderAliasRows(
   accounts: readonly Account[],
   providers: readonly ProviderDefinitionView[],
   cpaModels: readonly CpaAliasModel[] = [],
+  destinations: readonly Destination[] = [],
 ): ProviderAliasRow[] {
   const enabled = enabledAliasProviderIds(accounts);
   return [
     ...providerAliasRows(scopes, accounts),
-    ...dynamicProviderAliasRows(providers.filter((provider) => enabled.has(provider.id))),
+    ...dynamicProviderAliasRows(providers.filter((provider) => enabled.has(provider.id)), destinations),
     ...(enabled.has(CPA_PROVIDER_ID) ? cpaAliasRows(cpaModels, scopes) : []),
   ].filter((row) => row.routable);
 }
@@ -198,6 +232,48 @@ export function aliasNameOverlaps(row: ProviderAliasRow, rows: readonly Provider
   return rows.some((other) => other.provider_id !== row.provider_id
     && other.upstream_model === row.public_model
     && other.public_model.toLocaleLowerCase() !== row.public_model.toLocaleLowerCase());
+}
+
+/** Separator that cannot appear in a provider id or a folded public name. */
+const OVERLAP_TAG_SEPARATOR = "\u0000";
+
+/** Identity of one row as an overlap candidate: provider plus folded public name. */
+function overlapTag(row: ProviderAliasRow): string {
+  return `${row.provider_id}${OVERLAP_TAG_SEPARATOR}${row.public_model.toLocaleLowerCase()}`;
+}
+
+/** True when a candidate tagged from an upstream-model bucket overlaps `row`. */
+function bucketOverlapsRow(bucket: ReadonlySet<string>, row: ProviderAliasRow): boolean {
+  const folded = row.public_model.toLocaleLowerCase();
+  for (const tag of bucket) {
+    const separator = tag.indexOf(OVERLAP_TAG_SEPARATOR);
+    if (tag.slice(0, separator) !== row.provider_id && tag.slice(separator + 1) !== folded) return true;
+  }
+  return false;
+}
+
+/**
+ * Row keys whose public name can also be read as another provider's raw
+ * upstream ID — the same predicate {@link aliasNameOverlaps} applies, resolved
+ * for the whole table in one indexed pass. The Alias page renders the warning
+ * per group on every re-render, so the per-row table scan this replaces is
+ * quadratic in the number of rows.
+ */
+export function aliasOverlapFlags(rows: readonly ProviderAliasRow[]): Set<string> {
+  const byUpstreamModel = new Map<string, Set<string>>();
+  for (const row of rows) {
+    const tag = overlapTag(row);
+    const bucket = byUpstreamModel.get(row.upstream_model);
+    if (!bucket) byUpstreamModel.set(row.upstream_model, new Set([tag]));
+    else bucket.add(tag);
+  }
+  const flags = new Set<string>();
+  for (const row of rows) {
+    const bucket = byUpstreamModel.get(row.public_model);
+    if (!bucket) continue;
+    if (bucketOverlapsRow(bucket, row)) flags.add(row.key);
+  }
+  return flags;
 }
 
 /** Platform label for a platform-linked Custom Key row; null for anything else. */
