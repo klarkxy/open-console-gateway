@@ -1,6 +1,0 @@
-{
-  "meta": {
-    "title": "Open Console Gateway",
-    "description": "在 DSH 中使用本机 OCG 提供的模型，统一通过 Gateway Key 调用。"
-  }
-}

@@ -1,1 +1,0 @@
-{"default":{"identifier":"default","description":"Default capabilities for Open Console Gateway main window","local":true,"windows":["main"],"permissions":["core:default","core:window:default","core:window:allow-hide","core:window:allow-show","core:window:allow-close","core:window:allow-minimize"]}}
