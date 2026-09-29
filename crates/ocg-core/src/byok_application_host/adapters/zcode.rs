@@ -50,10 +50,10 @@ impl FormatAdapter for ZcodeAdapter {
             None => empty_document(),
             Some(bytes) => parse_json(bytes)?,
         };
-        if target_bytes.is_some() {
-            if let Some(reason) = unsupported_schema(&root) {
-                return Err(ByokError::invalid(reason));
-            }
+        if target_bytes.is_some()
+            && let Some(reason) = unsupported_schema(&root)
+        {
+            return Err(ByokError::invalid(reason));
         }
         if provider_rule(&root).is_some() && receipt.is_none() {
             return Err(ByokError::conflict(
@@ -245,7 +245,7 @@ fn unsupported_schema(root: &Value) -> Option<String> {
     None
 }
 
-fn config<'a>(root: &'a Value) -> Option<&'a Map<String, Value>> {
+fn config(root: &Value) -> Option<&Map<String, Value>> {
     root.get("config")?.as_object()
 }
 
@@ -404,10 +404,10 @@ fn upsert_order(root: &mut Value) {
         return;
     };
     let order = config.entry("providerOrder").or_insert_with(|| json!([]));
-    if let Some(list) = order.as_array_mut() {
-        if !list.iter().any(|item| item.as_str() == Some(PROVIDER_ID)) {
-            list.push(Value::String(PROVIDER_ID.into()));
-        }
+    if let Some(list) = order.as_array_mut()
+        && !list.iter().any(|item| item.as_str() == Some(PROVIDER_ID))
+    {
+        list.push(Value::String(PROVIDER_ID.into()));
     }
 }
 
@@ -505,15 +505,11 @@ fn remove_ocg(root: &mut Value) {
         if let Some(rules) = config
             .get_mut("modelConfigRules")
             .and_then(Value::as_object_mut)
-        {
-            if let Some(list) = rules
+            && let Some(list) = rules
                 .get_mut("providerModelRules")
                 .and_then(Value::as_array_mut)
-            {
-                list.retain(|rule| {
-                    rule.get("providerId").and_then(Value::as_str) != Some(PROVIDER_ID)
-                });
-            }
+        {
+            list.retain(|rule| rule.get("providerId").and_then(Value::as_str) != Some(PROVIDER_ID));
         }
     }
 }
@@ -596,15 +592,15 @@ fn has_user_data(root: &Value) -> bool {
             _ => return true,
         }
     }
-    if let Some(rules) = config.get("providerConfigRules") {
-        if !provider_rules_empty(rules) {
-            return true;
-        }
+    if let Some(rules) = config.get("providerConfigRules")
+        && !provider_rules_empty(rules)
+    {
+        return true;
     }
-    if let Some(rules) = config.get("modelConfigRules") {
-        if !model_rules_empty(rules) {
-            return true;
-        }
+    if let Some(rules) = config.get("modelConfigRules")
+        && !model_rules_empty(rules)
+    {
+        return true;
     }
     false
 }

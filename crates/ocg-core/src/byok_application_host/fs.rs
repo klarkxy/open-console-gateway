@@ -109,6 +109,10 @@ pub fn reject_symlink_ancestors(path: &Path) -> ByokResult<()> {
     Ok(())
 }
 
+fn unreachable_path(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(20) || error.kind() == ErrorKind::NotADirectory
+}
+
 pub fn reject_if_link_or_non_file(path: &Path) -> ByokResult<()> {
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
@@ -125,7 +129,10 @@ pub fn reject_if_link_or_non_file(path: &Path) -> ByokResult<()> {
 
 pub fn read_regular_file(path: &Path) -> ByokResult<Option<Vec<u8>>> {
     match fs::symlink_metadata(path) {
-        Err(error) if error.kind() == ErrorKind::NotFound => {
+        // NotADirectory covers a catalog whose parent exists as a file: on
+        // Linux that stat returns ENOTDIR rather than ENOENT, and the catalog
+        // is simply absent either way.
+        Err(error) if error.kind() == ErrorKind::NotFound || unreachable_path(&error) => {
             reject_symlink_ancestors(path)?;
             return Ok(None);
         }

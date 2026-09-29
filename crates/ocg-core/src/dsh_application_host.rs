@@ -40,6 +40,7 @@ const BOOTSTRAP_PLACEHOLDER: &str = "__OCG_CREDENTIAL_BOOTSTRAP_PATH_JSON__";
 const MAX_PACKAGE_FILES: usize = 16;
 const MAX_PACKAGE_BYTES: u64 = 1024 * 1024;
 const MAX_COMMAND_OUTPUT: usize = 16 * 1024;
+#[cfg(test)]
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 const RECONCILE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -193,6 +194,7 @@ impl DshDesktopHost {
         }
     }
 
+    #[cfg(test)]
     fn for_profile(&self, requested: Option<&str>) -> DshApplicationResult<Self> {
         let profiles = self.discovered_profiles();
         self.with_selected_profile(requested, &profiles)
@@ -240,6 +242,7 @@ impl DshDesktopHost {
         })
     }
 
+    #[cfg(test)]
     fn inspect(&self, gateway_v1_url: &str) -> DshApplicationResult<DshApplicationInspection> {
         let profiles = self.discovered_profiles();
         self.inspect_using(gateway_v1_url, &profiles)
@@ -799,6 +802,7 @@ impl DshDesktopHost {
         }
     }
 
+    #[cfg(test)]
     fn install(
         &self,
         expected_fingerprint: &str,
@@ -988,6 +992,7 @@ impl DshDesktopHost {
 
     /// Bounded `dsh --version` diagnostic. Status inspect never calls this.
     /// Installation verifies compatibility through the plugin command, not this string.
+    #[cfg(test)]
     fn read_version(&self, executable: &ResolvedExecutable) -> DshApplicationResult<String> {
         let command = CommandSpec {
             executable: executable.path.clone(),

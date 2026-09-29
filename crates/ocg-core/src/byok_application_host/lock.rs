@@ -186,10 +186,7 @@ fn acquire_minimax(target: &Path, policy: &LockPolicy) -> ByokResult<CrossProces
     let started = Instant::now();
     loop {
         match fs::create_dir(&lock_dir) {
-            Ok(()) => match finish_minimax_hold(lock_dir.clone(), sidecar.clone(), policy) {
-                Ok(held) => return Ok(held),
-                Err(error) => return Err(error),
-            },
+            Ok(()) => return finish_minimax_hold(lock_dir.clone(), sidecar.clone(), policy),
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {
                 if reclaim_dead_ocg_minimax(&lock_dir, &sidecar)?
                     || reclaim_abandoned_minimax(&lock_dir, &sidecar, policy)?
@@ -285,16 +282,16 @@ fn complete_minimax_hold(
     let heartbeat_handle = handle.try_clone().map_err(io_internal)?;
     let stop = Arc::new(AtomicBool::new(false));
     let failed = Arc::new(AtomicBool::new(false));
-    let heartbeat = spawn_mtime_heartbeat(
-        heartbeat_handle,
+    let heartbeat = spawn_mtime_heartbeat(Heartbeat {
+        handle: heartbeat_handle,
         identity,
-        lock_dir.clone(),
-        sidecar.clone(),
-        token.clone(),
-        stop.clone(),
-        failed.clone(),
-        policy.minimax_heartbeat,
-    );
+        lock_dir: lock_dir.clone(),
+        sidecar: sidecar.clone(),
+        token: token.clone(),
+        stop: stop.clone(),
+        failed: failed.clone(),
+        interval: policy.minimax_heartbeat,
+    });
     let held = CrossProcessLock {
         kind: LockKind::MiniMax {
             lock_dir,
@@ -518,7 +515,7 @@ fn reclaim_dead_ocg_zcode(lock_dir: &Path) -> ByokResult<bool> {
     Ok(!lock_dir.exists())
 }
 
-fn spawn_mtime_heartbeat(
+struct Heartbeat {
     handle: File,
     identity: DirId,
     lock_dir: PathBuf,
@@ -527,7 +524,19 @@ fn spawn_mtime_heartbeat(
     stop: Arc<AtomicBool>,
     failed: Arc<AtomicBool>,
     interval: Duration,
-) -> JoinHandle<()> {
+}
+
+fn spawn_mtime_heartbeat(beat: Heartbeat) -> JoinHandle<()> {
+    let Heartbeat {
+        handle,
+        identity,
+        lock_dir,
+        sidecar,
+        token,
+        stop,
+        failed,
+        interval,
+    } = beat;
     thread::spawn(move || {
         while !stop.load(Ordering::SeqCst) {
             thread::park_timeout(interval);

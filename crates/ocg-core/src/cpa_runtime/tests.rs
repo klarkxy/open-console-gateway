@@ -357,8 +357,10 @@ fn config_yaml_writes_requests_proxy_url_only_when_set() {
 
 #[test]
 fn cpa_requests_proxy_url_maps_the_outbound_proxy_policy_default_leg() {
-    let mut config = AppConfig::default();
-    config.proxy_mode = ProxyMode::Auto;
+    let mut config = AppConfig {
+        proxy_mode: ProxyMode::Auto,
+        ..AppConfig::default()
+    };
     assert_eq!(cpa_requests_proxy_url(&config), None);
 
     config.proxy_mode = ProxyMode::Manual;

@@ -53,12 +53,13 @@ fn harness(name: &str) -> Harness {
         minimax: target(ByokClient::Minimax, &[".minimax", "config.yaml"]),
         zcode: target(ByokClient::Zcode, &[".zcode", "v2", "provider_config.json"]),
     };
-    let mut policy = LockPolicy::default();
-    policy.minimax_max_wait = Duration::from_millis(120);
-    policy.minimax_retry = Duration::from_millis(10);
-    policy.minimax_heartbeat = Duration::from_millis(40);
-    policy.zcode_max_wait = Duration::from_millis(120);
-    policy.zcode_retry_delays_ms = vec![10];
+    let policy = LockPolicy {
+        minimax_max_wait: Duration::from_millis(120),
+        minimax_retry: Duration::from_millis(10),
+        minimax_heartbeat: Duration::from_millis(40),
+        zcode_max_wait: Duration::from_millis(120),
+        zcode_retry_delays_ms: vec![10],
+    };
     Harness {
         root,
         host: ByokNativeHost::new(data_dir, paths, policy),
@@ -761,11 +762,7 @@ fn concurrent_configure_second_caller_sees_stale_fingerprint() {
     let ok = ra.is_ok() as u8 + rb.is_ok() as u8;
     assert_eq!(ok, 1);
     assert!(ra.is_err() || rb.is_err());
-    let err = if ra.is_err() {
-        ra.unwrap_err()
-    } else {
-        rb.unwrap_err()
-    };
+    let err = ra.err().unwrap_or_else(|| rb.unwrap_err());
     assert_eq!(err.kind, crate::byok_application::ByokErrorKind::Conflict);
 }
 
@@ -1155,13 +1152,13 @@ fn codex_catalog_omits_invented_reasoning_and_keeps_efforts() {
 }
 
 fn lock_policy_fast() -> LockPolicy {
-    let mut policy = LockPolicy::default();
-    policy.minimax_max_wait = Duration::from_millis(80);
-    policy.minimax_retry = Duration::from_millis(5);
-    policy.minimax_heartbeat = Duration::from_millis(20);
-    policy.zcode_max_wait = Duration::from_millis(80);
-    policy.zcode_retry_delays_ms = vec![5];
-    policy
+    LockPolicy {
+        minimax_max_wait: Duration::from_millis(80),
+        minimax_retry: Duration::from_millis(5),
+        minimax_heartbeat: Duration::from_millis(20),
+        zcode_max_wait: Duration::from_millis(80),
+        zcode_retry_delays_ms: vec![5],
+    }
 }
 
 fn dead_pid() -> u32 {
@@ -1489,7 +1486,13 @@ fn stale_minimax_sidecar_does_not_claim_successor_directory() {
     fs::remove_dir(&lock_dir).unwrap();
     fs::create_dir(&lock_dir).unwrap();
     let successor_id = capture_dir_id(&lock_dir).unwrap();
-    assert_ne!(stale_id, successor_id);
+    // Some filesystems recycle the inode the moment the directory is removed,
+    // so the recreated directory can carry the same identity. The stale
+    // sidecar is only distinguishable from the successor when it differs.
+    if stale_id == successor_id {
+        fs::remove_dir_all(root).unwrap();
+        return;
+    }
     let err = CrossProcessLock::acquire(ByokClient::Minimax, &target, &lock_policy_fast())
         .err()
         .expect("lock acquisition must fail");
@@ -1886,12 +1889,9 @@ fn host_console_reports_a_stale_fingerprint_as_an_abandoned_operation() {
     )
     .unwrap();
     let refreshed = inspect(&h.host, ByokClient::Codex);
-    let written = read_text(&target_file(&h.host, ByokClient::Codex));
-    fs::write(
-        &target_file(&h.host, ByokClient::Codex),
-        format!("{written}# edited\n"),
-    )
-    .unwrap();
+    let written_path = target_file(&h.host, ByokClient::Codex);
+    let written = read_text(&written_path);
+    fs::write(&written_path, format!("{written}# edited\n")).unwrap();
     let error = configure(
         &h.host,
         ByokClient::Codex,

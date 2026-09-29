@@ -33,5 +33,5 @@ test("port preflight rejects an occupied port and accepts a free one", async () 
 });
 
 test("Vite dev server port stays aligned with vite.config.ts", () => {
-  assert.equal(VITE_DEV_PORT, 30001);
+  assert.equal(Number(VITE_DEV_PORT), 30001);
 });

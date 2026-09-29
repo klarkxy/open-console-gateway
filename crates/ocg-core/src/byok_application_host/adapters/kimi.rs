@@ -217,7 +217,7 @@ fn ocg_default(doc: &DocumentMut) -> Option<String> {
 fn ocg_model_id(default_model: Option<&str>) -> Option<&str> {
     let value = default_model?;
     let prefix = format!("{PROVIDER_ID}/");
-    Some(value.strip_prefix(&prefix)?)
+    value.strip_prefix(&prefix)
 }
 
 fn ocg_model_ids(doc: &DocumentMut) -> Vec<String> {
