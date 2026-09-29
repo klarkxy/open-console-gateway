@@ -26,7 +26,7 @@ impl FormatAdapter for CodexAdapter {
                 collision: catalog_unowned(catalog_bytes, receipt),
                 configured_model_ids: Vec::new(),
                 current_default: None,
-                user_changed_owned: receipt.is_some(),
+                user_changed_owned: false,
             };
         };
         let Ok(doc) = parse_toml(bytes) else {
@@ -75,7 +75,7 @@ impl FormatAdapter for CodexAdapter {
         let catalog_path = catalog_path.ok_or_else(|| {
             ByokError::internal("Codex catalog path was not derived from the target")
         })?;
-        if target_bytes.is_none() && receipt.is_some() {
+        if target_bytes.is_none() && receipt.is_some() && catalog_bytes.is_some() {
             return Err(ByokError::conflict(
                 "Owned Codex fields changed outside OCG",
             ));
@@ -99,7 +99,11 @@ impl FormatAdapter for CodexAdapter {
                 "An unowned Codex model catalog already exists",
             ));
         }
-        if ownership_conflict(receipt, true, &owned_from_doc(&doc, catalog_bytes)) {
+        if ownership_conflict(
+            receipt,
+            target_bytes.is_some(),
+            &owned_from_doc(&doc, catalog_bytes),
+        ) {
             return Err(ByokError::conflict(
                 "Owned Codex fields changed outside OCG",
             ));
@@ -156,10 +160,18 @@ impl FormatAdapter for CodexAdapter {
         let catalog_path = catalog_path.ok_or_else(|| {
             ByokError::internal("Codex catalog path was not derived from the target")
         })?;
+        // The target file is already gone, so there is nothing to restore and
+        // no owned bytes left to compare. A present file still goes through the
+        // ownership check below: a deleted provider entry with a rewritten
+        // catalog is an external edit and must conflict. Retire the catalog the
+        // same way a present-but-empty removal would.
         let Some(bytes) = target_bytes else {
-            return Err(ByokError::conflict(
-                "Owned Codex fields changed outside OCG",
-            ));
+            if catalog_bytes.is_some() {
+                return Err(ByokError::conflict(
+                    "Owned Codex fields changed outside OCG",
+                ));
+            }
+            return Ok(removal_plan(target_path, catalog_path, receipt, None, None));
         };
         let mut doc = parse_toml(bytes)?;
         if ownership_conflict(Some(receipt), true, &owned_from_doc(&doc, catalog_bytes)) {

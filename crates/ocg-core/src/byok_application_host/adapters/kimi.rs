@@ -20,7 +20,7 @@ impl FormatAdapter for KimiAdapter {
         receipt: Option<&Receipt>,
     ) -> ParsedStatus {
         let Some(bytes) = target_bytes else {
-            return empty_status(receipt.is_some());
+            return empty_status();
         };
         let Ok(doc) = parse_toml(bytes) else {
             return incompatible("Kimi config.toml is not valid TOML");
@@ -52,9 +52,6 @@ impl FormatAdapter for KimiAdapter {
             None => DocumentMut::new(),
             Some(bytes) => parse_toml(bytes)?,
         };
-        if target_bytes.is_none() && receipt.is_some() {
-            return Err(ByokError::conflict("Owned Kimi fields changed outside OCG"));
-        }
         if target_bytes.is_some() && !root_shape_ok(&doc) {
             return Err(ByokError::invalid(
                 "Malformed Kimi configuration cannot be overwritten",
@@ -65,7 +62,7 @@ impl FormatAdapter for KimiAdapter {
                 "An unowned ocg Kimi provider already exists",
             ));
         }
-        if ownership_conflict(receipt, true, &owned_from_doc(&doc)) {
+        if ownership_conflict(receipt, target_bytes.is_some(), &owned_from_doc(&doc)) {
             return Err(ByokError::conflict("Owned Kimi fields changed outside OCG"));
         }
         ensure_default_selected(input.default_model_id, input.models)?;
@@ -109,8 +106,9 @@ impl FormatAdapter for KimiAdapter {
         _catalog_bytes: Option<&[u8]>,
         receipt: &Receipt,
     ) -> ByokResult<ApplyPlan> {
+        // Nothing remains to restore once the target file itself is gone.
         let Some(bytes) = target_bytes else {
-            return Err(ByokError::conflict("Owned Kimi fields changed outside OCG"));
+            return Ok(removal_plan(target_path, receipt));
         };
         let mut doc = parse_toml(bytes)?;
         if ownership_conflict(Some(receipt), true, &owned_from_doc(&doc)) {
@@ -136,25 +134,37 @@ impl FormatAdapter for KimiAdapter {
         } else {
             Some(remaining.into_bytes())
         };
-        Ok(ApplyPlan {
-            files: vec![planned_target(target_path.to_path_buf(), target_out)],
-            created_target: receipt.created_target,
-            created_catalog: false,
-            baseline_default: receipt.baseline_default.clone(),
-            last_applied_default: None,
-            managed: snapshot(Vec::new(), Value::Null, None),
-            first_owned: receipt.first_owned.clone(),
-        })
+        Ok(removal_plan_with(target_path, receipt, target_out))
     }
 }
 
-fn empty_status(user_changed_owned: bool) -> ParsedStatus {
+fn removal_plan(target_path: &Path, receipt: &Receipt) -> ApplyPlan {
+    removal_plan_with(target_path, receipt, None)
+}
+
+fn removal_plan_with(
+    target_path: &Path,
+    receipt: &Receipt,
+    target_out: Option<Vec<u8>>,
+) -> ApplyPlan {
+    ApplyPlan {
+        files: vec![planned_target(target_path.to_path_buf(), target_out)],
+        created_target: receipt.created_target,
+        created_catalog: false,
+        baseline_default: receipt.baseline_default.clone(),
+        last_applied_default: None,
+        managed: snapshot(Vec::new(), Value::Null, None),
+        first_owned: receipt.first_owned.clone(),
+    }
+}
+
+fn empty_status() -> ParsedStatus {
     ParsedStatus {
         incompatible: None,
         collision: false,
         configured_model_ids: Vec::new(),
         current_default: None,
-        user_changed_owned,
+        user_changed_owned: false,
     }
 }
 

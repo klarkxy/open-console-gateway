@@ -264,6 +264,25 @@ test("connection store: clearSecrets invalidates a load that resolves after logo
   assert.equal(store.error, "");
 });
 
+test("connection store: regeneratePrimaryKey does not refetch plaintext after logout", async () => {
+  freshPinia();
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+  const calls = installDeferredFetch();
+  const store = useConnectionStore();
+
+  const rotation = store.regeneratePrimaryKey();
+  await waitForCalls(calls, 1);
+  assert.equal(calls[0]!.method, "POST");
+  // Session teardown lands while the mutation is still in flight.
+  store.clearSecrets();
+  calls[0]!.resolve({ revision: 8, processGeneration: 99 });
+
+  await assert.rejects(rotation, /session ended/);
+  assert.equal(calls.length, 1, "must not start GET /connection after session teardown");
+  assert.equal(store.info, null);
+  assert.equal(store.loading, false);
+});
+
 test("connection store: logout before a delayed mutation refresh skips a new plaintext fetch", async () => {
   freshPinia();
   const calls = installDeferredFetch();

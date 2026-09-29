@@ -96,27 +96,33 @@ pub fn display_name(model: &ByokModel) -> &str {
 
 pub fn owned_changed(receipt: Option<&Receipt>, current: Option<&serde_json::Value>) -> bool {
     match (receipt, current) {
-        (Some(receipt), Some(current)) => receipt.last_managed.owned != *current,
+        (Some(receipt), Some(current)) => {
+            // Secret-bearing fields are cleared before a snapshot is persisted,
+            // so both sides are compared without them. A receipt written by an
+            // older version still holds the raw values; stripping them here
+            // keeps that receipt comparable instead of flagging every one as
+            // an external edit.
+            super::receipt::without_secrets(&receipt.last_managed.owned)
+                != super::receipt::without_secrets(current)
+        }
         (Some(_), None) => true,
         (None, _) => false,
     }
 }
 
-/// A receipt means OCG already owns a snapshot. A missing target is loss of that
-/// snapshot. A present target is compared in full, including when the provider
-/// entry itself is gone.
+/// A receipt means OCG already owns a snapshot. A present target is compared in
+/// full, including when the provider entry itself is gone. A missing target is
+/// not a conflict: the file was removed, so configure may recreate it. Callers
+/// report that case through the absent-bytes branch instead.
 pub fn ownership_conflict(
     receipt: Option<&Receipt>,
     target_present: bool,
     current: &serde_json::Value,
 ) -> bool {
-    let Some(receipt) = receipt else {
-        return false;
-    };
     if !target_present {
-        return true;
+        return false;
     }
-    owned_changed(Some(receipt), Some(current))
+    owned_changed(receipt, Some(current))
 }
 
 pub fn restore_default(receipt: &Receipt, current_default: Option<&str>) -> Option<Option<String>> {

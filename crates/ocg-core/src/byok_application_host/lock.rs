@@ -7,7 +7,9 @@
 //! ownership are checked before mutate, heartbeat, release, and reclaim.
 //! After mkdir, a proven-dead OCG sidecar from a former directory may be
 //! retired before writing our owner. Successors and live/foreign/unparseable
-//! sidecars are left untouched.
+//! sidecars are left untouched. A lock directory left empty with no sidecar at
+//! all is the crash window between mkdir and the owner write; it is reclaimed
+//! once it has sat untouched well past one full acquire wait.
 //! ZCode uses `{config}.lock/owner-ocg-*.json` and reclaims only those
 //! markers with a proven-dead PID.
 use super::fs::{canonical_lexical_path, io_internal};
@@ -189,7 +191,9 @@ fn acquire_minimax(target: &Path, policy: &LockPolicy) -> ByokResult<CrossProces
                 Err(error) => return Err(error),
             },
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                if reclaim_dead_ocg_minimax(&lock_dir, &sidecar)? {
+                if reclaim_dead_ocg_minimax(&lock_dir, &sidecar)?
+                    || reclaim_abandoned_minimax(&lock_dir, &sidecar, policy)?
+                {
                     continue;
                 }
                 if started.elapsed() >= policy.minimax_max_wait {
@@ -342,6 +346,60 @@ fn reclaim_dead_ocg_minimax(lock_dir: &Path, sidecar: &Path) -> ByokResult<bool>
     Ok(true)
 }
 
+/// Recovers the crash window where `{config}.lock` was created but the process
+/// died before `.ocg-owner` was written. That directory has no sidecar and no
+/// entries, so nothing identifies an owner and `reclaim_dead_ocg_minimax`
+/// cannot touch it. A live holder heartbeats the mtime every
+/// `minimax_heartbeat`, so a directory untouched for `minimax_max_wait * 2` is
+/// not a holder waiting out its own acquire.
+fn reclaim_abandoned_minimax(
+    lock_dir: &Path,
+    sidecar: &Path,
+    policy: &LockPolicy,
+) -> ByokResult<bool> {
+    if sidecar.exists() {
+        return Ok(false);
+    }
+    match fs::read_dir(lock_dir) {
+        Ok(entries) => {
+            if entries.filter_map(Result::ok).next().is_some() {
+                return Ok(false);
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(io_internal(error)),
+    }
+    let stale_after = policy
+        .minimax_max_wait
+        .checked_mul(2)
+        .unwrap_or(policy.minimax_max_wait);
+    let modified = fs::metadata(lock_dir).and_then(|meta| meta.modified());
+    let abandoned = match modified {
+        Ok(modified) => modified.elapsed().is_ok_and(|age| age >= stale_after),
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        // mtime is the only signal available for an anonymous directory, so an
+        // unreadable one is left for its owner rather than deleted on a guess.
+        Err(_) => return Ok(false),
+    };
+    if !abandoned {
+        return Ok(false);
+    }
+    if sidecar.exists() {
+        return Ok(false);
+    }
+    match fs::read_dir(lock_dir) {
+        Ok(entries) => {
+            if entries.filter_map(Result::ok).next().is_some() {
+                return Ok(false);
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(io_internal(error)),
+    }
+    let _ = fs::remove_dir(lock_dir);
+    Ok(!lock_dir.exists())
+}
+
 fn acquire_zcode(target: &Path, policy: &LockPolicy) -> ByokResult<CrossProcessLock> {
     let lock_dir = lock_dir_for(target)?;
     let token = uuid::Uuid::new_v4().simple().to_string();
@@ -490,6 +548,12 @@ fn spawn_mtime_heartbeat(
 pub(crate) fn set_directory_mtime(path: &Path) -> ByokResult<()> {
     let file = open_directory_for_times(path).map_err(io_internal)?;
     file.set_modified(SystemTime::now()).map_err(io_internal)
+}
+
+#[cfg(test)]
+pub(crate) fn backdate_directory_mtime(path: &Path, when: SystemTime) -> ByokResult<()> {
+    let file = open_directory_for_times(path).map_err(io_internal)?;
+    file.set_modified(when).map_err(io_internal)
 }
 
 #[cfg(test)]

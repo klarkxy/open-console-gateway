@@ -272,7 +272,11 @@ impl Store {
             let old_hash = content_hash(current.as_deref());
             let new_hash = content_hash(file.new_bytes.as_deref());
             self.write_hash_backup(file.role, "old", current.as_deref())?;
-            self.write_hash_backup(file.role, "new", file.new_bytes.as_deref())?;
+            // The new bytes are the post-write config and carry the live
+            // gateway key. Nothing reads them back: rollback and journal
+            // validation use only the "old" side, and `new_hash` is already
+            // recorded in the journal. Drop any copy a previous version left.
+            self.write_hash_backup(file.role, "new", None)?;
             pending_files.push(PendingFile {
                 role: file.role,
                 old_hash,
@@ -309,7 +313,9 @@ impl Store {
             receipt.created_catalog = plan.created_catalog;
             self.save_origin_from_old_backups(&plan)?;
         }
-        receipt.last_managed = plan.managed;
+        let mut managed = plan.managed;
+        managed.owned = without_secrets(&managed.owned);
+        receipt.last_managed = managed;
         receipt.last_applied_default = plan.last_applied_default;
         receipt.pending = None;
         self.save_receipt(&receipt)?;
@@ -486,4 +492,35 @@ fn role_name(role: FileRole) -> &'static str {
 
 pub fn has_backup(store: &Store) -> bool {
     store.origin_dir().is_dir()
+}
+
+const SECRET_FIELDS: &[&str] = &[
+    "experimental_bearer_token",
+    "api_key",
+    "apiKey",
+    "access_token",
+    "refresh_token",
+];
+
+/// Clone with secret-bearing fields removed at any depth. Key matching is
+/// case-sensitive because every adapter writes these names in one exact case.
+/// Ownership comparisons use this on both sides, so a receipt persisted before
+/// secrets were stripped still matches the current config.
+pub fn without_secrets(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut cleaned = serde_json::Map::new();
+            for (key, item) in map {
+                if SECRET_FIELDS.contains(&key.as_str()) {
+                    continue;
+                }
+                cleaned.insert(key.clone(), without_secrets(item));
+            }
+            serde_json::Value::Object(cleaned)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(without_secrets).collect())
+        }
+        other => other.clone(),
+    }
 }

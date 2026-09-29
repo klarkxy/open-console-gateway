@@ -1002,6 +1002,52 @@ fn zcode_remove_keeps_unrelated_user_data() {
 }
 
 #[test]
+fn deleted_target_file_stays_configurable_and_removable() {
+    let h = harness("deleted-target");
+    let client = ByokClient::Kimi;
+    let path = target_file(&h.host, client);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, "keep = \"mine\"\n").unwrap();
+    let first = inspect(&h.host, client);
+    configure(
+        &h.host,
+        client,
+        first.fingerprint.as_deref().unwrap(),
+        vec![model("a", 1000, None)],
+        None,
+    )
+    .unwrap();
+
+    fs::remove_file(&path).unwrap();
+    let gone = inspect(&h.host, client);
+    assert_eq!(gone.status, ByokStatus::NotDetected);
+    assert!(gone.configure_supported);
+    assert!(gone.remove_supported);
+    assert!(!gone.recovery_supported);
+
+    configure(
+        &h.host,
+        client,
+        gone.fingerprint.as_deref().unwrap(),
+        vec![model("b", 2000, None)],
+        None,
+    )
+    .unwrap();
+    assert!(path.is_file(), "configure recreates the deleted file");
+    assert_eq!(inspect(&h.host, client).status, ByokStatus::Configured);
+
+    fs::remove_file(&path).unwrap();
+    let gone_again = inspect(&h.host, client);
+    remove(&h.host, client, gone_again.fingerprint.as_deref().unwrap()).unwrap();
+    let cleared = inspect(&h.host, client);
+    assert_eq!(cleared.status, ByokStatus::NotDetected);
+    assert!(
+        !cleared.remove_supported,
+        "removing a missing file retires the receipt"
+    );
+}
+
+#[test]
 fn minimax_external_lock_is_not_deleted() {
     let h = harness("mm-lock-keep");
     let path = target_file(&h.host, ByokClient::Minimax);

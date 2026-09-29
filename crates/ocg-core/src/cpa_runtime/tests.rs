@@ -1738,6 +1738,7 @@ fn old_managed_json_defaults_desired_running_false() {
 
 #[test]
 fn fresh_install_records_run_intent_and_update_preserves_it() {
+    assert!(committed_desired_running(None, false));
     assert!(inherited_desired_running(None));
     let stopped = ManagedCpa {
         current_version: "7.2.147".into(),
@@ -1747,11 +1748,16 @@ fn fresh_install_records_run_intent_and_update_preserves_it() {
         desired_running: false,
     };
     assert!(!inherited_desired_running(Some(&stopped)));
+    // A pre-intent manifest reads back as stopped. Updating it while its child
+    // is running must keep the intent, or the next startup will not restore it.
+    assert!(committed_desired_running(Some(&stopped), true));
+    assert!(!committed_desired_running(Some(&stopped), false));
     let running = ManagedCpa {
         desired_running: true,
         ..stopped
     };
     assert!(inherited_desired_running(Some(&running)));
+    assert!(committed_desired_running(Some(&running), false));
 }
 
 #[tokio::test]

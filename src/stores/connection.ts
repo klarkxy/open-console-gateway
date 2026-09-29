@@ -118,14 +118,20 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function regeneratePrimaryKey(): Promise<string> {
+    const session = currentSession();
     const primaryKey = await runKeyMutation(() => controlPlane.runMutation((exp) => dashboardApi.regeneratePrimaryKey(exp)));
+    // Logout or a 401 during the mutation must not start a fresh plaintext
+    // fetch. The session is captured before the await so teardown wins.
+    if (session !== sessionEpoch) {
+      throw new Error("connection session ended");
+    }
     // The API helper already read plaintext for its return value. Reuse it
     // when no newer connection load has committed during the mutation.
     if (info.value) {
       info.value = { ...info.value, primary_key: primaryKey };
       return primaryKey;
     }
-    return (await reloadAfterMutation()).primary_key;
+    return (await reloadAfterMutation(session)).primary_key;
   }
 
   /** Drop all plaintext Key material held in memory (401 / logout). */

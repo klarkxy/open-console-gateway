@@ -185,6 +185,15 @@ fn inherited_desired_running(previous: Option<&ManagedCpa>) -> bool {
     previous.map(|item| item.desired_running).unwrap_or(true)
 }
 
+/// Run intent recorded after an install or update.
+///
+/// A manifest written before `desiredRunning` existed deserializes as `false`,
+/// so inheritance alone would mark a process the user currently has running as
+/// stopped. `was_running` carries that live state across the upgrade.
+fn committed_desired_running(previous: Option<&ManagedCpa>, was_running: bool) -> bool {
+    was_running || inherited_desired_running(previous)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CpaRuntimeSnapshot {
     pub supported: bool,
@@ -1151,7 +1160,7 @@ impl CoreStateInner {
             previous_version,
             asset_sha256: sha256,
             port,
-            desired_running: inherited_desired_running(previous.as_ref()),
+            desired_running: committed_desired_running(previous.as_ref(), was_running),
         };
         let committed = {
             let _settings = self.settings_update.lock();

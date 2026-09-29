@@ -552,7 +552,10 @@ impl ByokNativeHost {
                 ByokStatus::NotDetected,
                 Some("Configuration file is missing and can be created".into()),
                 parent_is_safe(&target.path) || target.path.parent().is_some(),
-                false,
+                // A receipt with no file is the deleted-target case: removal
+                // retires the receipt, so it stays available instead of leaving
+                // the entry unmanageable.
+                receipt.is_some(),
                 false,
             )
         };

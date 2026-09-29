@@ -22,7 +22,7 @@ impl FormatAdapter for MinimaxAdapter {
         receipt: Option<&Receipt>,
     ) -> ParsedStatus {
         let Some(bytes) = target_bytes else {
-            return empty_status(receipt.is_some());
+            return empty_status();
         };
         let Ok(root) = parse_yaml(bytes) else {
             return incompatible("MiniMax config.yaml is not valid YAML");
@@ -53,11 +53,6 @@ impl FormatAdapter for MinimaxAdapter {
         receipt: Option<&Receipt>,
         input: ConfigureInput<'_>,
     ) -> ByokResult<ApplyPlan> {
-        if target_bytes.is_none() && receipt.is_some() {
-            return Err(ByokError::conflict(
-                "Owned MiniMax fields changed outside OCG",
-            ));
-        }
         let mut root = match target_bytes {
             None => serde_yaml_ng::Value::Mapping(Mapping::new()),
             Some(bytes) => parse_yaml(bytes)?,
@@ -75,7 +70,11 @@ impl FormatAdapter for MinimaxAdapter {
                 "An unowned ocg MiniMax provider already exists",
             ));
         }
-        if ownership_conflict(receipt, true, &owned_from_mapping(mapping)) {
+        if ownership_conflict(
+            receipt,
+            target_bytes.is_some(),
+            &owned_from_mapping(mapping),
+        ) {
             return Err(ByokError::conflict(
                 "Owned MiniMax fields changed outside OCG",
             ));
@@ -129,10 +128,9 @@ impl FormatAdapter for MinimaxAdapter {
         _catalog_bytes: Option<&[u8]>,
         receipt: &Receipt,
     ) -> ByokResult<ApplyPlan> {
+        // Nothing remains to restore once the target file itself is gone.
         let Some(bytes) = target_bytes else {
-            return Err(ByokError::conflict(
-                "Owned MiniMax fields changed outside OCG",
-            ));
+            return Ok(removal_plan(target_path, receipt));
         };
         let mut root = parse_yaml(bytes)?;
         let mapping = as_mapping_mut(&mut root).ok_or_else(|| {
@@ -174,25 +172,37 @@ impl FormatAdapter for MinimaxAdapter {
             } else {
                 Some(dumped)
             };
-        Ok(ApplyPlan {
-            files: vec![planned_target(target_path.to_path_buf(), target_out)],
-            created_target: receipt.created_target,
-            created_catalog: false,
-            baseline_default: receipt.baseline_default.clone(),
-            last_applied_default: None,
-            managed: snapshot(Vec::new(), Value::Null, None),
-            first_owned: receipt.first_owned.clone(),
-        })
+        Ok(removal_plan_with(target_path, receipt, target_out))
     }
 }
 
-fn empty_status(user_changed_owned: bool) -> ParsedStatus {
+fn removal_plan(target_path: &Path, receipt: &Receipt) -> ApplyPlan {
+    removal_plan_with(target_path, receipt, None)
+}
+
+fn removal_plan_with(
+    target_path: &Path,
+    receipt: &Receipt,
+    target_out: Option<Vec<u8>>,
+) -> ApplyPlan {
+    ApplyPlan {
+        files: vec![planned_target(target_path.to_path_buf(), target_out)],
+        created_target: receipt.created_target,
+        created_catalog: false,
+        baseline_default: receipt.baseline_default.clone(),
+        last_applied_default: None,
+        managed: snapshot(Vec::new(), Value::Null, None),
+        first_owned: receipt.first_owned.clone(),
+    }
+}
+
+fn empty_status() -> ParsedStatus {
     ParsedStatus {
         incompatible: None,
         collision: false,
         configured_model_ids: Vec::new(),
         current_default: None,
-        user_changed_owned,
+        user_changed_owned: false,
     }
 }
 

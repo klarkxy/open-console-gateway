@@ -1085,7 +1085,10 @@ const canCreateManagedDraft = computed(() => (
 let previousVisibleIds = new Set<string>();
 let previousStatusSignature = "";
 const visibleAccountIds = computed(() => {
-  const signature = accounts.value.map((account) => (
+  // The filter selection has to be part of the memo key: clicking a plan tab
+  // or status chip changes no account's status signature, so a key built only
+  // from account status would return the previous filter's id set.
+  const signature = `${effectivePlanFilter.value}|${effectiveStatusFilter.value}\n` + accounts.value.map((account) => (
     `${account.id}:${accountStatusKey(account, now.value, providerCatalog.value, destinationsStore.destinationForAccount(account.id))}`
   )).join("\n");
   const ids = new Set(
