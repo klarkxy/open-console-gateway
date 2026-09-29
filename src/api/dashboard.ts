@@ -162,9 +162,8 @@ export const dashboardApi = {
   regenerateKey: async (id: string, expectation: MutationExpectation): Promise<void> => {
     await dashboardV3.regenerateKey(id, expectation);
   },
-  regeneratePrimaryKey: async (expectation: MutationExpectation): Promise<string> => {
+  regeneratePrimaryKey: async (expectation: MutationExpectation): Promise<void> => {
     await dashboardV3.regeneratePrimaryKey(expectation);
-    return (await dashboardV3.getConnection()).primaryKey;
   },
 
   getAccounts: async (): Promise<Account[]> =>

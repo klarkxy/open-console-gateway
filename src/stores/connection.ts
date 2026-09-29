@@ -119,17 +119,25 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function regeneratePrimaryKey(): Promise<string> {
     const session = currentSession();
-    const primaryKey = await runKeyMutation(() => controlPlane.runMutation((exp) => dashboardApi.regeneratePrimaryKey(exp)));
-    // Logout or a 401 during the mutation must not start a fresh plaintext
-    // fetch. The session is captured before the await so teardown wins.
+    // The API helper reads the connection itself to return the new plaintext,
+    // so the session has to be re-checked before that read, not after it.
+    // Logout or a 401 while the rotation is in flight must not fetch it.
+    const rotated = await runKeyMutation(() => controlPlane.runMutation(async (exp) => {
+      await dashboardApi.regeneratePrimaryKey(exp);
+      if (session !== sessionEpoch) {
+        throw new Error("connection session ended");
+      }
+      return dashboardApi.getConnection();
+    }));
     if (session !== sessionEpoch) {
       throw new Error("connection session ended");
     }
-    // The API helper already read plaintext for its return value. Reuse it
-    // when no newer connection load has committed during the mutation.
+    // The mutation already read the connection for its return value. Commit
+    // that read when nothing newer landed during it; otherwise the reload is
+    // guarded by the session captured before the rotation.
     if (info.value) {
-      info.value = { ...info.value, primary_key: primaryKey };
-      return primaryKey;
+      info.value = rotated;
+      return rotated.primary_key;
     }
     return (await reloadAfterMutation(session)).primary_key;
   }
