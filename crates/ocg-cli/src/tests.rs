@@ -1,6 +1,6 @@
 use super::{
-    Cli, Commands, KeyAction, build_state, key_command, ping_keys, register_dsh_application_host,
-    resolve_cipher_with, resolve_dashboard_dir, resolve_data_dir, start_serve, status_command,
+    Cli, Commands, KeyAction, build_state, key_command, ping_keys, resolve_cipher_with,
+    resolve_dashboard_dir, resolve_data_dir, start_serve, status_command,
     stop_serve, toggle_account,
 };
 use chrono::Utc;
@@ -118,22 +118,11 @@ fn resolve_data_dir_prefers_explicit_path() {
 }
 
 #[test]
-fn dsh_application_host_matches_the_native_cli_build_capability() {
+fn minimal_cli_does_not_register_application_hosts() {
     let dir = temp_dir("dsh-host-capability");
     let state = build_state(dir.clone(), test_cipher()).unwrap();
     assert!(state.dsh_application_host().is_none());
     assert!(state.byok_application_host().is_none());
-
-    register_dsh_application_host(&state);
-
-    assert_eq!(
-        state.dsh_application_host().is_some(),
-        cfg!(feature = "dsh-local-host")
-    );
-    assert_eq!(
-        state.byok_application_host().is_some(),
-        cfg!(feature = "dsh-local-host")
-    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -164,14 +153,24 @@ fn resolve_cipher_uses_explicit_env_then_file() {
     assert_cipher_matches_static(&from_env, "env-secret", "plain-env");
 
     let file_dir = temp_dir("cipher-file");
-    let first = resolve_cipher_with(&file_dir, None, None).unwrap();
-    let second = resolve_cipher_with(&file_dir, None, None).unwrap();
+    let seeded = file_dir.join(".encryption-key");
+    std::fs::write(&seeded, "file-secret").unwrap();
+    let from_file = resolve_cipher_with(&file_dir, None, None).unwrap();
+    assert_cipher_matches_static(&from_file, "file-secret", "plain-file");
+
+    let bare_dir = temp_dir("cipher-bare");
+    let first = resolve_cipher_with(&bare_dir, None, None).unwrap();
+    let second = resolve_cipher_with(&bare_dir, None, None).unwrap();
     let ciphertext = first.encrypt("roundtrip").unwrap();
     assert_eq!(second.decrypt(&ciphertext).unwrap(), "roundtrip");
-    assert!(file_dir.join(".encryption-key").is_file());
-
+    if cfg!(windows) {
+        assert!(!bare_dir.join(".encryption-key").exists());
+    } else {
+        assert!(bare_dir.join(".encryption-key").is_file());
+    }
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(file_dir);
+    let _ = std::fs::remove_dir_all(bare_dir);
 }
 
 #[test]

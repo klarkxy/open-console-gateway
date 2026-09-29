@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use ocg_core::account_control;
-use ocg_core::crypto::{KeyCipher, StaticKeyCipher, load_or_create_static_cipher};
+use ocg_core::crypto::{KeyCipher, MachineBoundCipher, StaticKeyCipher, load_or_create_static_cipher};
 use ocg_core::db::Database;
 use ocg_core::gateway::{self, GatewayLifecycle};
 use ocg_core::models::{Account, AppConfig};
@@ -17,9 +17,10 @@ use std::sync::Arc;
 #[command(version)]
 #[command(after_long_help = r#"FIRST RUN
   ocg-manager-cli serve --port 9042
-  Open http://127.0.0.1:9042/dashboard/ in your browser. Add an upstream
-  account in Accounts, then copy the Gateway Key and API Base URL from Access
-  Center directly into your client. The usual local Base URL ends in /v1.
+  This build serves inference only: POST /v1/chat/completions and GET /v1/models.
+  It does not serve a dashboard. Point a client at http://127.0.0.1:9042/v1
+  and send the gateway key as a Bearer token. Accounts and model routes come
+  from the data directory.
 
 DOWNLOAD AND UPGRADE
   Get the matching platform archive and SHA256SUMS from the same GitHub
@@ -56,7 +57,7 @@ struct Cli {
 enum Commands {
     /// Start the gateway server
     #[command(
-        after_long_help = "The default listener is 127.0.0.1:9042. --port saves the port in SQLite. Keep dist/ beside the executable for the dashboard. A non-loopback --host requires dashboard administrator login; plan authentication, TLS, and network access before exposing it."
+        after_long_help = "The default listener is 127.0.0.1:9042. --port saves the port in SQLite. This build serves inference routes only and ignores --dashboard-dir."
     )]
     Serve {
         /// Address to listen on
@@ -140,7 +141,6 @@ enum KeyAction {
 }
 
 fn main() -> Result<()> {
-    ocg_core::cpa_runtime::host::run_internal_supervisor_if_requested();
     run_cli()
 }
 
@@ -180,19 +180,31 @@ fn resolve_cipher(
 }
 
 /// Priority: explicit encryption_key > env_key > on-disk key file.
+/// On Windows the desktop host seals credentials with the machine cipher and
+/// stores no key file, so that cipher is the fallback when the file is absent.
 fn resolve_cipher_with(
     data_dir: &Path,
     encryption_key: Option<String>,
     env_key: Option<String>,
 ) -> Result<Arc<dyn KeyCipher + Send + Sync>> {
-    let cipher = match encryption_key {
-        Some(secret) => StaticKeyCipher::new(&secret),
-        None => match env_key {
-            Some(secret) => StaticKeyCipher::new(&secret),
-            None => load_or_create_static_cipher(data_dir)?,
-        },
-    };
-    Ok(Arc::new(cipher))
+    if let Some(secret) = encryption_key {
+        return Ok(Arc::new(StaticKeyCipher::new(&secret)));
+    }
+    if let Some(secret) = env_key {
+        return Ok(Arc::new(StaticKeyCipher::new(&secret)));
+    }
+    let key_path = data_dir.join(".encryption-key");
+    if key_path.is_file() {
+        return Ok(Arc::new(load_or_create_static_cipher(data_dir)?));
+    }
+    #[cfg(windows)]
+    {
+        return Ok(Arc::new(MachineBoundCipher::new()));
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(Arc::new(load_or_create_static_cipher(data_dir)?))
+    }
 }
 
 fn build_state(
@@ -201,13 +213,6 @@ fn build_state(
 ) -> Result<Arc<CoreStateInner>> {
     let db = Database::open_with_cipher(data_dir.clone(), cipher.clone())?;
     Ok(Arc::new(CoreStateInner::new(db, data_dir, cipher)?))
-}
-
-fn register_dsh_application_host(_state: &Arc<CoreStateInner>) {
-    #[cfg(feature = "dsh-local-host")]
-    ocg_core::byok_application_host::register(_state);
-    #[cfg(feature = "dsh-local-host")]
-    ocg_core::dsh_application_host::register(_state);
 }
 
 async fn serve(
@@ -233,8 +238,7 @@ async fn start_serve(
     dashboard_dir: Option<PathBuf>,
 ) -> Result<Arc<CoreStateInner>> {
     let state = build_state(data_dir, cipher)?;
-    ocg_core::cpa_runtime::host::register_owned_host(&state);
-    register_dsh_application_host(&state);
+    gateway::set_router_override(gateway::inference_only_router);
     let executable = if dashboard_dir.is_none() {
         std::env::current_exe().ok()
     } else {
@@ -253,7 +257,7 @@ async fn start_serve(
             .await?;
     println!("gateway started on http://{}:{}", host, handle.port);
     println!("gateway key: [hidden; use status --show-key in a private terminal]");
-    println!("dashboard: http://{}:{}/dashboard/", host, handle.port);
+    println!("inference: http://{}:{}/v1", host, handle.port);
     println!(
         "upstream: {}",
         ocg_core::gateway::free_models::opencode_go_base_url(&config.upstream_base_url)
@@ -264,11 +268,6 @@ async fn start_serve(
         *gateway_lock = Some(handle);
     }
 
-    let restorer = state.clone();
-    tokio::spawn(async move {
-        restorer.restore_owned_cpa_runtime_on_startup().await;
-    });
-
     let _ = state.db.lock().log_gateway(
         "info",
         "gateway",
@@ -278,7 +277,6 @@ async fn start_serve(
 }
 
 async fn stop_serve(state: &CoreStateInner) {
-    state.stop_owned_cpa_runtime();
     let handle = state.gateway.lock().take();
     if let Some(handle) = handle {
         let _ = GatewayLifecycle::stop_and_wait(handle).await;

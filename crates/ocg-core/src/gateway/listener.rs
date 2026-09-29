@@ -17,6 +17,7 @@ use crate::state::CoreState;
 use anyhow::Result;
 use axum::Router;
 use std::net::SocketAddr;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::oneshot;
 
@@ -35,6 +36,15 @@ pub struct GatewayLifecycle;
 pub(crate) trait GatewayRouterHost {
     fn compose_router(state: CoreState) -> Router;
 }
+
+/// Installs the router the listener serves. The full console host installs
+/// the dashboard composition; the minimal CLI installs the inference router
+/// only. Unset keeps the default host composition.
+pub fn set_router_override(compose: fn(CoreState) -> Router) {
+    ROUTER_OVERRIDE.set(compose).ok();
+}
+
+static ROUTER_OVERRIDE: OnceLock<fn(CoreState) -> Router> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ListenerStopOutcome {
@@ -128,8 +138,12 @@ impl GatewayLifecycle {
             (!dashboard_is_local).then(|| PublicListenerRegistration::new(state.clone()));
         spawn_forward_log_backfill(state.clone());
         // Composed by the host root through the explicit listener boundary so
-        // this module does not import dashboard mounts.
-        let app = <CoreState as GatewayRouterHost>::compose_router(state.clone());
+        // this module does not import dashboard mounts. A minimal host may
+        // replace that composition before bind.
+        let app = match ROUTER_OVERRIDE.get() {
+            Some(compose) => compose(state.clone()),
+            None => <CoreState as GatewayRouterHost>::compose_router(state.clone()),
+        };
         let port = local_addr.port();
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();

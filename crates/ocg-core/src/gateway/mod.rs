@@ -51,7 +51,16 @@ fn request_body_limit(value: Option<&str>) -> usize {
     }
 }
 
-pub(crate) fn inference_router(state: CoreState) -> Router<CoreState> {
+pub use listener::set_router_override;
+
+/// Inference routes only: chat, responses, messages, and the model list.
+/// A minimal host installs this through [`set_router_override`] so the
+/// listener never mounts the dashboard.
+pub fn inference_only_router(state: CoreState) -> Router {
+    inference_router(state.clone()).with_state(state)
+}
+
+pub fn inference_router(state: CoreState) -> Router<CoreState> {
     let value = std::env::var_os("OCG_MAX_REQUEST_BODY_BYTES");
     let value = value.as_ref().map(|value| value.to_string_lossy());
     inference_router_with_body_limit(state, request_body_limit(value.as_deref()))
