@@ -6,7 +6,6 @@ use ocg_core::db::Database;
 use ocg_core::gateway::{self, GatewayLifecycle};
 use ocg_core::models::{Account, AppConfig};
 use ocg_core::provider::CredentialKind;
-use ocg_core::skill_install;
 use ocg_core::state::CoreStateInner;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -32,12 +31,6 @@ CAPABILITY BOUNDARY
   dashboard for other Providers, client Access Keys, Custom API destinations,
   model/protocol settings, routing, proxy, and backup/import.
 
-CODEX SKILL
-  Native release builds sync the bundled ocg-manager skill to ~/.agents/skills on
-  serve. Run `ocg-manager-cli skill sync` to install or repair it explicitly.
-  Existing OCG-managed versions are backed up; an unrelated same-name skill
-  is left untouched.
-
 SECRET HANDLING
   Do not paste Keys or passwords into an agent conversation. `key add` and
   --encryption-key accept plaintext process arguments; enter credentials in
@@ -61,9 +54,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the gateway server and, in native releases, sync the Codex skill
+    /// Start the gateway server
     #[command(
-        after_long_help = "The default listener is 127.0.0.1:9042. --port saves the port in SQLite. Keep dist/ beside the executable for the dashboard. A non-loopback --host requires dashboard administrator login; plan authentication, TLS, and network access before exposing it. Native release builds sync the bundled Codex skill when serve starts; the Docker build does not install it on the host."
+        after_long_help = "The default listener is 127.0.0.1:9042. --port saves the port in SQLite. Keep dist/ beside the executable for the dashboard. A non-loopback --host requires dashboard administrator login; plan authentication, TLS, and network access before exposing it."
     )]
     Serve {
         /// Address to listen on
@@ -93,20 +86,6 @@ enum Commands {
         #[arg(long)]
         show_key: bool,
     },
-    /// Install or update the bundled Codex skill
-    Skill {
-        #[command(subcommand)]
-        action: SkillAction,
-    },
-}
-
-#[derive(Subcommand)]
-enum SkillAction {
-    /// Sync to ~/.agents/skills/ocg-manager; back up a prior OCG-managed copy
-    #[command(
-        after_long_help = "Install the skill embedded in this binary into the current user's ~/.agents/skills/ocg-manager. Repeating the command is safe when the installed copy matches. When bundled skill content changes, the previous OCG-managed copy is moved to ~/.agents/skill-backups before replacement. A same-name skill without OCG's ownership marker, or a locally edited matching-copy, is left unchanged."
-    )]
-    Sync,
 }
 
 #[derive(Subcommand)]
@@ -168,15 +147,6 @@ fn main() -> Result<()> {
 #[tokio::main]
 async fn run_cli() -> Result<()> {
     let cli = Cli::parse();
-    if let Commands::Skill { action } = &cli.command {
-        return match action {
-            SkillAction::Sync => {
-                let result = skill_install::sync_user_skill()?;
-                println!("Codex skill {:?}: {}", result.status, result.path.display());
-                Ok(())
-            }
-        };
-    }
     let data_dir = resolve_data_dir(cli.data_dir);
     let cipher = resolve_cipher(&data_dir, cli.encryption_key)?;
 
@@ -188,7 +158,6 @@ async fn run_cli() -> Result<()> {
         } => serve(data_dir, cipher, host, port, dashboard_dir).await,
         Commands::Key { action } => key_command(data_dir, cipher, action).await,
         Commands::Status { show_key } => status_command(data_dir, cipher, show_key).await,
-        Commands::Skill { .. } => unreachable!(),
     }
 }
 
@@ -248,12 +217,6 @@ async fn serve(
     port: Option<u16>,
     dashboard_dir: Option<PathBuf>,
 ) -> Result<()> {
-    if cfg!(feature = "install-codex-skill")
-        && !cfg!(debug_assertions)
-        && let Err(error) = skill_install::sync_user_skill()
-    {
-        eprintln!("warning: Codex skill synchronization failed: {error:#}");
-    }
     let state = start_serve(data_dir, cipher, host, port, dashboard_dir).await?;
     println!("press Ctrl+C to stop");
     tokio::signal::ctrl_c().await?;

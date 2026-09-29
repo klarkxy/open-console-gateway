@@ -56,7 +56,6 @@ pub(crate) mod route_availability;
 pub(crate) mod routing_runtime;
 pub(crate) mod routing_snapshot;
 pub(crate) mod runtime_log;
-pub mod skill_install;
 pub mod state;
 pub(crate) mod upstream_limit;
 pub(crate) mod usage_http;

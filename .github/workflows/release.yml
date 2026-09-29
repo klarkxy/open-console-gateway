@@ -237,7 +237,6 @@ jobs:
             }
             if (!$ready) { throw 'Packaged CLI dashboard did not start' }
             if ((Get-Content $stdout -Raw) -match [regex]::Escape($gatewayKey)) { throw 'CLI serve exposed the key in its log' }
-            if (!(Test-Path (Join-Path $data '.agents/skills/ocg-manager/SKILL.md'))) { throw 'CLI serve did not synchronize its bundled skill' }
           } finally {
             if (!$server.HasExited) { Stop-Process -Id $server.Id -Force; $server.WaitForExit() }
           }
@@ -292,7 +291,6 @@ jobs:
           done
           if [ -z "$ready" ]; then echo 'Packaged CLI dashboard did not start'; exit 1; fi
           if grep -Fq "$gateway_key" "$log"; then echo 'CLI serve exposed the key in its log'; exit 1; fi
-          test -f "$data/.agents/skills/ocg-manager/SKILL.md"
           kill "$server_pid"
           wait "$server_pid" || true
           trap - EXIT

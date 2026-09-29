@@ -28,7 +28,7 @@ env:
 
 jobs:
   web:
-    name: Web tests and lint
+    name: Node tooling checks
     runs-on: ubuntu-22.04
     timeout-minutes: 15
 
@@ -48,13 +48,7 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
-      - run: pnpm run contract:v3:check
-      - run: pnpm run contract:v4:check
-      - run: pnpm run typecheck
-      - run: pnpm run test:web
       - run: pnpm run test:tooling
-      - run: pnpm exec vite build
-      - run: pnpm run design:lint
       - run: docker compose -f compose.example.yaml config --quiet
 
   rust:

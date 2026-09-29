@@ -7,47 +7,23 @@
   "scripts": {
     "prepare": "node scripts/install-git-hooks.mjs",
     "hooks:install": "node scripts/install-git-hooks.mjs",
-    "predev": "node scripts/free-dev-port.mjs",
     "dev": "node scripts/dev.mjs",
-    "predev:split": "node scripts/free-dev-port.mjs",
-    "dev:split": "node scripts/dev-split.mjs",
     "build": "node scripts/release.mjs",
-    "build:web": "vue-tsc && vite build",
     "release:check": "node scripts/release.mjs --check",
     "test:rust": "cargo test --workspace --locked --features ocg-core/ollama-cloud-loopback-test",
-    "test:web": "node --experimental-strip-types --test \"src/**/*.test.ts\"",
     "test:tooling": "node --experimental-strip-types --test \"scripts/*.test.mjs\"",
     "test:dsh:plugin": "node --experimental-strip-types --test scripts/dsh-plugin-package.test.mjs",
     "smoke:dsh:plugin": "node scripts/dsh-application-install-smoke.mjs",
     "smoke:dsh:cli": "node scripts/dsh-headless-cli-smoke.mjs",
     "smoke:dsh:runtime": "node scripts/dsh-web-runtime-smoke.mjs",
-    "contract:v3:generate": "node scripts/dashboard-v3-contract.mjs --write",
-    "contract:v3:check": "node scripts/dashboard-v3-contract.mjs --check",
-    "contract:v4:generate": "node scripts/dashboard-v4-contract.mjs --write",
-    "contract:v4:check": "node scripts/dashboard-v4-contract.mjs --check",
-    "typecheck": "vue-tsc --noEmit",
-    "test": "pnpm run test:web && pnpm run test:tooling && pnpm run typecheck && pnpm exec vite build && pnpm run test:rust",
-    "design:lint": "npx -y @google/design.md@0.3.0 lint DESIGN.md"
-  },
-  "dependencies": {
-    "@novnc/novnc": "^1.7.0",
-    "@vicons/antd": "^0.13.0",
-    "motion-v": "^2.4.4",
-    "naive-ui": "^2.44.1",
-    "pinia": "^4.0.3",
-    "reka-ui": "^2.10.5",
-    "vue": "^3",
-    "vue-router": "^4.6.4"
+    "test": "pnpm run test:tooling && pnpm run test:rust"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^20",
-    "@vitejs/plugin-vue": "^5",
-    "json-schema-to-typescript": "15.0.4",
     "tailwindcss": "^4.3.3",
     "typescript": "^5",
-    "vite": "^5",
-    "vue-tsc": "^2"
+    "vite": "^5"
   }
 }

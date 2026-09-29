@@ -1,7 +1,7 @@
 use super::{
-    Cli, Commands, KeyAction, SkillAction, build_state, key_command, ping_keys,
-    register_dsh_application_host, resolve_cipher_with, resolve_dashboard_dir, resolve_data_dir,
-    start_serve, status_command, stop_serve, toggle_account,
+    Cli, Commands, KeyAction, build_state, key_command, ping_keys, register_dsh_application_host,
+    resolve_cipher_with, resolve_dashboard_dir, resolve_data_dir, start_serve, status_command,
+    stop_serve, toggle_account,
 };
 use chrono::Utc;
 use clap::{CommandFactory, Parser};
@@ -106,14 +106,6 @@ fn cli_parses_key_and_status_subcommands() {
             .unwrap()
             .command,
         Commands::Status { show_key: true }
-    ));
-    assert!(matches!(
-        Cli::try_parse_from(["ocg-manager-cli", "skill", "sync"])
-            .unwrap()
-            .command,
-        Commands::Skill {
-            action: SkillAction::Sync
-        }
     ));
 }
 
