@@ -2290,6 +2290,122 @@ fn late_manual_start_commit_after_shutdown_does_not_publish_idle() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+/// Whether one published generation still carries the CPA integration rows.
+fn cpa_rows_published(snapshot: &crate::state::GatewayPreparationSnapshot) -> bool {
+    snapshot
+        .routing()
+        .credentials
+        .iter()
+        .any(|credential| credential.id == CPA_ACCOUNT_ID)
+        && snapshot
+            .routing()
+            .projection
+            .destinations
+            .iter()
+            .any(|destination| destination.adapter == ocg_domain::destination::AdapterKind::Cpa)
+}
+
+/// A compensation restore that captured no catalog has to invalidate the
+/// aggregate the restore's own `disconnect_cpa_integration` just republished as
+/// deleted. The restore reinstates the integration, destination, and credential
+/// rows, and without a catalog to activate nothing else on that path publishes
+/// or advances the revision — so the deleted generation would keep matching and
+/// report "CPA is gone" for the life of the process.
+#[test]
+fn a_catalog_less_restore_reaches_the_next_preparation_read() {
+    let dir = temp_dir("restore-without-catalog");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-restore"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    state
+        .persist_managed_connection(
+            free_loopback_port(),
+            "management-key",
+            "inference-key",
+            vec!["restore-model".into()],
+        )
+        .expect("the CPA integration should persist");
+    // A rollback that starts before any catalog was ever published: the
+    // integration is connected, but there is no CPA snapshot to restore.
+    {
+        let db = state.db.lock();
+        db.conn
+            .execute(
+                "DELETE FROM provider_model_catalogs WHERE provider_id = ?1",
+                [CPA_PROVIDER_ID],
+            )
+            .expect("the catalog row should be removed");
+        state
+            .publish_gateway_preparation(&db)
+            .expect("the fixture should publish");
+    }
+    let backup = state
+        .capture_persistence_backup()
+        .expect("the persistence snapshot should capture");
+    assert!(
+        backup.catalog.is_none(),
+        "this fixture must exercise the catalog-less restore branch"
+    );
+    let connected = state
+        .gateway_preparation()
+        .expect("the aggregate should publish");
+    assert!(
+        cpa_rows_published(&connected),
+        "the fixture must start from a generation that carries the CPA rows"
+    );
+    let connected_revision = connected.revision();
+    // Unrelated to the branch under review: `delete_cpa_integration` leaves the
+    // account's usage-sync row behind, and re-inserting the account then fails
+    // on that primary key, so drop it here to let the restore reach the
+    // revision handling this test pins.
+    state
+        .db
+        .lock()
+        .conn
+        .execute(
+            "DELETE FROM provider_usage_sync_state WHERE account_id = ?1",
+            [CPA_ACCOUNT_ID],
+        )
+        .expect("the orphaned usage-sync row should be removed");
+
+    state
+        .restore_persistence_backup(backup)
+        .expect("the restore should reinstate the previous rows");
+    assert!(
+        state
+            .db
+            .lock()
+            .cpa_integration()
+            .expect("the integration row should read")
+            .is_some(),
+        "the restore writes the rows back before publishing anything"
+    );
+
+    let restored = state
+        .gateway_preparation()
+        .expect("the aggregate should publish");
+    assert!(
+        cpa_rows_published(&restored),
+        "a catalog-less restore must still reach the next preparation read, not leave the deleted generation serving"
+    );
+    assert!(
+        restored.revision() > connected_revision,
+        "the restore must advance the revision so the deleted generation stops matching"
+    );
+    assert_eq!(
+        restored.revision(),
+        state.settings_revision(),
+        "the rebuild must land on the current revision so later reads stay on the fast path"
+    );
+    assert!(
+        Arc::ptr_eq(&restored, &state.gateway_preparation().unwrap()),
+        "the rebuild must publish itself, otherwise every later read pays the gate again"
+    );
+
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn already_running_start_commit_after_shutdown_does_not_publish_idle() {
     let dir = temp_dir("already-running-shutdown-commit");

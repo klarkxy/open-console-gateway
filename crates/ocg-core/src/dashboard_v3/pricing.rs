@@ -703,6 +703,14 @@ fn apply_go_refresh_locked(
             multiplier_changes,
         } => {
             let snapshot = stamp_pricing_activation(candidate);
+            // Bump before activating, not after. `activate_pricing_snapshot`
+            // republishes the preparation aggregate itself, and it stamps that
+            // publication with the revision as it stands. Activating first would
+            // publish the new pricing at the previous revision and then advance
+            // the revision, leaving every later request to pay a drift rebuild
+            // for a change this handler already published. The gate is held
+            // across both, so no other writer can observe the window.
+            state.bump_settings_revision();
             state
                 .activate_pricing_snapshot(snapshot.clone())
                 .map_err(V3ApiError::internal)?;
@@ -714,7 +722,6 @@ fn apply_go_refresh_locked(
                     snapshot.revision
                 ),
             );
-            state.bump_settings_revision();
             Ok(PricingRefresh {
                 snapshot: map_kernel_snapshot(state, &snapshot),
                 refresh_status: PricingRefreshStatus::Success,
@@ -755,6 +762,12 @@ fn apply_multipliers_locked(
         Ok(None) => Ok(snapshot_from_state(state)),
         Ok(Some(snapshot)) => {
             let snapshot = stamp_pricing_activation(snapshot);
+            // Bump before activating, for the same reason as
+            // `apply_go_refresh_locked`: the activation republishes the aggregate
+            // stamped with the revision as it stands, so bumping afterwards would
+            // leave that publication one revision behind and send the next
+            // request through a gated rebuild for a change already published.
+            state.bump_settings_revision();
             state
                 .activate_pricing_snapshot(snapshot.clone())
                 .map_err(V3ApiError::internal)?;
@@ -763,7 +776,6 @@ fn apply_multipliers_locked(
                 "info",
                 &format!("updated pricing multipliers in {}", snapshot.revision),
             );
-            state.bump_settings_revision();
             Ok(map_kernel_snapshot(state, &snapshot))
         }
     }
@@ -861,6 +873,7 @@ fn audit_pricing(state: &CoreState, level: &str, message: &str) {
 mod tests {
     use super::*;
     use crate::crypto::{KeyCipher, StaticKeyCipher};
+    use crate::dashboard_v3::types::{MutationExpectation, PricingMultiplierWrite};
     use crate::db::Database;
     use crate::provider::{COMMAND_CODE_PROVIDER_ID, OPENCODE_PROVIDER_ID};
     use crate::state::CoreStateInner;
@@ -909,6 +922,79 @@ mod tests {
         );
         assert!(goat.snapshot.is_none());
         assert_eq!(goat.pricing_revision, captured.revision);
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A pricing activation republishes the preparation aggregate itself, so the
+    /// revision bump has to happen *before* it. Publish-then-bump leaves the
+    /// aggregate stamped one revision behind, and the next request's preparation
+    /// falls off the fast path onto a gated rebuild — for a change the handler
+    /// already published.
+    ///
+    /// Both orders leave the next `gateway_preparation()` reporting the new
+    /// pricing, because the slow path repairs whatever drift it finds, so the
+    /// observable is the gate itself: the fast path never wants
+    /// `settings_update`. Hold it on a second thread and require the read to
+    /// return anyway. An ordering regression deadlocks on the non-reentrant gate
+    /// instead, and the receive timeout turns that into a failure rather than a
+    /// hung suite.
+    #[test]
+    fn pricing_activation_leaves_the_next_preparation_read_off_the_gate() {
+        use std::time::Duration as StdDuration;
+
+        let (state, dir) = test_state("pricing-bump-order");
+        let active = state.pricing_snapshot();
+        let model_id = active
+            .models
+            .first()
+            .expect("the seed pricing snapshot should list models")
+            .model_id
+            .clone();
+        {
+            let _settings_update = state.settings_update.lock();
+            apply_multipliers_locked(
+                &state,
+                PricingMultipliersUpdate {
+                    expectation: MutationExpectation {
+                        expected_revision: state.settings_revision(),
+                        process_generation: state.process_generation(),
+                    },
+                    expected_pricing_revision: active.revision.clone(),
+                    multipliers: vec![PricingMultiplierWrite {
+                        model_id,
+                        multiplier: 1.5,
+                    }],
+                },
+            )
+            .expect("a multiplier write should activate");
+        }
+
+        let expected = state.settings_revision();
+        let worker_state = Arc::clone(&state);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _gate = worker_state.settings_update.lock();
+            let read = worker_state.gateway_preparation();
+            let _ = tx.send(read.map(|published| published.revision()));
+        });
+
+        match rx.recv_timeout(StdDuration::from_secs(10)) {
+            Ok(Ok(revision)) => {
+                worker.join().expect("the reader thread should finish");
+                assert_eq!(
+                    revision, expected,
+                    "the read must be the fast path, serving the generation the activation published"
+                );
+            }
+            Ok(Err(error)) => panic!("preparation should read after a pricing activation: {error}"),
+            // Deliberately not joining: a regression leaves that thread blocked
+            // on the gate forever, and joining it would hang the suite.
+            Err(_) => panic!(
+                "pricing activation published before bumping: the next preparation read fell back to a gated rebuild"
+            ),
+        }
 
         drop(state);
         let _ = std::fs::remove_dir_all(dir);

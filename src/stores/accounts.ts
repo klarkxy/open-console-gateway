@@ -2,6 +2,13 @@ import { computed, ref, shallowRef } from "vue";
 import { defineStore } from "pinia";
 import { dashboardApi } from "../api/dashboard.ts";
 import type { Account } from "../api/dashboard.ts";
+import { dropSnapshot, readSnapshot, writeSnapshot } from "./persistence.ts";
+
+const SNAPSHOT_KEY = "accounts";
+
+function validateSnapshot(data: unknown): Account[] | null {
+  return Array.isArray(data) ? data as Account[] : null;
+}
 
 /**
  * Single owner of the account list. Views issue API mutations through
@@ -9,10 +16,15 @@ import type { Account } from "../api/dashboard.ts";
  * `removeAccount` / `setAccounts`; a pending load can never clobber state
  * committed by a newer load or an in-place mutation. Commits always replace
  * the list wholesale, so the snapshot is a shallow ref.
+ *
+ * The secret-free list is persisted to localStorage so a cold start renders
+ * the last snapshot immediately and revalidates in the background; logout
+ * wipes it through both `clearAccounts` and `dropAllSnapshots`.
  */
 export const useAccountsStore = defineStore("accounts", () => {
-  const accounts = shallowRef<Account[]>([]);
-  const loaded = ref(false);
+  const hydrated = readSnapshot(SNAPSHOT_KEY, validateSnapshot);
+  const accounts = shallowRef<Account[]>(hydrated ?? []);
+  const loaded = ref(hydrated !== null);
   const loading = ref(false);
   const error = ref("");
   // A delayed model/usage mutation may return an account after its DELETE.
@@ -40,6 +52,7 @@ export const useAccountsStore = defineStore("accounts", () => {
       accounts.value = list;
       loaded.value = true;
       error.value = "";
+      writeSnapshot(SNAPSHOT_KEY, list);
       return list;
     } catch (e) {
       if (generation === loadGeneration) {
@@ -60,6 +73,7 @@ export const useAccountsStore = defineStore("accounts", () => {
     accounts.value = list.filter(account => !removedIds.value.has(account.id));
     loaded.value = true;
     error.value = "";
+    writeSnapshot(SNAPSHOT_KEY, accounts.value);
   }
 
   function upsertAccount(account: Account): void {
@@ -83,6 +97,7 @@ export const useAccountsStore = defineStore("accounts", () => {
     loaded.value = false;
     loading.value = false;
     error.value = "";
+    dropSnapshot(SNAPSHOT_KEY);
   }
 
   return {

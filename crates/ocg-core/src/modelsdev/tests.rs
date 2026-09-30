@@ -65,6 +65,69 @@ fn unsupported_only_modality_lists_become_unknown_not_text_fallback() {
 }
 
 #[test]
+fn reasoning_options_effort_values_become_selector_levels() {
+    let rows = parse_api(
+        br#"{
+        "lab": {"models": {
+            "thinking": {
+                "reasoning": true,
+                "reasoning_options": [
+                    {"type": "toggle"},
+                    {"type": "effort", "values": ["none", "low", "high", "xhigh"]},
+                    {"type": "budget_tokens", "min": 1024}
+                ]
+            },
+            "toggle-only": {
+                "reasoning": true,
+                "reasoning_options": [{"type": "toggle"}]
+            }
+        }}
+    }"#,
+    );
+    let thinking = &rows["thinking"];
+    let efforts = thinking.reasoning_efforts.as_ref().unwrap();
+    assert_eq!(efforts.get("off").map(String::as_str), Some("none"));
+    assert_eq!(efforts.get("low").map(String::as_str), Some("low"));
+    assert_eq!(efforts.get("high").map(String::as_str), Some("high"));
+    assert_eq!(efforts.get("xhigh").map(String::as_str), Some("xhigh"));
+    assert_eq!(efforts.len(), 4);
+    assert_eq!(thinking.reasoning, Some(true));
+    // A toggle carries no selectable wire level: unknown, not fabricated.
+    assert_eq!(rows["toggle-only"].reasoning_efforts, None);
+}
+
+#[test]
+fn effort_values_outside_the_selector_table_are_dropped() {
+    let rows = parse_api(
+        br#"{
+        "lab": {"models": {
+            "alien": {
+                "reasoning": true,
+                "reasoning_options": [{"type": "effort", "values": ["low", "turbo"]}]
+            }
+        }}
+    }"#,
+    );
+    let efforts = rows["alien"].reasoning_efforts.as_ref().unwrap();
+    assert_eq!(efforts.get("low").map(String::as_str), Some("low"));
+    assert_eq!(efforts.len(), 1);
+}
+
+#[test]
+fn duplicate_ids_keep_only_agreeing_effort_spellings() {
+    let rows = parse_api(br#"{
+        "a": {"models": {"m": {"reasoning": true, "reasoning_options": [{"type": "effort", "values": ["low", "high"]}]}}},
+        "b": {"models": {"m": {"reasoning": true, "reasoning_options": [{"type": "effort", "values": ["high", "max"]}]}}}
+    }"#);
+    let efforts = rows["m"].reasoning_efforts.as_ref().unwrap();
+    let pairs: Vec<_> = efforts
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    assert_eq!(pairs, [("high", "high")]);
+}
+
+#[test]
 fn invalid_payloads_yield_an_empty_catalog() {
     assert!(parse_api(b"not json").is_empty());
     assert!(parse_api(br#"{"provider":{"models":[]}}"#).is_empty());

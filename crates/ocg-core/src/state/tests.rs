@@ -1081,3 +1081,219 @@ fn zen_activation_preflight_failure_rolls_back_catalog_and_preserves_all_active_
     drop(state);
     fs::remove_dir_all(dir).unwrap();
 }
+
+/// Comparable identity of a routing projection. `RoutingSnapshot` has no
+/// `PartialEq`, so the tests below compare the routing rows and destinations a
+/// request actually selects on.
+fn routing_identity(
+    snapshot: &crate::routing_snapshot::RoutingSnapshot,
+) -> (Vec<String>, Vec<String>) {
+    let mut credentials: Vec<String> = snapshot
+        .credentials
+        .iter()
+        .map(|credential| credential.id.clone())
+        .collect();
+    credentials.sort();
+    let mut destinations: Vec<String> = snapshot
+        .projection
+        .destinations
+        .iter()
+        .map(|destination| destination.id.clone())
+        .collect();
+    destinations.sort();
+    (credentials, destinations)
+}
+
+fn preparation_test_state(label: &str) -> (PathBuf, CoreStateInner) {
+    let dir = temp_data_dir(label);
+    let db = Database::open(dir.clone()).expect("test database should open");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+    let state = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
+    (dir, state)
+}
+
+fn list_config(state: &CoreStateInner, models: &[&str], gateway_key: &str) -> AppConfig {
+    let mut config = state.config();
+    config.gateway_key = gateway_key.into();
+    config.proxy_mode = ProxyMode::List;
+    config.proxy_url = "http://127.0.0.1:7890".into();
+    config.proxy_list_direction = ProxyListDirection::Whitelist;
+    config.proxy_list_models = models.iter().map(|model| (*model).to_string()).collect();
+    config
+}
+
+/// A committed settings write must be visible in the published aggregate on the
+/// very next read, without the reader having to re-enter the settings gate.
+#[test]
+fn preparation_aggregate_serves_a_committed_config_change_without_drift() {
+    let (dir, state) = preparation_test_state("preparation-config");
+    let config = list_config(&state, &["gpt-5.6-luna"], "gw-first");
+    state.set_config(config).expect("list config should save");
+
+    let published = state
+        .gateway_preparation()
+        .expect("the aggregate should publish");
+    assert_eq!(
+        published.revision,
+        state.settings_revision(),
+        "a wired writer must republish the aggregate instead of leaving the next reader to rebuild it"
+    );
+    assert_eq!(published.config().gateway_key, "gw-first");
+    assert_eq!(published.config().proxy_mode, ProxyMode::List);
+
+    drop(state);
+    fs::remove_dir_all(dir).expect("test data directory should be removed");
+}
+
+/// An aggregate captured before a republication keeps serving its own
+/// generation: publication swaps one `Arc` and never mutates a live one.
+#[test]
+fn an_in_flight_aggregate_keeps_its_generation_after_a_republication() {
+    let (dir, state) = preparation_test_state("preparation-isolation");
+    state
+        .set_config(list_config(&state, &["gpt-5.6-luna"], "gw-first"))
+        .expect("first list config should save");
+
+    let in_flight = state
+        .gateway_preparation()
+        .expect("the aggregate should publish");
+    assert_eq!(in_flight.config().gateway_key, "gw-first");
+
+    state
+        .set_config(list_config(&state, &["gpt-5.6-luna"], "gw-second"))
+        .expect("second list config should save");
+    let next = state
+        .gateway_preparation()
+        .expect("the aggregate should republish");
+
+    assert_eq!(
+        in_flight.config().gateway_key,
+        "gw-first",
+        "a captured aggregate must not observe the newer config generation"
+    );
+    assert_eq!(next.config().gateway_key, "gw-second");
+    assert!(
+        !Arc::ptr_eq(&in_flight, &next),
+        "republication must install a new aggregate rather than mutate the published one"
+    );
+    assert!(
+        in_flight.revision < next.revision,
+        "each published generation records the revision it was built at"
+    );
+
+    drop(state);
+    fs::remove_dir_all(dir).expect("test data directory should be removed");
+}
+
+/// A writer that advances the CAS token without republishing must not serve a
+/// stale aggregate: the reader detects the drift and rebuilds, then publishes
+/// the rebuild so the next read is a fast-path hit.
+#[test]
+fn a_revision_bump_without_republication_rebuilds_the_aggregate_on_read() {
+    let dir = temp_data_dir("preparation-drift");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+    let drifted = routing_test_account(&cipher, "drift-acct");
+    let db = Database::open(dir.clone()).expect("test database should open");
+    let state = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
+
+    let before = state
+        .gateway_preparation()
+        .expect("the aggregate should publish");
+    assert_eq!(before.revision, state.settings_revision());
+    assert!(
+        !routing_identity(before.routing())
+            .0
+            .iter()
+            .any(|id| id == "drift-acct"),
+        "the account is not committed yet"
+    );
+
+    // An unwired control-plane writer: commit routing rows, then advance the
+    // shared CAS token without republishing the preparation view.
+    state
+        .db
+        .lock()
+        .create_account(&drifted)
+        .expect("account row should commit");
+    state.bump_settings_revision();
+    assert_ne!(
+        before.revision,
+        state.settings_revision(),
+        "the writer moved the revision without publishing, so the published aggregate is now behind"
+    );
+
+    let rebuilt = state
+        .gateway_preparation()
+        .expect("a drifted aggregate must be rebuilt rather than served");
+    assert!(
+        routing_identity(rebuilt.routing())
+            .0
+            .iter()
+            .any(|id| id == "drift-acct"),
+        "the rebuilt aggregate must observe the committed routing row"
+    );
+    assert_eq!(rebuilt.revision, state.settings_revision());
+
+    let again = state
+        .gateway_preparation()
+        .expect("the republished aggregate should serve the fast path");
+    assert!(
+        Arc::ptr_eq(&rebuilt, &again),
+        "the drift rebuild must publish itself, otherwise every later read pays the gate again"
+    );
+
+    drop(state);
+    fs::remove_dir_all(dir).expect("test data directory should be removed");
+}
+
+/// Torn-state guard: after a writer that rebuilds config, contracts, and the
+/// route set together, every half of the published aggregate describes the same
+/// generation as the live in-memory state and the committed rows.
+#[test]
+fn a_rebuilding_writer_publishes_one_self_consistent_aggregate() {
+    let (dir, state) = preparation_test_state("preparation-consistent");
+    state
+        .set_config(list_config(
+            &state,
+            &["first-free", "replacement-free"],
+            "gw-consistent",
+        ))
+        .expect("list config should save");
+
+    state
+        .activate_zen_free_model_catalog(crate::kernel::zen::ZenFreeModelCatalog {
+            models: vec!["replacement-free".into()],
+            refreshed_at: Some(chrono::Utc::now()),
+            source_url: crate::kernel::zen::ZEN_MODELS_SOURCE_URL.into(),
+        })
+        .expect("zen catalog activation should publish");
+
+    let published = state
+        .gateway_preparation()
+        .expect("the aggregate should publish");
+    let live = crate::routing_snapshot::RoutingSnapshot::load(&state.db.lock())
+        .expect("a live routing read should succeed");
+
+    assert_eq!(published.revision, state.settings_revision());
+    assert_eq!(
+        serde_json::to_value(published.config()).expect("config should serialize"),
+        serde_json::to_value(state.config()).expect("config should serialize"),
+        "the published config must be the installed config, not the previous generation"
+    );
+    assert!(
+        Arc::ptr_eq(&published.routes(), &state.forward_route_set()),
+        "the published route set must be the one the writer installed"
+    );
+    assert!(
+        Arc::ptr_eq(&published.pricing(), &state.pricing_snapshot()),
+        "the published pricing must be the active pointer"
+    );
+    assert_eq!(
+        routing_identity(published.routing()),
+        routing_identity(&live),
+        "the published routing rows must be the committed rows"
+    );
+
+    drop(state);
+    fs::remove_dir_all(dir).expect("test data directory should be removed");
+}

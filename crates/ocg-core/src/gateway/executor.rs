@@ -56,9 +56,11 @@ pub(crate) struct RequestSnapshots {
 }
 
 impl RequestSnapshots {
+    /// Freezes the rest of the preparation view from the published aggregate.
+    /// Every field comes from one `Arc`, so routing, config, routes, and
+    /// pricing are guaranteed to be the same generation.
     fn capture(
-        state: &CoreState,
-        config: AppConfig,
+        preparation: &crate::state::GatewayPreparationSnapshot,
         resolved: alias::ResolvedModel,
         routing: crate::routing_snapshot::RoutingSnapshot,
     ) -> anyhow::Result<Self> {
@@ -71,9 +73,9 @@ impl RequestSnapshots {
                 .and_then(|d| d.base_url.clone())
         });
         Ok(Self {
-            config,
-            pricing: state.pricing_snapshot(),
-            routes: state.forward_route_set(),
+            config: preparation.config().clone(),
+            pricing: preparation.pricing(),
+            routes: preparation.routes(),
             resolved,
             cpa_base_url,
             routing,
@@ -117,11 +119,13 @@ impl GatewayExecutor {
         client_key_id: Option<String>,
     ) -> Response {
         let (snapshots, facts, route_set, prices) = {
-            // Publish settings, catalog, credentials, route and pricing identities
-            // as one preparation phase. No guard crosses upstream I/O.
-            let _settings_update = state.settings_update.lock();
-            let routing = match crate::routing_snapshot::RoutingSnapshot::load(&state.db.lock()) {
-                Ok(routing) => routing,
+            // One published aggregate supplies settings, catalog, route, and
+            // pricing identities as a single generation. Ordinary preparation
+            // takes no `settings_update`: a writer republishes the whole view
+            // with one Arc swap, so the read lock below is held for an Arc
+            // clone and nothing else. No guard crosses upstream I/O.
+            let preparation = match state.gateway_preparation() {
+                Ok(preparation) => preparation,
                 Err(error) => {
                     return protocol_error_response(
                         client_format,
@@ -131,6 +135,7 @@ impl GatewayExecutor {
                     );
                 }
             };
+            let routing = preparation.routing().clone();
             let catalog = crate::gateway::handler::RuntimeCatalogSnapshot::from_routing(
                 routing,
                 state.sample_gateway_clock().0,
@@ -148,12 +153,8 @@ impl GatewayExecutor {
                     );
                 }
             };
-            let snapshots = match RequestSnapshots::capture(
-                &state,
-                state.config(),
-                resolved,
-                catalog.routing,
-            ) {
+            let snapshots = match RequestSnapshots::capture(&preparation, resolved, catalog.routing)
+            {
                 Ok(snapshots) => snapshots,
                 Err(error) => {
                     return protocol_error_response(

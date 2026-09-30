@@ -67,10 +67,14 @@
                 <main class="app-content">
                   <n-alert v-if="logoutError" class="app-error" type="error" closable @close="logoutError = ''">{{ logoutError }}</n-alert>
                   <n-alert v-if="upgradeGuidance" class="app-error" type="warning" closable @close="upgradeGuidance = ''">{{ upgradeGuidance }}</n-alert>
-                  <!-- Keep views mounted across navigation: filters, scroll and drafts survive. -->
+                  <!-- Keep every shell view mounted across navigation: filters,
+                       scroll, drafts and store snapshots survive, and revisiting
+                       a page revalidates against the stores instead of paying a
+                       cold remount plus a full refetch storm. The shell has a
+                       fixed set of nine views, so no LRU cap is applied. -->
                   <router-view v-slot="{ Component }">
                     <Transition name="view-fade" mode="out-in">
-                      <KeepAlive :max="4">
+                      <KeepAlive>
                         <component :is="Component" :key="activeKey" v-bind="viewBindings" />
                       </KeepAlive>
                     </Transition>

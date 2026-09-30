@@ -226,8 +226,17 @@ pub async fn models(
 }
 
 fn published_alias_models_response(state: &CoreState) -> axum::response::Response {
-    let _settings_update = state.settings_update.lock();
-    match published_models_data_locked(state) {
+    // Every fact in the body needs settings_update, db, and the models.dev
+    // catalog, so they are captured into owned rows under the lock. The
+    // envelope and the JSON encoding run only after the guard is dropped:
+    // serialization of a large catalog must never hold the global
+    // control-plane gate that also serializes gateway traffic and dashboard
+    // writes.
+    let data = {
+        let _settings_update = state.settings_update.lock();
+        published_models_data_locked(state)
+    };
+    match data {
         Ok(data) => axum::Json(serde_json::json!({"object": "list", "data": data})).into_response(),
         Err(error) => protocol_error_response(
             ApiFormat::ChatCompletions,

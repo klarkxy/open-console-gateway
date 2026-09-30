@@ -101,6 +101,7 @@ async fn rate_limited_candidate_reports_temporary_retry_after_without_durable_qu
             }],
         )
         .unwrap();
+    announce_fixture_rows(&state);
     let mut headers = HeaderMap::new();
     headers.insert(
         "authorization",
@@ -150,6 +151,17 @@ async fn rate_limited_candidate_reports_temporary_retry_after_without_durable_qu
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Request preparation reads the published preparation aggregate, not the
+/// database, so a fixture that commits routing or quota-recovery rows straight
+/// to SQLite has to announce that write the way a real writer would. These
+/// helpers bypass the writer APIs on purpose — they need rows a dashboard
+/// mutation would reject — so the announcement is the seam that keeps them
+/// honest about what request preparation will actually see.
+fn announce_fixture_rows(state: &crate::state::CoreState) {
+    let db = state.db.lock();
+    state.publish_gateway_preparation(&db).unwrap();
+}
+
 fn persist_recovery(
     state: &crate::state::CoreState,
     account_id: &str,
@@ -182,6 +194,9 @@ fn persist_recovery(
         key_cipher,
     };
     crate::db::quota_recovery::save_on(&state.db.lock().conn, &episode, &recovery).unwrap();
+    // The routing snapshot reads this recovery evidence, so the aggregate has to
+    // be told about it before the next request prepares.
+    announce_fixture_rows(state);
     episode
 }
 
@@ -252,6 +267,7 @@ fn custom_http_state(
             )
             .unwrap();
     }
+    announce_fixture_rows(&state);
     (dir, state)
 }
 
@@ -354,6 +370,9 @@ async fn rotation_during_probe_does_not_block_replacement_key() {
         .lock()
         .rotate_account_credential("rotate-a", &rotated)
         .unwrap();
+    // The rotated key and its version live in the routing projection, so the
+    // replacement has to reach the aggregate before the next preparation.
+    announce_fixture_rows(&state);
     let sent = chat(state.clone(), "quota-model").await;
     assert_ne!(sent.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);

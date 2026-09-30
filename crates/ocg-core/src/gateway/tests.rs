@@ -511,3 +511,176 @@ async fn gemini_and_messages_routes_stay_wired() {
     drop(state);
     fs::remove_dir_all(dir).expect("test data directory should be removed");
 }
+
+const CATALOGED_MODEL: &str = "vendor/cataloged";
+const UNCATEGORIZED_MODEL: &str = "vendor/plain";
+
+/// Publishes the fixture's routeable Custom models on one account.
+fn publish_models_endpoint_fixture(state: &crate::state::CoreState, ids: &[&str]) {
+    use crate::models::{
+        Account, AccountCustomConfigInput, AccountModelCapabilityInput, AccountSetupStep,
+        AccountType,
+    };
+    use crate::provider::{CUSTOM_PROVIDER_ID, CredentialKind, QuotaScope, UpstreamProtocolKind};
+    let now = chrono::Utc::now();
+    state
+        .db
+        .lock()
+        .create_account_with_contract(
+            &Account {
+                id: "models-endpoint-custom".into(),
+                provider_id: CUSTOM_PROVIDER_ID.into(),
+                credential_kind: CredentialKind::ApiKey,
+                quota_scope: QuotaScope::Key,
+                name: "Models endpoint test".into(),
+                username: None,
+                password_cipher: None,
+                key_cipher: state
+                    .encrypt_key("sk-ocg-models-endpoint-upstream")
+                    .unwrap(),
+                enabled: true,
+                account_type: AccountType::Key,
+                setup_step: AccountSetupStep::Ready,
+                referral_code: None,
+                purchase_date: String::new(),
+                expires_on: String::new(),
+                cooldown_until: None,
+                cooldown_generic_until: None,
+                cooldown_5h_until: None,
+                cooldown_week_until: None,
+                cooldown_month_until: None,
+                cooldown_free_until: None,
+                last_error: None,
+                auth_error: None,
+                notes: None,
+                created_at: now,
+                updated_at: now,
+            },
+            Some(&AccountCustomConfigInput {
+                endpoint_url: "https://example.test/v1/chat/completions".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+            }),
+            &ids.iter()
+                .map(|id| AccountModelCapabilityInput {
+                    public_model: (*id).to_string(),
+                    upstream_model: (*id).to_string(),
+                    protocol: UpstreamProtocolKind::ChatCompletions,
+                    source: None,
+                })
+                .collect::<Vec<_>>(),
+        )
+        .expect("fixture account should be created");
+}
+
+fn models_endpoint_state(label: &str) -> (std::path::PathBuf, crate::state::CoreState) {
+    let dir = std::env::temp_dir().join(format!("ocg-models-{label}-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&dir).unwrap();
+    let state = Arc::new(
+        CoreStateInner::new(
+            Database::open(dir.clone()).unwrap(),
+            dir.clone(),
+            Arc::new(StaticKeyCipher::new(label)),
+        )
+        .unwrap(),
+    );
+    // A fresh catalog keeps `ensure_fresh` off the network and gives one model
+    // real models.dev facts while the other stays unknown.
+    *state.modelsdev_catalog.write() = Arc::new(crate::modelsdev::ModelsDevCatalog {
+        fetched_at: Some(chrono::Utc::now()),
+        models: [(
+            CATALOGED_MODEL.to_string(),
+            crate::model_metadata::ModelMetadata {
+                name: Some("Cataloged model".into()),
+                context_window: Some(262_144),
+                max_output_tokens: Some(32_768),
+                input_modalities: Some(vec!["text".into(), "image".into()]),
+                output_modalities: Some(vec!["text".into()]),
+                tool_calling: Some(true),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+    });
+    publish_models_endpoint_fixture(&state, &[CATALOGED_MODEL, UNCATEGORIZED_MODEL]);
+    (dir, state)
+}
+
+fn models_endpoint_headers(state: &crate::state::CoreState) -> axum::http::HeaderMap {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        format!("Bearer {}", state.config().gateway_key)
+            .parse()
+            .unwrap(),
+    );
+    headers
+}
+
+/// The body is encoded after the control-plane lock is released; the rows and
+/// their enrichment must be identical to what the locked read produced.
+#[tokio::test]
+async fn models_endpoint_serves_the_enriched_rows_captured_under_the_lock() {
+    use axum::body::to_bytes;
+    let (dir, state) = models_endpoint_state("enriched");
+    let headers = models_endpoint_headers(&state);
+
+    let locked_rows = {
+        let _settings_update = state.settings_update.lock();
+        super::handler::published_models_data_locked(&state)
+            .expect("locked model rows should build")
+    };
+    assert_eq!(
+        locked_rows.len(),
+        2,
+        "both published Custom models should be routeable"
+    );
+
+    let response = super::handler::models(axum::extract::State(state.clone()), headers).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("response body should be readable");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("response should be JSON");
+
+    assert_eq!(body["object"], json!("list"));
+    assert_eq!(
+        body["data"],
+        json!(locked_rows),
+        "response rows must match the rows captured under the lock exactly"
+    );
+
+    let row = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == json!(CATALOGED_MODEL))
+        .expect("cataloged model should be listed");
+    assert_eq!(row["object"], json!("model"));
+    assert_eq!(row["created"], json!(0));
+    assert_eq!(row["owned_by"], json!(crate::provider::CUSTOM_PROVIDER_ID));
+    assert_eq!(row["name"], json!("Cataloged model"));
+    assert_eq!(row["contextWindow"], json!(262_144));
+    assert_eq!(row["maxTokens"], json!(32_768));
+    assert_eq!(row["ocg"]["schemaVersion"], json!(1));
+    assert_eq!(row["ocg"]["status"], json!("declared"));
+    assert_eq!(row["ocg"]["sources"], json!(["modelsdev"]));
+    assert_eq!(row["ocg"]["inputModalities"], json!(["text", "image"]));
+    assert_eq!(row["ocg"]["toolCalling"], json!(true));
+
+    let unknown = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == json!(UNCATEGORIZED_MODEL))
+        .expect("uncataloged model should be listed");
+    assert_eq!(unknown["ocg"]["status"], json!("unknown"));
+    assert_eq!(unknown["ocg"]["sources"], json!(["unknown"]));
+    assert!(
+        unknown.get("contextWindow").is_none(),
+        "an unknown model must not declare a context window"
+    );
+
+    drop(state);
+    fs::remove_dir_all(dir).expect("test data directory should be removed");
+}

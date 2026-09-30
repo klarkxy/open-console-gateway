@@ -7,6 +7,7 @@ import {
 } from "../api/dashboard.ts";
 import type { AuthStatus } from "../api/generated/dashboard-v3.ts";
 import { useControlPlaneStore } from "./controlPlane.ts";
+import { dropAllSnapshots } from "./persistence.ts";
 
 export type SessionPhase = "checking" | "login" | "register" | "ready";
 
@@ -123,6 +124,9 @@ export const useSessionStore = defineStore("session", () => {
         | undefined;
       store?.[method]?.();
     }
+    // Persisted read-model snapshots die with the session too: the next
+    // login must never render the previous session's data.
+    dropAllSnapshots();
     status.value = null;
     phase.value = "login";
   }

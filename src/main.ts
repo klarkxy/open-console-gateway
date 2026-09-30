@@ -6,6 +6,7 @@ import { createAppRouter, prefetchAppViews } from "./router.ts";
 import { convertLegacyAppLocation } from "./views/app-navigation.ts";
 import "./styles/tailwind.css";
 import { applyTheme, getThemeStorage, getThemeTokens, readTheme, resolveTheme } from "./theme";
+import { flushSnapshots } from "./stores/persistence.ts";
 
 // Theme and language resolve before mount so the first paint already uses the
 // stored preference; Pinia installs before any store consumer mounts.
@@ -19,3 +20,6 @@ convertLegacyAppLocation();
 
 createApp(App).use(createPinia()).use(createAppRouter()).mount("#app");
 prefetchAppViews();
+
+// Debounced snapshot writes would otherwise be lost with the page.
+window.addEventListener("pagehide", flushSnapshots);
