@@ -48,6 +48,8 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+      - run: pnpm run contract:v3:check
+      - run: pnpm run contract:v4:check
       - run: pnpm run test:tooling
       - run: docker compose -f compose.example.yaml config --quiet
 

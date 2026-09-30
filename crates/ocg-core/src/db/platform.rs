@@ -28,7 +28,7 @@ fn fresh_version() -> u64 {
 }
 
 pub(super) fn migrate_to_v38(conn: &Connection) -> Result<()> {
-    let version = schema_version_on(conn)?;
+    let version = super::lifecycle::schema_version_on(conn)?;
     if version >= 38 {
         return Ok(());
     }

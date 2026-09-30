@@ -1,14 +1,35 @@
-//! Dashboard V3 contract kernel: public auth and process generation.
+//! Dashboard V3 contract kernel: schema drift, public auth, and process generation.
 
-use ocg_core::dashboard_v3::ControlRevision;
+use ocg_core::dashboard_v3::{ControlRevision, contract_schema_pretty};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use std::fs;
+use std::path::PathBuf;
 
 #[path = "fixtures/dashboard_v3/harness.rs"]
 mod harness;
 
 use harness::{start_loopback, start_public, state};
+
+fn checked_in_schema_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../schema/dashboard-api-v3.schema.json")
+}
+
+fn normalize_schema_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
+#[test]
+fn checked_in_schema_matches_rust_dtos() {
+    let generated = contract_schema_pretty();
+    let checked_in = fs::read_to_string(checked_in_schema_path())
+        .expect("schema/dashboard-api-v3.schema.json must be checked in");
+    assert_eq!(
+        normalize_schema_text(&generated),
+        normalize_schema_text(&checked_in),
+        "Dashboard V3 schema drifted; run `pnpm run contract:v3:generate`"
+    );
+}
 
 #[test]
 fn process_generation_is_stable_per_core_state_and_differs_across_fresh_states() {

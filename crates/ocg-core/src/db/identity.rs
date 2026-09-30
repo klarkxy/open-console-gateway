@@ -313,7 +313,7 @@ fn connection_id_for_persisted_account(
 pub(crate) fn backfill_authorization_connections_on(conn: &Connection) -> Result<()> {
     // Older upgrades still have partial credential projection columns.
     // v59 performs this backfill after the pre-v59 migrations have completed.
-    if schema_version_on(conn)? < 58 {
+    if super::lifecycle::schema_version_on(conn)? < 58 {
         return Ok(());
     }
 
@@ -381,7 +381,7 @@ fn identity_facts_on_credentials(conn: &Connection) -> Result<bool> {
 }
 
 fn identity_model_writable(conn: &Connection) -> Result<bool> {
-    let version = schema_version_on(conn)?;
+    let version = super::lifecycle::schema_version_on(conn)?;
     if version < IDENTITY_MODEL_VERSION {
         return Ok(false);
     }
@@ -839,10 +839,12 @@ fn parse_stored_grant_list(raw: Option<&str>) -> Vec<String> {
 }
 
 fn binding_grant_columns_ready(conn: &Connection) -> Result<bool> {
-    Ok(schema_version_on(conn)? >= BINDING_GRANT_VERSION
-        && leftover_identity_tables_present(conn)?
-        && table_has_column(conn, "credential_bindings", "allowed_endpoint_ids")?
-        && table_has_column(conn, "credential_bindings", "allowed_origins")?)
+    Ok(
+        super::lifecycle::schema_version_on(conn)? >= BINDING_GRANT_VERSION
+            && leftover_identity_tables_present(conn)?
+            && table_has_column(conn, "credential_bindings", "allowed_endpoint_ids")?
+            && table_has_column(conn, "credential_bindings", "allowed_origins")?,
+    )
 }
 
 fn credential_grants_ready(conn: &Connection) -> Result<bool> {
@@ -854,7 +856,7 @@ fn configured_endpoints_for_provider(
     provider_id: &str,
     account_id: &str,
 ) -> Result<Vec<AssignedEndpoint>> {
-    if schema_version_on(conn)? >= 63 {
+    if super::lifecycle::schema_version_on(conn)? >= 63 {
         let bound: Option<(String, String)> = conn.query_row(
             "SELECT destination_id, authorization_connection_id FROM credentials WHERE legacy_account_id = ?1 AND authorization_connection_id IS NOT NULL",
             [account_id], |row| Ok((row.get(0)?, row.get(1)?)),
@@ -906,7 +908,7 @@ fn configured_endpoints_for_provider(
         let Some((url, kind)) = custom_store::custom_endpoint_protocol_on(conn, account_id)? else {
             return Ok(Vec::new());
         };
-        let protocols = if schema_version_on(conn)? >= 59 {
+        let protocols = if super::lifecycle::schema_version_on(conn)? >= 59 {
             let raw: String = conn.query_row(
                 "SELECT d.protocols_json FROM credentials c JOIN destinations d ON d.id = c.destination_id WHERE c.legacy_account_id = ?1",
                 [account_id], |row| row.get(0),
@@ -1678,11 +1680,11 @@ pub(crate) fn delete_platform_identity(conn: &Connection, platform_id: &str) -> 
 }
 
 pub(crate) fn migrate_to_v45(conn: &Connection) -> Result<()> {
-    if schema_version_on(conn)? >= 45 {
+    if super::lifecycle::schema_version_on(conn)? >= 45 {
         return Ok(());
     }
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    let version = schema_version_on(&tx)?;
+    let version = super::lifecycle::schema_version_on(&tx)?;
     if version >= 45 {
         return Ok(());
     }
@@ -1694,11 +1696,11 @@ pub(crate) fn migrate_to_v45(conn: &Connection) -> Result<()> {
 }
 
 pub(crate) fn migrate_to_v46(conn: &Connection) -> Result<()> {
-    if schema_version_on(conn)? >= BINDING_GRANT_VERSION {
+    if super::lifecycle::schema_version_on(conn)? >= BINDING_GRANT_VERSION {
         return Ok(());
     }
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    let version = schema_version_on(&tx)?;
+    let version = super::lifecycle::schema_version_on(&tx)?;
     if version >= BINDING_GRANT_VERSION {
         return Ok(());
     }
@@ -1733,7 +1735,7 @@ fn identity_account_violations(conn: &Connection) -> Result<i64> {
 }
 
 pub(crate) fn ensure_identity_model_consistent(conn: &Connection) -> Result<()> {
-    let version = schema_version_on(conn)?;
+    let version = super::lifecycle::schema_version_on(conn)?;
     if version < IDENTITY_MODEL_VERSION {
         return Ok(());
     }
@@ -1859,7 +1861,7 @@ fn repair_identity_facts_on_credentials(conn: &Connection) -> Result<()> {
 }
 
 fn create_identity_tables(tx: &Transaction<'_>) -> Result<()> {
-    let version = schema_version_on(tx)?;
+    let version = super::lifecycle::schema_version_on(tx)?;
     if version < 57 || leftover_identity_tables_present(tx)? {
         create_leftover_identity_tables(tx)?;
     }
@@ -2865,7 +2867,7 @@ fn merge_pool_cooldown_maxima(conn: &Connection, pool_id: &str) -> Result<()> {
 }
 
 pub(crate) fn list_identity_model_on(conn: &Connection) -> Result<IdentityModelSnapshot> {
-    let version = schema_version_on(conn)?;
+    let version = super::lifecycle::schema_version_on(conn)?;
     if version < IDENTITY_MODEL_VERSION {
         return Ok(IdentityModelSnapshot {
             accounts: Vec::new(),
