@@ -124,6 +124,14 @@ async fn ollama_cookie_routes_are_gone_and_unconfigured_accounts_stay_routeable(
 async fn ollama_paid_tier_requires_purchase_date_and_publishes_month_credits() {
     let harness = start_loopback("ollama-paid-month").await;
     let account = base_ollama_account("ollama-pro-1");
+    // Anchor the pro-tier month window to the current month. A hardcoded past
+    // month makes the Utc::now()-stamped forward logs fall outside the window
+    // as soon as the calendar crosses that month's boundary, and the 1st of
+    // the month is still in the future for most of the rollover day in UTC.
+    let purchase_date = (Utc::now() - chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    let purchase_date = purchase_date.as_str();
     harness.state.db.lock().create_account(&account).unwrap();
 
     let (status, body) = send_json(
@@ -136,7 +144,7 @@ async fn ollama_paid_tier_requires_purchase_date_and_publishes_month_credits() {
                 "providerId": "ollama",
                 "name": "ollama-missing-tier",
                 "key": "ollama-key-missing-tier",
-                "purchaseDate": "2026-09-01"
+                "purchaseDate": purchase_date
             }),
         ),
     )
@@ -173,7 +181,7 @@ async fn ollama_paid_tier_requires_purchase_date_and_publishes_month_credits() {
                 "name": "ollama-pro-create",
                 "key": "ollama-key-create",
                 "ollamaBillingTier": "pro",
-                "purchaseDate": "2026-09-01"
+                "purchaseDate": purchase_date
             }),
         ),
     )
@@ -192,7 +200,7 @@ async fn ollama_paid_tier_requires_purchase_date_and_publishes_month_credits() {
                 "name": "ollama-free-rejected",
                 "key": "ollama-key-free",
                 "ollamaBillingTier": "free",
-                "purchaseDate": "2026-09-01"
+                "purchaseDate": purchase_date
             }),
         ),
     )
@@ -207,7 +215,7 @@ async fn ollama_paid_tier_requires_purchase_date_and_publishes_month_credits() {
             &harness,
             json!({
                 "ollamaBillingTier": "pro",
-                "purchaseDate": "2026-09-01"
+                "purchaseDate": purchase_date
             }),
         ),
     )
