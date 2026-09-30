@@ -1632,6 +1632,8 @@ struct FakeUsageInner {
     accounts: ParkingMutex<HashMap<String, Account>>,
     sync: ParkingMutex<HashMap<String, ProviderUsageSyncState>>,
     decrypts: ParkingMutex<HashMap<String, String>>,
+    /// How many times the refresh path announced rewritten preparation rows.
+    preparation_notes: AtomicUsize,
 }
 
 #[derive(Clone)]
@@ -1650,6 +1652,7 @@ impl FakeUsageHost {
                 accounts: ParkingMutex::new(HashMap::new()),
                 sync: ParkingMutex::new(HashMap::new()),
                 decrypts: ParkingMutex::new(HashMap::new()),
+                preparation_notes: AtomicUsize::new(0),
             }),
         }
     }
@@ -1717,6 +1720,11 @@ impl FakeUsageHost {
             self.settings_revision(),
             self.inner.process_generation,
         )
+    }
+
+    /// How many landed commits announced the preparation rows they rewrote.
+    fn preparation_notes(&self) -> usize {
+        self.inner.preparation_notes.load(AtomicOrdering::Acquire)
     }
 }
 
@@ -1854,6 +1862,13 @@ impl UsageSyncHost for FakeUsageHost {
         f(&self.inner)
     }
 
+    fn note_preparation_rows_changed(&self) {
+        self.inner
+            .preparation_notes
+            .fetch_add(1, AtomicOrdering::AcqRel);
+        self.bump_settings_revision();
+    }
+
     fn with_authorized_sync_store<F, R>(
         &self,
         authorization: &UsageSyncCommitAuthorization,
@@ -1967,6 +1982,155 @@ async fn authoritative_usage_replaces_exhaustion_but_preserves_temporary_cooldow
     state.usage_sync.clear_test_seams();
     drop(state);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Official usage reconciliation rewrites `credentials.quota_recovery_json`,
+/// which the published preparation aggregate reads. Without invalidating that
+/// aggregate, a refreshed credential keeps routing against the exhaustion
+/// evidence the refresh just replaced — and, since nothing else here advances
+/// the revision, it keeps doing so until some unrelated writer happens to bump.
+#[tokio::test]
+async fn a_successful_usage_refresh_reaches_the_next_preparation_read() {
+    let (dir, state) = test_state("usage-reconcile-preparation");
+    let account = ready_account(&state, "reconciled", "test-key");
+    state.db.lock().create_account(&account).unwrap();
+    // The fixture writes its row directly, which is not a wired writer. Publish
+    // so the starting aggregate genuinely contains this credential rather than
+    // merely lacking it.
+    {
+        let _settings_update = state.settings_update.lock();
+        let db = state.db.lock();
+        state.publish_gateway_preparation(&db).unwrap();
+    }
+    {
+        let published = state.gateway_preparation().unwrap();
+        assert_eq!(published.revision(), state.settings_revision());
+        let credential = published
+            .routing()
+            .credentials
+            .iter()
+            .find(|credential| credential.id == account.id)
+            .expect("the fixture credential should be in the published routing rows");
+        assert_eq!(
+            credential.quota_recovery, None,
+            "the fixture starts with no recovery evidence, so a failure below can only come from the refresh"
+        );
+    }
+
+    state
+        .usage_sync
+        .set_fetch_for_test(|_, _| Box::pin(async { Ok(sample_snapshot()) }));
+    refresh_official_usage(&state, &account.id, UsageSyncTrigger::Scheduled)
+        .await
+        .expect("a successful refresh should commit");
+    assert!(
+        crate::db::quota_recovery::load_for_legacy_on(&state.db.lock().conn, &account.id)
+            .unwrap()
+            .unwrap()
+            .3
+            .is_some(),
+        "the refresh should have persisted the reconciled recovery row"
+    );
+
+    let published = state
+        .gateway_preparation()
+        .expect("the aggregate should rebuild after the refresh");
+    let credential = published
+        .routing()
+        .credentials
+        .iter()
+        .find(|credential| credential.id == account.id)
+        .expect("the fixture credential should still be in the published routing rows");
+    assert!(
+        credential.quota_recovery.is_some(),
+        "the reconciled recovery evidence must reach request preparation, not stay hidden in the database"
+    );
+    assert_eq!(
+        published.revision(),
+        state.settings_revision(),
+        "the rebuild must land on the current revision so later reads stay on the fast path"
+    );
+
+    drop(state);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The commit the refresh path performs rewrites `credentials.quota_recovery_json`,
+/// which the published preparation aggregate reads. The host has to be told about
+/// that write from the same place that performs it, so a host whose commit lands
+/// must announce it — exactly once, from the landing and from nowhere else.
+#[tokio::test]
+async fn a_landed_commit_announces_the_preparation_rows_it_rewrote() {
+    let state = FakeUsageHost::new();
+    state.insert_ready_go("announced", "sk-announced");
+    let now = fixed("2026-08-18T12:00:00Z");
+    state.inner.runtime.set_clock_for_test(move || now);
+    state.inner.runtime.set_jitter_for_test(|| 0.0);
+    state
+        .inner
+        .runtime
+        .set_fetch_for_test(|_cfg, _key| Box::pin(async { Ok(sample_snapshot()) }));
+
+    assert_eq!(
+        state.preparation_notes(),
+        0,
+        "announcing is the commit path's job, so nothing before the refresh may announce"
+    );
+    refresh_official_usage(&state, "announced", UsageSyncTrigger::Scheduled)
+        .await
+        .expect("a successful refresh should commit");
+    assert_eq!(
+        state.preparation_notes(),
+        1,
+        "a landed commit rewrote quota recovery evidence, so it must announce that once"
+    );
+}
+
+/// The other half of the same contract: a commit that lands nothing must stay
+/// silent. The account or its key can change underneath a refresh, and then the
+/// guarded commit writes no row — announcing anyway would hand every later
+/// request a gated rebuild for rows nobody wrote.
+///
+/// The real store is what makes a landing observable, so this pins it there
+/// rather than on the fake host, whose commit seam never reports a no-op.
+#[tokio::test]
+async fn a_commit_that_lands_nothing_does_not_announce_preparation_rows() {
+    let (dir, state) = test_state("usage-unlanded-preparation");
+    let account = ready_account(&state, "unlanded", "test-key");
+    state.db.lock().create_account(&account).unwrap();
+    // Rotate the credential version while the fetch is in flight: the commit
+    // still matches the key cipher, but its version guard rejects the write.
+    let rotate = state.clone();
+    state.usage_sync.set_fetch_for_test(move |_, _| {
+        let rotate = rotate.clone();
+        Box::pin(async move {
+            rotate
+                .db
+                .lock()
+                .conn
+                .execute(
+                    "UPDATE credentials SET credential_version = credential_version + 1 WHERE legacy_account_id = 'unlanded'",
+                    [],
+                )
+                .unwrap();
+            Ok(sample_snapshot())
+        })
+    });
+
+    let revision = state.settings_revision();
+    assert!(matches!(
+        refresh_official_usage(&state, &account.id, UsageSyncTrigger::Scheduled).await,
+        Err(OfficialUsageRefreshError::Conflict(_))
+    ));
+    assert_eq!(
+        state.settings_revision(),
+        revision,
+        "a commit that wrote nothing must not invalidate the published preparation view"
+    );
+
+    state.usage_sync.clear_test_seams();
+    drop(state);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]

@@ -1438,6 +1438,317 @@ async fn r06_granted_same_origin_custom_sends_once() {
     let _ = fs::remove_dir_all(dir);
 }
 
+/// Pre-send confirmation with no quota trial pending re-authorizes against live
+/// rows only, so it must not wait for the global `settings_update` gate. The
+/// gate is a writer lock; ordinary traffic may not queue behind dashboard
+/// writes.
+#[test]
+fn confirm_execution_send_authorizes_while_the_settings_gate_is_held() {
+    let (dir, state) = test_state("confirm-fast-path");
+    let endpoint = "https://example.test/v1/chat/completions";
+    let mut config = state.config();
+    config.proxy_mode = ProxyMode::Direct;
+    state.set_config(config).unwrap();
+    let account = custom_account(&state);
+    persist_custom_at(&state, &account, endpoint);
+    grant_binding(
+        &state,
+        &account.id,
+        &[RouteSpec {
+            operation: EndpointOperation::ChatCreate,
+            url: Some(endpoint.into()),
+        }],
+        LegacyConnectionKind::CustomAccount,
+        &account.id,
+    );
+    let plan = chat_plan("local-custom", Some(endpoint));
+    let selection = live_send_selection(&state, &account, &plan);
+    let spec = selection
+        .attempt_spec
+        .clone()
+        .expect("a routed fixture must carry the attempt spec it was built from");
+
+    let worker_state = Arc::clone(&state);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        // Hold the control-plane gate on this thread, then confirm the send.
+        // An implementation that acquires `settings_update` before deciding
+        // whether a quota trial is needed self-deadlocks here, because
+        // `settings_update` is not reentrant. The receive timeout below turns
+        // that regression into an ordinary failure instead of a hung suite.
+        let _gate = worker_state.settings_update.lock();
+        let outcome = super::live_send::confirm_execution_send(&worker_state, &selection, &spec);
+        let _ = tx.send(outcome.map(|episode| episode.is_some()));
+    });
+
+    match rx.recv_timeout(StdDuration::from_secs(10)) {
+        Ok(Ok(trial_started)) => {
+            worker
+                .join()
+                .expect("the confirmation thread should finish");
+            assert!(
+                !trial_started,
+                "no quota recovery is pending, so confirmation must not start a trial"
+            );
+        }
+        Ok(Err(error)) => panic!("an unchanged routed selection must still authorize: {error:?}"),
+        // Deliberately not joining: a regression leaves that thread blocked on
+        // the gate forever, and joining it would hang the suite instead.
+        Err(_) => panic!(
+            "confirm_execution_send blocked on settings_update: the no-trial fast path must not take the gate"
+        ),
+    }
+
+    drop(state);
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// The `next_retry_at` one published generation carries for a credential.
+fn published_retry_at(
+    aggregate: &crate::state::GatewayPreparationSnapshot,
+    account_id: &str,
+) -> chrono::DateTime<chrono::Utc> {
+    aggregate
+        .routing()
+        .credentials
+        .iter()
+        .find(|credential| credential.id == account_id)
+        .expect("the fixture credential should be in the published routing rows")
+        .quota_recovery
+        .as_ref()
+        .expect("the fixture starts in quota recovery")
+        .next_retry_at
+}
+
+/// A confirmed quota-trial send mutates routing state (`quota_recovery_json`),
+/// advances the revision, and republishes — and that publish belongs to the
+/// production entry, not to a test standing in for it. Stamping the aggregate
+/// before the bump would leave it one revision behind, so every later request
+/// would pay a gated drift rebuild for a trial the send path already had in hand.
+///
+/// The teeth are the gate. `confirm_execution_send` publishes before it
+/// returns, so the very next read is already current and completes on the fast
+/// path while another thread holds `settings_update`. Delete the republish from
+/// the `QuotaAcquire::Trial` arm — revision bumped, nothing published — and the
+/// same read blocks on the gate, which the timeout below turns into a failure
+/// instead of a hung suite.
+#[test]
+fn a_confirmed_trial_send_publishes_the_preparation_aggregate() {
+    let endpoint = "https://example.test/v1/chat/completions";
+    let (dir, state) = test_state("trial-publish");
+    let mut config = state.config();
+    config.proxy_mode = ProxyMode::Direct;
+    state.set_config(config).unwrap();
+    let account = custom_account(&state);
+    persist_granted_custom(&state, &account, endpoint);
+    seed_due_recovery(&state, &account.id);
+    let plan = chat_plan("local-custom", Some(endpoint));
+    let selection = live_send_selection(&state, &account, &plan);
+    let spec = selection
+        .attempt_spec
+        .clone()
+        .expect("a routed fixture must carry the attempt spec it was built from");
+
+    // The fixture writes its rows directly, which is not a wired writer. Publish
+    // once so the starting aggregate genuinely carries the due recovery.
+    {
+        let _settings_update = state.settings_update.lock();
+        let db = state.db.lock();
+        state
+            .publish_gateway_preparation(&db)
+            .expect("the fixture should publish");
+    }
+    let before = state
+        .gateway_preparation()
+        .expect("the aggregate should publish");
+    assert_eq!(before.revision(), state.settings_revision());
+    let ready_at = published_retry_at(&before, &account.id);
+
+    let episode = super::live_send::confirm_execution_send(&state, &selection, &spec)
+        .expect("a due recovery must still authorize the send")
+        .expect("a due recovery must start a trial");
+    assert_eq!(episode.account_id, account.id);
+    assert!(
+        state.settings_revision() > before.revision(),
+        "starting a trial advances the revision"
+    );
+
+    let worker_state = Arc::clone(&state);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let _gate = worker_state.settings_update.lock();
+        let aggregate = worker_state
+            .gateway_preparation()
+            .expect("the aggregate should publish");
+        let _ = tx.send(aggregate.revision());
+    });
+    let published_revision = rx
+        .recv_timeout(StdDuration::from_secs(10))
+        // Deliberately not joining on the timeout path: a regression leaves that
+        // thread blocked on the gate forever, and joining it would hang the suite.
+        .unwrap_or_else(|_| {
+            panic!(
+                "a confirmed trial send must publish the preparation aggregate: \
+                 the next read waited for the settings gate over a generation the send path already had"
+            )
+        });
+    worker.join().expect("the reading thread should finish");
+    assert_eq!(
+        published_revision,
+        state.settings_revision(),
+        "the publish must stamp the post-bump revision, or the next reader rebuilds for nothing"
+    );
+
+    let after = state
+        .gateway_preparation()
+        .expect("the aggregate should publish");
+    assert!(
+        Arc::ptr_eq(&after, &state.gateway_preparation().unwrap()),
+        "a send path that published correctly leaves later reads on the fast path"
+    );
+    assert!(
+        published_retry_at(&after, &account.id) > ready_at,
+        "the published rows must carry the trial's crash-safe retry, not the pre-trial generation"
+    );
+
+    drop(state);
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// The `auth_error` a request path writes is an admission gate inside
+/// `RoutingSnapshot`. If that write never invalidates the published preparation
+/// aggregate, a key the upstream just rejected stays selectable — and, because
+/// nothing else on this path advances the revision, it stays selectable for the
+/// life of the process.
+///
+/// This pins the write as the forwarder performs it. Without the revision bump
+/// the aggregate still matches the (unchanged) revision, so the read below
+/// takes the fast path and serves the pre-401 credential.
+#[test]
+fn an_upstream_401_reaches_the_next_preparation_read() {
+    let (dir, state) = test_state("auth-error-invalidation");
+    let account = custom_account(&state);
+    persist_custom_at(&state, &account, "https://example.test/v1/chat/completions");
+
+    // The fixture writes its rows directly, which is not a wired writer. Publish
+    // once so the starting aggregate genuinely contains this credential with no
+    // auth error, rather than merely lacking it.
+    {
+        let _settings_update = state.settings_update.lock();
+        let db = state.db.lock();
+        state
+            .publish_gateway_preparation(&db)
+            .expect("the fixture should publish");
+    }
+
+    let before = state
+        .gateway_preparation()
+        .expect("the aggregate should publish");
+    let credential = before
+        .routing()
+        .credentials
+        .iter()
+        .find(|credential| credential.id == account.id)
+        .expect("the fixture credential should be in the published routing rows");
+    assert_eq!(
+        credential.auth_error, None,
+        "the fixture starts healthy, so a failure below can only come from the write"
+    );
+
+    {
+        let db = state.db.lock();
+        super::record_upstream_auth_error(
+            &state,
+            &db,
+            &account.id,
+            &account.key_cipher,
+            "upstream account error 401: bad key",
+        )
+        .expect("a current-key 401 should record");
+    }
+
+    let after = state
+        .gateway_preparation()
+        .expect("the aggregate should rebuild");
+    let credential = after
+        .routing()
+        .credentials
+        .iter()
+        .find(|credential| credential.id == account.id)
+        .expect("the fixture credential should still be in the published routing rows");
+    assert_eq!(
+        credential.auth_error.as_deref(),
+        Some("upstream account error 401: bad key"),
+        "a key the upstream rejected must leave the routing set, not stay selectable"
+    );
+    assert_eq!(
+        after.revision(),
+        state.settings_revision(),
+        "the rebuild must land on the current revision so later reads stay on the fast path"
+    );
+
+    drop(state);
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// The bump is conditional on the guarded write landing. A late 401 for a key
+/// that has since been rotated writes no row, so it must not invalidate the
+/// aggregate either — otherwise every stale response would hand every later
+/// request a rebuild for a no-op.
+#[test]
+fn a_stale_key_401_leaves_the_preparation_aggregate_alone() {
+    let (dir, state) = test_state("auth-error-stale-key");
+    let account = custom_account(&state);
+    persist_custom_at(&state, &account, "https://example.test/v1/chat/completions");
+    {
+        let _settings_update = state.settings_update.lock();
+        let db = state.db.lock();
+        state
+            .publish_gateway_preparation(&db)
+            .expect("the fixture should publish");
+    }
+
+    let before = state
+        .gateway_preparation()
+        .expect("the aggregate should publish");
+    let revision = state.settings_revision();
+
+    {
+        let db = state.db.lock();
+        super::record_upstream_auth_error(
+            &state,
+            &db,
+            &account.id,
+            "cipher-of-a-key-that-was-already-replaced",
+            "late 401 from the replaced key",
+        )
+        .expect("a stale-key 401 is a no-op, not a failure");
+    }
+
+    assert_eq!(
+        state.settings_revision(),
+        revision,
+        "a write that matched no row must not invalidate the published aggregate"
+    );
+    let after = state
+        .gateway_preparation()
+        .expect("the aggregate should publish");
+    assert!(
+        Arc::ptr_eq(&before, &after),
+        "without a bump there is no drift, so the reader must keep the same generation"
+    );
+    let credential = after
+        .routing()
+        .credentials
+        .iter()
+        .find(|credential| credential.id == account.id)
+        .expect("the fixture credential should be in the published routing rows");
+    assert_eq!(credential.auth_error, None);
+
+    drop(state);
+    let _ = fs::remove_dir_all(dir);
+}
+
 #[tokio::test]
 async fn r06_shared_custom_second_key_uses_owner_grant_and_model_override() {
     let (default_addr, default_hits, default_stop) = spawn_hit_counter().await;

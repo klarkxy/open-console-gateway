@@ -19,7 +19,7 @@
 - `MODEL_PROTOCOLS` 只提供已知模型的离线协议默认值和既有共享别名，不再充当 Go 模型目录白名单。Go、Zen、Command 刷新时读取官方协议文档；只有明确端点或 Command 的官方模型家族规则提供新证据。文档读取失败或漏列模型时，保留原有证据和已保存首选协议。没有证据的完全未知模型不推断可用协议，保持 Auto。具有官方已知或已配置协议的新模型会启用。既有关闭协议/模型状态只有在有支持证据或显式 `force_off` 时才保持关闭；否则后续官方声明可以启用 Auto 行。在已启用、已配置、且已授权给所选 Key 的协议中，已启用的客户端协议直通，否则按已保存首选协议和适配器顺序转换。该选择在发送前完成。请求路径不探测协议，也不发送付费发现请求。OpenCode Go 的 effort 别名只在所选路由携带该兼容策略时应用。操作者可以从已保存的本地目录删除模型；该写入只改本地快照，之后的官方刷新可能把相同 ID 作为启用的新行加回来。CPA 保持 Chat、Responses、Messages 客户端协议，Gemini 转为 Chat。请求路径使用已保存合约。整篇 JSON 转换内核在 `ocg-gateway` 中。
 - 每一次 OpenCode Go 推理尝试都携带 `x-opencode-session`。客户端已有值优先；否则 Gateway 依次映射 OpenCode 自定义 Provider 发送的 `x-session-id` / `x-session-affinity`、根据会话种子生成稳定且不泄露原文的摘要，只有在请求不存在可用会话种子时才使用请求 ID。Zen Free 使用同一套 session 头，并补上官方匿名通道身份头（`User-Agent` 含 `opencode`、`x-opencode-client`、`x-opencode-request`、`x-opencode-project`）。客户端已提供的 OpenCode 值优先；否则 Gateway 在选定账号后补齐（合成的 `User-Agent` 为 `opencode`，`x-opencode-client` 为 `cli`，request/project 回退到请求 ID / session）。其他 Provider 不携带这些头。这组 Provider 专用身份只在选定账号后添加。
 
-一次逻辑请求在设置锁内捕获 `RequestSnapshots`。`RoutingSnapshot` 直接读取持久化目的地、模型映射与执行凭据；缺失或损坏配置会明确失败。兼容 Account 行与历史创建类型不参与正常路由选择。
+一次逻辑请求的请求准备读取原子发布的 `GatewayPreparationSnapshot`（`CoreStateInner.gateway_preparation`，`RwLock<Arc<…>>`）：路由投影、配置、定价与路由表同属一个一致世代，普通准备只在短读锁下克隆 `Arc`，全程不持有 `settings_update`。写者在设置锁内安装内存状态后，以一次 `Arc` 交换重发布聚合；只推进 `settings_revision` 而未重发布的写者会留下漂移，由下一位读者检测并经闸门重建修复——漏发布只损失延迟，不构成正确性错误；既不重发布也不推进 revision 的写者则是 bug。凭据认证表保持独立的短锁快照，不属于该聚合。`RoutingSnapshot` 直接读取持久化目的地、模型映射与执行凭据；缺失或损坏配置会明确失败。兼容 Account 行与历史创建类型不参与正常路由选择。`confirm_execution_send` 同样拆分：普通发送仅在 `db` 锁下对实时库状态重新授权；配额/积分试用这类真实 mutation 仍持有设置锁，并在释放前重发布聚合。
 
 | 请求入口固定 | 每次发送重新检查 |
 | --- | --- |

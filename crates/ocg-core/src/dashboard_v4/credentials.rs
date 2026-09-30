@@ -102,10 +102,22 @@ fn rotate_locked(
 
     let rotated = {
         let db = state.db.lock();
-        db.rotate_account_credential(&account.id, &key_cipher)
-            .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?
+        let rotated = db
+            .rotate_account_credential(&account.id, &key_cipher)
+            .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
+        // Rotation replaces the key a credential is executed with, which
+        // `RoutingSnapshot` carries as `key_cipher` plus its recovery-episode
+        // identity. `settings_update` is already held here, so this is the one
+        // shape that can republish: bump first, then swap the aggregate from the
+        // same still-held `db` view the row was committed through. Publishing
+        // before the bump would stamp the pre-bump revision and leave the next
+        // reader rebuilding anyway.
+        state.bump_settings_revision();
+        state
+            .publish_gateway_preparation(&db)
+            .map_err(V3ApiError::internal)?;
+        rotated
     };
-    state.bump_settings_revision();
     Ok(CredentialRotateResult {
         revision: ControlRevision::from_state(state),
         credential_id: rotated.credential_id,

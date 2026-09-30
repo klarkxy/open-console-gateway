@@ -27,6 +27,25 @@ import type {
 } from "../api/generated/dashboard-v4.ts";
 import { useAccountsStore } from "./accounts.ts";
 import { hideRemovedAccountCredentials } from "../domain/confirmed-account-removal.ts";
+import { dropSnapshot, readSnapshot, writeSnapshot } from "./persistence.ts";
+
+const SNAPSHOT_KEY = "destinations";
+
+interface DestinationsSnapshot {
+  destinations: Destination[];
+  credentials: DestinationCredential[];
+  cards: RoutingCardView[];
+  expectation: MutationExpectation | null;
+}
+
+function validateSnapshot(data: unknown): DestinationsSnapshot | null {
+  if (!data || typeof data !== "object") return null;
+  const candidate = data as Partial<DestinationsSnapshot>;
+  if (!Array.isArray(candidate.destinations)
+    || !Array.isArray(candidate.credentials)
+    || !Array.isArray(candidate.cards)) return null;
+  return candidate as DestinationsSnapshot;
+}
 
 export interface DestinationProjectionRefusal {
   kind: RefusedRowKindDto | string;
@@ -74,12 +93,17 @@ function refusalsFromError(error: DashboardRequestError): DestinationProjectionR
 export const useDestinationsStore = defineStore("destinations", () => {
   // Every write path replaces these arrays wholesale (applySnapshot, map /
   // filter commits), so shallow refs are sufficient and skip deep
-  // traversal of the largest lists in the projection.
-  const destinations = shallowRef<Destination[]>([]);
-  const credentials = shallowRef<DestinationCredential[]>([]);
-  const cards = shallowRef<RoutingCardView[]>([]);
-  const expectation = ref<MutationExpectation | null>(null);
-  const loaded = ref(false);
+  // traversal of the largest lists in the projection. The projection is
+  // secret-free by the V4 contract, so it persists across restarts; a
+  // hydrated snapshot renders immediately and the mount revalidation
+  // replaces it. A stale expectation only costs one CAS conflict, which
+  // the existing recovery path already handles.
+  const hydrated = readSnapshot(SNAPSHOT_KEY, validateSnapshot);
+  const destinations = shallowRef<Destination[]>(hydrated?.destinations ?? []);
+  const credentials = shallowRef<DestinationCredential[]>(hydrated?.credentials ?? []);
+  const cards = shallowRef<RoutingCardView[]>(hydrated?.cards ?? []);
+  const expectation = ref<MutationExpectation | null>(hydrated?.expectation ?? null);
+  const loaded = ref(hydrated !== null);
   const loading = ref(false);
   const error = ref("");
   const refusals = ref<DestinationProjectionRefusal[]>([]);
@@ -175,6 +199,15 @@ export const useDestinationsStore = defineStore("destinations", () => {
     return credential ? destinationsById.value.get(credential.destination_id) ?? null : null;
   }
 
+  function persistProjection(): void {
+    writeSnapshot(SNAPSHOT_KEY, {
+      destinations: destinations.value,
+      credentials: credentials.value,
+      cards: cards.value,
+      expectation: expectation.value,
+    } satisfies DestinationsSnapshot);
+  }
+
   function applySnapshot(
     nextDestinations: Destination[],
     nextCredentials: DestinationCredential[],
@@ -188,6 +221,7 @@ export const useDestinationsStore = defineStore("destinations", () => {
     refusals.value = [];
     loaded.value = true;
     error.value = "";
+    persistProjection();
   }
 
   /** Commit a fresh snapshot and invalidate in-flight loads, like an in-place mutation. */
@@ -233,6 +267,7 @@ export const useDestinationsStore = defineStore("destinations", () => {
           destination.id === id ? result.destination : destination
         ));
         expectation.value = result.expectation;
+        persistProjection();
       }
       return result;
     } catch (cause) {
@@ -265,6 +300,7 @@ export const useDestinationsStore = defineStore("destinations", () => {
         ));
         credentials.value = result.credentials;
         expectation.value = result.expectation;
+        persistProjection();
       }
       return result.destination;
     } catch (cause) {
@@ -296,6 +332,7 @@ export const useDestinationsStore = defineStore("destinations", () => {
       );
       if (beginMutationCommit(token, result.expectation)) {
         expectation.value = result.expectation;
+        persistProjection();
       }
       return result;
     } catch (cause) {
@@ -329,6 +366,7 @@ export const useDestinationsStore = defineStore("destinations", () => {
         ));
         credentials.value = result.credentials;
         expectation.value = result.expectation;
+        persistProjection();
       }
       return result.destination;
     } catch (cause) {
@@ -359,6 +397,7 @@ export const useDestinationsStore = defineStore("destinations", () => {
           credential.id === id ? result.credential : credential
         ));
         expectation.value = result.expectation;
+        persistProjection();
       }
       return result.credential;
     } catch (cause) {
@@ -379,6 +418,7 @@ export const useDestinationsStore = defineStore("destinations", () => {
         credentials.value = credentials.value.filter((credential) => credential.destination_id !== id);
         cards.value = cards.value.filter((card) => card.destination_id !== id);
         expectation.value = nextExpectation;
+        persistProjection();
       }
     } catch (cause) {
       if (isRevisionConflict(cause) && mutationSessionIsCurrent(token)) {
@@ -518,6 +558,7 @@ export const useDestinationsStore = defineStore("destinations", () => {
       if (beginMutationCommit(token, snapshot.expectation)) {
         expectation.value = snapshot.expectation;
         modelMetadata.value = { ...modelMetadata.value, [id]: snapshot };
+        persistProjection();
       }
       return snapshot;
     } catch (cause) {
@@ -548,6 +589,7 @@ export const useDestinationsStore = defineStore("destinations", () => {
     modelMetadata.value = {};
     modelMetadataLoading.value = {};
     modelMetadataErrors.value = {};
+    dropSnapshot(SNAPSHOT_KEY);
   }
 
   return {

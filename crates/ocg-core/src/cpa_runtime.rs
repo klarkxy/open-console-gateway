@@ -1900,6 +1900,15 @@ impl CoreStateInner {
                         catalog.refreshed_at.unwrap_or_else(Utc::now),
                     )
                     .map_err(|error| CpaRuntimeError::Failed(error.to_string()))?;
+                } else {
+                    // The restore resurrected the integration, destination,
+                    // and credential rows that `disconnect_cpa_integration`
+                    // just republished as deleted, and nothing else on this
+                    // compensation path advances the revision. Bump so the
+                    // next preparation read detects the drift and rebuilds
+                    // against the restored rows instead of serving the
+                    // deleted state indefinitely.
+                    self.bump_settings_revision();
                 }
                 self.routing.reset();
                 Ok(())

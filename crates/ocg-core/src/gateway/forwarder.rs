@@ -551,6 +551,39 @@ pub(crate) async fn forward_request(
     .await
 }
 
+/// Record an upstream 401 against the credential that produced it, and
+/// invalidate the published request-preparation aggregate when it lands.
+///
+/// `credentials.auth_error` is an admission gate inside `RoutingSnapshot`: a
+/// credential that carries one is not selectable. A write here that never
+/// reaches the published aggregate therefore keeps a known-broken key in the
+/// routing set — and, because nothing else necessarily advances the revision,
+/// for as long as the process lives. That is the one writer on this path that
+/// had neither a bump nor a publish.
+///
+/// Request preparation never holds `settings_update`, and taking that gate here
+/// would put a control-plane mutex in front of the failure path of every
+/// request, so this bumps the revision instead. The bump is what the contract
+/// needs: the next `gateway_preparation()` sees the drift and rebuilds under
+/// the gate, so a broken key is skipped from the following request onward
+/// instead of indefinitely.
+///
+/// The bump is conditional on the guarded write actually landing. A late 401
+/// for a key that has since been replaced writes no row, and bumping for that
+/// no-op would hand every later reader a rebuild for nothing.
+fn record_upstream_auth_error(
+    state: &CoreState,
+    db: &Database,
+    account_id: &str,
+    key_cipher: &str,
+    message: &str,
+) -> anyhow::Result<()> {
+    if db.set_account_auth_error_if_key_matches(account_id, key_cipher, Some(message))? {
+        state.bump_settings_revision();
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn forward_request_with_deadline(
     client: &Client,
@@ -1704,10 +1737,12 @@ pub(crate) async fn forward_request_with_deadline(
                         Some(failure),
                     )?;
                     if quota_observation.is_current(&db)? {
-                        db.set_account_auth_error_if_key_matches(
+                        record_upstream_auth_error(
+                            state,
+                            &db,
                             &account.id,
                             &account.key_cipher,
-                            Some(&error_message),
+                            &error_message,
                         )?;
                     }
                 }
@@ -2946,6 +2981,16 @@ fn persist_quota_write(
         });
         if persisted || released {
             state.bump_settings_revision();
+            // Cooldown and quota-recovery rows are routing state the next
+            // request re-reads, and this runs once per forwarded attempt that
+            // changes them. Republish while the gate and `db` are still held so
+            // the following request keeps the preparation fast path instead of
+            // paying one gated rebuild per failed attempt. Best-effort: a failed
+            // publish leaves the aggregate one revision behind, which the next
+            // reader detects and rebuilds.
+            if let Err(error) = state.publish_gateway_preparation(&db) {
+                eprintln!("warning: failed to republish the request preparation view: {error}");
+            }
         }
         persisted
     })

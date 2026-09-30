@@ -519,15 +519,19 @@ fn bind_credit_attempt_price(
                     serde_json::to_vec(&credit).unwrap_or_default()
                 )),
             );
-            let hosted_tools = serde_json::from_slice::<Value>(&plan.body)
-                .ok()
-                .is_none_or(|body| request_has_hosted_tool_charges(&body));
+            // One parse of this route's client body feeds both gates; the
+            // request may be large, and the fallback rules differ (an
+            // unparseable body is a hosted-tool charge here and simply
+            // uncovered there).
+            let body = serde_json::from_slice::<Value>(&plan.body).ok();
+            let hosted_tools = body.as_ref().is_none_or(request_has_hosted_tool_charges);
             RequestPricingSnapshot::Credits {
                 attempt: credit,
                 provider_id: account.provider_id.clone(),
                 revision,
                 token_pricing_supported: !hosted_tools
-                    && token_pricing_covers_request(&plan.body, plan.service_tier.as_deref()),
+                    && token_pricing_covers_service_tier(plan.service_tier.as_deref())
+                    && body.is_some_and(|body| !request_has_unpriced_media(&body)),
             }
         }
         Ok(None) => pricing,
@@ -556,9 +560,15 @@ fn request_has_hosted_tool_charges(body: &Value) -> bool {
 /// tier, and a JSON body without non-text media. Unparseable bodies are not
 /// covered. Hosted-tool charges are a separate gate.
 pub(crate) fn token_pricing_covers_request(body: &[u8], service_tier: Option<&str>) -> bool {
-    service_tier.is_none_or(|tier| tier == "default")
+    token_pricing_covers_service_tier(service_tier)
         && serde_json::from_slice::<Value>(body)
             .is_ok_and(|value| !request_has_unpriced_media(&value))
+}
+
+/// The tier half of [`token_pricing_covers_request`], split out so a caller
+/// holding an already-parsed body does not parse it a second time.
+fn token_pricing_covers_service_tier(service_tier: Option<&str>) -> bool {
+    service_tier.is_none_or(|tier| tier == "default")
 }
 
 /// Media that token rates do not cover, read from protocol content positions.
