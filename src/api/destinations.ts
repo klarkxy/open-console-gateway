@@ -28,6 +28,7 @@ import type {
   DestinationDto,
   DestinationList,
   DestinationModelMetadata,
+  ModelMetadataCatalog,
   DestinationOnboardingTaskDto,
   DestinationPatchRequest,
   LegacyDestinationRefDto,
@@ -220,6 +221,12 @@ export interface DestinationModelMetadataEntryView {
 export interface DestinationModelMetadataSnapshot {
   destination_id: string;
   models: DestinationModelMetadataEntryView[];
+  expectation: MutationExpectation;
+}
+
+/** Every destination's metadata snapshot from one aggregate read. */
+export interface ModelMetadataCatalogSnapshot {
+  destinations: DestinationModelMetadataSnapshot[];
   expectation: MutationExpectation;
 }
 
@@ -742,9 +749,24 @@ export function presentDestinationModelMetadata(
   };
 }
 
+export function presentModelMetadataCatalog(
+  value: ModelMetadataCatalog,
+): ModelMetadataCatalogSnapshot {
+  return {
+    destinations: value.destinations.map(presentDestinationModelMetadata),
+    expectation: {
+      expectedRevision: value.revision.revision,
+      processGeneration: value.revision.processGeneration,
+    },
+  };
+}
+
 export const modelMetadataApi = {
   get: async (id: string): Promise<DestinationModelMetadataSnapshot> =>
     presentDestinationModelMetadata(await dashboardV4.getDestinationModelMetadata(id)),
+  /** One aggregate read covering every destination (alias-page fan-in). */
+  list: async (): Promise<ModelMetadataCatalogSnapshot> =>
+    presentModelMetadataCatalog(await dashboardV4.getModelMetadataCatalog()),
   /**
    * Declare (or with `null`, reset) the full metadata of one exact public
    * model under CAS. The receipt replaces the whole destination entry set.

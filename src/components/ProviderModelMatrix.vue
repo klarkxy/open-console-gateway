@@ -68,4 +68,10 @@ const editorDisabled = computed(() => Boolean(
   props.actionLocked || props.removing
   || props.pendingOverrideKeys?.size || props.probingModels?.size,
 ));
+
+/** Deep-link entry: open the capabilities editor for one model row. */
+function openMetadataEditor(modelId: string): void {
+  void metadataEditor.value?.openEditor(modelId);
+}
+defineExpose({ openMetadataEditor });
 </script>

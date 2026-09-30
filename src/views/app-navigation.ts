@@ -73,6 +73,8 @@ export interface ProviderScopeQuery {
   destination?: string;
   tab?: ProviderDetailTab;
   model?: string;
+  /** One-shot: open the model capabilities editor for this public model. */
+  capabilities?: string;
   add?: boolean;
   preset?: string;
 }
@@ -84,6 +86,7 @@ export interface ProviderPageQuery {
   destination: string | null;
   tab: ProviderDetailTab | null;
   model: string | null;
+  capabilities: string | null;
   add: boolean;
   preset: string | null;
 }
@@ -135,6 +138,7 @@ export function readProviderPageQuery(search: string): ProviderPageQuery {
     destination: params.get("destination"),
     tab: normalizeProviderDetailTab(params.get("tab")),
     model: params.get("model"),
+    capabilities: params.get("capabilities"),
     add,
     preset,
   };

@@ -20,13 +20,15 @@ This version captures explicitly supplied metadata during Go/GOAT catalog refres
 
 Routes fall back to the public [models.dev](https://models.dev) catalog for any field they never learned — no operator declaration, and no upstream-observed value for that field. OCG downloads `https://models.dev/api.json` in the background (never inside a `/v1/models` request), caches it locally, and refreshes it about once a day; a failed refresh keeps the previous cache and retries later, so offline use simply stays with the last copy. Matching is by exact upstream model ID, then its last path segment, then the exact public model ID — never a fuzzy name guess. The same model ID under several models.dev providers keeps only the common guarantees (minimum limits, modality intersection, identical effort spellings), and modalities outside `text`/`image`/`audio`/`video` are dropped at ingestion. Effort-style `reasoning_options` become selectable reasoning levels (the `none` spelling fills the `off` selector); toggle-only and budget-token options carry no selectable wire level and leave the levels unknown. Effective facts keep their per-field priority: operator declaration > upstream observation > models.dev > unknown. A declaration or refresh always overrides the public catalog for the fields it knows, and an operator declaration is never augmented from the public catalog; when models.dev fills gaps under an upstream observation, the row's `sources` list credits both.
 
-Declare metadata in the dashboard: open **Providers**, select a connection, and use a model row's **Model capabilities** action. The form shows the effective metadata and its source (`operator`, `upstream`, `modelsdev`, or `unknown`), applies the same validation rules as the server, saves the full declaration under CAS, and can clear a manual declaration to reveal discovered facts. Blank fields mean unknown, not false.
+Declare metadata in the dashboard: open **Providers**, select a connection, and use a model row's **Model capabilities** action. The form shows the effective metadata and its source (`operator`, `upstream`, `modelsdev`, or `unknown`), applies the same validation rules as the server, saves the full declaration under CAS, and can clear a manual declaration to reveal discovered facts. Blank fields mean unknown, not false. The **Aliases** page shows every mapping's effective input modalities and their provenance, and its **Declare** link on unknown rows lands directly in this editor.
 
 The same rules are available to scripts through the authenticated dashboard endpoint:
 
 ```
 GET /dashboard/api/v4/destinations/{id}/model-metadata
 ```
+
+`GET /dashboard/api/v4/model-metadata` returns the same entries for every destination in one aggregate read — prefer it over fanning the per-destination route out across many rows.
 
 Use the destination ID from `GET /dashboard/api/v4/destinations`. The response includes the current revision, exact public and upstream IDs, effective metadata and its source (`operator`, `upstream`, `modelsdev`, or `unknown`). No inference Key is accepted in place of the dashboard session.
 

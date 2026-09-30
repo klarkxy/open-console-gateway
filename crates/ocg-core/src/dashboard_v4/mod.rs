@@ -77,6 +77,7 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             "/destinations/{id}/catalog",
             axum::routing::put(destination_catalog::update),
         )
+        .route("/model-metadata", get(model_metadata::list))
         .route(
             "/destinations/{id}/model-metadata",
             get(model_metadata::get).put(model_metadata::put),

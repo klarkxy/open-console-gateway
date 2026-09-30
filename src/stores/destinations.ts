@@ -128,6 +128,7 @@ export const useDestinationsStore = defineStore("destinations", () => {
   const modelMetadataLoading = ref<Record<string, boolean>>({});
   const modelMetadataErrors = ref<Record<string, string>>({});
   const metadataRequests = new Map<string, number>();
+  let metadataCatalogRequestId = 0;
 
   let loadGeneration = 0;
   // Bumped by `clear` so an explanation resolving after logout never commits.
@@ -500,6 +501,21 @@ export const useDestinationsStore = defineStore("destinations", () => {
   }
 
   /**
+   * `GET /model-metadata`: one aggregate read covering every destination.
+   * Only the latest call commits, and nothing commits after `clear`.
+   */
+  async function loadAllModelMetadata(): Promise<void> {
+    const requestId = ++metadataCatalogRequestId;
+    const session = sessionGeneration;
+    const catalog = await modelMetadataApi.list();
+    if (session !== sessionGeneration || metadataCatalogRequestId !== requestId) return;
+    const next: Record<string, DestinationModelMetadataSnapshot> = {};
+    for (const snapshot of catalog.destinations) next[snapshot.destination_id] = snapshot;
+    modelMetadata.value = next;
+    modelMetadataErrors.value = {};
+  }
+
+  /**
    * On-demand `GET /destinations/{id}/model-metadata`. Only the latest
    * request per destination commits, and nothing commits after `clear`.
    */
@@ -575,6 +591,7 @@ export const useDestinationsStore = defineStore("destinations", () => {
     sessionGeneration++;
     explainRequests.clear();
     metadataRequests.clear();
+    metadataCatalogRequestId++;
     destinations.value = [];
     credentials.value = [];
     cards.value = [];
@@ -623,6 +640,7 @@ export const useDestinationsStore = defineStore("destinations", () => {
     explainKey,
     explainRouting,
     loadModelMetadata,
+    loadAllModelMetadata,
     declareModelMetadata,
     clear,
   };

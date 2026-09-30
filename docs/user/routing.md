@@ -37,6 +37,8 @@ create them.
 
 On **Aliases**, each mapping row carries a **routing order** column: the global routing ranks of the Keys that can serve that public name at the configuration level (the same order you drag into shape on the Accounts view). Rows within a model are sorted by ascending rank; a plan backed by several eligible Keys lists each rank in turn; "—" means no enabled Key currently serves the mapping. This is the configured order — runtime states such as cooldowns or quota waits are not reflected here, and it is not a delivery guarantee. Custom Keys linked from a platform (new-api/sub-api) also show the platform name as a tag next to the plan name, so rows serving the same model are easy to tell apart by origin.
 
+Each mapping row also carries a **capabilities** column: the effective input modalities of the route behind that mapping (text/image/audio/video) plus their provenance (operator declaration, upstream discovery, or the models.dev catalog). "Unknown" means no source has reported modalities for that route yet; its **Declare** link opens the model capabilities editor on the matching Providers row. Declarations stay route-scoped there — the Aliases page only reads them. CPA rows have no per-route metadata and show "—".
+
 Accounts are tried in **list order**, which you can drag into shape and persist
 from the Accounts view. The selector skips:
 

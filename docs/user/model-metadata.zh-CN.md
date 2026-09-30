@@ -20,13 +20,15 @@ DSH 现有原生接口并不使用所有能力。额外事实保留在 Adapter �
 
 路由从未获知的字段——既没有人工声明、上游观测也没有该字段的值——回退到公开的 [models.dev](https://models.dev) 目录。OCG 在后台下载 `https://models.dev/api.json`（绝不在 `/v1/models` 请求内联网），本地缓存约一天刷新一次；刷新失败保留上一份缓存并稍后重试，离线时只是继续使用旧副本。匹配按精确上游模型 ID、ID 的最后一段、精确公开模型 ID 依次进行，不做模糊名称猜测。同一 ID 出现在 models.dev 多个供应商下时只保留共同保证（下限容量、模态交集、一致的档位拼写），`text`/`image`/`audio`/`video` 之外的模态在采集时丢弃。effort 类型的 `reasoning_options` 会转换为可选思考档位（`none` 拼写对应 `off` 档）；纯开关和预算 token 类型的选项没有可选择的线路拼写，档位保持未知。生效事实按字段保持优先级：人工声明 > 上游观测 > models.dev > 未知。声明或目录刷新始终在其已知字段上覆盖公开目录；人工声明不会被公开目录补充。当 models.dev 在上游观测之下补齐了空缺字段时，该行的 `sources` 列表会同时标注两个来源。
 
-在 Dashboard 中声明元数据：打开 **供应商**，选择一个连接，使用模型行的 **模型能力** 操作。表单显示当前生效的元数据及其来源（`operator`、`upstream`、`modelsdev`、`unknown`），应用与服务端一致的校验规则，在 CAS 下保存整份声明，也可以清除人工声明以恢复目录发现的事实。留空表示未知，不等于不支持。
+在 Dashboard 中声明元数据：打开 **供应商**，选择一个连接，使用模型行的 **模型能力** 操作。表单显示当前生效的元数据及其来源（`operator`、`upstream`、`modelsdev`、`unknown`），应用与服务端一致的校验规则，在 CAS 下保存整份声明，也可以清除人工声明以恢复目录发现的事实。留空表示未知，不等于不支持。**别名**页会展示每个映射的生效输入模态及其来源，未知行上的“去声明”链接会直接落到这个编辑器。
 
 同样的规则也通过带 Dashboard 登录会话的接口提供给脚本使用：
 
 ```
 GET /dashboard/api/v4/destinations/{id}/model-metadata
 ```
+
+`GET /dashboard/api/v4/model-metadata` 一次聚合返回所有连接的同类条目——需要批量读取时用它，不要把逐连接接口扇出成几十次请求。
 
 连接 ID 来自 `GET /dashboard/api/v4/destinations`。响应包含当前版本、精确的公开/上游模型 ID、有效元数据及来源 `operator`、`upstream`、`modelsdev`、`unknown`。推理 Key 不能代替 Dashboard 登录会话。
 

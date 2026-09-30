@@ -151,3 +151,50 @@ test("model metadata: clear drops cached entries", async () => {
   assert.deepEqual(store.modelMetadata, {});
   assert.deepEqual(store.modelMetadataErrors, {});
 });
+
+test("model metadata: the aggregate catalog read replaces the map in one call", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore();
+  const calls = installDeferredFetch();
+  const store = useDestinationsStore();
+
+  const pending = store.loadAllModelMetadata();
+  await waitForCalls(calls, 1);
+  assert.ok(calls[0].url.endsWith("/model-metadata") && calls[0].method === "GET");
+  calls[0].resolve({
+    destinations: [
+      metadataBody("dest-a", 9, { contextWindow: 64000 }, "upstream"),
+      metadataBody("dest-b", 9, { inputModalities: ["text"] }, "unknown"),
+    ],
+    revision: { revision: 9, processGeneration: 99, pricingRevision: "p1" },
+  });
+  await pending;
+  assert.deepEqual(Object.keys(store.modelMetadata).sort(), ["dest-a", "dest-b"]);
+  assert.equal(store.modelMetadata["dest-a"]?.models[0]?.metadata.context_window, 64000);
+  assert.deepEqual(store.modelMetadata["dest-b"]?.models[0]?.metadata.input_modalities, ["text"]);
+});
+
+test("model metadata: only the latest aggregate load commits", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore();
+  const calls = installDeferredFetch();
+  const store = useDestinationsStore();
+
+  const first = store.loadAllModelMetadata();
+  const second = store.loadAllModelMetadata();
+  await waitForCalls(calls, 2);
+
+  calls[1].resolve({
+    destinations: [metadataBody("dest-b", 9, { contextWindow: 128000 }, "operator")],
+    revision: { revision: 9, processGeneration: 99, pricingRevision: "p1" },
+  });
+  await second;
+  assert.deepEqual(Object.keys(store.modelMetadata), ["dest-b"]);
+
+  calls[0].resolve({
+    destinations: [metadataBody("dest-a", 9, { contextWindow: 32000 }, "upstream")],
+    revision: { revision: 9, processGeneration: 99, pricingRevision: "p1" },
+  });
+  await first;
+  assert.deepEqual(Object.keys(store.modelMetadata), ["dest-b"]);
+});
