@@ -1,7 +1,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use ocg_core::account_control;
-use ocg_core::crypto::{KeyCipher, MachineBoundCipher, StaticKeyCipher, load_or_create_static_cipher};
+use ocg_core::crypto::{
+    KeyCipher, MachineBoundCipher, StaticKeyCipher, load_or_create_static_cipher,
+};
 use ocg_core::db::Database;
 use ocg_core::gateway::{self, GatewayLifecycle};
 use ocg_core::models::{Account, AppConfig};

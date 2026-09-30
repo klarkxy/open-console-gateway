@@ -1,7 +1,7 @@
 use super::{
     Cli, Commands, KeyAction, build_state, key_command, ping_keys, resolve_cipher_with,
-    resolve_dashboard_dir, resolve_data_dir, start_serve, status_command,
-    stop_serve, toggle_account,
+    resolve_dashboard_dir, resolve_data_dir, start_serve, status_command, stop_serve,
+    toggle_account,
 };
 use chrono::Utc;
 use clap::{CommandFactory, Parser};
