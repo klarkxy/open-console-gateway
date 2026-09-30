@@ -1,0 +1,7796 @@
+{
+  "$comment": "Extensible Dashboard V3 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. ConnectionInfo is the only plaintext Key DTO.",
+  "$defs": {
+    "Account": {
+      "additionalProperties": false,
+      "description": "Secret-free account resource. Distinct from `models::Account`.\n\nResponses emit `T | null` for every optional field. Plaintext upstream\nkeys, passwords, ciphers, gateway Keys, and referral codes never appear.",
+      "properties": {
+        "accountType": {
+          "$ref": "#/$defs/AccountType"
+        },
+        "authError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "connectionVerifiedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldown5hUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldownFreeUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldownGenericUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldownMonthUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldownUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldownWeekUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "credentialKind": {
+          "$ref": "#/$defs/AccountCredentialKind"
+        },
+        "customConfig": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountCustomConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "expiresOn": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "modelCapabilities": {
+          "items": {
+            "$ref": "#/$defs/AccountModelCapability"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ollamaBillingTier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OllamaBillingTier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "planRoutable": {
+          "type": "boolean"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "purchaseDate": {
+          "type": "string"
+        },
+        "quotaScope": {
+          "$ref": "#/$defs/AccountQuotaScope"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "setupStep": {
+          "$ref": "#/$defs/AccountSetupStep"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "usageSyncLastSuccessAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "usageSyncNextAllowedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verificationError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verificationStatus": {
+          "$ref": "#/$defs/AccountVerificationStatus"
+        }
+      },
+      "required": [
+        "id",
+        "providerId",
+        "credentialKind",
+        "quotaScope",
+        "name",
+        "username",
+        "enabled",
+        "accountType",
+        "setupStep",
+        "purchaseDate",
+        "expiresOn",
+        "cooldownUntil",
+        "cooldownGenericUntil",
+        "cooldown5hUntil",
+        "cooldownWeekUntil",
+        "cooldownMonthUntil",
+        "cooldownFreeUntil",
+        "lastError",
+        "authError",
+        "notes",
+        "usageSyncLastSuccessAt",
+        "usageSyncNextAllowedAt",
+        "createdAt",
+        "updatedAt",
+        "revision",
+        "processGeneration",
+        "verificationStatus",
+        "connectionVerifiedAt",
+        "verificationError",
+        "planRoutable",
+        "customConfig",
+        "modelCapabilities",
+        "ollamaBillingTier"
+      ],
+      "type": "object"
+    },
+    "AccountAuthScheme": {
+      "description": "Custom auth scheme. Wire values match V2 kebab-case.",
+      "enum": [
+        "bearer",
+        "x-api-key",
+        "api-key"
+      ],
+      "type": "string"
+    },
+    "AccountCreate": {
+      "additionalProperties": false,
+      "description": "POST `/accounts` body. CAS tokens and `name` are required. `key`,\n`password`, and `referralCode` are write-only and never echoed.",
+      "properties": {
+        "customConfig": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountCustomConfigWrite"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "key": {
+          "type": "string"
+        },
+        "modelCapabilities": {
+          "items": {
+            "$ref": "#/$defs/AccountModelCapabilityWrite"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ollamaBillingTier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OllamaBillingTier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "password": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "purchaseDate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "referralCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "name",
+        "key"
+      ],
+      "type": "object"
+    },
+    "AccountCredentialKind": {
+      "description": "Wire identity matching V2 `api_key` / `none`.",
+      "enum": [
+        "api_key",
+        "none"
+      ],
+      "type": "string"
+    },
+    "AccountCustomConfig": {
+      "additionalProperties": false,
+      "description": "Nested Custom HTTP destination as returned on an account.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "endpointUrl": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "upstreamProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        }
+      },
+      "required": [
+        "accountId",
+        "endpointUrl",
+        "upstreamProtocol",
+        "createdAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "AccountCustomConfigUpdate": {
+      "additionalProperties": false,
+      "description": "PUT `/accounts/{id}/custom-config` body. The endpoint binding and complete\nmodel capability list are replaced atomically under one CAS expectation.",
+      "properties": {
+        "endpointUrl": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "modelCapabilities": {
+          "items": {
+            "$ref": "#/$defs/AccountModelCapabilityWrite"
+          },
+          "type": "array"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "upstreamProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "endpointUrl",
+        "upstreamProtocol",
+        "modelCapabilities"
+      ],
+      "type": "object"
+    },
+    "AccountCustomConfigWrite": {
+      "additionalProperties": false,
+      "description": "Create-time Custom destination (no timestamps). Nested under `AccountCreate`.",
+      "properties": {
+        "endpointUrl": {
+          "type": "string"
+        },
+        "upstreamProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        }
+      },
+      "required": [
+        "endpointUrl",
+        "upstreamProtocol"
+      ],
+      "type": "object"
+    },
+    "AccountExport": {
+      "additionalProperties": false,
+      "description": "Encrypted node migration package returned by the export endpoint.\n`bundle` contains only a versioned Argon2id + AES-256-GCM envelope; no\nplaintext upstream credential is returned to the dashboard.",
+      "properties": {
+        "bundle": {
+          "type": "string"
+        },
+        "exportedAccounts": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skippedAccounts": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "filename",
+        "bundle",
+        "exportedAccounts",
+        "skippedAccounts",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "AccountExportRequest": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/transfer/export` body. The password is write-only and used\nonly to encrypt the portable node-state file.",
+      "properties": {
+        "bundlePassword": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "bundlePassword"
+      ],
+      "type": "object"
+    },
+    "AccountImportDisposition": {
+      "enum": [
+        "import",
+        "imported",
+        "merge",
+        "merged",
+        "duplicate"
+      ],
+      "type": "string"
+    },
+    "AccountImportPreview": {
+      "additionalProperties": false,
+      "description": "Secret-free preview of one node migration package.",
+      "properties": {
+        "duplicateAccounts": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exportedAt": {
+          "type": "string"
+        },
+        "importableAccounts": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/AccountImportPreviewItem"
+          },
+          "type": "array"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "exportedAt",
+        "items",
+        "importableAccounts",
+        "duplicateAccounts",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "AccountImportPreviewItem": {
+      "additionalProperties": false,
+      "description": "One secret-free preview/result row. Account Keys, endpoint credentials,\nbrowser identity, and verification evidence never appear.",
+      "properties": {
+        "accountType": {
+          "$ref": "#/$defs/AccountType"
+        },
+        "disposition": {
+          "$ref": "#/$defs/AccountImportDisposition"
+        },
+        "index": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "index",
+        "name",
+        "providerId",
+        "accountType",
+        "disposition",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "AccountImportPreviewRequest": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/transfer/preview` body. `password` is write-only and never\nappears in a response or log.",
+      "properties": {
+        "bundle": {
+          "type": "string"
+        },
+        "password": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "password",
+        "bundle"
+      ],
+      "type": "object"
+    },
+    "AccountImportRequest": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/transfer/import` body. CAS tokens are rechecked only after\nthe expensive authenticated decryption and validation phase finishes.",
+      "properties": {
+        "bundle": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "password": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "password",
+        "bundle"
+      ],
+      "type": "object"
+    },
+    "AccountImportResult": {
+      "additionalProperties": false,
+      "description": "Atomic database import result. `items` is secret-free and preserves bundle\norder; duplicates are the only per-row skip in V1.",
+      "properties": {
+        "duplicateAccounts": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "importedAccounts": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/AccountImportPreviewItem"
+          },
+          "type": "array"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "importedAccounts",
+        "duplicateAccounts",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "AccountList": {
+      "additionalProperties": false,
+      "description": "GET `/accounts` and PUT `/accounts/order` envelope.",
+      "properties": {
+        "accounts": {
+          "items": {
+            "$ref": "#/$defs/Account"
+          },
+          "type": "array"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accounts",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "AccountManagedCreate": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/managed` body. CAS tokens and `name` are required.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "name"
+      ],
+      "type": "object"
+    },
+    "AccountManagedKeyVerify": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/{id}/setup/verify-key` body. CAS tokens and the write-only\n`key` are required. Unknown fields are rejected. The key is never echoed.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "key": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "key"
+      ],
+      "type": "object"
+    },
+    "AccountModelCapabilitiesUpdate": {
+      "additionalProperties": false,
+      "description": "PUT `/accounts/{id}/model-capabilities` body.",
+      "properties": {
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/AccountModelCapabilityWrite"
+          },
+          "type": "array"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "capabilities"
+      ],
+      "type": "object"
+    },
+    "AccountModelCapability": {
+      "additionalProperties": false,
+      "description": "One declared Custom model capability as returned on an account.",
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "publicModel": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "upstreamModel": {
+          "type": "string"
+        },
+        "verifiedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "publicModel",
+        "upstreamModel",
+        "protocol",
+        "verifiedAt",
+        "source"
+      ],
+      "type": "object"
+    },
+    "AccountModelCapabilityWrite": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AccountModelCapabilityWriteCanonical"
+        },
+        {
+          "$ref": "#/$defs/AccountModelCapabilityWriteLegacy"
+        }
+      ],
+      "description": "One declared Custom model capability on create or replace. Canonical writes\ncarry both identities; the legacy `modelId` shape remains accepted so a\nstale dashboard can complete one migration-window write without data loss."
+    },
+    "AccountModelCapabilityWriteCanonical": {
+      "additionalProperties": false,
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "publicModel": {
+          "type": "string"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "upstreamModel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "publicModel",
+        "upstreamModel",
+        "protocol"
+      ],
+      "type": "object"
+    },
+    "AccountModelCapabilityWriteLegacy": {
+      "additionalProperties": false,
+      "properties": {
+        "modelId": {
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "modelId",
+        "protocol"
+      ],
+      "type": "object"
+    },
+    "AccountModelTestRequest": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/{id}/model-tests` body. This is an operational test, so it\nintentionally carries no CAS tokens and has no account mutation effect.",
+      "properties": {
+        "modelId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "modelId"
+      ],
+      "type": "object"
+    },
+    "AccountModelTestResponse": {
+      "additionalProperties": false,
+      "description": "Result of one exact-account, one-model operational request. Error text is\ntransport-sanitized and never includes an upstream response body or key.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "durationMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "httpStatus": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "accountId",
+        "modelId",
+        "protocol",
+        "success",
+        "httpStatus",
+        "durationMs",
+        "error"
+      ],
+      "type": "object"
+    },
+    "AccountMutation": {
+      "additionalProperties": false,
+      "description": "Successful single-account mutation. `account` is `null` after delete.",
+      "properties": {
+        "account": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Account"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "account",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "AccountOrder": {
+      "additionalProperties": false,
+      "description": "PUT `/accounts/order` body. CAS tokens and the complete id set are required.",
+      "properties": {
+        "accountIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "accountIds"
+      ],
+      "type": "object"
+    },
+    "AccountQuotaScope": {
+      "description": "Wire identity matching V2 `key` / `egress-ip`.",
+      "enum": [
+        "key",
+        "egress-ip"
+      ],
+      "type": "string"
+    },
+    "AccountSetupStep": {
+      "description": "Managed-setup wizard step. Wire values match V2 snake_case.",
+      "enum": [
+        "google_account",
+        "opencode_registration",
+        "payment",
+        "key_verification",
+        "ready"
+      ],
+      "type": "string"
+    },
+    "AccountSetupUpdate": {
+      "additionalProperties": false,
+      "description": "PATCH `/accounts/{id}/setup` body. CAS tokens and `setupStep` are required.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "setupStep": {
+          "$ref": "#/$defs/AccountSetupStep"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "setupStep"
+      ],
+      "type": "object"
+    },
+    "AccountType": {
+      "description": "Wire identity matching V2 `key` / `managed`.",
+      "enum": [
+        "key",
+        "managed"
+      ],
+      "type": "string"
+    },
+    "AccountUpdate": {
+      "additionalProperties": false,
+      "description": "PATCH `/accounts/{id}` body. CAS tokens are required; other fields may be\nomitted. Write-only `key` / `password` / `referralCode` are accepted and\nnever echoed. Unknown fields, including provider binding, are rejected.",
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ollamaBillingTier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OllamaBillingTier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "password": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "purchaseDate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "referralCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "AccountUpstreamProtocol": {
+      "description": "Custom/upstream protocol. Wire values match V2 snake_case.",
+      "enum": [
+        "chat_completions",
+        "responses",
+        "messages"
+      ],
+      "type": "string"
+    },
+    "AccountUsageUpdate": {
+      "additionalProperties": false,
+      "description": "PATCH `/accounts/{id}/usage` body. CAS tokens, `window`, and `percent` are\nrequired; `resetsInMinutes` may be omitted. Unknown fields are rejected.\nWindow tokens stay the V2 identifiers `window_5h` / `window_week` /\n`window_month`.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "percent": {
+          "format": "double",
+          "type": "number"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "resetsInMinutes": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "window": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "window",
+        "percent"
+      ],
+      "type": "object"
+    },
+    "AccountVerificationStatus": {
+      "description": "Connection-verification status. Wire values match V2 snake_case.",
+      "enum": [
+        "not_required",
+        "pending",
+        "verified",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "AccountVerify": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/{id}/verify` body. CAS tokens are required. Unknown\nfields, including any Key material, are rejected.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "ApplicationModels": {
+      "additionalProperties": false,
+      "description": "Local Go-routable Alias ∩ current Go pricing snapshot (no request-time upstream).",
+      "properties": {
+        "models": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "models",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "AuthLogin": {
+      "additionalProperties": false,
+      "description": "POST `/auth/login` body. Same required fields as [`AuthRegister`]; kept\nas a distinct catalog type so the two endpoints stay separately versionable.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "password": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "username": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "username",
+        "password"
+      ],
+      "type": "object"
+    },
+    "AuthLogout": {
+      "additionalProperties": false,
+      "description": "POST `/auth/logout` body. CAS tokens are required; unknown fields,\nincluding credentials, are rejected.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "AuthRegister": {
+      "additionalProperties": false,
+      "description": "POST `/auth/register` body. CAS tokens, `username`, and `password` are\nrequired. `password` is write-only and never echoed.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "password": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "username": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "username",
+        "password"
+      ],
+      "type": "object"
+    },
+    "AuthStatus": {
+      "additionalProperties": false,
+      "description": "Public dashboard authentication snapshot. Never carries a password,\nsession token, Key, cipher, or secret.",
+      "properties": {
+        "authenticated": {
+          "type": "boolean"
+        },
+        "initialized": {
+          "type": "boolean"
+        },
+        "local": {
+          "type": "boolean"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "local",
+        "initialized",
+        "authenticated",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "BrowserCapabilities": {
+      "additionalProperties": false,
+      "description": "GET `/browser/capabilities` body. Read-only; no `expectedRevision`.\nDistinct from `browser::BrowserCapabilities`. `reason` is required `T | null`.",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/BrowserMode"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "mode",
+        "reason",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "BrowserMode": {
+      "description": "Browser runtime mode. Wire values match V2 lowercase `native` / `remote` /\n`unsupported`. Distinct from `browser::BrowserMode`.",
+      "enum": [
+        "native",
+        "remote",
+        "unsupported"
+      ],
+      "type": "string"
+    },
+    "BrowserOpen": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/{id}/browser` result. Distinct from `browser::BrowserOpenResult`.\n\nNative mode always emits `sessionToken: null`. Remote mode emits only the\nopaque dashboard-bound display token —never a worker URL or control token.",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/BrowserMode"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sessionToken": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "mode",
+        "sessionToken",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "BrowserOpenRequest": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/{id}/browser` body. CAS tokens and `target` are required.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target": {
+          "$ref": "#/$defs/BrowserTarget"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "target"
+      ],
+      "type": "object"
+    },
+    "BrowserTarget": {
+      "description": "Managed-browser launch target. Wire values match V2 snake_case.",
+      "enum": [
+        "google_signup",
+        "google_login",
+        "github_signup",
+        "github_login",
+        "invite",
+        "console"
+      ],
+      "type": "string"
+    },
+    "CapabilitySummary": {
+      "additionalProperties": false,
+      "description": "Registry pricing or usage availability copied as display data.",
+      "properties": {
+        "availability": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "availability"
+      ],
+      "type": "object"
+    },
+    "CardCapabilitySummary": {
+      "additionalProperties": false,
+      "description": "Provider-page actions that are actually implemented for this scope.",
+      "properties": {
+        "catalogRefresh": {
+          "type": "boolean"
+        },
+        "discoverModels": {
+          "type": "boolean"
+        },
+        "fetchZenModels": {
+          "type": "boolean"
+        },
+        "protocolProbe": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "fetchZenModels",
+        "discoverModels",
+        "protocolProbe",
+        "catalogRefresh"
+      ],
+      "type": "object"
+    },
+    "ConnectionInfo": {
+      "additionalProperties": false,
+      "description": "Lightweight connection-center payload. The only V3 DTO allowed to carry\nplaintext primary and sub Key values.",
+      "properties": {
+        "clientRootUrl": {
+          "type": "string"
+        },
+        "gatewayPort": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "primaryKey": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "subKeys": {
+          "items": {
+            "$ref": "#/$defs/ConnectionSubKey"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "gatewayPort",
+        "clientRootUrl",
+        "primaryKey",
+        "subKeys",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "ConnectionSubKey": {
+      "additionalProperties": false,
+      "description": "One non-deleted sub Key as exposed by [`ConnectionInfo`].",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "enabled",
+        "value"
+      ],
+      "type": "object"
+    },
+    "ContractEvidenceSource": {
+      "description": "How a protocol row was established. Wire values match V2 snake_case.",
+      "enum": [
+        "static",
+        "preset",
+        "probe_confirmed",
+        "probe_observed"
+      ],
+      "type": "string"
+    },
+    "ContractScopeKind": {
+      "description": "Contract scope kind. Wire values match V2 `provider` / `custom_endpoint`.",
+      "enum": [
+        "provider",
+        "custom_endpoint"
+      ],
+      "type": "string"
+    },
+    "ControlRevision": {
+      "additionalProperties": false,
+      "description": "Live CAS token, process generation, and pricing snapshot id.",
+      "properties": {
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "CpaAccount": {
+      "additionalProperties": false,
+      "properties": {
+        "authIndex": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "disabled": {
+          "type": "boolean"
+        },
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mutable": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "quota": true,
+        "runtimeOnly": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "statusMessage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unavailable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "authIndex",
+        "provider",
+        "label",
+        "status",
+        "statusMessage",
+        "disabled",
+        "unavailable",
+        "runtimeOnly",
+        "mutable",
+        "email",
+        "quota"
+      ],
+      "type": "object"
+    },
+    "CpaAccountDelete": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "authIndex": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "name",
+        "authIndex"
+      ],
+      "type": "object"
+    },
+    "CpaAccountStatusUpdate": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "authIndex": {
+          "type": "string"
+        },
+        "disabled": {
+          "type": "boolean"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "name",
+        "authIndex",
+        "disabled"
+      ],
+      "type": "object"
+    },
+    "CpaAccounts": {
+      "additionalProperties": false,
+      "properties": {
+        "accounts": {
+          "items": {
+            "$ref": "#/$defs/CpaAccount"
+          },
+          "type": "array"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accounts",
+        "version",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CpaCliImportOutcome": {
+      "enum": [
+        "imported",
+        "alreadyImported",
+        "unconfirmed"
+      ],
+      "type": "string"
+    },
+    "CpaCliImportRequest": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "provider": {
+          "$ref": "#/$defs/CpaOAuthProvider"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "provider"
+      ],
+      "type": "object"
+    },
+    "CpaCliImportResult": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/CpaCliImportOutcome"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "provider": {
+          "$ref": "#/$defs/CpaOAuthProvider"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "provider",
+        "name",
+        "outcome",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CpaCliImportSource": {
+      "additionalProperties": false,
+      "properties": {
+        "available": {
+          "description": "File presence only. Credentials are read exclusively on explicit import.",
+          "type": "boolean"
+        },
+        "provider": {
+          "$ref": "#/$defs/CpaOAuthProvider"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "supported": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "provider",
+        "source",
+        "supported",
+        "available",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "CpaCliImports": {
+      "additionalProperties": false,
+      "properties": {
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/CpaCliImportSource"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "sources"
+      ],
+      "type": "object"
+    },
+    "CpaConnectionReport": {
+      "additionalProperties": false,
+      "properties": {
+        "buildDate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "commit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inferenceError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inferenceReady": {
+          "type": "boolean"
+        },
+        "managementError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "managementReady": {
+          "type": "boolean"
+        },
+        "modelCount": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reachable": {
+          "type": "boolean"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "reachable",
+        "managementReady",
+        "inferenceReady",
+        "version",
+        "commit",
+        "buildDate",
+        "modelCount",
+        "managementError",
+        "inferenceError",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CpaIntegration": {
+      "additionalProperties": false,
+      "description": "Secret-free singleton configuration for the local CPA external integration.",
+      "properties": {
+        "accountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "baseUrl": {
+          "type": "string"
+        },
+        "baseUrlReadOnly": {
+          "type": "boolean"
+        },
+        "configured": {
+          "type": "boolean"
+        },
+        "currentOperation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "inferenceKeyConfigured": {
+          "type": "boolean"
+        },
+        "installedVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "latestVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "managementKeyConfigured": {
+          "type": "boolean"
+        },
+        "modelCount": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "modelsRefreshedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runtimeOwned": {
+          "type": "boolean"
+        },
+        "runtimeRunning": {
+          "type": "boolean"
+        },
+        "runtimeSupported": {
+          "type": "boolean"
+        },
+        "runtimeUnavailableReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updateAvailable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "configured",
+        "baseUrl",
+        "baseUrlReadOnly",
+        "managementKeyConfigured",
+        "inferenceKeyConfigured",
+        "enabled",
+        "accountId",
+        "modelCount",
+        "modelsRefreshedAt",
+        "runtimeSupported",
+        "runtimeOwned",
+        "runtimeRunning",
+        "installedVersion",
+        "latestVersion",
+        "updateAvailable",
+        "currentOperation",
+        "runtimeUnavailableReason",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CpaIntegrationUpdate": {
+      "additionalProperties": false,
+      "description": "PUT CPA configuration. Secret fields are write-only; omission preserves\ntheir existing encrypted values.",
+      "properties": {
+        "baseUrl": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "inferenceKey": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "managementKey": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CpaModel": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "ownedBy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "ownedBy"
+      ],
+      "type": "object"
+    },
+    "CpaModels": {
+      "additionalProperties": false,
+      "properties": {
+        "models": {
+          "items": {
+            "$ref": "#/$defs/CpaModel"
+          },
+          "type": "array"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "refreshedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sourceUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "models",
+        "sourceUrl",
+        "refreshedAt",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CpaOAuthMethod": {
+      "enum": [
+        "browser",
+        "device"
+      ],
+      "type": "string"
+    },
+    "CpaOAuthProvider": {
+      "enum": [
+        "codex",
+        "anthropic",
+        "antigravity",
+        "kimi",
+        "xai"
+      ],
+      "type": "string"
+    },
+    "CpaOAuthSessionDelete": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "state"
+      ],
+      "type": "object"
+    },
+    "CpaOAuthStart": {
+      "additionalProperties": false,
+      "properties": {
+        "expiresIn": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "flow": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "provider": {
+          "$ref": "#/$defs/CpaOAuthProvider"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "userCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "provider",
+        "state",
+        "url",
+        "flow",
+        "userCode",
+        "expiresIn",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CpaOAuthStartRequest": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "method": {
+          "$ref": "#/$defs/CpaOAuthMethod",
+          "default": "browser",
+          "description": "Browser is the backward-compatible default; device is managed Codex only."
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "provider": {
+          "$ref": "#/$defs/CpaOAuthProvider"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "provider"
+      ],
+      "type": "object"
+    },
+    "CpaOAuthStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "status",
+        "error",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CpaQuotaReset": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "authIndex": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "name",
+        "authIndex"
+      ],
+      "type": "object"
+    },
+    "CpaRuntime": {
+      "additionalProperties": false,
+      "description": "Secret-free CPA runtime snapshot. `supported` is true only on an\ninstalled desktop Host on Windows x64, macOS, or Linux x64.",
+      "properties": {
+        "assetSha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "baseUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "currentOperation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "currentVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "desiredRunning": {
+          "description": "Last explicit Start/Stop intent for the OCG-owned child. True means the\nnext Open Console Gateway process should restore that child once.",
+          "type": "boolean"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "installed": {
+          "type": "boolean"
+        },
+        "latestVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "owned": {
+          "type": "boolean"
+        },
+        "phase": {
+          "$ref": "#/$defs/CpaRuntimePhase"
+        },
+        "port": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "previousVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "running": {
+          "type": "boolean"
+        },
+        "supported": {
+          "type": "boolean"
+        },
+        "unavailableReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updateAvailable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "supported",
+        "unavailableReason",
+        "installed",
+        "running",
+        "desiredRunning",
+        "owned",
+        "currentVersion",
+        "previousVersion",
+        "assetSha256",
+        "port",
+        "baseUrl",
+        "phase",
+        "error",
+        "latestVersion",
+        "updateAvailable",
+        "currentOperation",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CpaRuntimeCheck": {
+      "additionalProperties": false,
+      "properties": {
+        "currentVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "latestVersion": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "releaseUrl": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "updateAvailable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "currentVersion",
+        "latestVersion",
+        "updateAvailable",
+        "releaseUrl",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CpaRuntimeInstall": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expectedVersion": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CpaRuntimeKey": {
+      "additionalProperties": false,
+      "properties": {
+        "fingerprint": {
+          "type": "string"
+        },
+        "hint": {
+          "type": "string"
+        },
+        "protected": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "fingerprint",
+        "hint",
+        "protected"
+      ],
+      "type": "object"
+    },
+    "CpaRuntimeKeyCreated": {
+      "additionalProperties": false,
+      "description": "One-time CPA client inference secret. The value is never persisted in this\nDTO after the creating response.",
+      "properties": {
+        "fingerprint": {
+          "type": "string"
+        },
+        "hint": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "secret": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "fingerprint",
+        "hint",
+        "secret",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CpaRuntimeKeys": {
+      "additionalProperties": false,
+      "properties": {
+        "keys": {
+          "items": {
+            "$ref": "#/$defs/CpaRuntimeKey"
+          },
+          "type": "array"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "keys",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CpaRuntimeLogs": {
+      "additionalProperties": false,
+      "properties": {
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stderr": {
+          "type": "string"
+        },
+        "stdout": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "stdout",
+        "stderr",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CpaRuntimePhase": {
+      "enum": [
+        "idle",
+        "checking",
+        "downloading",
+        "installing",
+        "starting",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "CpaTestRequest": {
+      "additionalProperties": false,
+      "description": "Operational connection test. Optional write-only values allow testing a\nfirst-time configuration without persisting it.",
+      "properties": {
+        "baseUrl": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inferenceKey": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "managementKey": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "CreditBalance": {
+      "additionalProperties": false,
+      "description": "One credit balance row as projected for provider usage. Distinct from the\nstored provider credit row.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "amount": {
+          "format": "double",
+          "type": "number"
+        },
+        "balanceKind": {
+          "type": "string"
+        },
+        "observedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId",
+        "balanceKind",
+        "amount",
+        "unit",
+        "source",
+        "observedAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "CustomEndpointContract": {
+      "additionalProperties": false,
+      "description": "One Custom API account scope. Distinct from built-in provider groups.",
+      "properties": {
+        "account": {
+          "$ref": "#/$defs/ProviderAccountChoice"
+        },
+        "card": {
+          "$ref": "#/$defs/CardCapabilitySummary"
+        },
+        "catalog": {
+          "$ref": "#/$defs/EffectiveCatalog"
+        },
+        "catalogRoutable": {
+          "type": "boolean"
+        },
+        "disabledReasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/EffectiveModelContract"
+          },
+          "type": "array"
+        },
+        "pricing": {
+          "$ref": "#/$defs/CapabilitySummary"
+        },
+        "productionInference": {
+          "type": "boolean"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "revision": {
+          "description": "Display revision for this endpoint, distinct from the top-level CAS token.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scopeId": {
+          "type": "string"
+        },
+        "scopeKind": {
+          "$ref": "#/$defs/ContractScopeKind"
+        },
+        "usage": {
+          "$ref": "#/$defs/CapabilitySummary"
+        }
+      },
+      "required": [
+        "scopeKind",
+        "scopeId",
+        "providerId",
+        "account",
+        "catalog",
+        "models",
+        "pricing",
+        "usage",
+        "card",
+        "catalogRoutable",
+        "productionInference",
+        "disabledReasons",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "CustomModelDiscoveryRequest": {
+      "additionalProperties": false,
+      "description": "POST `/custom/models/discover` body. Operational probe: CAS tokens must\nnot be sent. `apiKey` is write-only; an edit form may send `accountId`\ninstead so the handler can use the stored Custom key. Unknown fields are\nrejected.",
+      "properties": {
+        "accountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "apiKey": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "endpointUrl": {
+          "type": "string"
+        },
+        "upstreamProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        }
+      },
+      "required": [
+        "endpointUrl",
+        "upstreamProtocol"
+      ],
+      "type": "object"
+    },
+    "CustomModelDiscoveryResponse": {
+      "additionalProperties": false,
+      "description": "Custom model-list probe result. Identity tokens are the captured current\nrevision / process generation / pricing snapshot id; this response never\nechoes the supplied key or mutates control state.",
+      "properties": {
+        "models": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "models",
+        "truncated",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "DailyModelTokens": {
+      "additionalProperties": false,
+      "description": "One UTC day / model token bucket. `date` is `YYYY-MM-DD`.",
+      "properties": {
+        "date": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "tokens": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "date",
+        "model",
+        "tokens"
+      ],
+      "type": "object"
+    },
+    "DailyTokensByModel": {
+      "additionalProperties": false,
+      "description": "GET `/dashboard/daily-tokens-by-model` envelope.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/DailyModelTokens"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "DailyTokensQuery": {
+      "additionalProperties": false,
+      "description": "GET `/dashboard/daily-tokens-by-model` query. `days` may be omitted.",
+      "properties": {
+        "days": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "DashboardSummary": {
+      "additionalProperties": false,
+      "description": "Dashboard home totals. `availableAccounts` counts accounts that can\ncontribute at least one currently enabled production route.",
+      "properties": {
+        "availableAccounts": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gatewayRunning": {
+          "type": "boolean"
+        },
+        "monthCost": {
+          "format": "double",
+          "type": "number"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "todayCost": {
+          "format": "double",
+          "type": "number"
+        },
+        "totalAccounts": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "weekCost": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "totalAccounts",
+        "availableAccounts",
+        "gatewayRunning",
+        "todayCost",
+        "weekCost",
+        "monthCost",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "DesktopUpdate": {
+      "additionalProperties": false,
+      "description": "Desktop signed-update status machine as exposed by GET `/settings/update-status`\nand POST `/settings/install-update`. `total` and `error` stay required `T | null`.\nIdentity tokens are the live CAS pair and are not bumped by polling or install.",
+      "properties": {
+        "currentVersion": {
+          "type": "string"
+        },
+        "downloaded": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "installSupported": {
+          "type": "boolean"
+        },
+        "phase": {
+          "$ref": "#/$defs/DesktopUpdatePhase"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "phase",
+        "downloaded",
+        "total",
+        "error",
+        "currentVersion",
+        "installSupported",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "DesktopUpdatePhase": {
+      "description": "Update-status phase. Wire values stay lowercase, matching V2.",
+      "enum": [
+        "idle",
+        "checking",
+        "downloading",
+        "installing",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "EffectiveCatalog": {
+      "additionalProperties": false,
+      "description": "Merged model-id catalog for one contract scope.",
+      "properties": {
+        "models": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "refreshSupported": {
+          "type": "boolean"
+        },
+        "refreshedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "sourceUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "sourceUrl",
+        "refreshedAt",
+        "models",
+        "refreshSupported"
+      ],
+      "type": "object"
+    },
+    "EffectiveModelContract": {
+      "additionalProperties": false,
+      "description": "One model's preferred protocol and per-protocol evidence.",
+      "properties": {
+        "alias": {
+          "type": "string"
+        },
+        "disabledReasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "preferredProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "protocols": {
+          "$ref": "#/$defs/EffectiveModelProtocols"
+        },
+        "routable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "alias",
+        "modelId",
+        "preferredProtocol",
+        "protocols",
+        "routable",
+        "disabledReasons"
+      ],
+      "type": "object"
+    },
+    "EffectiveModelProtocols": {
+      "additionalProperties": false,
+      "description": "Per-protocol evidence keyed by snake_case protocol tokens. Missing\nprotocols serialize as `null` and must not be invented as available.",
+      "properties": {
+        "chat_completions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectiveProtocolEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "messages": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectiveProtocolEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "responses": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectiveProtocolEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "chat_completions",
+        "responses",
+        "messages"
+      ],
+      "type": "object"
+    },
+    "EffectiveProtocolEvidence": {
+      "additionalProperties": false,
+      "description": "Merged evidence for one upstream protocol on one model.",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "lastProbeAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastProbeError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastProbeResult": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProbeResultKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "override": {
+          "$ref": "#/$defs/ProtocolOverrideState"
+        },
+        "protocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "source": {
+          "$ref": "#/$defs/ContractEvidenceSource"
+        },
+        "verifiedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "protocol",
+        "available",
+        "enabled",
+        "source",
+        "verifiedAt",
+        "observedAt",
+        "lastProbeResult",
+        "lastProbeAt",
+        "lastProbeError",
+        "override"
+      ],
+      "type": "object"
+    },
+    "ForwardLog": {
+      "additionalProperties": false,
+      "description": "One redacted forward-log row plus native model identity. There is no\n`requestedAlias` field.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "accountName": {
+          "type": "string"
+        },
+        "attempt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cacheCreationTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "cachedTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "clientKeyId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "clientKeyName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "completionTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "cost": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "costState": {
+          "type": "string"
+        },
+        "credentialAccountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "diagnostic": true,
+        "durationMs": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "effectivePaidCostUsd": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "errorMessage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errorSource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errorStage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "httpStatus": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "localAdjustmentMultiplier": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "nativeCostCurrency": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativeCostUnit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativeCostValue": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "pricingRevisionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "promptTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "providerId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quotaDebit": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "quotaMultiplier": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "rawCostUsd": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestedModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resolvedAlias": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "route": {
+          "type": "string"
+        },
+        "routeAccountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "serviceTier": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string"
+        },
+        "upstreamModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "timestamp",
+        "model",
+        "accountId",
+        "accountName",
+        "routeAccountId",
+        "providerId",
+        "credentialAccountId",
+        "clientKeyId",
+        "clientKeyName",
+        "status",
+        "httpStatus",
+        "route",
+        "promptTokens",
+        "completionTokens",
+        "cachedTokens",
+        "cacheCreationTokens",
+        "cost",
+        "rawCostUsd",
+        "quotaDebit",
+        "effectivePaidCostUsd",
+        "pricingRevisionId",
+        "quotaMultiplier",
+        "localAdjustmentMultiplier",
+        "serviceTier",
+        "costState",
+        "errorMessage",
+        "requestId",
+        "attempt",
+        "errorSource",
+        "errorStage",
+        "durationMs",
+        "diagnostic",
+        "requestedModel",
+        "resolvedAlias",
+        "upstreamModel",
+        "nativeCostValue",
+        "nativeCostUnit",
+        "nativeCostCurrency"
+      ],
+      "type": "object"
+    },
+    "ForwardLogClientKey": {
+      "additionalProperties": false,
+      "description": "One historical client-key identity observed in forward logs.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "ForwardLogKeys": {
+      "additionalProperties": false,
+      "description": "GET `/logs/forward/keys` envelope. Includes disabled, deleted, and\ndangling identities so stored rows remain selectable.",
+      "properties": {
+        "keys": {
+          "items": {
+            "$ref": "#/$defs/ForwardLogClientKey"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "keys",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "ForwardLogModels": {
+      "additionalProperties": false,
+      "description": "GET `/logs/forward/models` envelope.",
+      "properties": {
+        "models": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "models",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "ForwardLogQuery": {
+      "additionalProperties": false,
+      "description": "GET `/logs/forward` query. Filter/sort tokens keep V2 values\n(`prompt_tokens`, `asc`/`desc`). Unknown fields are rejected.",
+      "properties": {
+        "accountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credentialAccountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "endTime": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "keyId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "offset": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "providerId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "routeAccountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sortBy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sortOrder": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startTime": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ForwardLogSummary": {
+      "additionalProperties": false,
+      "description": "Aggregates for the current forward-log filter, computed before paging.",
+      "properties": {
+        "cachedTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "completionTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "cost": {
+          "format": "double",
+          "type": "number"
+        },
+        "promptTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "totalRequests": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "totalRequests",
+        "promptTokens",
+        "completionTokens",
+        "cachedTokens",
+        "cost"
+      ],
+      "type": "object"
+    },
+    "ForwardLogs": {
+      "additionalProperties": false,
+      "description": "GET `/logs/forward` envelope.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ForwardLog"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "summary": {
+          "$ref": "#/$defs/ForwardLogSummary"
+        }
+      },
+      "required": [
+        "items",
+        "summary",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "GatewayLog": {
+      "additionalProperties": false,
+      "description": "One redacted gateway log row.",
+      "properties": {
+        "attempt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "category": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "diagnostic": true,
+        "durationMs": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "errorSource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errorStage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "level": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "level",
+        "category",
+        "message",
+        "createdAt",
+        "requestId",
+        "attempt",
+        "errorSource",
+        "errorStage",
+        "durationMs",
+        "diagnostic"
+      ],
+      "type": "object"
+    },
+    "GatewayLogQuery": {
+      "additionalProperties": false,
+      "description": "GET `/logs/gateway` query. All fields may be omitted.",
+      "properties": {
+        "category": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "level": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "GatewayLogs": {
+      "additionalProperties": false,
+      "description": "GET `/logs/gateway` envelope.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/GatewayLog"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "GatewayStatus": {
+      "additionalProperties": false,
+      "description": "Secret-free gateway listener view. The plaintext Key lives only on\n[`ConnectionInfo`].",
+      "properties": {
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "port": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "running": {
+          "type": "boolean"
+        },
+        "upstreamBaseUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "running",
+        "port",
+        "upstreamBaseUrl",
+        "lastError",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "InstallUpdate": {
+      "additionalProperties": false,
+      "description": "POST `/settings/install-update` body. CAS tokens and `expectedVersion` are\nrequired. Unknown fields are rejected. This mutation does not bump revision.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expectedVersion": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "expectedVersion"
+      ],
+      "type": "object"
+    },
+    "KeyCreate": {
+      "additionalProperties": false,
+      "description": "POST `/keys` body. CAS tokens are required; `name` is required. Unknown\nfields, including any Key material, are rejected.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "name"
+      ],
+      "type": "object"
+    },
+    "KeyUpdate": {
+      "additionalProperties": false,
+      "description": "PATCH `/keys/{id}` body. CAS tokens are required; `name` and `enabled`\nmay be omitted. Unknown fields, including any Key material, are rejected.",
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "ModelProtocolOverride": {
+      "additionalProperties": false,
+      "description": "One per-cell override entry in a batch update.",
+      "properties": {
+        "modelId": {
+          "type": "string"
+        },
+        "preferred": {
+          "description": "Remember this conversion-default protocol, even while disabled.\nOmitted or false preserves the saved choice; static reset clears it.",
+          "type": "boolean"
+        },
+        "protocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "state": {
+          "$ref": "#/$defs/ProtocolOverrideState"
+        }
+      },
+      "required": [
+        "modelId",
+        "protocol",
+        "state"
+      ],
+      "type": "object"
+    },
+    "ModelProtocolOverridesUpdate": {
+      "additionalProperties": false,
+      "description": "PUT a batch of per-model/per-protocol overrides for one contract scope.\nAn empty `overrides` array is rejected by handlers.",
+      "properties": {
+        "authorizeCredentialIds": {
+          "description": "Explicit consent to add this batch's enabled builtin endpoint grants.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "overrides": {
+          "items": {
+            "$ref": "#/$defs/ModelProtocolOverride"
+          },
+          "type": "array"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "overrides"
+      ],
+      "type": "object"
+    },
+    "MutationAck": {
+      "additionalProperties": false,
+      "description": "Successful control-plane mutation acknowledgement.",
+      "properties": {
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "MutationExpectation": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "OllamaBillingTier": {
+      "description": "Paid Ollama Cloud billing profile. Wire values are exactly `pro`, `max`,\nand `team`. Absence of a stored row (migrated/unconfigured) and non-Ollama\naccounts serialize the account field as `null`.",
+      "enum": [
+        "pro",
+        "max",
+        "team"
+      ],
+      "type": "string"
+    },
+    "PlatformAccount": {
+      "properties": {
+        "baseUrl": {
+          "type": "string"
+        },
+        "hasUserCredential": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/PlatformKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlatformSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "name",
+        "baseUrl",
+        "hasUserCredential",
+        "version",
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "PlatformAccounts": {
+      "properties": {
+        "accounts": {
+          "items": {
+            "$ref": "#/$defs/PlatformAccount"
+          },
+          "type": "array"
+        },
+        "links": {
+          "items": {
+            "$ref": "#/$defs/PlatformLink"
+          },
+          "type": "array"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accounts",
+        "links",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "PlatformCreate": {
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "baseUrl": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/PlatformKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "userCredential": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "kind",
+        "name",
+        "baseUrl"
+      ],
+      "type": "object"
+    },
+    "PlatformGroup": {
+      "properties": {
+        "autoGroups": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "platform": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriptionType": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verified": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "platform",
+        "subscriptionType",
+        "autoGroups",
+        "verified"
+      ],
+      "type": "object"
+    },
+    "PlatformKind": {
+      "enum": [
+        "new_api",
+        "sub2api"
+      ],
+      "type": "string"
+    },
+    "PlatformLink": {
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "group": {
+          "$ref": "#/$defs/PlatformGroup"
+        },
+        "platformAccountId": {
+          "type": "string"
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlatformSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "accountId",
+        "platformAccountId",
+        "group",
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "PlatformLinkWrite": {
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "group": {
+          "$ref": "#/$defs/PlatformGroup"
+        },
+        "platformAccountId": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "platformAccountId",
+        "group"
+      ],
+      "type": "object"
+    },
+    "PlatformModel": {
+      "properties": {
+        "groupId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "platform": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "A storefront row is never proof of inference permission.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "platform",
+        "groupId",
+        "source"
+      ],
+      "type": "object"
+    },
+    "PlatformPrice": {
+      "properties": {
+        "cacheRead": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "cacheWrite": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "currency": {
+          "type": "string"
+        },
+        "groupId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "input": {
+          "description": "All numeric rates are currency per token, never per million tokens.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "officialReference": {
+          "type": "boolean"
+        },
+        "output": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "unavailableReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "validUntil": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "model",
+        "groupId",
+        "currency",
+        "input",
+        "output",
+        "cacheRead",
+        "cacheWrite",
+        "source",
+        "officialReference",
+        "unavailableReason",
+        "validUntil"
+      ],
+      "type": "object"
+    },
+    "PlatformQuota": {
+      "properties": {
+        "expiresAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/PlatformQuotaKind"
+        },
+        "limit": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "period": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "remaining": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "resetsAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scopeId": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "unlimited": {
+          "type": "boolean"
+        },
+        "used": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "scopeId",
+        "unit",
+        "used",
+        "remaining",
+        "limit",
+        "unlimited",
+        "period",
+        "resetsAt",
+        "expiresAt",
+        "source"
+      ],
+      "type": "object"
+    },
+    "PlatformQuotaKind": {
+      "enum": [
+        "wallet",
+        "subscription",
+        "key_limit"
+      ],
+      "type": "string"
+    },
+    "PlatformRefresh": {
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "accountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "PlatformSnapshot": {
+      "properties": {
+        "billingPreference": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errors": {
+          "description": "Fixed component/error codes only, never upstream bodies or credentials.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "groups": {
+          "items": {
+            "$ref": "#/$defs/PlatformGroup"
+          },
+          "type": "array"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/PlatformModel"
+          },
+          "type": "array"
+        },
+        "observedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "prices": {
+          "items": {
+            "$ref": "#/$defs/PlatformPrice"
+          },
+          "type": "array"
+        },
+        "quotas": {
+          "items": {
+            "$ref": "#/$defs/PlatformQuota"
+          },
+          "type": "array"
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "walletOverflow": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "observedAt",
+        "stale",
+        "errors",
+        "quotas",
+        "models",
+        "prices",
+        "groups",
+        "billingPreference",
+        "walletOverflow"
+      ],
+      "type": "object"
+    },
+    "PlatformUpdate": {
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "userCredential": {
+          "description": "Omitted/null preserves, empty clears.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "name"
+      ],
+      "type": "object"
+    },
+    "PricingAdjustment": {
+      "additionalProperties": false,
+      "description": "One documented local adjustment on a model row.",
+      "properties": {
+        "appliesTo": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "multiplier": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "label",
+        "multiplier",
+        "appliesTo"
+      ],
+      "type": "object"
+    },
+    "PricingAvailability": {
+      "description": "Registry pricing availability. Wire values stay snake_case.",
+      "enum": [
+        "available",
+        "unavailable",
+        "not_applicable",
+        "unpriced"
+      ],
+      "type": "string"
+    },
+    "PricingLimits": {
+      "additionalProperties": false,
+      "description": "OpenCode Go 5h / week / month usage windows.",
+      "properties": {
+        "window5h": {
+          "format": "double",
+          "type": "number"
+        },
+        "windowMonth": {
+          "format": "double",
+          "type": "number"
+        },
+        "windowWeek": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "window5h",
+        "windowWeek",
+        "windowMonth"
+      ],
+      "type": "object"
+    },
+    "PricingModel": {
+      "additionalProperties": false,
+      "description": "One official model row, including optional cache-write and token-tier bounds.",
+      "properties": {
+        "adjustments": {
+          "items": {
+            "$ref": "#/$defs/PricingAdjustment"
+          },
+          "type": "array"
+        },
+        "cacheRead": {
+          "format": "double",
+          "type": "number"
+        },
+        "cacheWrite": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "input": {
+          "format": "double",
+          "type": "number"
+        },
+        "maxInputTokens": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "minInputTokens": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "output": {
+          "format": "double",
+          "type": "number"
+        },
+        "quotaMultiplier": {
+          "format": "double",
+          "type": "number"
+        },
+        "timeWindow": {
+          "$ref": "#/$defs/PricingTimeWindow"
+        },
+        "usage": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "modelId",
+        "displayName",
+        "input",
+        "output",
+        "cacheRead",
+        "cacheWrite",
+        "usage",
+        "quotaMultiplier",
+        "minInputTokens",
+        "maxInputTokens",
+        "timeWindow",
+        "adjustments"
+      ],
+      "type": "object"
+    },
+    "PricingMultiplierChange": {
+      "additionalProperties": false,
+      "description": "One model whose official multiplier differs from the active snapshot.",
+      "properties": {
+        "currentMultiplier": {
+          "format": "double",
+          "type": "number"
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "officialMultiplier": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "modelId",
+        "currentMultiplier",
+        "officialMultiplier"
+      ],
+      "type": "object"
+    },
+    "PricingMultiplierWrite": {
+      "additionalProperties": false,
+      "description": "One multiplier write. Handlers validate model id, range, and uniqueness.",
+      "properties": {
+        "modelId": {
+          "type": "string"
+        },
+        "multiplier": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "modelId",
+        "multiplier"
+      ],
+      "type": "object"
+    },
+    "PricingMultipliersUpdate": {
+      "additionalProperties": false,
+      "description": "PUT provider pricing-multipliers body. CAS tokens,\n`expectedPricingRevision` (the selected provider's active revision), and\n`multipliers` are required.",
+      "properties": {
+        "expectedPricingRevision": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "multipliers": {
+          "items": {
+            "$ref": "#/$defs/PricingMultiplierWrite"
+          },
+          "type": "array"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "expectedPricingRevision",
+        "multipliers"
+      ],
+      "type": "object"
+    },
+    "PricingRefresh": {
+      "additionalProperties": false,
+      "description": "Pricing refresh result. Nested `snapshot` is required; nullable fields emit `T | null`.",
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "multiplierChanges": {
+          "items": {
+            "$ref": "#/$defs/PricingMultiplierChange"
+          },
+          "type": "array"
+        },
+        "officialContentHash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "refreshStatus": {
+          "$ref": "#/$defs/PricingRefreshStatus"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/PricingSnapshot"
+        }
+      },
+      "required": [
+        "snapshot",
+        "refreshStatus",
+        "multiplierChanges",
+        "officialContentHash",
+        "error"
+      ],
+      "type": "object"
+    },
+    "PricingRefreshPolicy": {
+      "description": "Refresh confirmation policy. Wire values stay snake_case.",
+      "enum": [
+        "keep_current",
+        "use_official"
+      ],
+      "type": "string"
+    },
+    "PricingRefreshStatus": {
+      "description": "Refresh outcome. Wire values stay snake_case.",
+      "enum": [
+        "success",
+        "unchanged",
+        "needs_confirmation",
+        "failed_no_change"
+      ],
+      "type": "string"
+    },
+    "PricingRefreshUpdate": {
+      "additionalProperties": false,
+      "description": "POST pricing-refresh body. CAS tokens and `expectedPricingRevision` are\nrequired; `policy` and `expectedOfficialContentHash` may be omitted.",
+      "properties": {
+        "expectedOfficialContentHash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedPricingRevision": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PricingRefreshPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "expectedPricingRevision"
+      ],
+      "type": "object"
+    },
+    "PricingRevision": {
+      "additionalProperties": false,
+      "description": "Pricing snapshot identity. Distinct from the u64 settings CAS token.",
+      "properties": {
+        "pricingRevision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "PricingSnapshot": {
+      "additionalProperties": false,
+      "description": "Dashboard V3 pricing snapshot. Distinct from `kernel::pricing::PricingSnapshot`\nand from the stored provider pricing blob.\n\n`revision` is the settings CAS token. The official snapshot id is\n`pricingRevision` and must never be named `revision` on this wire type.",
+      "properties": {
+        "activatedAt": {
+          "type": "string"
+        },
+        "adjustmentPolicyVersion": {
+          "type": "string"
+        },
+        "contentHash": {
+          "type": "string"
+        },
+        "documentUpdatedAt": {
+          "type": "string"
+        },
+        "limits": {
+          "$ref": "#/$defs/PricingLimits"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/PricingModel"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sourceUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "revision",
+        "processGeneration",
+        "pricingRevision",
+        "activatedAt",
+        "documentUpdatedAt",
+        "sourceUrl",
+        "contentHash",
+        "adjustmentPolicyVersion",
+        "limits",
+        "models"
+      ],
+      "type": "object"
+    },
+    "PricingTimeWindow": {
+      "description": "Official Peak / Off-Peak row. Wire values stay snake_case.",
+      "enum": [
+        "always",
+        "off_peak",
+        "peak"
+      ],
+      "type": "string"
+    },
+    "ProbeResultKind": {
+      "description": "Last explicit probe outcome stored on evidence. Distinct from\n[`ProtocolProbeResult`].",
+      "enum": [
+        "success",
+        "failure"
+      ],
+      "type": "string"
+    },
+    "ProtocolOverrideState": {
+      "description": "Per-model/per-protocol override state. `auto` removes any persisted override.",
+      "enum": [
+        "auto",
+        "force_on",
+        "force_off"
+      ],
+      "type": "string"
+    },
+    "ProtocolProbeRequest": {
+      "additionalProperties": false,
+      "description": "POST protocol-probe body. `accountId` is a deprecated compatibility field\nand is ignored; the provider chooses eligible accounts automatically.\n`protocols` is the required explicit probe set.",
+      "properties": {
+        "accountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "protocols": {
+          "items": {
+            "$ref": "#/$defs/AccountUpstreamProtocol"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "modelId",
+        "protocols"
+      ],
+      "type": "object"
+    },
+    "ProtocolProbeResponse": {
+      "additionalProperties": false,
+      "description": "Protocol-probe mutation result. Identity strings are always present;\n`contract` is required `T | null` on the wire.",
+      "properties": {
+        "accountId": {
+          "description": "Deprecated compatibility field. Provider-level probes can use different\naccounts per protocol, so this is always `null`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contract": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectiveModelContract"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "results": {
+          "items": {
+            "$ref": "#/$defs/ProtocolProbeResult"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accountId",
+        "providerId",
+        "modelId",
+        "results",
+        "contract",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "ProtocolProbeResult": {
+      "additionalProperties": false,
+      "description": "One requested protocol's probe outcome.",
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "protocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "skipped": {
+          "type": "boolean"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "protocol",
+        "success",
+        "skipped",
+        "error"
+      ],
+      "type": "object"
+    },
+    "ProviderAccountChoice": {
+      "additionalProperties": false,
+      "description": "Secret-free account identity on a contract card.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "verificationStatus": {
+          "$ref": "#/$defs/AccountVerificationStatus"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "enabled",
+        "verificationStatus"
+      ],
+      "type": "object"
+    },
+    "ProviderCatalog": {
+      "additionalProperties": false,
+      "description": "Built-in Plan catalog. Model capabilities are a separate DTO.\n\n`pricingRevision` is the live pricing snapshot id, not a CAS token.",
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/ProviderCatalogEntry"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "entries",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "ProviderCatalogEntry": {
+      "additionalProperties": false,
+      "description": "One Provider Registry entry as a wire catalog row. Identity strings are\ndata copied from the static registry; this DTO does not define them.",
+      "properties": {
+        "authSchemes": {
+          "items": {
+            "$ref": "#/$defs/AccountAuthScheme"
+          },
+          "type": "array"
+        },
+        "creationAvailability": {
+          "type": "string"
+        },
+        "creationUnavailableReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credentialKind": {
+          "$ref": "#/$defs/AccountCredentialKind"
+        },
+        "deletable": {
+          "description": "Whether the dashboard may DELETE this entry. Same rules as `editable`.",
+          "type": "boolean"
+        },
+        "displayFamily": {
+          "type": "string"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "editable": {
+          "description": "Whether the dashboard may PATCH this entry. Always `false` for\n`builtin` rows; `true` for `preset`/`custom`.",
+          "type": "boolean"
+        },
+        "formFields": {
+          "items": {
+            "$ref": "#/$defs/ProviderCatalogFormField"
+          },
+          "type": "array"
+        },
+        "keyPrefix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "managedRegistration": {
+          "type": "boolean"
+        },
+        "manualUsageCalibration": {
+          "type": "boolean"
+        },
+        "modelAliases": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "modelSource": {
+          "type": "string"
+        },
+        "offering": {
+          "description": "Plan/api offering label carried by the catalog row. Builtin rows use\nthe sealed builtin map; dynamic rows mirror the persisted `offering`.",
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/ProviderOrigin",
+          "description": "Row provenance in the unified `providers` table. Wire values:\n`builtin` (sealed adapter), `preset` (preset-derived dynamic row),\n`custom` (manual dynamic row)."
+        },
+        "pricingAvailability": {
+          "type": "string"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "quotaScope": {
+          "$ref": "#/$defs/AccountQuotaScope"
+        },
+        "quotaUnit": {
+          "type": "string"
+        },
+        "routable": {
+          "type": "boolean"
+        },
+        "singleton": {
+          "type": "boolean"
+        },
+        "upstreamProtocols": {
+          "items": {
+            "$ref": "#/$defs/AccountUpstreamProtocol"
+          },
+          "type": "array"
+        },
+        "usageAvailability": {
+          "type": "string"
+        },
+        "verificationPolicy": {
+          "type": "string"
+        },
+        "verificationRuntimeAvailability": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "providerId",
+        "origin",
+        "editable",
+        "deletable",
+        "offering",
+        "displayName",
+        "displayFamily",
+        "credentialKind",
+        "quotaScope",
+        "singleton",
+        "creationAvailability",
+        "creationUnavailableReason",
+        "verificationPolicy",
+        "verificationRuntimeAvailability",
+        "routable",
+        "managedRegistration",
+        "pricingAvailability",
+        "usageAvailability",
+        "manualUsageCalibration",
+        "quotaUnit",
+        "modelSource",
+        "keyPrefix",
+        "authSchemes",
+        "upstreamProtocols",
+        "formFields",
+        "modelAliases"
+      ],
+      "type": "object"
+    },
+    "ProviderCatalogFormField": {
+      "additionalProperties": false,
+      "description": "One create-form field advertised by a catalog provider.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "immutableAfterCreate": {
+          "type": "boolean"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "required",
+        "immutableAfterCreate"
+      ],
+      "type": "object"
+    },
+    "ProviderContractGroup": {
+      "additionalProperties": false,
+      "description": "One built-in Provider contract scope.",
+      "properties": {
+        "accounts": {
+          "items": {
+            "$ref": "#/$defs/ProviderAccountChoice"
+          },
+          "type": "array"
+        },
+        "card": {
+          "$ref": "#/$defs/CardCapabilitySummary"
+        },
+        "catalog": {
+          "$ref": "#/$defs/EffectiveCatalog"
+        },
+        "catalogRoutable": {
+          "type": "boolean"
+        },
+        "disabledReasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/EffectiveModelContract"
+          },
+          "type": "array"
+        },
+        "pricing": {
+          "$ref": "#/$defs/CapabilitySummary"
+        },
+        "productionInference": {
+          "type": "boolean"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "revision": {
+          "description": "Display revision for this scope, distinct from the top-level CAS token.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scopeId": {
+          "type": "string"
+        },
+        "scopeKind": {
+          "$ref": "#/$defs/ContractScopeKind"
+        },
+        "staticProtocolSnapshotDate": {
+          "description": "The built-in provider's static protocol-evidence snapshot date. This is\n`null` when the scope has no restorable snapshot and is distinct from\ncatalog `refreshed_at`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "usage": {
+          "$ref": "#/$defs/CapabilitySummary"
+        }
+      },
+      "required": [
+        "scopeKind",
+        "scopeId",
+        "providerId",
+        "staticProtocolSnapshotDate",
+        "accounts",
+        "catalog",
+        "models",
+        "pricing",
+        "usage",
+        "card",
+        "catalogRoutable",
+        "productionInference",
+        "disabledReasons",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "ProviderContracts": {
+      "additionalProperties": false,
+      "description": "Effective provider-scope and custom-endpoint contracts.\n\nTop-level `revision` is the settings CAS token. Nested `revision` values\nare display-only and must not be sent as `expectedRevision`.",
+      "properties": {
+        "customEndpoints": {
+          "items": {
+            "$ref": "#/$defs/CustomEndpointContract"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providers": {
+          "items": {
+            "$ref": "#/$defs/ProviderContractGroup"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "providers",
+        "customEndpoints",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "ProviderDefinition": {
+      "additionalProperties": false,
+      "description": "Secret-free Provider definition. Surfaces both builtin and dynamic rows\nthrough the same wire shape. `endpointUrl` / `upstreamProtocol` /\n`authKind` are nullable because builtin rows leave them empty (the sealed\nadapter drives those at call time).",
+      "properties": {
+        "authKind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderDefinitionAuthKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Nullable: builtin rows leave the field empty."
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "deletable": {
+          "description": "Whether the dashboard may DELETE this row. Always `false` for builtin.",
+          "type": "boolean"
+        },
+        "editable": {
+          "description": "Whether the dashboard may PATCH this row. Always `false` for builtin.",
+          "type": "boolean"
+        },
+        "endpointUrl": {
+          "description": "Nullable: builtin rows leave the field empty.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "models": {
+          "description": "Empty for builtin rows; builtin catalogs feed the contract projection.",
+          "items": {
+            "$ref": "#/$defs/ProviderDefinitionModel"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "offering": {
+          "description": "Plan/api offering label persisted alongside the row.",
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/ProviderOrigin",
+          "description": "Row provenance: `builtin` | `preset` | `custom`."
+        },
+        "presetId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "upstreamProtocol": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountUpstreamProtocol"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Nullable: builtin rows leave the field empty."
+        }
+      },
+      "required": [
+        "origin",
+        "editable",
+        "deletable",
+        "offering",
+        "id",
+        "name",
+        "models",
+        "createdAt",
+        "updatedAt",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "ProviderDefinitionAuthKind": {
+      "description": "Auth kind owned by a Provider definition. Independent of protocol.\nNullable on the wire because builtin rows leave the field empty.",
+      "enum": [
+        "bearer",
+        "x-api-key",
+        "api-key",
+        "none"
+      ],
+      "type": "string"
+    },
+    "ProviderDefinitionCreate": {
+      "additionalProperties": false,
+      "description": "POST `/providers` body. Creates the definition and mappings.\nA Key on keyed auth creates the first account in the same write (Accounts add).\nKeyed auth may omit `key` to save the definition only; add Keys on Accounts.\nNo-auth always creates the singleton account.",
+      "properties": {
+        "accountName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authKind": {
+          "$ref": "#/$defs/ProviderDefinitionAuthKind"
+        },
+        "endpointUrl": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/ProviderDefinitionModel"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "presetId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "upstreamProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "name",
+        "endpointUrl",
+        "upstreamProtocol",
+        "authKind",
+        "models"
+      ],
+      "type": "object"
+    },
+    "ProviderDefinitionDiscoverRequest": {
+      "additionalProperties": false,
+      "description": "POST `/providers/models/discover` body. Operational probe; no CAS bump.",
+      "properties": {
+        "authKind": {
+          "$ref": "#/$defs/ProviderDefinitionAuthKind"
+        },
+        "endpointUrl": {
+          "type": "string"
+        },
+        "key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "upstreamProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        }
+      },
+      "required": [
+        "endpointUrl",
+        "upstreamProtocol",
+        "authKind"
+      ],
+      "type": "object"
+    },
+    "ProviderDefinitionDiscoverResponse": {
+      "additionalProperties": false,
+      "description": "Discovery result. Never includes the submitted Key.",
+      "properties": {
+        "models": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "models",
+        "truncated",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "ProviderDefinitionModel": {
+      "additionalProperties": false,
+      "properties": {
+        "publicModel": {
+          "type": "string"
+        },
+        "upstreamModel": {
+          "type": "string"
+        },
+        "upstreamOverride": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderModelUpstreamOverride"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "publicModel",
+        "upstreamModel"
+      ],
+      "type": "object"
+    },
+    "ProviderDefinitionMutation": {
+      "additionalProperties": false,
+      "description": "Mutation result for a Provider definition write.",
+      "properties": {
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "provider": {
+          "$ref": "#/$defs/ProviderDefinition"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "provider",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "ProviderDefinitionTestRequest": {
+      "additionalProperties": false,
+      "description": "POST `/providers/test` body. Operational probe; no CAS bump.",
+      "properties": {
+        "authKind": {
+          "$ref": "#/$defs/ProviderDefinitionAuthKind"
+        },
+        "endpointUrl": {
+          "type": "string"
+        },
+        "key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "publicModel": {
+          "type": "string"
+        },
+        "upstreamModel": {
+          "type": "string"
+        },
+        "upstreamProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        }
+      },
+      "required": [
+        "endpointUrl",
+        "upstreamProtocol",
+        "authKind",
+        "publicModel",
+        "upstreamModel"
+      ],
+      "type": "object"
+    },
+    "ProviderDefinitionTestResponse": {
+      "additionalProperties": false,
+      "description": "Model-test result. Never includes the submitted Key.",
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "ok",
+        "error",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "ProviderDefinitionUpdate": {
+      "additionalProperties": false,
+      "description": "PATCH `/providers/{providerId}` body. Full replacement of mutable config.",
+      "properties": {
+        "authKind": {
+          "$ref": "#/$defs/ProviderDefinitionAuthKind"
+        },
+        "endpointUrl": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/ProviderDefinitionModel"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "presetId": {
+          "description": "Omitted/null preserves provenance; an empty string clears it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "upstreamProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "name",
+        "endpointUrl",
+        "upstreamProtocol",
+        "authKind",
+        "models"
+      ],
+      "type": "object"
+    },
+    "ProviderModelCapability": {
+      "additionalProperties": false,
+      "description": "One Go protocol-table capability. GOAT must not reuse these rows.",
+      "properties": {
+        "modelId": {
+          "type": "string"
+        },
+        "preferredProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "supportedProtocols": {
+          "items": {
+            "$ref": "#/$defs/AccountUpstreamProtocol"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "modelId",
+        "providerId",
+        "preferredProtocol",
+        "supportedProtocols"
+      ],
+      "type": "object"
+    },
+    "ProviderModelUpstreamOverride": {
+      "additionalProperties": false,
+      "description": "One public-to-upstream mapping owned by a Provider definition.",
+      "properties": {
+        "endpointUrl": {
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        }
+      },
+      "required": [
+        "protocol",
+        "endpointUrl"
+      ],
+      "type": "object"
+    },
+    "ProviderModels": {
+      "additionalProperties": false,
+      "properties": {
+        "accountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "models": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "refreshedAt": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sourceUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "providerId",
+        "accountId",
+        "models",
+        "refreshedAt",
+        "sourceUrl",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "ProviderModelsRefreshUpdate": {
+      "additionalProperties": false,
+      "description": "Provider-scoped model-directory refresh. OpenCode Go requires a selected\naccount credential; Command Code exposes a public Provider catalog.",
+      "properties": {
+        "accountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "ProviderOrigin": {
+      "description": "Provenance of a row in the unified `providers` table. The column is\nadditive in v42 and never feeds routing decisions: builtin adapters stay\nsealed, and dynamic rows keep their `ConfigurableHttp` adapter path.",
+      "enum": [
+        "builtin",
+        "preset",
+        "custom"
+      ],
+      "type": "string"
+    },
+    "ProviderPricing": {
+      "additionalProperties": false,
+      "description": "Provider-scoped pricing. `snapshot` is required `T | null` and never\ncarries a raw stored pricing blob.",
+      "properties": {
+        "availability": {
+          "$ref": "#/$defs/PricingAvailability"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "providerPricingRevision": {
+          "type": "string"
+        },
+        "providerSnapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderPricingSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PricingSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "providerId",
+        "availability",
+        "snapshot",
+        "providerSnapshot",
+        "revision",
+        "processGeneration",
+        "pricingRevision",
+        "providerPricingRevision"
+      ],
+      "type": "object"
+    },
+    "ProviderPricingRefresh": {
+      "additionalProperties": false,
+      "description": "Result of refreshing the priced snapshot owned by one Provider. Provider\nfailures are isolated: this response never represents a cross-Provider\ntransaction.",
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "multiplierChanges": {
+          "items": {
+            "$ref": "#/$defs/PricingMultiplierChange"
+          },
+          "type": "array"
+        },
+        "officialContentHash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "providerPricingRevision": {
+          "type": "string"
+        },
+        "refreshStatus": {
+          "$ref": "#/$defs/PricingRefreshStatus"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PricingSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The refreshed Go snapshot. Provider-neutral plans expose their active\nsnapshot through the provider pricing read endpoint instead."
+        }
+      },
+      "required": [
+        "providerId",
+        "refreshStatus",
+        "multiplierChanges",
+        "officialContentHash",
+        "error",
+        "snapshot",
+        "revision",
+        "processGeneration",
+        "pricingRevision",
+        "providerPricingRevision"
+      ],
+      "type": "object"
+    },
+    "ProviderPricingRefreshUpdate": {
+      "additionalProperties": false,
+      "description": "POST Provider pricing-refresh body. The Provider-local pricing revision is\ndistinct from the global Go `pricingRevision` control token.",
+      "properties": {
+        "expectedOfficialContentHash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedProviderPricingRevision": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PricingRefreshPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "expectedProviderPricingRevision"
+      ],
+      "type": "object"
+    },
+    "ProviderPricingSnapshot": {
+      "additionalProperties": false,
+      "description": "Provider-neutral immutable pricing snapshot. GOAT uses this shape both for\ndashboard display and provider-scoped per-request cost attribution.",
+      "properties": {
+        "activatedAt": {
+          "type": "string"
+        },
+        "contentHash": {
+          "type": "string"
+        },
+        "documentUpdatedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "sourceUrl": {
+          "type": "string"
+        },
+        "values": {
+          "items": {
+            "$ref": "#/$defs/ProviderPricingValue"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "revision",
+        "activatedAt",
+        "documentUpdatedAt",
+        "sourceUrl",
+        "contentHash",
+        "evidence",
+        "values"
+      ],
+      "type": "object"
+    },
+    "ProviderPricingValue": {
+      "additionalProperties": false,
+      "properties": {
+        "cacheReadPerMillion": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "cacheWritePerMillion": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "currency": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "inputPerMillion": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "maxInputTokens": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "minInputTokens": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "modelAllowance": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "outputPerMillion": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "paidPlanPrice": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "planLimit": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "quotaMultiplier": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "timeWindow": {
+          "$ref": "#/$defs/PricingTimeWindow"
+        }
+      },
+      "required": [
+        "modelId",
+        "displayName",
+        "inputPerMillion",
+        "outputPerMillion",
+        "cacheReadPerMillion",
+        "cacheWritePerMillion",
+        "planLimit",
+        "modelAllowance",
+        "quotaMultiplier",
+        "paidPlanPrice",
+        "currency",
+        "minInputTokens",
+        "maxInputTokens",
+        "timeWindow"
+      ],
+      "type": "object"
+    },
+    "ProviderUsage": {
+      "additionalProperties": false,
+      "description": "GET `/accounts/{id}/provider-usage` body. Distinct from stored quota rows.\n\n`pricingRevision` is present when live Go quota windows use one captured\npricing snapshot.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "availability": {
+          "$ref": "#/$defs/UsageAvailability"
+        },
+        "creditBalances": {
+          "items": {
+            "$ref": "#/$defs/CreditBalance"
+          },
+          "type": "array"
+        },
+        "experimental": {
+          "type": "boolean"
+        },
+        "freeCooldownUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pricingRevision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "quotaWindows": {
+          "items": {
+            "$ref": "#/$defs/QuotaWindow"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "syncState": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageSyncState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "accountId",
+        "providerId",
+        "availability",
+        "experimental",
+        "freeCooldownUntil",
+        "quotaWindows",
+        "creditBalances",
+        "syncState",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "ProxyListDirection": {
+      "description": "Which listed models take the list-mode exception leg.",
+      "enum": [
+        "whitelist",
+        "blacklist"
+      ],
+      "type": "string"
+    },
+    "ProxyMode": {
+      "description": "Global outbound proxy mode. Wire values stay kebab-case, matching V2.",
+      "enum": [
+        "auto",
+        "manual",
+        "direct",
+        "list"
+      ],
+      "type": "string"
+    },
+    "ProxySupportedModel": {
+      "additionalProperties": false,
+      "description": "One known model backing the list-mode checkbox grid.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "preferredProtocol": {
+          "type": "string"
+        },
+        "zenFree": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "preferredProtocol",
+        "zenFree"
+      ],
+      "type": "object"
+    },
+    "ProxyTestRequest": {
+      "additionalProperties": false,
+      "description": "POST `/settings/test-proxy` body. This is an operational diagnostic, not a\ncontrol-plane mutation: CAS tokens are neither required nor accepted.\nUnknown fields, including an upstream URL, are rejected. `proxyUrl` and\n`proxyListDirection` may be omitted; omitted direction keeps the persisted\nlist-mode direction.",
+      "properties": {
+        "proxyListDirection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProxyListDirection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proxyMode": {
+          "$ref": "#/$defs/ProxyMode"
+        },
+        "proxyUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "proxyMode"
+      ],
+      "type": "object"
+    },
+    "ProxyTestResponse": {
+      "additionalProperties": false,
+      "description": "POST `/settings/test-proxy` result. Any diagnostic HTTP status is success.\nThe body never includes proxy credentials, the diagnostic URL, or the\nupstream payload. `revision` and `processGeneration` are captured before\nnetwork I/O and are not bumped.",
+      "properties": {
+        "latencyMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "proxyMode": {
+          "$ref": "#/$defs/ProxyMode"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "proxyMode",
+        "status",
+        "latencyMs",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "QuotaWindow": {
+      "additionalProperties": false,
+      "description": "One live or synthetic quota window. Distinct from `models::QuotaWindow`.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "calibrationOffset": {
+          "format": "double",
+          "type": "number"
+        },
+        "limitValue": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "observedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resetsAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "startedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unit": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "used": {
+          "format": "double",
+          "type": "number"
+        },
+        "windowKind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId",
+        "windowKind",
+        "used",
+        "limitValue",
+        "startedAt",
+        "resetsAt",
+        "calibrationOffset",
+        "unit",
+        "source",
+        "observedAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "RoutingMode": {
+      "description": "Account selection mode. Wire values stay kebab-case, matching V2.",
+      "enum": [
+        "strict-priority",
+        "sticky-global",
+        "round-robin"
+      ],
+      "type": "string"
+    },
+    "Settings": {
+      "additionalProperties": false,
+      "description": "Application settings contract. Never contains primary/sub Key plaintext\nor a field named `gatewayKey` / `key`.",
+      "properties": {
+        "autoStart": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "autoStartSupported": {
+          "type": "boolean"
+        },
+        "clientRootUrl": {
+          "type": "string"
+        },
+        "clientRootUrlFromEnv": {
+          "type": "boolean"
+        },
+        "connectTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "conversationSticky": {
+          "type": "boolean"
+        },
+        "dockVisibilitySupported": {
+          "type": "boolean"
+        },
+        "gatewayPort": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gatewayPortFromEnv": {
+          "type": "boolean"
+        },
+        "nonStreamTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "opencodeInviteUrl": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "proxyListDirection": {
+          "$ref": "#/$defs/ProxyListDirection"
+        },
+        "proxyListModels": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "proxyMode": {
+          "$ref": "#/$defs/ProxyMode"
+        },
+        "proxySupportedModels": {
+          "items": {
+            "$ref": "#/$defs/ProxySupportedModel"
+          },
+          "type": "array"
+        },
+        "proxyUrl": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "routingMode": {
+          "$ref": "#/$defs/RoutingMode"
+        },
+        "showDockIcon": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "streamIdleTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "processGeneration",
+        "gatewayPort",
+        "gatewayPortFromEnv",
+        "proxyMode",
+        "proxyUrl",
+        "proxyListDirection",
+        "proxyListModels",
+        "proxySupportedModels",
+        "opencodeInviteUrl",
+        "clientRootUrl",
+        "clientRootUrlFromEnv",
+        "autoStart",
+        "autoStartSupported",
+        "showDockIcon",
+        "dockVisibilitySupported",
+        "connectTimeoutSecs",
+        "nonStreamTimeoutSecs",
+        "streamIdleTimeoutSecs",
+        "routingMode",
+        "conversationSticky"
+      ],
+      "type": "object"
+    },
+    "SettingsUpdate": {
+      "additionalProperties": false,
+      "description": "PATCH-style settings write. `expectedRevision` and `processGeneration`\nare required; every other field may be omitted. Unknown fields, including\nany Key material, are rejected.",
+      "properties": {
+        "autoStart": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "clientRootUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "connectTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "conversationSticky": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gatewayPort": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "nonStreamTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "opencodeInviteUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "proxyListDirection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProxyListDirection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proxyListModels": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "proxyMode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProxyMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proxyUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "routingMode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RoutingMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "showDockIcon": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "streamIdleTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "UpdateCheck": {
+      "additionalProperties": false,
+      "description": "GET `/settings/check-update` result. Identity tokens are captured before\nthe GitHub await and are not bumped. `releaseUrl` is the fixed public\nGitHub latest-release page, never the outbound API URL or a loopback seam.",
+      "properties": {
+        "currentVersion": {
+          "type": "string"
+        },
+        "installSupported": {
+          "type": "boolean"
+        },
+        "latestVersion": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "releaseUrl": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "updateAvailable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "currentVersion",
+        "latestVersion",
+        "updateAvailable",
+        "releaseUrl",
+        "installSupported",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "UsageAvailability": {
+      "description": "Registry usage availability. Wire values stay snake_case.",
+      "enum": [
+        "available",
+        "unavailable",
+        "local_state"
+      ],
+      "type": "string"
+    },
+    "UsageMutation": {
+      "additionalProperties": false,
+      "description": "PATCH `/accounts/{id}/usage` envelope. Calibration does not bump revision.",
+      "properties": {
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "usage": {
+          "$ref": "#/$defs/UsageWindow"
+        }
+      },
+      "required": [
+        "usage",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "UsageRefresh": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/{id}/usage/refresh` result. Nested `usage` is the V3\nwindow projection; `revision` is captured after the shared coordinator\nreturns and is not advanced by official calibration.",
+      "properties": {
+        "lastSuccessAt": {
+          "type": "string"
+        },
+        "nextAllowedAt": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source": {
+          "type": "string"
+        },
+        "usage": {
+          "$ref": "#/$defs/UsageWindow"
+        }
+      },
+      "required": [
+        "usage",
+        "source",
+        "lastSuccessAt",
+        "nextAllowedAt",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "UsageRefreshThrottleError": {
+      "additionalProperties": false,
+      "description": "Typed 429 body for `POST /accounts/{id}/usage/refresh`.\n\nThis preserves the stable V3 error fields while making the endpoint-only\nabsolute retry time an explicit append-only contract instead of injecting\nan undeclared property into `V3Error`.",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "currentRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "nextAllowedAt": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "currentRevision",
+        "processGeneration",
+        "nextAllowedAt"
+      ],
+      "type": "object"
+    },
+    "UsageRefreshUpdate": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/{id}/usage/refresh` body. CAS tokens are required;\nunknown fields, including Key material, are rejected.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "UsageSyncState": {
+      "additionalProperties": false,
+      "description": "Official-usage sync metadata as projected for provider usage. Distinct from\nthe stored `provider_usage_sync_state` row.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "failureStreak": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "lastAttemptAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastExpeditedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastSuccessAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nextEligibleAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "accountId",
+        "lastSuccessAt",
+        "lastAttemptAt",
+        "nextEligibleAt",
+        "failureStreak",
+        "lastExpeditedAt"
+      ],
+      "type": "object"
+    },
+    "UsageWindow": {
+      "additionalProperties": false,
+      "description": "GET `/accounts/{id}/usage` body. Distinct from `models::UsageWindow`.\n\n`revision` is the settings CAS token and is not advanced by calibration.\n`pricingRevision` is present when the projection uses the live Go snapshot.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "pricingRevision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "resetsIn5h": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resetsInMonth": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resetsInWeek": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "window5h": {
+          "format": "double",
+          "type": "number"
+        },
+        "windowMonth": {
+          "format": "double",
+          "type": "number"
+        },
+        "windowWeek": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "accountId",
+        "window5h",
+        "windowWeek",
+        "windowMonth",
+        "resetsIn5h",
+        "resetsInWeek",
+        "resetsInMonth",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "V3Error": {
+      "additionalProperties": false,
+      "description": "Stable non-2xx JSON envelope for every Dashboard V3 error.",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "currentRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "currentRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "ZenFreeModel": {
+      "additionalProperties": false,
+      "description": "One persisted Zen Free model and its de-suffixed alias.",
+      "properties": {
+        "alias": {
+          "type": "string"
+        },
+        "modelId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "modelId",
+        "alias"
+      ],
+      "type": "object"
+    },
+    "ZenFreeModels": {
+      "additionalProperties": false,
+      "description": "Last successful Zen Free catalog snapshot. `sourceUrl` is the public\nofficial directory, not a credential.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/ZenFreeModel"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "refreshedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sourceUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId",
+        "models",
+        "refreshedAt",
+        "sourceUrl",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "ZenFreeSettings": {
+      "additionalProperties": false,
+      "description": "Zen Free enablement after a successful settings write.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accountId",
+        "enabled",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "ZenFreeSettingsUpdate": {
+      "additionalProperties": false,
+      "description": "PATCH Zen Free enablement. CAS tokens and `enabled` are required.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "enabled"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/ControlRevision"
+    },
+    {
+      "$ref": "#/$defs/MutationAck"
+    },
+    {
+      "$ref": "#/$defs/MutationExpectation"
+    },
+    {
+      "$ref": "#/$defs/PricingRevision"
+    },
+    {
+      "$ref": "#/$defs/V3Error"
+    },
+    {
+      "$ref": "#/$defs/ConnectionInfo"
+    },
+    {
+      "$ref": "#/$defs/ConnectionSubKey"
+    },
+    {
+      "$ref": "#/$defs/Settings"
+    },
+    {
+      "$ref": "#/$defs/SettingsUpdate"
+    },
+    {
+      "$ref": "#/$defs/ProxySupportedModel"
+    },
+    {
+      "$ref": "#/$defs/KeyCreate"
+    },
+    {
+      "$ref": "#/$defs/KeyUpdate"
+    },
+    {
+      "$ref": "#/$defs/Account"
+    },
+    {
+      "$ref": "#/$defs/AccountList"
+    },
+    {
+      "$ref": "#/$defs/AccountMutation"
+    },
+    {
+      "$ref": "#/$defs/AccountCustomConfig"
+    },
+    {
+      "$ref": "#/$defs/AccountModelCapability"
+    },
+    {
+      "$ref": "#/$defs/AccountCreate"
+    },
+    {
+      "$ref": "#/$defs/AccountManagedCreate"
+    },
+    {
+      "$ref": "#/$defs/AccountModelTestRequest"
+    },
+    {
+      "$ref": "#/$defs/AccountModelTestResponse"
+    },
+    {
+      "$ref": "#/$defs/AccountUpdate"
+    },
+    {
+      "$ref": "#/$defs/AccountOrder"
+    },
+    {
+      "$ref": "#/$defs/AccountSetupUpdate"
+    },
+    {
+      "$ref": "#/$defs/AccountCustomConfigUpdate"
+    },
+    {
+      "$ref": "#/$defs/AccountCustomConfigWrite"
+    },
+    {
+      "$ref": "#/$defs/AccountModelCapabilitiesUpdate"
+    },
+    {
+      "$ref": "#/$defs/AccountModelCapabilityWrite"
+    },
+    {
+      "$ref": "#/$defs/ProviderCatalog"
+    },
+    {
+      "$ref": "#/$defs/ProviderCatalogEntry"
+    },
+    {
+      "$ref": "#/$defs/ProviderCatalogFormField"
+    },
+    {
+      "$ref": "#/$defs/ProviderModelCapability"
+    },
+    {
+      "$ref": "#/$defs/ZenFreeSettings"
+    },
+    {
+      "$ref": "#/$defs/ZenFreeSettingsUpdate"
+    },
+    {
+      "$ref": "#/$defs/ZenFreeModels"
+    },
+    {
+      "$ref": "#/$defs/ZenFreeModel"
+    },
+    {
+      "$ref": "#/$defs/ProviderContracts"
+    },
+    {
+      "$ref": "#/$defs/ProviderContractGroup"
+    },
+    {
+      "$ref": "#/$defs/CustomEndpointContract"
+    },
+    {
+      "$ref": "#/$defs/ProviderAccountChoice"
+    },
+    {
+      "$ref": "#/$defs/EffectiveCatalog"
+    },
+    {
+      "$ref": "#/$defs/EffectiveModelContract"
+    },
+    {
+      "$ref": "#/$defs/EffectiveModelProtocols"
+    },
+    {
+      "$ref": "#/$defs/EffectiveProtocolEvidence"
+    },
+    {
+      "$ref": "#/$defs/CapabilitySummary"
+    },
+    {
+      "$ref": "#/$defs/CardCapabilitySummary"
+    },
+    {
+      "$ref": "#/$defs/ModelProtocolOverridesUpdate"
+    },
+    {
+      "$ref": "#/$defs/ModelProtocolOverride"
+    },
+    {
+      "$ref": "#/$defs/ProtocolOverrideState"
+    },
+    {
+      "$ref": "#/$defs/ProtocolProbeRequest"
+    },
+    {
+      "$ref": "#/$defs/ProtocolProbeResult"
+    },
+    {
+      "$ref": "#/$defs/ProtocolProbeResponse"
+    },
+    {
+      "$ref": "#/$defs/PricingSnapshot"
+    },
+    {
+      "$ref": "#/$defs/PricingLimits"
+    },
+    {
+      "$ref": "#/$defs/PricingModel"
+    },
+    {
+      "$ref": "#/$defs/PricingAdjustment"
+    },
+    {
+      "$ref": "#/$defs/PricingTimeWindow"
+    },
+    {
+      "$ref": "#/$defs/PricingRefresh"
+    },
+    {
+      "$ref": "#/$defs/PricingRefreshStatus"
+    },
+    {
+      "$ref": "#/$defs/PricingMultiplierChange"
+    },
+    {
+      "$ref": "#/$defs/PricingRefreshUpdate"
+    },
+    {
+      "$ref": "#/$defs/PricingRefreshPolicy"
+    },
+    {
+      "$ref": "#/$defs/PricingMultipliersUpdate"
+    },
+    {
+      "$ref": "#/$defs/PricingMultiplierWrite"
+    },
+    {
+      "$ref": "#/$defs/ProviderPricing"
+    },
+    {
+      "$ref": "#/$defs/PricingAvailability"
+    },
+    {
+      "$ref": "#/$defs/GatewayStatus"
+    },
+    {
+      "$ref": "#/$defs/ApplicationModels"
+    },
+    {
+      "$ref": "#/$defs/DashboardSummary"
+    },
+    {
+      "$ref": "#/$defs/DailyModelTokens"
+    },
+    {
+      "$ref": "#/$defs/DailyTokensByModel"
+    },
+    {
+      "$ref": "#/$defs/GatewayLog"
+    },
+    {
+      "$ref": "#/$defs/GatewayLogs"
+    },
+    {
+      "$ref": "#/$defs/ForwardLog"
+    },
+    {
+      "$ref": "#/$defs/ForwardLogSummary"
+    },
+    {
+      "$ref": "#/$defs/ForwardLogs"
+    },
+    {
+      "$ref": "#/$defs/ForwardLogClientKey"
+    },
+    {
+      "$ref": "#/$defs/ForwardLogKeys"
+    },
+    {
+      "$ref": "#/$defs/ForwardLogModels"
+    },
+    {
+      "$ref": "#/$defs/GatewayLogQuery"
+    },
+    {
+      "$ref": "#/$defs/ForwardLogQuery"
+    },
+    {
+      "$ref": "#/$defs/DailyTokensQuery"
+    },
+    {
+      "$ref": "#/$defs/UsageWindow"
+    },
+    {
+      "$ref": "#/$defs/UsageMutation"
+    },
+    {
+      "$ref": "#/$defs/AccountUsageUpdate"
+    },
+    {
+      "$ref": "#/$defs/ProviderUsage"
+    },
+    {
+      "$ref": "#/$defs/QuotaWindow"
+    },
+    {
+      "$ref": "#/$defs/CreditBalance"
+    },
+    {
+      "$ref": "#/$defs/UsageSyncState"
+    },
+    {
+      "$ref": "#/$defs/UsageAvailability"
+    },
+    {
+      "$ref": "#/$defs/AuthStatus"
+    },
+    {
+      "$ref": "#/$defs/AuthRegister"
+    },
+    {
+      "$ref": "#/$defs/AuthLogin"
+    },
+    {
+      "$ref": "#/$defs/AuthLogout"
+    },
+    {
+      "$ref": "#/$defs/ProxyTestRequest"
+    },
+    {
+      "$ref": "#/$defs/ProxyTestResponse"
+    },
+    {
+      "$ref": "#/$defs/CustomModelDiscoveryRequest"
+    },
+    {
+      "$ref": "#/$defs/CustomModelDiscoveryResponse"
+    },
+    {
+      "$ref": "#/$defs/AccountVerify"
+    },
+    {
+      "$ref": "#/$defs/BrowserMode"
+    },
+    {
+      "$ref": "#/$defs/BrowserTarget"
+    },
+    {
+      "$ref": "#/$defs/BrowserCapabilities"
+    },
+    {
+      "$ref": "#/$defs/BrowserOpenRequest"
+    },
+    {
+      "$ref": "#/$defs/BrowserOpen"
+    },
+    {
+      "$ref": "#/$defs/UpdateCheck"
+    },
+    {
+      "$ref": "#/$defs/DesktopUpdate"
+    },
+    {
+      "$ref": "#/$defs/InstallUpdate"
+    },
+    {
+      "$ref": "#/$defs/AccountManagedKeyVerify"
+    },
+    {
+      "$ref": "#/$defs/UsageRefresh"
+    },
+    {
+      "$ref": "#/$defs/UsageRefreshUpdate"
+    },
+    {
+      "$ref": "#/$defs/UsageRefreshThrottleError"
+    },
+    {
+      "$ref": "#/$defs/ProviderModelsRefreshUpdate"
+    },
+    {
+      "$ref": "#/$defs/ProviderModels"
+    },
+    {
+      "$ref": "#/$defs/ProviderPricingSnapshot"
+    },
+    {
+      "$ref": "#/$defs/ProviderPricingValue"
+    },
+    {
+      "$ref": "#/$defs/ProviderPricingRefresh"
+    },
+    {
+      "$ref": "#/$defs/ProviderPricingRefreshUpdate"
+    },
+    {
+      "$ref": "#/$defs/AccountExportRequest"
+    },
+    {
+      "$ref": "#/$defs/AccountExport"
+    },
+    {
+      "$ref": "#/$defs/AccountImportPreviewRequest"
+    },
+    {
+      "$ref": "#/$defs/AccountImportPreview"
+    },
+    {
+      "$ref": "#/$defs/AccountImportPreviewItem"
+    },
+    {
+      "$ref": "#/$defs/AccountImportDisposition"
+    },
+    {
+      "$ref": "#/$defs/AccountImportRequest"
+    },
+    {
+      "$ref": "#/$defs/AccountImportResult"
+    },
+    {
+      "$ref": "#/$defs/CpaIntegration"
+    },
+    {
+      "$ref": "#/$defs/CpaIntegrationUpdate"
+    },
+    {
+      "$ref": "#/$defs/CpaTestRequest"
+    },
+    {
+      "$ref": "#/$defs/CpaConnectionReport"
+    },
+    {
+      "$ref": "#/$defs/CpaModel"
+    },
+    {
+      "$ref": "#/$defs/CpaModels"
+    },
+    {
+      "$ref": "#/$defs/CpaAccounts"
+    },
+    {
+      "$ref": "#/$defs/CpaAccount"
+    },
+    {
+      "$ref": "#/$defs/CpaAccountStatusUpdate"
+    },
+    {
+      "$ref": "#/$defs/CpaAccountDelete"
+    },
+    {
+      "$ref": "#/$defs/CpaQuotaReset"
+    },
+    {
+      "$ref": "#/$defs/CpaOAuthProvider"
+    },
+    {
+      "$ref": "#/$defs/CpaOAuthStartRequest"
+    },
+    {
+      "$ref": "#/$defs/CpaOAuthStart"
+    },
+    {
+      "$ref": "#/$defs/CpaOAuthStatus"
+    },
+    {
+      "$ref": "#/$defs/CpaOAuthSessionDelete"
+    },
+    {
+      "$ref": "#/$defs/CpaCliImportSource"
+    },
+    {
+      "$ref": "#/$defs/CpaCliImports"
+    },
+    {
+      "$ref": "#/$defs/CpaCliImportRequest"
+    },
+    {
+      "$ref": "#/$defs/CpaCliImportResult"
+    },
+    {
+      "$ref": "#/$defs/CpaRuntime"
+    },
+    {
+      "$ref": "#/$defs/CpaRuntimePhase"
+    },
+    {
+      "$ref": "#/$defs/CpaRuntimeCheck"
+    },
+    {
+      "$ref": "#/$defs/CpaRuntimeInstall"
+    },
+    {
+      "$ref": "#/$defs/CpaRuntimeLogs"
+    },
+    {
+      "$ref": "#/$defs/CpaRuntimeKey"
+    },
+    {
+      "$ref": "#/$defs/CpaRuntimeKeys"
+    },
+    {
+      "$ref": "#/$defs/CpaRuntimeKeyCreated"
+    },
+    {
+      "$ref": "#/$defs/ProviderDefinitionAuthKind"
+    },
+    {
+      "$ref": "#/$defs/ProviderDefinitionModel"
+    },
+    {
+      "$ref": "#/$defs/ProviderDefinition"
+    },
+    {
+      "$ref": "#/$defs/ProviderDefinitionCreate"
+    },
+    {
+      "$ref": "#/$defs/ProviderDefinitionUpdate"
+    },
+    {
+      "$ref": "#/$defs/ProviderDefinitionMutation"
+    },
+    {
+      "$ref": "#/$defs/ProviderDefinitionDiscoverRequest"
+    },
+    {
+      "$ref": "#/$defs/ProviderDefinitionDiscoverResponse"
+    },
+    {
+      "$ref": "#/$defs/ProviderDefinitionTestRequest"
+    },
+    {
+      "$ref": "#/$defs/ProviderDefinitionTestResponse"
+    },
+    {
+      "$ref": "#/$defs/OllamaBillingTier"
+    },
+    {
+      "$ref": "#/$defs/PlatformAccounts"
+    },
+    {
+      "$ref": "#/$defs/PlatformAccount"
+    },
+    {
+      "$ref": "#/$defs/PlatformLink"
+    },
+    {
+      "$ref": "#/$defs/PlatformSnapshot"
+    },
+    {
+      "$ref": "#/$defs/PlatformCreate"
+    },
+    {
+      "$ref": "#/$defs/PlatformUpdate"
+    },
+    {
+      "$ref": "#/$defs/PlatformLinkWrite"
+    },
+    {
+      "$ref": "#/$defs/PlatformRefresh"
+    }
+  ],
+  "title": "DashboardApiV3"
+}
