@@ -1,8 +1,9 @@
 //! models.dev public catalog as the lowest-priority model metadata source.
 //!
-//! When a route has neither an operator declaration nor upstream-observed
-//! metadata, facts from <https://models.dev> fill the gap so downstream
-//! clients (DSH) still see verified context windows and modalities. The
+//! Fields a route never learned — no operator declaration, and no
+//! upstream-observed value for that field — are filled from
+//! <https://models.dev> so downstream clients (DSH) still see verified context
+//! windows and modalities; operator declarations stay untouched. The
 //! catalog is cached in a local setting and refreshed in the background; a
 //! failed refresh keeps the previous cache and never blocks `/v1/models`.
 //! Matching is exact upstream id, then its last path segment, then the exact

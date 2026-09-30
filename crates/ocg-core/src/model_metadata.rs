@@ -98,6 +98,49 @@ impl ModelMetadata {
         }
         Ok(())
     }
+
+    /// Supply still-unknown fields from a lower-priority source, leaving every
+    /// known fact untouched. Returns true when at least one field was filled.
+    pub(crate) fn fill_missing(&mut self, fallback: &ModelMetadata) -> bool {
+        let mut filled = false;
+        if self.name.is_none() {
+            self.name = fallback.name.clone();
+            filled |= self.name.is_some();
+        }
+        if self.context_window.is_none() {
+            self.context_window = fallback.context_window;
+            filled |= self.context_window.is_some();
+        }
+        if self.max_output_tokens.is_none() {
+            self.max_output_tokens = fallback.max_output_tokens;
+            filled |= self.max_output_tokens.is_some();
+        }
+        if self.input_modalities.is_none() {
+            self.input_modalities = fallback.input_modalities.clone();
+            filled |= self.input_modalities.is_some();
+        }
+        if self.output_modalities.is_none() {
+            self.output_modalities = fallback.output_modalities.clone();
+            filled |= self.output_modalities.is_some();
+        }
+        if self.reasoning.is_none() {
+            self.reasoning = fallback.reasoning;
+            filled |= self.reasoning.is_some();
+        }
+        if self.reasoning_efforts.is_none() {
+            self.reasoning_efforts = fallback.reasoning_efforts.clone();
+            filled |= self.reasoning_efforts.is_some();
+        }
+        if self.tool_calling.is_none() {
+            self.tool_calling = fallback.tool_calling;
+            filled |= self.tool_calling.is_some();
+        }
+        if self.parallel_tool_calls.is_none() {
+            self.parallel_tool_calls = fallback.parallel_tool_calls;
+            filled |= self.parallel_tool_calls.is_some();
+        }
+        filled
+    }
 }
 
 /// Deliberately stores only whitelisted facts, never raw upstream JSON.
@@ -158,23 +201,34 @@ pub(crate) fn effective(
     }
 }
 
-/// Effective facts with the models.dev catalog as the last resort. Priority
-/// is operator declaration > upstream observation > models.dev > unknown;
-/// a public-catalog hit never overrides a route-specific fact.
+/// Effective facts with the models.dev catalog filling fields the route never
+/// learned. Per-field priority is operator declaration > upstream observation
+/// > models.dev > unknown: a public-catalog hit supplies only absent facts and
+/// never overrides a route-specific one, and an operator declaration stays
+/// untouched. The bool reports whether models.dev contributed at least one
+/// field, so callers can credit it alongside the primary source.
 pub(crate) fn effective_with_catalog(
     records: &[Record],
     modelsdev: &crate::modelsdev::ModelsDevCatalog,
     destination: &Destination,
     model: &CatalogModel,
-) -> (ModelMetadata, &'static str) {
-    let (metadata, source) = effective(records, destination, model);
-    if source != "unknown" {
-        return (metadata, source);
+) -> (ModelMetadata, &'static str, bool) {
+    let (mut metadata, source) = effective(records, destination, model);
+    if source == "operator" {
+        return (metadata, source, false);
     }
-    match crate::modelsdev::lookup(modelsdev, &model.public_model, &model.upstream_model) {
-        Some(found) => (found.clone(), "modelsdev"),
-        None => (metadata, source),
-    }
+    let Some(found) =
+        crate::modelsdev::lookup(modelsdev, &model.public_model, &model.upstream_model)
+    else {
+        return (metadata, source, false);
+    };
+    let filled = metadata.fill_missing(found);
+    let source = if source == "unknown" {
+        "modelsdev"
+    } else {
+        source
+    };
+    (metadata, source, filled)
 }
 
 pub(crate) fn declare(
@@ -468,10 +522,13 @@ pub(crate) fn enrich(
                         id,
                     )
                 {
-                    let (metadata, source) =
+                    let (metadata, source, modelsdev_filled) =
                         effective_with_catalog(&records, modelsdev, destination, model);
                     candidates.push(metadata);
                     sources.insert(source);
+                    if modelsdev_filled {
+                        sources.insert("modelsdev");
+                    }
                 }
             }
         }
