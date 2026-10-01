@@ -3780,6 +3780,26 @@
       },
       "type": "object"
     },
+    "ModelMetadataCatalog": {
+      "additionalProperties": false,
+      "description": "Every destination's effective metadata in one payload. The alias page\nrenders per-mapping capabilities from this single read; fanning the\nper-destination endpoint out across rows would serialize N full routing\nsnapshots behind the settings lock.",
+      "properties": {
+        "destinations": {
+          "items": {
+            "$ref": "#/$defs/DestinationModelMetadata"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "destinations"
+      ],
+      "type": "object"
+    },
     "ModelResolutionDto": {
       "description": "Which client model names may resolve to a destination mapping.",
       "enum": [
@@ -6334,6 +6354,9 @@
     },
     {
       "$ref": "#/$defs/DestinationModelMetadataUpdate"
+    },
+    {
+      "$ref": "#/$defs/ModelMetadataCatalog"
     },
     {
       "$ref": "#/$defs/DestinationCatalogModelUpdate"

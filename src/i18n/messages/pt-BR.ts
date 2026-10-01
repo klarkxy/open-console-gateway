@@ -680,4 +680,7 @@ export const ptBRMessages = {
   "本月已用": "Usado neste mês",
   "账号绑定已变更": "O vínculo da conta mudou",
   "手工余额": "Saldo manual",
+  "能力": "Capacidades",
+  "去声明": "Declarar",
+  "加载失败": "Falha ao carregar",
 } satisfies Messages;

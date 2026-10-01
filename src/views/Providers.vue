@@ -185,6 +185,7 @@
               :title="t('连接测试失败：{error}', { error: probeError })"
             />
             <ProviderModelMatrix
+              ref="modelMatrix"
               :key="activeScope.key"
               :scope="activeScope"
               :target-model="targetModel"
@@ -418,6 +419,7 @@
                   :title="t('连接测试失败：{error}', { error: probeError })"
                 />
                 <ProviderModelMatrix
+                  ref="modelMatrix"
                   :key="activeScope.key"
                   :scope="activeScope"
                   :target-model="targetModel"
@@ -1132,6 +1134,10 @@ function currentUrlIsProvidersView(): boolean {
 const targetModel = computed(() => currentUrlIsProvidersView()
   ? readProviderPageQuery(routeQuerySearch("providers", route.query)).model : null);
 
+const modelMatrix = ref<InstanceType<typeof ProviderModelMatrix> | null>(null);
+/** One-shot deep-link target: open the capabilities editor for this model. */
+const pendingCapabilitiesOpen = ref<string | null>(null);
+
 function selectionProjectionReady(): boolean {
   return providersSelectionProjectionReady({
     destinationsLoaded: destinationsStore.loaded,
@@ -1216,6 +1222,8 @@ function applyFromQuery(
   }
   if (action === "defer") return action;
   applySelection(resolved, fellBackNotice);
+  // Capture the one-shot capabilities target before writeUrl strips it.
+  if (query.capabilities) pendingCapabilitiesOpen.value = query.capabilities;
   const candidate = query.model ? "models" : query.tab ?? activeTab.value;
   activeTab.value = candidate;
   writeUrl();
@@ -2221,7 +2229,12 @@ function probeResultUrl(error: string | null): string {
 // the Accounts add deep link) is not ours to apply. Same-view query changes
 // (history back/forward) arrive here instead of onActivated.
 watch(() => route.query, () => {
-  if (!currentUrlIsProvidersView()) return;
+  if (!currentUrlIsProvidersView()) {
+    // A pending one-shot target dies with its route instead of firing on a
+    // later unrelated visit.
+    pendingCapabilitiesOpen.value = null;
+    return;
+  }
   freshRequiredLoadSucceeded = false;
   const action = applyFromQuery();
   // Same-view history to an unresolved target has no onActivated; refresh so
@@ -2234,6 +2247,15 @@ watch(() => route.query, () => {
 watch([selectedConnectionId, selectedDestinationId], () => {
   catalogRefreshError.value = "";
   if (!addKeyBusy.value) showAddKeyModal.value = false;
+});
+
+// The capabilities deep link opens the editor once the selected scope's
+// matrix has mounted; applyFromQuery captured the one-shot parameter and
+// writeUrl has since stripped it from the URL.
+watch([pendingCapabilitiesOpen, () => activeScope.value?.key, modelMatrix], ([model]) => {
+  if (!model || !activeScope.value || !modelMatrix.value) return;
+  pendingCapabilitiesOpen.value = null;
+  modelMatrix.value.openMetadataEditor(model);
 });
 
 watch(selectedConnection, (connection) => {

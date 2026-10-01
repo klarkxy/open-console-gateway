@@ -202,7 +202,7 @@ fn declarations_are_bound_to_the_exact_destination_route_and_model_mapping() {
 }
 
 #[test]
-fn modelsdev_fills_only_routes_without_route_specific_facts() {
+fn modelsdev_fills_only_fields_the_route_never_learned() {
     let destination = route_fixture();
     let model = &destination.catalog[0];
     let mut catalog = crate::modelsdev::ModelsDevCatalog::default();
@@ -217,40 +217,63 @@ fn modelsdev_fills_only_routes_without_route_specific_facts() {
 
     // No record: models.dev supplies the facts.
     let records = vec![];
-    let (metadata, source) = effective_with_catalog(&records, &catalog, &destination, model);
+    let (metadata, source, filled) =
+        effective_with_catalog(&records, &catalog, &destination, model);
     assert_eq!(source, "modelsdev");
+    assert!(filled);
     assert_eq!(metadata.context_window, Some(64000));
 
-    // An upstream observation outranks the public catalog.
+    // An upstream observation outranks the public catalog per field: known
+    // fields stay route-specific, fields it never learned are filled.
     let mut records = vec![];
     record_for(&mut records, &destination, model).observed = Some(ModelMetadata {
         context_window: Some(8000),
         ..Default::default()
     });
-    let (metadata, source) = effective_with_catalog(&records, &catalog, &destination, model);
+    let (metadata, source, filled) =
+        effective_with_catalog(&records, &catalog, &destination, model);
     assert_eq!(source, "upstream");
+    assert!(filled);
     assert_eq!(metadata.context_window, Some(8000));
+    assert_eq!(
+        metadata.input_modalities,
+        Some(vec!["text".into(), "image".into()])
+    );
 
-    // An operator declaration outranks both.
+    // An observation that already knows everything leaves nothing to fill.
+    record_for(&mut records, &destination, model).observed = Some(ModelMetadata {
+        context_window: Some(8000),
+        input_modalities: Some(vec!["text".into()]),
+        ..Default::default()
+    });
+    let (metadata, source, filled) =
+        effective_with_catalog(&records, &catalog, &destination, model);
+    assert_eq!(source, "upstream");
+    assert!(!filled);
+    assert_eq!(metadata.input_modalities, Some(vec!["text".into()]));
+
+    // An operator declaration outranks both and stays untouched.
     record_for(&mut records, &destination, model).declared = Some(ModelMetadata {
         context_window: Some(16000),
         ..Default::default()
     });
-    let (metadata, source) = effective_with_catalog(&records, &catalog, &destination, model);
+    let (metadata, source, filled) =
+        effective_with_catalog(&records, &catalog, &destination, model);
     assert_eq!(source, "operator");
+    assert!(!filled);
     assert_eq!(metadata.context_window, Some(16000));
+    assert_eq!(metadata.input_modalities, None);
 
     // A route change invalidates the record; models.dev still applies.
     let mut changed = destination.clone();
     changed.base_url = Some("https://other.test/v1".into());
-    let (metadata, source) = effective_with_catalog(&records, &catalog, &changed, model);
+    let (metadata, source, _) = effective_with_catalog(&records, &catalog, &changed, model);
     assert_eq!(source, "modelsdev");
     assert_eq!(metadata.context_window, Some(64000));
 
     // No catalog entry and no route-specific record: stays unknown.
     let empty = crate::modelsdev::ModelsDevCatalog::default();
-    assert_eq!(
-        effective_with_catalog(&[], &empty, &destination, model).1,
-        "unknown"
-    );
+    let (_, source, filled) = effective_with_catalog(&[], &empty, &destination, model);
+    assert_eq!(source, "unknown");
+    assert!(!filled);
 }

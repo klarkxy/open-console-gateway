@@ -11,6 +11,7 @@ use serde_json::{Map, Value, json};
 
 pub use super::model_metadata::{
     DestinationModelMetadata, DestinationModelMetadataEntry, DestinationModelMetadataUpdate,
+    ModelMetadataCatalog,
 };
 pub use crate::billing_types::{
     BillingStatus, CreditBalanceCorrection, CreditCalibrationRequest, CreditConfigurationWrite,
@@ -142,6 +143,7 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "DestinationModelMetadata",
     "DestinationModelMetadataEntry",
     "DestinationModelMetadataUpdate",
+    "ModelMetadataCatalog",
     "DestinationCatalogModelUpdate",
     "DestinationModelTestRequest",
     "DestinationModelTestResult",
@@ -1909,6 +1911,7 @@ pub fn contract_schema() -> Value {
     include_type::<ModelMetadata>(&mut serialize);
     include_type::<DestinationModelMetadata>(&mut serialize);
     include_type::<DestinationModelMetadataEntry>(&mut serialize);
+    include_type::<ModelMetadataCatalog>(&mut serialize);
     include_type::<DestinationDto>(&mut serialize);
     include_type::<ModelResolutionDto>(&mut serialize);
     include_type::<DestinationPatchResult>(&mut serialize);

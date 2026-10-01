@@ -347,7 +347,25 @@ function bodyFor(pathname: string): object {
     return { revision: { revision: 12, processGeneration: 42 }, unpublished: [] };
   }
   if (pathname === "/routing/cards") return destinationBody();
+  if (pathname === "/model-metadata") return modelMetadataCatalogBody();
   throw new Error(`unexpected alias request ${pathname}`);
+}
+
+/** Same aggregate catalog the alias page reads once for every destination. */
+function modelMetadataCatalogBody() {
+  return {
+    destinations: [{
+      destinationId: "dest-dyn",
+      models: [{
+        publicModel: DYNAMIC,
+        upstreamModel: "upstream-dynamic-sentinel",
+        source: "modelsdev",
+        metadata: { inputModalities: ["text"], outputModalities: ["text"] },
+      }],
+      revision: { revision: 12, processGeneration: 42, pricingRevision: "p1" },
+    }],
+    revision: { revision: 12, processGeneration: 42, pricingRevision: "p1" },
+  };
 }
 
 type Dashboard = { requests: Recorded[]; failures: FailureMap };

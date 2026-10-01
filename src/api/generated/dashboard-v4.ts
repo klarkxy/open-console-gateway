@@ -80,6 +80,7 @@ export type DashboardApiV4 =
   | DestinationModelMetadata
   | DestinationModelMetadataEntry
   | DestinationModelMetadataUpdate
+  | ModelMetadataCatalog
   | DestinationCatalogModelUpdate
   | DestinationModelTestRequest
   | DestinationModelTestResult
@@ -1513,6 +1514,16 @@ export interface DestinationModelMetadataUpdate {
   metadata?: ModelMetadata | null;
   processGeneration: number;
   publicModel: string;
+}
+/**
+ * Every destination's effective metadata in one payload. The alias page
+ * renders per-mapping capabilities from this single read; fanning the
+ * per-destination endpoint out across rows would serialize N full routing
+ * snapshots behind the settings lock.
+ */
+export interface ModelMetadataCatalog {
+  destinations: DestinationModelMetadata[];
+  revision: ControlRevision;
 }
 /**
  * Required process-scoped mutation precondition.

@@ -679,4 +679,7 @@ export const esESMessages = {
   "本月已用": "Usado este mes",
   "账号绑定已变更": "El vínculo de la cuenta cambió",
   "手工余额": "Saldo manual",
+  "能力": "Capacidades",
+  "去声明": "Declarar",
+  "加载失败": "Error al cargar",
 } satisfies Messages;

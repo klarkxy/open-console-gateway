@@ -679,4 +679,7 @@ export const deDEMessages = {
   "本月已用": "Diesen Monat verbraucht",
   "账号绑定已变更": "Kontobindung hat sich geändert",
   "手工余额": "Manueller Saldo",
+  "能力": "Fähigkeiten",
+  "去声明": "Deklarieren",
+  "加载失败": "Laden fehlgeschlagen",
 } satisfies Messages;

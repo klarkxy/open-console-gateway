@@ -680,4 +680,7 @@ export const frFRMessages = {
   "本月已用": "Utilisé ce mois",
   "账号绑定已变更": "La liaison du compte a changé",
   "手工余额": "Solde manuel",
+  "能力": "Capacités",
+  "去声明": "Déclarer",
+  "加载失败": "Échec du chargement",
 } satisfies Messages;
