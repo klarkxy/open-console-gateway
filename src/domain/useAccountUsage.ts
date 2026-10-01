@@ -2,36 +2,43 @@ import { computed, getCurrentScope, nextTick, onScopeDispose, ref, watch } from 
 import type { ComputedRef, Ref } from "vue";
 import { useMessage } from "naive-ui";
 import { DashboardRequestError, dashboardApi } from "../api/dashboard.ts";
-import type { Account, UsageWindow } from "../api/dashboard";
+import type { Account } from "../api/dashboard";
 import type { BillingStatus, ProviderUsage } from "../api/billing.ts";
 import type {
   ProviderCatalogEntry,
   ProviderQuotaWindow,
   ProviderUsageResponse,
 } from "../api/providers.ts";
-import { useBillingStore } from "../stores/billing.ts";
+import { useBillingStore, type BillingSlot } from "../stores/billing.ts";
 import {
   defaultResetsInMinutes,
   isUsageLimitReached,
+  manualEditorWindowKeys,
+  manualUsageEditorEnabled,
   mergeUsageEdit,
   normalizeUsagePercent,
   resetsFieldsToMinutes,
   resetsFirstFieldValue,
   resetsInMinutesForSave,
   resetsSecondFieldValue,
-  usagePercentFromCost,
   WINDOW_FULL_MINUTES,
   windowResetsAt,
 } from "./accounts-usage.ts";
-import type { UsageEditState, UsageKey } from "./accounts-usage.ts";
-import { isLegacyGoFallbackPlan } from "./account-capabilities.ts";
+import type {
+  ManualCalibrationPlan,
+  ObservedUsageWindow,
+  UsageEditState,
+  UsageKey,
+} from "./accounts-usage.ts";
 import { accountIsReady } from "./account-display.ts";
 import {
   BILLING_ERROR_KEYS,
   billingBinding,
   billingManualCalibration,
   presentedUsageOf,
+  usageWindowFromManualReceipt,
   usageWindowFromProviderUsage,
+  type ManualQuotaReceipt,
 } from "./billing.ts";
 import { findPlanDefinition } from "./plans.ts";
 import { t } from "../i18n/index.ts";
@@ -39,15 +46,24 @@ import { dashboardErrorDetail } from "../utils/errors.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
 import { ACCOUNT_AUTO_REFRESH_MS, billingObservedAt, timestampMs, type AccountRefreshTarget } from "./accounts-auto-refresh.ts";
 
-export type AccountUsageEdits = Record<UsageKey, UsageEditState>;
+const USAGE_LIMIT_ORDER = ["window_5h", "window_week", "window_month"] as const satisfies readonly UsageKey[];
+
+const USAGE_LIMIT_LABELS = {
+  window_5h: "5 小时",
+  window_week: "本周",
+  window_month: "本月",
+} as const satisfies Record<UsageKey, "5 小时" | "本周" | "本月">;
+
+export type AccountUsageEdits = Partial<Record<UsageKey, UsageEditState>>;
 
 export type UsageLimitView = { key: UsageKey; label: string; limit: number };
 
 /**
  * Account-list usage editors. Server snapshots live in useBillingStore;
  * this composable keeps calibration drafts, messages, and focus, and
- * projects usageMap / providerUsageMap from BillingStatus.usage. The
- * whole-table computeds serve list-level consumers; row-level consumers
+ * projects usageMap from a full usage snapshot or a quota-only receipt.
+ * providerUsageMap stays on the full snapshot. Whole-table computeds serve
+ * list-level consumers; row-level consumers
  * should subscribe to the per-account `*For(accountId)` selectors so one
  * account's update does not invalidate every row.
  */
@@ -61,6 +77,8 @@ export function useAccountUsage(
     officialBalanceFor?: (account: Account) => boolean;
     /** Manual companion work, including model-only accounts; covered by the refresh lock. */
     afterUsageRefresh?: (accountId: string, isCurrent: () => boolean) => Promise<void>;
+    /** Loaded destination plan. Absent plans fall back to sealed manual windows. */
+    calibrationPlanFor?: (accountId: string) => ManualCalibrationPlan | null | undefined;
   },
 ) {
   const message = options?.message ?? useMessage();
@@ -72,19 +90,6 @@ export function useAccountUsage(
   let disposed = false;
   if (getCurrentScope()) onScopeDispose(() => { disposed = true; });
 
-  const quotaLimits = computed(() => billing.pricingLimits);
-  const quotaLimitsLoading = computed(() => billing.pricingLoading);
-  const quotaLimitsError = computed(() => billing.pricingError);
-  const usageLimits = computed<UsageLimitView[]>(() => {
-    const limits = quotaLimits.value;
-    if (!limits) return [];
-    return [
-      { key: "window_5h", label: t("5 小时"), limit: limits.window_5h },
-      { key: "window_week", label: t("本周"), limit: limits.window_week },
-      { key: "window_month", label: t("本月"), limit: limits.window_month },
-    ];
-  });
-
   const providerUsageMap = computed(() => {
     const out: Record<string, ProviderUsageResponse> = {};
     for (const [id, slot] of Object.entries(billing.byId)) {
@@ -95,9 +100,9 @@ export function useAccountUsage(
   });
 
   const usageMap = computed(() => {
-    const out: Record<string, UsageWindow> = {};
+    const out: Record<string, ObservedUsageWindow> = {};
     for (const [id, slot] of Object.entries(billing.byId)) {
-      out[id] = usageProjectionFor(id, slot.status?.usage ?? null);
+      out[id] = observedUsageFor(id, slot);
     }
     return out;
   });
@@ -128,15 +133,32 @@ export function useAccountUsage(
   // references across loading-only writes, so one account's begin/write cycle
   // never changes another account's projected reference — whole-table map
   // entries and row memos keyed on them stay valid.
-  const usageProjections = new Map<string, { source: ProviderUsage | null; window: UsageWindow }>();
+  const usageProjections = new Map<string, { source: ProviderUsage | null; window: ObservedUsageWindow }>();
+  const receiptProjections = new Map<string, { source: ManualQuotaReceipt; window: ObservedUsageWindow }>();
   const presentedProjections = new Map<string, { source: ProviderUsage | null; presented: ProviderUsageResponse | null }>();
 
-  function usageProjectionFor(accountId: string, source: ProviderUsage | null): UsageWindow {
+  function usageProjectionFor(accountId: string, source: ProviderUsage | null): ObservedUsageWindow {
     const cached = usageProjections.get(accountId);
     if (cached && cached.source === source) return cached.window;
     const window = usageWindowFromProviderUsage(source, accountId);
     usageProjections.set(accountId, { source, window });
     return window;
+  }
+
+  function receiptProjectionFor(accountId: string, source: ManualQuotaReceipt): ObservedUsageWindow {
+    const cached = receiptProjections.get(accountId);
+    if (cached && cached.source === source) return cached.window;
+    const window = usageWindowFromManualReceipt(source, accountId);
+    receiptProjections.set(accountId, { source, window });
+    return window;
+  }
+
+  function observedUsageFor(accountId: string, slot: BillingSlot | undefined): ObservedUsageWindow {
+    const source = slot?.status?.usage ?? null;
+    if (source) return usageProjectionFor(accountId, source);
+    const receipt = slot?.manualReceipt ?? null;
+    if (receipt && receipt.windows.length > 0) return receiptProjectionFor(accountId, receipt);
+    return usageProjectionFor(accountId, null);
   }
 
   function presentedProjectionFor(
@@ -159,7 +181,7 @@ export function useAccountUsage(
   // instead of accumulating new ones, and the projection cache above keeps
   // its value referentially stable when the account's usage did not change.
   const providerUsageSelectors = new Map<string, ComputedRef<ProviderUsageResponse | null>>();
-  const usageSelectors = new Map<string, ComputedRef<UsageWindow>>();
+  const usageSelectors = new Map<string, ComputedRef<ObservedUsageWindow>>();
   const usageLoadingSelectors = new Map<string, ComputedRef<boolean>>();
   const usageLoadErrorSelectors = new Map<string, ComputedRef<string | null>>();
   const usageRefreshLoadingSelectors = new Map<string, ComputedRef<boolean>>();
@@ -175,12 +197,12 @@ export function useAccountUsage(
     return selector;
   }
 
-  function usageFor(accountId: string): ComputedRef<UsageWindow> {
+  function usageFor(accountId: string): ComputedRef<ObservedUsageWindow> {
     const cached = usageSelectors.get(accountId);
     if (cached) return cached;
-    const selector = computed(() => usageProjectionFor(
+    const selector = computed(() => observedUsageFor(
       accountId,
-      billing.slotFor(accountId).value?.status?.usage ?? null,
+      billing.slotFor(accountId).value,
     ));
     usageSelectors.set(accountId, selector);
     return selector;
@@ -214,19 +236,23 @@ export function useAccountUsage(
     return selector;
   }
 
+  function calibrationPlan(account: Account): ManualCalibrationPlan | null {
+    return options?.calibrationPlanFor?.(account.id) ?? null;
+  }
+
   function usageLimitsFor(account: Account): UsageLimitView[] {
     const presented = providerUsageFor(account.id).value;
-    if (presented?.quota_windows.length) return limitsFromProviderWindows(presented.quota_windows);
-    const surface = findPlanDefinition(account.provider_id, catalog.value);
-    const limits = surface && isLegacyGoFallbackPlan(surface, catalog.value)
-      ? quotaLimits.value
-      : null;
-    if (!limits) return [];
-    return [
-      { key: "window_5h", label: t("5 小时"), limit: limits.window_5h },
-      { key: "window_week", label: t("本周"), limit: limits.window_week },
-      { key: "window_month", label: t("本月"), limit: limits.window_month },
-    ];
+    const observed = presented ? limitsFromProviderWindows(presented.quota_windows) : [];
+    if (!usageCapabilities(account).manual) return observed;
+    const byKey = new Map(observed.map((limit) => [limit.key, limit]));
+    for (const key of manualEditorWindowKeys(account.provider_id, calibrationPlan(account))) {
+      if (byKey.has(key)) continue;
+      byKey.set(key, { key, label: t(USAGE_LIMIT_LABELS[key]), limit: 100 });
+    }
+    return USAGE_LIMIT_ORDER.flatMap((key) => {
+      const limit = byKey.get(key);
+      return limit ? [limit] : [];
+    });
   }
 
   function bindingFor(account: Account): string {
@@ -253,17 +279,28 @@ export function useAccountUsage(
   } {
     const slot = billing.slotFor(account.id).value;
     const status = slot?.boundVersion === bindingFor(account) ? slot.status : null;
+    const plan = calibrationPlan(account);
     if (status) {
       return {
         providerWindows: Boolean(status.usage) || status.model === "quota",
         refresh: status.officialRefresh,
-        manual: billingManualCalibration(status),
+        manual: manualUsageEditorEnabled({
+          providerId: account.provider_id,
+          plan,
+          reportedManual: billingManualCalibration(status),
+          hasCreditMeter: Boolean(status.credits),
+        }),
       };
     }
     const surface = findPlanDefinition(account.provider_id, catalog.value);
-    const manual = surface?.manual_usage_calibration === true;
     const refresh = surface?.usage_availability === "available";
     const creditBalance = options?.officialBalanceFor?.(account) === true;
+    const manual = manualUsageEditorEnabled({
+      providerId: account.provider_id,
+      plan,
+      reportedManual: surface?.manual_usage_calibration === true || plan?.manual_calibration === true,
+      hasCreditMeter: false,
+    });
     return {
       providerWindows: refresh || manual || creditBalance,
       refresh: refresh || creditBalance,
@@ -273,30 +310,31 @@ export function useAccountUsage(
 
   function limitsFromProviderWindows(windows: ProviderQuotaWindow[]): UsageLimitView[] {
     const byKind = new Map(windows.map((window) => [window.window_kind, window]));
-    const definitions: Array<[UsageKey, string, string]> = [
-      ["window_5h", "five_hours", t("5 小时")],
-      ["window_week", "week", t("本周")],
-      ["window_month", "month", t("本月")],
+    const definitions: Array<[UsageKey, string]> = [
+      ["window_5h", "five_hours"],
+      ["window_week", "week"],
+      ["window_month", "month"],
     ];
-    return definitions.flatMap(([key, kind, label]) => {
-      const limit = byKind.get(kind)?.limit_value;
-      return typeof limit === "number" && Number.isFinite(limit) && limit > 0
-        ? [{ key, label, limit }]
-        : [];
+    return definitions.flatMap(([key, kind]) => {
+      const window = kind === "month"
+        ? byKind.get("month") ?? byKind.get("monthly")
+        : byKind.get(kind);
+      if (!window || !Number.isFinite(window.used)) return [];
+      const stored = window.limit_value;
+      const limit = typeof stored === "number" && Number.isFinite(stored) && stored > 0 ? stored : 100;
+      return [{ key, label: t(USAGE_LIMIT_LABELS[key]), limit }];
     });
   }
 
   const usageEdits = ref<Record<string, AccountUsageEdits>>({});
 
-  function getUsage(accountId: string): UsageWindow {
+  function getUsage(accountId: string): ObservedUsageWindow {
     return usageFor(accountId).value;
   }
 
-  function usageLimit(accountId: string, key: UsageKey): number {
-    const account = accounts.value.find(({ id }) => id === accountId);
-    return account
-      ? usageLimitsFor(account).find((limit) => limit.key === key)?.limit ?? 0
-      : 0;
+  function observedDraftPercent(usage: ObservedUsageWindow, key: UsageKey): number | null {
+    const value = usage[key];
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
   }
 
   function accountUsageLimitReached(account: Account, key: UsageKey): boolean {
@@ -304,7 +342,6 @@ export function useAccountUsage(
   }
 
   function hasAvailableUsageEditor(account: Account): boolean {
-    if (usageLoadingFor(account.id).value || usageLoadErrorFor(account.id).value) return false;
     return usageLimitsFor(account).some(({ key }) => !accountUsageLimitReached(account, key));
   }
 
@@ -318,25 +355,37 @@ export function useAccountUsage(
     });
   }
 
-  function usageEditsFromWindow(usage: UsageWindow): AccountUsageEdits {
+  function blankUsageEdit(): UsageEditState {
+    return {
+      draft: null,
+      saved: null,
+      saving: false,
+      error: null,
+      resets_in_minutes_draft: null,
+      resets_at_saved: null,
+      resets_dirty: false,
+    };
+  }
+
+  function usageEditsFromWindow(usage: ObservedUsageWindow): AccountUsageEdits {
     const account = accounts.value.find(({ id }) => id === usage.account_id);
     const limits = account ? usageLimitsFor(account) : [];
-    return Object.fromEntries(limits.map(({ key, limit }) => {
-      const percent = usagePercentFromCost(usage[key], limit);
-      const resetsInMin = defaultResetsInMinutes(usage, key, now.value);
+    return Object.fromEntries(limits.map(({ key }) => {
+      const percent = observedDraftPercent(usage, key);
+      if (percent === null) return [key, blankUsageEdit()];
       return [key, {
         draft: percent,
         saved: percent,
         saving: false,
         error: null,
-        resets_in_minutes_draft: resetsInMin,
+        resets_in_minutes_draft: defaultResetsInMinutes(usage, key, now.value),
         resets_at_saved: windowResetsAt(usage, key),
         resets_dirty: false,
       }];
     })) as AccountUsageEdits;
   }
 
-  function syncUsageEdits(accountId: string, usage: UsageWindow) {
+  function syncUsageEdits(accountId: string, usage: ObservedUsageWindow) {
     const existing = usageEdits.value[accountId];
     if (!existing) {
       usageEdits.value[accountId] = usageEditsFromWindow(usage);
@@ -344,9 +393,26 @@ export function useAccountUsage(
     }
     const account = accounts.value.find(({ id }) => id === accountId);
     const limits = account ? usageLimitsFor(account) : [];
-    for (const { key, limit } of limits) {
-      const saved = usagePercentFromCost(usage[key], limit);
+    for (const { key } of limits) {
+      const saved = observedDraftPercent(usage, key);
       const edit = existing[key];
+      if (saved === null) {
+        // Same-binding refresh only. A clean acknowledged editor follows a
+        // snapshot that has no observation. An unsaved, reset-dirty, or
+        // in-flight draft stays. A binding change replaces this record first.
+        if (
+          edit
+          && !edit.saving
+          && !edit.resets_dirty
+          && edit.draft === edit.saved
+          && edit.saved !== null
+        ) {
+          existing[key] = blankUsageEdit();
+        } else if (!edit) {
+          existing[key] = blankUsageEdit();
+        }
+        continue;
+      }
       const wasActuallyReset = account && isUsageLimitReached(account, key, now.value);
       if (!edit) {
         const created = mergeUsageEdit(undefined, saved, Boolean(wasActuallyReset));
@@ -365,9 +431,16 @@ export function useAccountUsage(
   }
 
   function updateUsageDraft(accountId: string, key: UsageKey, value: number | null) {
-    const edit = usageEdits.value[accountId]?.[key];
-    if (!edit || edit.saving || value === null) return;
-    edit.draft = normalizeUsagePercent(value);
+    const account = accounts.value.find(({ id }) => id === accountId);
+    const allowed = Boolean(account) && usageLimitsFor(account!).some((limit) => limit.key === key);
+    let edit = usageEdits.value[accountId]?.[key];
+    if (edit?.saving || (!edit && !allowed)) return;
+    if (!edit) {
+      const bucket = usageEdits.value[accountId] ?? (usageEdits.value[accountId] = {});
+      edit = blankUsageEdit();
+      bucket[key] = edit;
+    }
+    edit.draft = value === null || !Number.isFinite(value) ? null : normalizeUsagePercent(value);
   }
 
   function updateResetsFirstField(accountId: string, key: UsageKey, value: number | null) {
@@ -395,7 +468,7 @@ export function useAccountUsage(
   async function saveUsage(accountId: string, key: UsageKey) {
     const account = accounts.value.find(({ id }) => id === accountId);
     const edit = usageEdits.value[accountId]?.[key];
-    if (!account || !edit || edit.saving) return;
+    if (!account || !edit || edit.saving || edit.draft === null) return;
     const currentRequest = requestStillCurrent(account);
     const isCurrent = () => currentRequest() && usageEdits.value[accountId]?.[key] === edit;
     const binding = bindingFor(account);
@@ -414,6 +487,7 @@ export function useAccountUsage(
         resetsInMin,
       );
       if (!isCurrent()) return;
+      const observedAt = new Date().toISOString();
       billing.applyCalibratedUsage(
         accountId,
         binding,
@@ -425,9 +499,11 @@ export function useAccountUsage(
           ...(key === "window_week" ? { resets_in_week: usage.resets_in_week } : {}),
           ...(key === "window_month" ? { resets_in_month: usage.resets_in_month } : {}),
         },
-        new Date().toISOString(),
+        observedAt,
       );
-      const saved = usagePercentFromCost(usage[key], usageLimit(accountId, key));
+      if (!isCurrent()) return;
+      const saved = observedDraftPercent(usage, key);
+      if (saved === null) return;
       edit.draft = saved;
       edit.saved = saved;
       edit.resets_at_saved = windowResetsAt(usage, key);
@@ -542,10 +618,6 @@ export function useAccountUsage(
     };
   }
 
-  async function loadQuotaLimits(): Promise<boolean> {
-    return billing.loadPricing();
-  }
-
   function loadAccountUsage(accountId: string): Promise<void> {
     const account = accounts.value.find(({ id }) => id === accountId);
     if (!account) return Promise.resolve();
@@ -579,24 +651,13 @@ export function useAccountUsage(
     billing.remove(accountId);
     delete usageEdits.value[accountId];
     usageProjections.delete(accountId);
+    receiptProjections.delete(accountId);
     presentedProjections.delete(accountId);
     providerUsageSelectors.delete(accountId);
     usageSelectors.delete(accountId);
     usageLoadingSelectors.delete(accountId);
     usageLoadErrorSelectors.delete(accountId);
     usageRefreshLoadingSelectors.delete(accountId);
-  }
-
-  async function retryQuotaLimits() {
-    if (!await loadQuotaLimits()) return;
-    await mapWithConcurrency(
-      accounts.value.filter((account) => (
-        accountIsReady(account)
-        && (usageCapabilities(account).providerWindows || usageCapabilities(account).manual)
-      )),
-      4,
-      (account) => loadAccountUsage(account.id),
-    );
   }
 
   watch(() => accounts.value.map(account => account.id), (ids, previousIds) => {
@@ -614,7 +675,13 @@ export function useAccountUsage(
       const slot = billing.slotFor(id).value;
       return slot !== undefined && slot.boundVersion !== binding;
     });
-    for (const { id } of changed) billing.remove(id);
+    for (const { id } of changed) {
+      billing.remove(id);
+      // The slot is gone, so this seeds blank drafts for the new binding.
+      // New edit objects fence an in-flight ack: its finally only touches
+      // the editor it captured, and the removed draft is not kept for return.
+      usageEdits.value[id] = usageEditsFromWindow(getUsage(id));
+    }
     const session = billing.sessionEpoch;
     // Batch synchronous account/connection updates before reading their final
     // binding. An explicit owner load in this turn already covers the change.
@@ -634,6 +701,7 @@ export function useAccountUsage(
     usageEdits.value = {};
     // A new session must never serve projections cached from the old one.
     usageProjections.clear();
+    receiptProjections.clear();
     presentedProjections.clear();
     providerUsageSelectors.clear();
     usageSelectors.clear();
@@ -651,10 +719,6 @@ export function useAccountUsage(
   }
 
   return {
-    quotaLimits,
-    quotaLimitsLoading,
-    quotaLimitsError,
-    usageLimits,
     usageLimitsFor,
     usageMap,
     providerUsageMap,
@@ -676,11 +740,9 @@ export function useAccountUsage(
     saveUsage,
     refreshAccountUsage,
     automaticRefreshTarget,
-    loadQuotaLimits,
     loadAccountUsage,
     ensureAccountUsage,
     revalidateAccountUsage,
-    retryQuotaLimits,
     forgetAccount,
   };
 }

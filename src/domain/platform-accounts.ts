@@ -3,7 +3,6 @@ import type {
   PlatformGroup,
   PlatformKind,
   PlatformLink,
-  PlatformPrice,
   PlatformQuota,
   PlatformQuotaKind,
   PlatformSnapshot,
@@ -447,20 +446,6 @@ export function platformGroupLabel(
   return [group.id, group.platform, group.subscriptionType].filter((part) => part).join(" · ");
 }
 
-/**
- * Fixed unavailable-reason codes from the reader. Known codes get a localized
- * i18n key; anything else returns null so the UI shows the raw code.
- */
-export const PLATFORM_UNAVAILABLE_REASON_KEYS: Record<string, string> = {
-  user_identity_required: "登录后才能查看价格",
-  group_model_unavailable: "该分组不提供此模型",
-  reasoning_multiplier: "按推理强度倍率计费",
-};
-
-export function platformUnavailableReasonKey(reason: string | null): string | null {
-  return reason ? PLATFORM_UNAVAILABLE_REASON_KEYS[reason] ?? null : null;
-}
-
 export const MAX_PLATFORM_GROUP_ID_CHARS = 200;
 export const MAX_PLATFORM_GROUP_PLATFORM_CHARS = 64;
 
@@ -514,162 +499,11 @@ export function formatPlatformTime(epochSeconds: number, locale: string): string
   }).format(new Date(epochSeconds * 1000));
 }
 
-function formatCurrency(value: number, currency: string, locale: string, digits: number): string {
-  try {
-    return numberFormatter(locale, {
-      style: "currency",
-      currency,
-      currencyDisplay: "narrowSymbol",
-      maximumSignificantDigits: digits,
-    }).format(value);
-  } catch {
-    // Non-ISO currency labels (points, credits, …) fall back to a plain suffix.
-    return `${numberFormatter(locale, { maximumSignificantDigits: digits }).format(value)} ${currency}`;
-  }
-}
-
-export interface FormattedPlatformRate {
-  /** Per-token rate; the wire unit is always currency per token. */
-  label: string;
-  /** Per-million-token reading for the tooltip, null for zero. */
-  perMillion: string | null;
-}
-
-export function formatPlatformRate(
-  value: number | null,
-  currency: string,
-  locale: string,
-): FormattedPlatformRate | null {
-  if (value === null || !Number.isFinite(value)) return null;
-  return {
-    label: `${formatCurrency(value, currency, locale, 4)}/token`,
-    perMillion: value === 0 ? null : `${formatCurrency(value * 1e6, currency, locale, 6)} / 1M tokens`,
-  };
-}
-
-export type PlatformPriceFlag = "official_reference" | "unavailable" | "expired" | "stale";
-
-/**
- * Price trust flags: an official reference is not a quote, an unavailable
- * reason replaces numbers, expiry comes from `validUntil`, and a stale parent
- * snapshot marks every row in it.
- */
-export function platformPriceFlags(
-  price: PlatformPrice,
-  snapshotStale: boolean,
-  nowSeconds: number,
-): PlatformPriceFlag[] {
-  const flags: PlatformPriceFlag[] = [];
-  if (price.officialReference) flags.push("official_reference");
-  if (price.unavailableReason) flags.push("unavailable");
-  if (price.validUntil > 0 && price.validUntil <= nowSeconds) flags.push("expired");
-  if (snapshotStale) flags.push("stale");
-  return flags;
-}
-
-/** Exact (model, group) price first, then the group-agnostic row; billed rows beat official references within each tier. */
-export function platformPriceForModel(
-  prices: readonly PlatformPrice[],
-  modelId: string,
-  groupId: string | null,
-): PlatformPrice | null {
-  const exact = prices.filter((price) => price.model === modelId && price.groupId === groupId);
-  const fallback = prices.filter((price) => price.model === modelId && price.groupId === null);
-  return exact.find((price) => !price.officialReference)
-    ?? exact[0]
-    ?? fallback.find((price) => !price.officialReference)
-    ?? fallback[0]
-    ?? null;
-}
-
-export type PlatformPriceDistinction = "billed" | "official";
-
-export interface PlatformPriceRow {
-  /** Unique per row; billed and official rows for the same model never share a key. */
-  key: string;
-  model: string;
-  groupId: string | null;
-  source: string;
-  price: PlatformPrice | null;
-  flags: PlatformPriceFlag[];
-  /** Set when the same model+group has both a billed and an official-reference price. */
-  distinction: PlatformPriceDistinction | null;
-}
-
-function priceGroupKey(model: string, groupId: string | null): string {
-  return `${model}\n${groupId ?? ""}`;
-}
-
-/**
- * Display rows for the model/price table. Each storefront model gets one row
- * carrying its billed price; an official reference for the same model+group
- * becomes its own row so actual and reference prices stay visually distinct.
- * Prices without a storefront model row are appended as price-only rows.
- */
-export function platformPriceRows(
-  snapshot: PlatformSnapshot,
-  nowSeconds: number,
-): PlatformPriceRow[] {
-  const billedByGroup = new Map<string, PlatformPrice[]>();
-  const officialByGroup = new Map<string, PlatformPrice[]>();
-  for (const price of snapshot.prices) {
-    const map = price.officialReference ? officialByGroup : billedByGroup;
-    const key = priceGroupKey(price.model, price.groupId);
-    map.set(key, [...(map.get(key) ?? []), price]);
-  }
-  const lookup = (map: Map<string, PlatformPrice[]>, modelId: string, groupId: string | null) => (
-    map.get(priceGroupKey(modelId, groupId)) ?? map.get(priceGroupKey(modelId, null))
-  );
-  const consumed = new Set<PlatformPrice>();
-  const rows: PlatformPriceRow[] = [];
-  const pushPriceRow = (price: PlatformPrice, distinction: PlatformPriceDistinction | null, index: number): void => {
-    consumed.add(price);
-    rows.push({
-      key: `price:${price.officialReference ? "official" : "billed"}:${price.model}:${price.groupId ?? ""}:${index}`,
-      model: price.model,
-      groupId: price.groupId,
-      source: price.source,
-      price,
-      flags: platformPriceFlags(price, snapshot.stale, nowSeconds),
-      distinction,
-    });
-  };
-  for (const model of snapshot.models) {
-    const billed = lookup(billedByGroup, model.id, model.groupId);
-    const official = lookup(officialByGroup, model.id, model.groupId);
-    const both = Boolean(billed?.length && official?.length);
-    const price = billed?.[0] ?? official?.[0] ?? null;
-    if (price) consumed.add(price);
-    rows.push({
-      key: `model:${model.id}:${model.groupId ?? ""}`,
-      model: model.id,
-      groupId: model.groupId,
-      source: model.source,
-      price,
-      flags: price ? platformPriceFlags(price, snapshot.stale, nowSeconds) : [],
-      distinction: both && price ? (price.officialReference ? "official" : "billed") : null,
-    });
-    if (both && price === billed?.[0]) {
-      official?.forEach((officialPrice, index) => pushPriceRow(officialPrice, "official", index));
-    }
-  }
-  for (const price of snapshot.prices) {
-    if (consumed.has(price)) continue;
-    const both = Boolean(
-      lookup(billedByGroup, price.model, price.groupId)?.length
-      && lookup(officialByGroup, price.model, price.groupId)?.length,
-    );
-    pushPriceRow(price, both ? (price.officialReference ? "official" : "billed") : null, rows.length);
-  }
-  return rows;
-}
-
 export interface PlatformModelCandidate {
   id: string;
   platform: string | null;
   groupId: string | null;
   source: string;
-  price: PlatformPrice | null;
   alreadyMapped: boolean;
 }
 
@@ -701,7 +535,6 @@ export function platformModelCandidates(
       platform: model.platform,
       groupId: model.groupId,
       source: model.source,
-      price: platformPriceForModel(snapshot.prices, model.id, model.groupId),
       alreadyMapped: taken.has(identity),
     });
   }

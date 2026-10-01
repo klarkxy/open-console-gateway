@@ -40,10 +40,12 @@ export function installFetchMock(
 export function setupControlPlane(
   revision = 7,
   processGeneration = 99,
-  pricingRevision: string | null = null,
+  // Kept so existing callers still typecheck. A historical id is not a live CAS token.
+  pricingRevision?: string | null,
 ): void {
+  void pricingRevision;
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision, processGeneration, pricingRevision });
+  useControlPlaneStore().sync({ revision, processGeneration });
 }
 
 export function v3AccountDto(id: string, overrides: Record<string, unknown> = {}): object {

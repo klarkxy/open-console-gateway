@@ -1845,12 +1845,47 @@
       ],
       "type": "object"
     },
+    "CreditConfigurationWrite": {
+      "additionalProperties": false,
+      "description": "Manual credit setup. Token rates and the currency conversion factor are not writable.\nStored historical rates stay on the meter and are not replaced by this body.",
+      "properties": {
+        "currency": {
+          "type": "string"
+        },
+        "monthly": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MonthlyCredits"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "sourceUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "currency",
+        "monthly",
+        "sourceUrl"
+      ],
+      "type": "object"
+    },
     "CreditConfigureRequest": {
       "additionalProperties": false,
       "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
       "properties": {
         "configuration": {
-          "$ref": "#/$defs/CreditConfiguration"
+          "$ref": "#/$defs/CreditConfigurationWrite"
         },
         "expectedRevision": {
           "format": "uint64",
@@ -3836,33 +3871,6 @@
       ],
       "type": "string"
     },
-    "OfficialApiPrices": {
-      "properties": {
-        "prices": {
-          "$ref": "#/$defs/OfficialPriceSheet"
-        },
-        "processGeneration": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "providerId": {
-          "type": "string"
-        },
-        "revision": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "providerId",
-        "prices",
-        "revision",
-        "processGeneration"
-      ],
-      "type": "object"
-    },
     "OfficialApiStatus": {
       "properties": {
         "accountId": {
@@ -3896,9 +3904,6 @@
           "format": "date-time",
           "type": "string"
         },
-        "prices": {
-          "$ref": "#/$defs/OfficialPriceSheet"
-        },
         "processGeneration": {
           "format": "uint64",
           "minimum": 0,
@@ -3924,7 +3929,6 @@
         "kind",
         "balanceAvailable",
         "balances",
-        "prices",
         "monthStartedAt",
         "monthSpend",
         "lifetimeSpend",
@@ -3962,80 +3966,6 @@
         "granted",
         "toppedUp",
         "observedAt"
-      ],
-      "type": "object"
-    },
-    "OfficialPriceRow": {
-      "properties": {
-        "cacheReadPerMillion": {
-          "format": "double",
-          "type": [
-            "number",
-            "null"
-          ]
-        },
-        "currency": {
-          "type": "string"
-        },
-        "inputPerMillion": {
-          "format": "double",
-          "type": "number"
-        },
-        "model": {
-          "type": "string"
-        },
-        "outputPerMillion": {
-          "format": "double",
-          "type": "number"
-        },
-        "period": {
-          "description": "`all`, or DeepSeek `peak` / `off_peak` at the frozen attempt time.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "model",
-        "currency",
-        "period",
-        "inputPerMillion",
-        "outputPerMillion",
-        "cacheReadPerMillion"
-      ],
-      "type": "object"
-    },
-    "OfficialPriceSheet": {
-      "properties": {
-        "kind": {
-          "$ref": "#/$defs/OfficialApiKind"
-        },
-        "observedAt": {
-          "format": "date-time",
-          "type": "string"
-        },
-        "revision": {
-          "type": "string"
-        },
-        "rows": {
-          "items": {
-            "$ref": "#/$defs/OfficialPriceRow"
-          },
-          "type": "array"
-        },
-        "sourceUrl": {
-          "type": "string"
-        },
-        "validUntil": {
-          "format": "date-time",
-          "type": "string"
-        }
-      },
-      "required": [
-        "kind",
-        "revision",
-        "sourceUrl",
-        "observedAt",
-        "validUntil",
-        "rows"
       ],
       "type": "object"
     },
@@ -4840,7 +4770,7 @@
     },
     "ProviderUsage": {
       "additionalProperties": false,
-      "description": "GET `/accounts/{id}/provider-usage` body. Distinct from stored quota rows.\n\n`pricingRevision` is present when live Go quota windows use one captured\npricing snapshot.",
+      "description": "GET `/accounts/{id}/provider-usage` body. Distinct from stored quota rows.\n\n`pricingRevision` is always absent. Usage is no longer a pricing CAS token.",
       "properties": {
         "accountId": {
           "type": "string"
@@ -6475,12 +6405,6 @@
       "$ref": "#/$defs/OfficialApiKind"
     },
     {
-      "$ref": "#/$defs/OfficialPriceRow"
-    },
-    {
-      "$ref": "#/$defs/OfficialPriceSheet"
-    },
-    {
       "$ref": "#/$defs/OfficialBalance"
     },
     {
@@ -6488,9 +6412,6 @@
     },
     {
       "$ref": "#/$defs/OfficialApiStatus"
-    },
-    {
-      "$ref": "#/$defs/OfficialApiPrices"
     },
     {
       "$ref": "#/$defs/BillingModel"
@@ -6503,6 +6424,9 @@
     },
     {
       "$ref": "#/$defs/CreditRate"
+    },
+    {
+      "$ref": "#/$defs/CreditConfigurationWrite"
     },
     {
       "$ref": "#/$defs/MonthlyCredits"

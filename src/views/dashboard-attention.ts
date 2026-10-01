@@ -53,7 +53,9 @@ export function buildNeedsAttention(
   for (const account of accounts) {
     const destination = destinationForAccount?.(account.id);
     const ready = account.setup_step === "ready";
-    if (ready && account.auth_error) {
+    // Disabling a ready account is a deliberate choice and does not clear a
+    // retained auth_error, so only an enabled account raises auth attention.
+    if (ready && account.enabled && account.auth_error) {
       items.push({ accountId: account.id, accountName: account.name, reason: "auth-error" });
       continue;
     }

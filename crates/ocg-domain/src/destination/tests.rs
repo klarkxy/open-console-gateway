@@ -272,7 +272,8 @@ fn sealed_builtin_destinations_map_all_seven_ids() {
     );
     assert_eq!(go_plan.expiry_cadence, Some(ExpiryCadence::Monthly));
     assert_eq!(go_plan.pricing_source, PricingSource::Official);
-    assert!(!go_plan.manual_calibration);
+    assert!(go_plan.manual_calibration);
+    assert_eq!(go_plan.windows.len(), 3);
     assert_eq!(go.max_credentials, None);
     assert!(go.observer_credential_id.is_none());
     assert!(go.enabled);
@@ -291,6 +292,7 @@ fn sealed_builtin_destinations_map_all_seven_ids() {
         }]
     );
     assert_eq!(zen_plan.pricing_source, PricingSource::Unpriced);
+    assert!(!zen_plan.manual_calibration);
     assert_eq!(
         zen.capabilities.redirect_policy,
         RedirectPolicy::FollowKeyless
@@ -311,6 +313,18 @@ fn sealed_builtin_destinations_map_all_seven_ids() {
     let goat_plan = goat.plan.expect("GOAT has a plan");
     assert_eq!(goat_plan.usage_source, UsageSource::LocalProjection);
     assert!(goat_plan.manual_calibration);
+    assert_eq!(
+        goat_plan
+            .windows
+            .iter()
+            .map(|window| window.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            PlanWindowKind::FiveHours,
+            PlanWindowKind::Week,
+            PlanWindowKind::Month,
+        ]
+    );
     assert_eq!(goat_plan.pricing_source, PricingSource::VerifiedSnapshot);
     assert_eq!(goat.max_credentials, None);
 
@@ -341,6 +355,7 @@ fn sealed_builtin_destinations_map_all_seven_ids() {
     assert_eq!(kimi_plan.usage_source, UsageSource::OfficialApi);
     assert_eq!(kimi_plan.pricing_source, PricingSource::Unpriced);
     assert_eq!(kimi_plan.windows, cn_windows);
+    assert!(!kimi_plan.manual_calibration);
     assert_eq!(kimi_plan.expiry_cadence, Some(ExpiryCadence::Monthly));
     assert_eq!(goat_plan.expiry_cadence, Some(ExpiryCadence::Monthly));
 

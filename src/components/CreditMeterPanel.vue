@@ -32,14 +32,14 @@
                 circle
                 quaternary
                 size="small"
-                :aria-label="t('费率')"
+                :aria-label="t('配置额度')"
                 :disabled="mutating"
                 @click="openSettings"
               >
                 <template #icon><n-icon :component="SettingOutlined" /></template>
               </n-button>
             </template>
-            {{ t("费率") }}
+            {{ t("配置额度") }}
           </n-tooltip>
           <n-tooltip trigger="hover">
             <template #trigger>
@@ -104,11 +104,12 @@
       </n-form-item>
       <n-form-item :label="t('重置日期')">
         <input
-          v-model="topupExpiry"
+          :value="topupExpiry"
           type="datetime-local"
           class="credit-meter__datetime mono"
           :disabled="mutating"
           :aria-label="t('重置日期')"
+          @input="setTopupExpiry"
         >
       </n-form-item>
       <n-checkbox v-model:checked="topupThirtyDays" :disabled="mutating">
@@ -128,14 +129,13 @@
 
   <FormSurface
     :show="settingsOpen"
-    :title="t('费率')"
+    :title="t('配置额度')"
     modal-style="width: 520px; max-width: calc(100vw - 32px)"
     :close-on-esc="!mutating"
     @update:show="setSettings"
   >
     <n-form label-placement="top" @submit.prevent="submitSettings">
       <p v-if="draftIssue" class="credit-meter__hint" role="alert">{{ t(draftIssue) }}</p>
-      <CreditRateFields :model-value="rateDrafts" :disabled="mutating" @update:model-value="rates => rateDrafts.splice(0, rateDrafts.length, ...rates)" />
       <n-checkbox v-model:checked="monthlyEnabled" :disabled="mutating">
         {{ t("月度额度") }}
       </n-checkbox>
@@ -154,11 +154,12 @@
       </n-form-item>
       <n-form-item v-if="monthlyEnabled" :label="t('重置日期')" :required="monthlyEnabled">
         <input
-          v-model="resetDraft"
+          :value="resetDraft"
           type="datetime-local"
           class="credit-meter__datetime mono"
           :disabled="mutating"
           :aria-label="t('重置日期')"
+          @input="setResetDraft"
         >
       </n-form-item>
     </n-form>
@@ -178,7 +179,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import {
   NButton,
   NCheckbox,
@@ -190,9 +191,8 @@ import {
   NTooltip,
 } from "naive-ui";
 import { PlusOutlined, ReloadOutlined, SettingOutlined } from "@vicons/antd";
-import type { BillingStatus, CreditRate } from "../api/billing.ts";
+import type { BillingStatus } from "../api/billing.ts";
 import {
-  BILLING_SOURCE_KEYS,
   CHINA_OFFSET_MINUTES,
   TOPUP_QUICK_AMOUNTS,
   buildCreditSettingsConfiguration,
@@ -219,7 +219,6 @@ import { useBillingStore } from "../stores/billing.ts";
 import type { ApiPriceMeterCell } from "./ApiPriceMeter.vue";
 import ApiPriceMeter from "./ApiPriceMeter.vue";
 import FormSurface from "./FormSurface.vue";
-import CreditRateFields from "./CreditRateFields.vue";
 
 const props = defineProps<{
   accountId: string;
@@ -239,10 +238,6 @@ const settingsOpen = ref(false);
 const topupAmount = ref<number | null>(null);
 const topupExpiry = ref("");
 const topupThirtyDays = ref(false);
-const genericName = ref("");
-const genericCurrency = ref("CNY");
-const genericFactor = ref<number | null>(1);
-const rateDrafts = reactive<CreditRate[]>([]);
 const draftIssue = ref<MessageKey | null>(null);
 
 const slot = computed(() => store.byId[props.accountId]);
@@ -280,7 +275,7 @@ const cells = computed<ApiPriceMeterCell[]>(() => {
 const caption = computed(() => {
   const view = meter.value;
   if (!view) return "";
-  const parts = [t(BILLING_SOURCE_KEYS[props.status.source])];
+  const parts = [t("手工余额")];
   const observed = formatPayGoObservedAt(view.estimatedAt, locale.value);
   if (observed) parts.push(observed);
   const reset = meterNextResetAt(view);
@@ -318,10 +313,6 @@ function clearDrafts(): void {
   topupAmount.value = null;
   topupExpiry.value = "";
   topupThirtyDays.value = false;
-  genericName.value = "";
-  genericCurrency.value = "CNY";
-  genericFactor.value = 1;
-  rateDrafts.splice(0, rateDrafts.length);
   topupOpen.value = false;
   settingsOpen.value = false;
 }
@@ -332,6 +323,18 @@ function fillTopup(amount: number): void {
     topupThirtyDays.value = true;
     topupExpiry.value = toDatetimeLocalValue(topupExpiryIso(props.now), offsetMinutes.value);
   }
+}
+
+function datetimeDraft(event: Event): string {
+  return event.target instanceof HTMLInputElement ? event.target.value : "";
+}
+
+function setTopupExpiry(event: Event): void {
+  topupExpiry.value = datetimeDraft(event);
+}
+
+function setResetDraft(event: Event): void {
+  resetDraft.value = datetimeDraft(event);
 }
 
 function openTopup(): void {
@@ -386,10 +389,6 @@ function reload(): void {
 function openSettings(): void {
   const view = meter.value;
   if (view) {
-    genericName.value = view.configuration.name;
-    genericCurrency.value = view.configuration.currency;
-    genericFactor.value = view.configuration.creditsPerCurrency;
-    rateDrafts.splice(0, rateDrafts.length, ...view.configuration.rates.map((rate) => ({ ...rate })));
     monthlyEnabled.value = Boolean(view.configuration.monthly);
     monthlyAmountDraft.value = view.configuration.monthly
       ? creditsToScaled(view.configuration.monthly.amount, unitFactor.value)
@@ -425,13 +424,6 @@ function parsedMonthlyReset(): string | null {
 async function submitSettings(): Promise<void> {
   if (mutating.value) return;
   const view = meter.value;
-  const rates = rateDrafts.filter((rate) => rate.model.trim()).map((rate) => ({
-    model: rate.model,
-    inputPerMillion: rate.inputPerMillion,
-    outputPerMillion: rate.outputPerMillion,
-    cacheReadPerMillion: rate.cacheReadPerMillion,
-    cacheWritePerMillion: rate.cacheWritePerMillion,
-  }));
   const grant = parsedMonthlyGrant();
   if ("issue" in grant) {
     draftIssue.value = CREDIT_AMOUNT_ISSUE_KEYS[grant.issue];
@@ -445,12 +437,8 @@ async function submitSettings(): Promise<void> {
   try {
     if (view) {
       const configuration = buildCreditSettingsConfiguration(view.configuration, {
-        name: genericName.value.trim() || view.configuration.name,
-        currency: genericCurrency.value.trim() || view.configuration.currency,
-        creditsPerCurrency: genericFactor.value && genericFactor.value > 0
-          ? genericFactor.value
-          : view.configuration.creditsPerCurrency,
-        rates: rates.length > 0 ? rates : view.configuration.rates,
+        name: view.configuration.name,
+        currency: view.configuration.currency,
         monthlyEnabled: monthlyEnabled.value,
         monthlyAmount: grant.amount,
         nextResetAt: resetAt,

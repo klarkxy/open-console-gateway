@@ -109,10 +109,6 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             post(official_api::refresh_balance),
         )
         .route(
-            "/providers/{id}/official-api/pricing",
-            get(official_api::get_prices).post(official_api::refresh_prices),
-        )
-        .route(
             "/applications/dsh",
             get(applications::get_dsh)
                 .post(applications::install_dsh)

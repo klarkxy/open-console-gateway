@@ -33,7 +33,7 @@ async fn stalled_error_body_keeps_known_status_and_account_at_deadline() {
     assert_eq!(logs[0].account_id, "acct-1");
     assert_eq!(logs[0].http_status, Some(503));
     assert_eq!(logs[0].status, "error");
-    assert_eq!(logs[0].cost_state, "not_applicable");
+    assert_eq!(logs[0].cost_state, "unknown");
     assert_eq!(logs[0].diagnostic.as_ref().unwrap()["upstream_status"], 503);
 }
 

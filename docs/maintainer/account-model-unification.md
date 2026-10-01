@@ -8,7 +8,7 @@ Status: **schema v59 makes destinations, credentials and model mappings the norm
 
 Normal requests use persisted destinations, model mappings and a private execution credential view. The planner no longer reconstructs Account, branches on legacy creation origin, or falls back after a failed authoritative read. Frozen attempts and live authorization share the same model gate with route explanation. HTTP destination edits and deletes share one transaction with runtime preflight; imported formats and operational Account DTOs remain boundary adapters. Global credential ordering is exposed separately from supplier grouping.
 
-The remaining RFC sections describe the historical migration rationale; their counts and staged proposals are not current runtime status.
+The remaining RFC sections describe the historical migration rationale; their counts and staged proposals are not current runtime status. Live price tables, reference-price feeds, multipliers, and price-based estimates are retired. Historical fields described below, including `pricing_source` and price-table snapshots, remain explanations of stored history and are not a current pricing feature.
 
 ## 1. What is wrong
 

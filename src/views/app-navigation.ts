@@ -58,7 +58,7 @@ const LEGACY_PROVIDER_CATALOG_TAB = "catalog";
 
 const viewKeySet = new Set<string>(APP_VIEW_KEYS);
 
-export const PROVIDER_DETAIL_TABS = ["models", "pricing", "settings"] as const;
+export const PROVIDER_DETAIL_TABS = ["models", "settings"] as const;
 export type ProviderDetailTab = (typeof PROVIDER_DETAIL_TABS)[number];
 
 /**
@@ -100,7 +100,7 @@ export function resolveAppViewKey(raw: string | null | undefined): AppViewKey {
 
 export function normalizeProviderDetailTab(raw: string | null | undefined): ProviderDetailTab | null {
   if (!raw) return null;
-  if (raw === LEGACY_PROVIDER_CATALOG_TAB) return "models";
+  if (raw === LEGACY_PROVIDER_CATALOG_TAB || raw === LEGACY_PRICING_VIEW) return "models";
   if (raw === PROVIDER_OTHER_TAB) return "settings";
   return (PROVIDER_DETAIL_TABS as readonly string[]).includes(raw)
     ? raw as ProviderDetailTab

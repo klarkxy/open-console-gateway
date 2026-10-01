@@ -86,7 +86,6 @@ export interface DestinationPlanWindow {
 export interface DestinationPlan {
   expiry_cadence: PlanDto["expiryCadence"];
   manual_calibration: boolean;
-  pricing_source: PlanDto["pricingSource"];
   usage_source: PlanDto["usageSource"];
   windows: DestinationPlanWindow[];
 }
@@ -332,7 +331,6 @@ function presentPlan(value: PlanDto | null): DestinationPlan | null {
   return {
     expiry_cadence: value.expiryCadence,
     manual_calibration: value.manualCalibration,
-    pricing_source: value.pricingSource,
     usage_source: value.usageSource,
     windows: value.windows.map((window) => ({ kind: window.kind })),
   };

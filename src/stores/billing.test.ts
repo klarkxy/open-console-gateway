@@ -6,8 +6,9 @@ import { installWindowDashboard } from "../test-helpers/dashboard-v3-fetch.ts";
 import { useControlPlaneStore } from "./controlPlane.ts";
 import { useBillingStore } from "./billing.ts";
 import { billingApi, type BillingStatus, type CreditMeterView, type ProviderUsage } from "../api/billing.ts";
-import type { OfficialApiPrices, OfficialApiStatus } from "../api/generated/dashboard-v4.ts";
+import type { OfficialApiStatus } from "../api/generated/dashboard-v4.ts";
 import { billingBinding } from "../domain/billing.ts";
+import type { ObservedUsageWindow } from "../domain/accounts-usage.ts";
 
 interface DeferredCall {
   url: string;
@@ -48,6 +49,16 @@ async function waitForCalls(calls: DeferredCall[], count: number): Promise<void>
     await new Promise((resolve) => setImmediate(resolve));
   }
   assert.equal(calls.length, count, `expected ${count} fetch calls, saw ${calls.length}`);
+}
+
+function assertNoRetiredPriceRoute(calls: readonly DeferredCall[]): void {
+  for (const call of calls) {
+    assert.equal(
+      /\/official-api\/pricing|\/pricing\/multipliers|\/providers\/[^/]+\/pricing(?:\?|$)/.test(call.url),
+      false,
+      call.url,
+    );
+  }
 }
 
 function credits(overrides: Partial<CreditMeterView> = {}): CreditMeterView {
@@ -149,7 +160,7 @@ test("slotFor tracks a slot added after the selector was created", async () => {
 
 test("a stale load cannot overwrite a newer snapshot, mutation, or cleared session", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 3, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 3, processGeneration: 99 });
   const store = useBillingStore();
   const first = installDeferredFetch();
   const pendingFirst = store.load("acc-1", "v1");
@@ -182,7 +193,7 @@ test("a stale load cannot overwrite a newer snapshot, mutation, or cleared sessi
 
 test("account version change and a later mutation reject earlier loads", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 3, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 3, processGeneration: 99 });
   const store = useBillingStore();
   const first = installDeferredFetch();
   const pendingFirst = store.load("acc-1", "v1");
@@ -233,7 +244,7 @@ test("same-binding revalidation keeps evidence; endpoint change is a new binding
 
 test("unrelated revision advance 409s once, GETs billing, and the next explicit action uses the fresh revision", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 3, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 3, processGeneration: 99 });
   const store = useBillingStore();
   const calls = installDeferredFetch();
   const pendingLoad = store.load("acc-1", "v1");
@@ -243,7 +254,7 @@ test("unrelated revision advance 409s once, GETs billing, and the next explicit 
     revision: 3,
   }));
   await pendingLoad;
-  useControlPlaneStore().sync({ revision: 6, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 6, processGeneration: 99 });
 
   const pendingCalibrate = store.calibrateCredits("acc-1", "v1", [
     { bucketId: "monthly", remaining: 8 },
@@ -296,7 +307,7 @@ test("unrelated revision advance 409s once, GETs billing, and the next explicit 
 
 test("failed conflict GET keeps the snapshot and the next action loads status before sending", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 3, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 3, processGeneration: 99 });
   const store = useBillingStore();
   const calls = installDeferredFetch();
   const pendingLoad = store.load("acc-1", "v1");
@@ -306,7 +317,7 @@ test("failed conflict GET keeps the snapshot and the next action loads status be
     revision: 3,
   }));
   await pendingLoad;
-  useControlPlaneStore().sync({ revision: 6, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 6, processGeneration: 99 });
 
   const pendingGrant = store.grantCredits("acc-1", "v1", {
     label: "topup",
@@ -352,7 +363,7 @@ test("failed conflict GET keeps the snapshot and the next action loads status be
 
 test("configure commits the returned status; late GET cannot overwrite a saved calibration", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 3, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 3, processGeneration: 99 });
   const store = useBillingStore();
   const original = billingApi.status;
   const originalConfigure = billingApi.configureCredits;
@@ -383,7 +394,7 @@ test("configure commits the returned status; late GET cannot overwrite a saved c
 
 test("clear is the dropSession epoch and rejects a late mutation", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 3, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 3, processGeneration: 99 });
   const store = useBillingStore();
   const calls = installDeferredFetch();
   const pending = store.configureCredits("acc-1", "v1", {
@@ -394,37 +405,6 @@ test("clear is the dropSession epoch and rejects a late mutation", async () => {
   calls[0]!.resolve(billingStatus({ revision: 12, credits: credits() }));
   await pending.catch(() => undefined);
   assert.equal(store.byId["acc-1"], undefined);
-});
-
-test("logout epoch also drops pricing limits so a late GET cannot write back", async () => {
-  setActivePinia(createPinia());
-  const store = useBillingStore();
-  const calls = installDeferredFetch();
-  const pending = store.loadPricing();
-  await waitForCalls(calls, 1);
-  store.clear();
-  calls[0]!.resolve({
-    providerId: "opencode",
-    availability: "available",
-    snapshot: {
-      pricingRevision: "p1",
-      revision: 1,
-      processGeneration: 99,
-      activatedAt: "2026-09-01T00:00:00Z",
-      documentUpdatedAt: "2026-09-01T00:00:00Z",
-      sourceUrl: "https://example.test",
-      contentHash: "h",
-      adjustmentPolicyVersion: "1",
-      limits: { window5h: 1, windowWeek: 2, windowMonth: 3 },
-      models: [],
-    },
-    revision: 1,
-    processGeneration: 99,
-    pricingRevision: "p1",
-    providerPricingRevision: "p1",
-  });
-  await pending;
-  assert.equal(store.pricingLimits, null);
 });
 
 function providerUsage(overrides: Partial<ProviderUsage> = {}): ProviderUsage {
@@ -461,14 +441,6 @@ function officialCash(overrides: Partial<OfficialApiStatus> = {}): OfficialApiSt
     lifetimeSpend: [],
     monthSpend: [],
     monthStartedAt: "2026-09-01T00:00:00Z",
-    prices: {
-      kind: "deepseek",
-      observedAt: "2026-09-21T00:00:00Z",
-      revision: "r1",
-      rows: [],
-      sourceUrl: "https://example.test",
-      validUntil: "2026-10-21T00:00:00Z",
-    },
     processGeneration: 99,
     providerId: "deepseek",
     revision: 5,
@@ -477,33 +449,9 @@ function officialCash(overrides: Partial<OfficialApiStatus> = {}): OfficialApiSt
   };
 }
 
-function officialPrices(overrides: Partial<OfficialApiPrices> = {}): OfficialApiPrices {
-  return {
-    providerId: "deepseek",
-    processGeneration: 99,
-    revision: 3,
-    prices: {
-      kind: "deepseek",
-      observedAt: "2026-09-21T00:00:00Z",
-      revision: "r1",
-      rows: [{
-        cacheReadPerMillion: 0.1,
-        currency: "USD",
-        inputPerMillion: 1,
-        model: "m",
-        outputPerMillion: 2,
-        period: "all",
-      }],
-      sourceUrl: "https://example.test",
-      validUntil: "2026-10-21T00:00:00Z",
-    },
-    ...overrides,
-  };
-}
-
 test("cash with null OfficialApiStatus refreshes provider-usage and keeps last balances on failure", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 3, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 3, processGeneration: 99 });
   const store = useBillingStore();
   const calls = installDeferredFetch();
   const pendingLoad = store.load("acc-1", "v1");
@@ -528,11 +476,12 @@ test("cash with null OfficialApiStatus refreshes provider-usage and keeps last b
   assert.notEqual(result, "ok");
   assert.equal(store.byId["acc-1"]?.status?.usage?.creditBalances[0]?.amount, 12.5);
   assert.equal(store.byId["acc-1"]?.error, "load_failed");
+  assertNoRetiredPriceRoute(calls);
 });
 
 test("cash with OfficialApiStatus refreshes the official balance endpoint", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 3, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 3, processGeneration: 99 });
   const store = useBillingStore();
   const calls = installDeferredFetch();
   const pendingLoad = store.load("acc-1", "v1");
@@ -559,50 +508,29 @@ test("cash with OfficialApiStatus refreshes the official balance endpoint", asyn
   await pendingRefresh;
   assert.equal(store.byId["acc-1"]?.status?.cash?.revision, 6);
   assert.equal(store.byId["acc-1"]?.status?.cash?.balances[0]?.total, 18);
+  assertNoRetiredPriceRoute(calls);
 });
 
-test("provider price revalidation keeps the table; errors keep the last good sheet", async () => {
+test("the billing store does not expose active price reads or multiplier edits", () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 3, processGeneration: 99, pricingRevision: null });
   const store = useBillingStore();
-  const first = installDeferredFetch();
-  const pendingFirst = store.loadPrices("deepseek");
-  await waitForCalls(first, 1);
-  assert.match(first[0]!.url, /\/providers\/deepseek\/official-api\/pricing$/);
-
-  const second = installDeferredFetch();
-  const pendingSecond = store.loadPrices("deepseek");
-  await waitForCalls(second, 1);
-  second[0]!.resolve(officialPrices({ revision: 4 }));
-  await pendingSecond;
-  assert.equal(store.pricesById.deepseek?.prices?.revision, 4);
-  assert.equal(store.pricesById.deepseek?.prices?.prices.rows.length, 1);
-
-  first[0]!.resolve(officialPrices({ revision: 3, prices: { ...officialPrices().prices, rows: [] } }));
-  await pendingFirst;
-  assert.equal(store.pricesById.deepseek?.prices?.revision, 4);
-  assert.equal(store.pricesById.deepseek?.prices?.prices.rows.length, 1);
-
-  const fail = installDeferredFetch();
-  const pendingFail = store.loadPrices("deepseek");
-  await waitForCalls(fail, 1);
-  fail[0]!.reject(new TypeError("Failed to fetch"));
-  await pendingFail;
-  assert.equal(store.pricesById.deepseek?.prices?.revision, 4);
-  assert.equal(store.pricesById.deepseek?.error, "load_failed");
-
-  const late = installDeferredFetch();
-  const pendingLate = store.loadPrices("deepseek");
-  await waitForCalls(late, 1);
-  store.clear();
-  late[0]!.resolve(officialPrices({ revision: 9 }));
-  await pendingLate;
-  assert.equal(store.pricesById.deepseek, undefined);
+  for (const key of [
+    "loadPrices",
+    "refreshPrices",
+    "loadPricing",
+    "pricesById",
+    "priceSlotFor",
+    "pricingLimits",
+    "pricingLoading",
+    "pricingError",
+  ]) {
+    assert.equal(key in store, false, key);
+  }
 });
 
 test("generic credit configure uses the credits PUT path", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 3, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 3, processGeneration: 99 });
   const store = useBillingStore();
   const calls = installDeferredFetch();
   const pendingLoad = store.load("acc-1", "v1");
@@ -632,7 +560,7 @@ test("generic credit configure uses the credits PUT path", async () => {
 
 test("a rejected credit calibration keeps the last good remaining and does not retry", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 3, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 3, processGeneration: 99 });
   const store = useBillingStore();
   const calls = installDeferredFetch();
   const pendingLoad = store.load("acc-1", "v1");
@@ -664,7 +592,7 @@ test("a rejected credit calibration keeps the last good remaining and does not r
 
 test("initialization retries read back a committed ledger without replaying initial balances", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 3, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 3, processGeneration: 99 });
   const store = useBillingStore();
   const calls = installDeferredFetch();
   const input = { configuration: credits().configuration, initialBuckets: [] };
@@ -687,7 +615,7 @@ test("initialization retries read back a committed ledger without replaying init
 test("initialization cannot start its write after logout or rebinding during its read", async () => {
   for (const transition of ["logout", "binding"] as const) {
     setActivePinia(createPinia());
-    useControlPlaneStore().sync({ revision: 3, processGeneration: 99, pricingRevision: null });
+    useControlPlaneStore().sync({ revision: 3, processGeneration: 99 });
     const store = useBillingStore();
     const calls = installDeferredFetch();
     const pending = store.initializeCredits("acc-1", "v1", { configuration: credits().configuration, initialBuckets: [] });
@@ -701,4 +629,442 @@ test("initialization cannot start its write after logout or rebinding during its
     if (reload) { calls[1]!.resolve(billingStatus({ credits: credits({ remaining: 456 }) })); await reload; }
     assert.equal(store.byId["acc-1"]?.status?.credits?.remaining, transition === "logout" ? undefined : 456);
   }
+});
+
+const CALIBRATED_RESET = "2026-10-01T00:30:00.000Z";
+const FRESH_RESET = "2026-10-01T01:00:00.000Z";
+
+function calibratedWindow(accountId: string, percent: number): ObservedUsageWindow {
+  return {
+    account_id: accountId,
+    window_5h: percent,
+    window_week: null,
+    window_month: null,
+    resets_in_5h: CALIBRATED_RESET,
+    resets_in_week: null,
+    resets_in_month: null,
+  };
+}
+
+function quotaBilling(
+  accountId: string,
+  windows: ReadonlyArray<{ kind: string; used: number; resetsAt?: string | null }>,
+  overrides: Partial<BillingStatus> = {},
+): BillingStatus {
+  return billingStatus({
+    accountId,
+    model: "quota",
+    source: windows.length === 0 ? "unavailable" : "official",
+    unit: "percent",
+    configurableCredits: false,
+    manualCalibration: true,
+    officialRefresh: true,
+    cash: null,
+    credits: null,
+    presets: [],
+    revision: 3,
+    processGeneration: 99,
+    usage: {
+      accountId,
+      providerId: "command-code",
+      availability: "available",
+      creditBalances: [],
+      experimental: false,
+      freeCooldownUntil: null,
+      pricingRevision: null,
+      processGeneration: 99,
+      revision: 3,
+      syncState: null,
+      quotaWindows: windows.map((window) => ({
+        accountId,
+        calibrationOffset: 0,
+        limitValue: 100,
+        observedAt: "2026-10-01T00:00:00.000Z",
+        resetsAt: window.resetsAt ?? null,
+        source: "manual",
+        startedAt: null,
+        unit: "percent",
+        updatedAt: "2026-10-01T00:00:00.000Z",
+        used: window.used,
+        windowKind: window.kind,
+      })),
+    },
+    ...overrides,
+  });
+}
+
+function moneyPoison(accountId: string, windows: ReadonlyArray<{ kind: string; used: number }>): BillingStatus {
+  return quotaBilling(accountId, windows, {
+    model: "credits",
+    unit: "credits",
+    configurableCredits: true,
+    revision: 9,
+    cash: officialCash({
+      accountId,
+      balances: [{
+        currency: "CNY",
+        granted: 0,
+        observedAt: "2026-10-01T00:00:00.000Z",
+        toppedUp: 0,
+        total: 0,
+      }],
+    }),
+    credits: credits({ remaining: 0, activeGranted: 0 }),
+    usage: {
+      ...quotaBilling(accountId, windows).usage!,
+      creditBalances: [{
+        accountId,
+        amount: 0,
+        balanceKind: "wallet",
+        observedAt: "2026-10-01T00:00:00.000Z",
+        source: "official",
+        unit: "CNY",
+        updatedAt: "2026-10-01T00:00:00.000Z",
+      }],
+      revision: 9,
+    },
+  });
+}
+
+function calibrationView(store: ReturnType<typeof useBillingStore>, accountId: string) {
+  const slot = store.slotFor(accountId).value;
+  const status = slot?.status ?? null;
+  const rows = status?.usage?.quotaWindows ?? [];
+  return {
+    loading: slot?.loading ?? null,
+    model: status?.model ?? null,
+    cash: status?.cash ?? null,
+    credits: status?.credits ?? null,
+    presets: status?.presets.length ?? 0,
+    balances: status?.usage?.creditBalances.length ?? 0,
+    windows: rows.map((row) => ({ kind: row.windowKind, used: row.used, resetsAt: row.resetsAt })),
+    zeroUsed: rows.filter((row) => row.used === 0).length,
+  };
+}
+
+function manualReceiptView() {
+  return {
+    loading: false,
+    model: "quota",
+    cash: null,
+    credits: null,
+    presets: 0,
+    balances: 0,
+    windows: [{ kind: "five_hours", used: 42.5, resetsAt: CALIBRATED_RESET }],
+    zeroUsed: 0,
+  };
+}
+
+async function deferQuotaReread(accountId: string, used: number) {
+  setActivePinia(createPinia());
+  const store = useBillingStore();
+  const first = installDeferredFetch();
+  const pendingFirst = store.load(accountId, "v1");
+  await waitForCalls(first, 1);
+  first[0]!.resolve(quotaBilling(accountId, [{ kind: "five_hours", used }]));
+  await pendingFirst;
+  const second = installDeferredFetch();
+  const pendingSecond = store.load(accountId, "v1");
+  await waitForCalls(second, 1);
+  return { store, second, pendingSecond };
+}
+
+test("a calibration receipt stays visible when an older billing read returns no windows", { timeout: 5_000 }, async () => {
+  const { store, second, pendingSecond } = await deferQuotaReread("acc-1", 10);
+  assert.equal(store.slotFor("acc-1").value?.loading, true);
+  store.applyCalibratedUsage("acc-1", "v1", "window_5h", calibratedWindow("acc-1", 42.5), "2026-10-01T00:00:01.000Z");
+  assert.deepEqual(calibrationView(store, "acc-1"), manualReceiptView());
+  assert.equal(second.length, 1);
+  second[0]!.resolve(moneyPoison("acc-1", []));
+  await pendingSecond;
+  assert.deepEqual(calibrationView(store, "acc-1"), manualReceiptView());
+  assert.equal(second.length, 1);
+});
+
+test("a calibration receipt stays visible when an older billing read returns a lower percent", { timeout: 5_000 }, async () => {
+  setActivePinia(createPinia());
+  const store = useBillingStore();
+  const other = installDeferredFetch();
+  const pendingOther = store.load("acc-2", "v2");
+  await waitForCalls(other, 1);
+  other[0]!.resolve(quotaBilling("acc-2", [{ kind: "five_hours", used: 10 }]));
+  await pendingOther;
+  const first = installDeferredFetch();
+  const pendingFirst = store.load("acc-1", "v1");
+  await waitForCalls(first, 1);
+  first[0]!.resolve(quotaBilling("acc-1", [{ kind: "five_hours", used: 10 }]));
+  await pendingFirst;
+  const second = installDeferredFetch();
+  const pendingSecond = store.load("acc-1", "v1");
+  await waitForCalls(second, 1);
+  const scope = effectScope();
+  let acc2Runs = 0;
+  try {
+    scope.run(() => {
+      watch(store.slotFor("acc-2"), () => { acc2Runs += 1; }, { flush: "sync" });
+    });
+    const before = store.slotFor("acc-2").value;
+    store.applyCalibratedUsage("acc-1", "v1", "window_5h", calibratedWindow("acc-1", 42.5), "2026-10-01T00:00:01.000Z");
+    assert.equal(acc2Runs, 0);
+    assert.equal(store.slotFor("acc-2").value, before);
+    assert.deepEqual(calibrationView(store, "acc-1"), manualReceiptView());
+    assert.equal(calibrationView(store, "acc-2").windows[0]?.used, 10);
+    second[0]!.resolve(moneyPoison("acc-1", [
+      { kind: "five_hours", used: 1 },
+      { kind: "week", used: 0 },
+    ]));
+    await pendingSecond;
+    assert.deepEqual(calibrationView(store, "acc-1"), manualReceiptView());
+    assert.equal(acc2Runs, 0);
+    assert.equal(store.slotFor("acc-2").value, before);
+    assert.equal(second.length, 1);
+  } finally {
+    scope.stop();
+  }
+});
+
+const ACK_AT = "2026-10-01T00:00:01.000Z";
+const QUOTA_WINDOW_KEYS = [
+  "limitValue",
+  "observedAt",
+  "resetsAt",
+  "source",
+  "unit",
+  "updatedAt",
+  "used",
+  "windowKind",
+];
+
+function coldFragmentView(store: ReturnType<typeof useBillingStore>, accountId: string) {
+  const slot = store.slotFor(accountId).value;
+  const status = slot?.status ?? null;
+  const receipt = slot?.manualReceipt ?? null;
+  return {
+    loading: slot?.loading ?? null,
+    loaded: slot?.loaded ?? null,
+    status,
+    error: slot?.error ?? null,
+    revision: status?.revision ?? null,
+    processGeneration: status?.processGeneration ?? null,
+    providerId: status?.usage?.providerId ?? null,
+    cash: status?.cash ?? null,
+    credits: status?.credits ?? null,
+    receiptKeys: receipt ? Object.keys(receipt).sort() : [],
+    windowKeys: (receipt?.windows ?? []).map((row) => Object.keys(row).sort()),
+    windows: (receipt?.windows ?? []).map((row) => ({
+      kind: row.windowKind,
+      used: row.used,
+      resetsAt: row.resetsAt,
+      unit: row.unit,
+      source: row.source,
+      limit: row.limitValue,
+      observedAt: row.observedAt,
+      updatedAt: row.updatedAt,
+    })),
+  };
+}
+
+function coldQuotaFragment(used: number, resetsAt = CALIBRATED_RESET) {
+  return {
+    loading: false,
+    loaded: false,
+    status: null,
+    error: null,
+    revision: null,
+    processGeneration: null,
+    providerId: null,
+    cash: null,
+    credits: null,
+    receiptKeys: ["windows"],
+    windowKeys: [QUOTA_WINDOW_KEYS],
+    windows: [{
+      kind: "five_hours",
+      used,
+      resetsAt,
+      unit: "percent" as const,
+      source: "manual" as const,
+      limit: 100 as const,
+      observedAt: ACK_AT,
+      updatedAt: ACK_AT,
+    }],
+  };
+}
+
+function observedWindow(accountId: string, window: Partial<ObservedUsageWindow>): ObservedUsageWindow {
+  return {
+    account_id: accountId,
+    window_5h: null,
+    window_week: null,
+    window_month: null,
+    resets_in_5h: null,
+    resets_in_week: null,
+    resets_in_month: null,
+    ...window,
+  };
+}
+
+async function startPendingRead(accountId = "acc-1", binding = "v1") {
+  setActivePinia(createPinia());
+  const store = useBillingStore();
+  const calls = installDeferredFetch();
+  const pending = store.load(accountId, binding);
+  await waitForCalls(calls, 1);
+  assert.equal(store.slotFor(accountId).value?.status, null);
+  assert.equal(store.slotFor(accountId).value?.loaded, false);
+  assert.equal(store.slotFor(accountId).value?.loading, true);
+  assert.equal(calls[0]?.method, "GET");
+  return { store, calls, pending };
+}
+
+test("a calibration receipt is presented while the first billing read is still pending", { timeout: 5_000 }, async () => {
+  const { store, calls, pending } = await startPendingRead();
+  store.applyCalibratedUsage("acc-1", "v1", "window_5h", calibratedWindow("acc-1", 42.5), ACK_AT);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(coldFragmentView(store, "acc-1"), coldQuotaFragment(42.5));
+  calls[0]!.resolve(moneyPoison("acc-1", [
+    { kind: "five_hours", used: 1 },
+    { kind: "week", used: 0 },
+  ]));
+  await pending;
+  assert.equal(calls.length, 1);
+  assert.deepEqual(coldFragmentView(store, "acc-1"), coldQuotaFragment(42.5));
+  const fresh = installDeferredFetch();
+  const pendingFresh = store.load("acc-1", "v1");
+  await waitForCalls(fresh, 1);
+  fresh[0]!.resolve(quotaBilling("acc-1", [
+    { kind: "five_hours", used: 55, resetsAt: FRESH_RESET },
+    { kind: "week", used: 12 },
+  ]));
+  await pendingFresh;
+  assert.equal(store.slotFor("acc-1").value?.manualReceipt, null);
+  assert.equal(store.slotFor("acc-1").value?.loaded, true);
+  assert.deepEqual(calibrationView(store, "acc-1"), {
+    loading: false,
+    model: "quota",
+    cash: null,
+    credits: null,
+    presets: 0,
+    balances: 0,
+    windows: [
+      { kind: "five_hours", used: 55, resetsAt: FRESH_RESET },
+      { kind: "week", used: 12, resetsAt: null },
+    ],
+    zeroUsed: 0,
+  });
+  assert.equal(fresh.length, 1);
+  assert.equal(fresh[0]?.method, "GET");
+});
+
+test("an older billing read error and its finally leave the quota fragment in place", { timeout: 5_000 }, async () => {
+  const { store, calls, pending } = await startPendingRead();
+  store.applyCalibratedUsage("acc-1", "v1", "window_5h", calibratedWindow("acc-1", 42.5), ACK_AT);
+  calls[0]!.reject(new Error("offline"));
+  await pending;
+  assert.equal(calls.length, 1);
+  assert.deepEqual(coldFragmentView(store, "acc-1"), coldQuotaFragment(42.5));
+});
+
+test("a later failed billing read keeps the known quota fragment", { timeout: 5_000 }, async () => {
+  const { store, calls, pending } = await startPendingRead();
+  store.applyCalibratedUsage("acc-1", "v1", "window_5h", calibratedWindow("acc-1", 42.5), ACK_AT);
+  calls[0]!.resolve(moneyPoison("acc-1", []));
+  await pending;
+  const fresh = installDeferredFetch();
+  const pendingFresh = store.load("acc-1", "v1");
+  await waitForCalls(fresh, 1);
+  fresh[0]!.reject(new Error("offline"));
+  await pendingFresh;
+  assert.equal(calls.length, 1);
+  assert.equal(fresh.length, 1);
+  assert.deepEqual(coldFragmentView(store, "acc-1"), {
+    ...coldQuotaFragment(42.5),
+    error: "load_failed",
+  });
+});
+
+test("two acknowledged windows coexist while the first billing read is pending", { timeout: 5_000 }, async () => {
+  const { store, calls, pending } = await startPendingRead();
+  store.applyCalibratedUsage("acc-1", "v1", "window_5h", calibratedWindow("acc-1", 42.5), ACK_AT);
+  store.applyCalibratedUsage("acc-1", "v1", "window_week", observedWindow("acc-1", {
+    window_week: 18,
+    resets_in_week: "2026-10-08T00:00:00.000Z",
+  }), ACK_AT);
+  assert.equal(calls.length, 1);
+  assert.equal(store.slotFor("acc-1").value?.status, null);
+  assert.equal(store.slotFor("acc-1").value?.loaded, false);
+  const fragment = coldFragmentView(store, "acc-1");
+  assert.deepEqual(fragment.windows.map((row) => `${row.kind}:${row.used}`), ["five_hours:42.5", "week:18"]);
+  assert.equal(fragment.windows.some((row) => row.used === 0), false);
+  assert.deepEqual(fragment.windowKeys, [QUOTA_WINDOW_KEYS, QUOTA_WINDOW_KEYS]);
+  assert.deepEqual(fragment.receiptKeys, ["windows"]);
+  assert.equal(fragment.revision, null);
+  assert.equal(fragment.processGeneration, null);
+  assert.equal(fragment.providerId, null);
+  assert.equal(fragment.cash, null);
+  assert.equal(fragment.credits, null);
+  calls[0]!.resolve(moneyPoison("acc-1", [
+    { kind: "five_hours", used: 1 },
+    { kind: "week", used: 0 },
+  ]));
+  await pending;
+  assert.equal(calls.length, 1);
+  assert.deepEqual(
+    coldFragmentView(store, "acc-1").windows.map((row) => `${row.kind}:${row.used}`),
+    ["five_hours:42.5", "week:18"],
+  );
+  assert.equal(store.slotFor("acc-1").value?.status, null);
+  assert.equal(store.slotFor("acc-1").value?.loaded, false);
+});
+
+test("an explicit zero on a cold slot stays zero without inventing sibling windows", { timeout: 5_000 }, async () => {
+  const { store, calls, pending } = await startPendingRead();
+  store.applyCalibratedUsage("acc-1", "v1", "window_5h", calibratedWindow("acc-1", 0), ACK_AT);
+  assert.deepEqual(coldFragmentView(store, "acc-1"), coldQuotaFragment(0));
+  calls[0]!.resolve(moneyPoison("acc-1", [
+    { kind: "five_hours", used: 1 },
+    { kind: "week", used: 0 },
+  ]));
+  await pending;
+  assert.equal(calls.length, 1);
+  assert.deepEqual(coldFragmentView(store, "acc-1"), coldQuotaFragment(0));
+});
+
+test("logout, remove, and a binding change drop a cold quota fragment", { timeout: 5_000 }, async () => {
+  const loggedOut = await startPendingRead();
+  loggedOut.store.applyCalibratedUsage("acc-1", "v1", "window_5h", calibratedWindow("acc-1", 42.5), ACK_AT);
+  loggedOut.store.clear();
+  loggedOut.calls[0]!.resolve(moneyPoison("acc-1", [{ kind: "five_hours", used: 42.5 }]));
+  await loggedOut.pending;
+  assert.equal(loggedOut.store.slotFor("acc-1").value, undefined);
+  assert.equal(loggedOut.calls.length, 1);
+
+  const removed = await startPendingRead();
+  removed.store.applyCalibratedUsage("acc-1", "v1", "window_5h", calibratedWindow("acc-1", 42.5), ACK_AT);
+  removed.store.remove("acc-1");
+  removed.calls[0]!.resolve(moneyPoison("acc-1", [{ kind: "five_hours", used: 42.5 }]));
+  await removed.pending;
+  assert.equal(removed.store.slotFor("acc-1").value, undefined);
+  assert.equal(removed.calls.length, 1);
+
+  const rebound = await startPendingRead();
+  rebound.store.applyCalibratedUsage("acc-1", "v1", "window_5h", calibratedWindow("acc-1", 42.5), ACK_AT);
+  const next = installDeferredFetch();
+  const pendingNext = rebound.store.load("acc-1", "v2");
+  await waitForCalls(next, 1);
+  assert.equal(rebound.store.slotFor("acc-1").value?.boundVersion, "v2");
+  assert.equal(rebound.store.slotFor("acc-1").value?.manualReceipt, null);
+  assert.equal(rebound.store.slotFor("acc-1").value?.status, null);
+  assert.equal(rebound.store.slotFor("acc-1").value?.loaded, false);
+  rebound.calls[0]!.resolve(moneyPoison("acc-1", [{ kind: "five_hours", used: 42.5 }]));
+  await rebound.pending;
+  assert.equal(rebound.calls.length, 1);
+  assert.equal(next.length, 1);
+  assert.equal(rebound.store.slotFor("acc-1").value?.manualReceipt, null);
+  assert.equal(rebound.store.slotFor("acc-1").value?.status, null);
+  next[0]!.resolve(quotaBilling("acc-1", []));
+  await pendingNext;
+  assert.equal(rebound.store.slotFor("acc-1").value?.manualReceipt, null);
+  assert.equal(rebound.store.slotFor("acc-1").value?.loaded, true);
+  assert.deepEqual(calibrationView(rebound.store, "acc-1").windows, []);
+  assert.equal(next.length, 1);
 });

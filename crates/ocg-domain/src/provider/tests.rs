@@ -665,6 +665,32 @@ fn contract_scopes_are_unique_and_limited_to_ordinary_providers() {
 }
 
 #[test]
+fn manual_usage_calibration_is_true_only_for_go_goat_and_ollama() {
+    for plan in BUILTIN_PROVIDERS {
+        let expected = matches!(
+            plan.provider_id,
+            OPENCODE_PROVIDER_ID | COMMAND_CODE_PROVIDER_ID | OLLAMA_PROVIDER_ID
+        );
+        assert_eq!(
+            plan.manual_usage_calibration, expected,
+            "{}",
+            plan.provider_id
+        );
+        let descriptor = ProviderRegistry::get(plan.provider_id).unwrap();
+        assert_eq!(
+            descriptor.usage.manual_calibration, expected,
+            "{}",
+            plan.provider_id
+        );
+        assert_eq!(
+            descriptor.card_actions.manual_usage_calibration, expected,
+            "{}",
+            plan.provider_id
+        );
+    }
+}
+
+#[test]
 fn defaults_and_verification_status_tokens_round_trip() {
     assert_eq!(default_provider_id(), OPENCODE_PROVIDER_ID);
     assert_eq!(default_credential_kind(), CredentialKind::ApiKey);

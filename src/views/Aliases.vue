@@ -33,6 +33,15 @@
         </n-button>
       </n-alert>
       <n-alert
+        v-if="catalogLoadError"
+        type="warning"
+        :title="t('加载供应商目录失败：{error}', { error: catalogLoadError })"
+      >
+        <n-button size="small" secondary :loading="loading" @click="loadAliases({ retain: true })">
+          {{ t("重试") }}
+        </n-button>
+      </n-alert>
+      <n-alert
         v-if="accountsLoadError"
         type="warning"
         :title="t('加载 Custom Alias 账号失败：{error}', { error: accountsLoadError })"
@@ -45,6 +54,15 @@
         v-if="dynamicLoadError"
         type="warning"
         :title="t('加载供应商失败：{error}', { error: dynamicLoadError })"
+      >
+        <n-button size="small" secondary :loading="loading" @click="loadAliases({ retain: true })">
+          {{ t("重试") }}
+        </n-button>
+      </n-alert>
+      <n-alert
+        v-if="destinationsLoadError"
+        type="warning"
+        :title="t('目的地投影刷新失败：{error}', { error: destinationsLoadError })"
       >
         <n-button size="small" secondary :loading="loading" @click="loadAliases({ retain: true })">
           {{ t("重试") }}
@@ -202,8 +220,10 @@ const cpaModels = computed(() => providersStore.cpaModels ?? []);
 const loading = ref(false);
 const search = ref("");
 const loadError = ref("");
+const catalogLoadError = ref("");
 const accountsLoadError = ref("");
 const dynamicLoadError = ref("");
+const destinationsLoadError = ref("");
 const cpaLoadError = ref("");
 const identitiesLoadError = ref("");
 // Alias publication lives in the providers store; these are read-through views.
@@ -310,12 +330,25 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
   loading.value = true;
   if (!options.retain) {
     loadError.value = "";
+    catalogLoadError.value = "";
     dynamicLoadError.value = "";
+    destinationsLoadError.value = "";
     cpaLoadError.value = "";
     identitiesLoadError.value = "";
   }
   try {
-    const [contractsResult, catalogResult, accountsResult, cpaResult, identitiesResult, destinationsResult] = await Promise.allSettled([
+    // Every slot is named: the publication read (store-owned error) must
+    // never be mistaken for the destination catalog read, and each read
+    // propagates its own failure independently.
+    const [
+      contractsResult,
+      catalogResult,
+      accountsResult,
+      cpaResult,
+      identitiesResult,
+      publicationResult,
+      destinationsResult,
+    ] = await Promise.allSettled([
       providersStore.loadContracts(),
       providersStore.loadCatalog(),
       accountsStore.loadPresented(),
@@ -327,6 +360,8 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
       destinationsStore.load(),
     ]);
     if (generation !== loadGeneration) return;
+    // Alias publication failures surface through the store-owned load error.
+    void publicationResult;
     if (identitiesResult.status === "fulfilled") {
       identitiesLoadError.value = "";
     } else {
@@ -338,6 +373,7 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
       cpaLoadError.value = dashboardErrorDetail(cpaResult.reason);
     }
     if (catalogResult.status === "fulfilled") {
+      catalogLoadError.value = "";
       const enabledProviderIds = new Set(
         (accountsResult.status === "fulfilled" ? accountsResult.value : accounts.value)
           .filter((account) => account.enabled)
@@ -348,23 +384,25 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
       ));
       if (entries.length === 0) {
         dynamicLoadError.value = "";
+        destinationsLoadError.value = "";
       } else {
-        // Destination catalog enablement decides dynamic row routability, so a
-        // projection failure hides those rows and is reported with them.
-        const destinationFailure = destinationsResult.status === "rejected"
+        // Destination catalog enablement decides dynamic row routability, so
+        // its failure hides those rows and is reported apart from definition
+        // failures.
+        destinationsLoadError.value = destinationsResult.status === "rejected"
           ? dashboardErrorDetail(destinationsResult.reason)
           : "";
         const details = await Promise.allSettled(
           entries.map((entry) => providersStore.loadDefinition(entry.provider_id)),
         );
         if (generation !== loadGeneration) return;
-        const failures: string[] = [];
-        if (destinationFailure) failures.push(destinationFailure);
-        details.forEach(result => {
-          if (result.status === "rejected") failures.push(dashboardErrorDetail(result.reason));
-        });
-        dynamicLoadError.value = failures[0] ?? "";
+        const failure = details.find((result) => result.status === "rejected");
+        dynamicLoadError.value = failure?.status === "rejected"
+          ? dashboardErrorDetail(failure.reason)
+          : "";
       }
+    } else {
+      catalogLoadError.value = dashboardErrorDetail(catalogResult.reason);
     }
     if (accountsResult.status === "fulfilled") {
       accountsLoadError.value = "";
@@ -387,7 +425,7 @@ watch(() => sessionStore.authenticated, ok => {
   loadGeneration += 1;
   aliasesLoadedAt = 0;
   loading.value = false;
-  loadError.value = accountsLoadError.value = dynamicLoadError.value = cpaLoadError.value = identitiesLoadError.value = "";
+  loadError.value = catalogLoadError.value = accountsLoadError.value = dynamicLoadError.value = destinationsLoadError.value = cpaLoadError.value = identitiesLoadError.value = "";
 }, { flush: "sync" });
 onUnmounted(() => { loadGeneration += 1; });
 onMounted(() => void loadAliases());

@@ -270,18 +270,6 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route("/settings/update-status", get(updater::get_update_status))
         .route("/settings/install-update", post(updater::install_update))
         .route(
-            "/providers/{provider_id}/pricing/refresh",
-            post(pricing::refresh_provider_pricing),
-        )
-        .route(
-            "/providers/{provider_id}/pricing/multipliers",
-            put(pricing::put_pricing_multipliers),
-        )
-        .route(
-            "/providers/{provider_id}/pricing",
-            get(pricing::get_provider_pricing),
-        )
-        .route(
             "/keys/primary/regenerate",
             post(keys::regenerate_primary_key),
         )

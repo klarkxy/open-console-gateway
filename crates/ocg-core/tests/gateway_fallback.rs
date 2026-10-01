@@ -367,8 +367,6 @@ async fn application_models_remains_available_with_empty_or_disjoint_pricing() {
     )
     .await;
     let mut empty = p.state.pricing_snapshot().as_ref().clone();
-    let mut raw_row = empty.models[0].clone();
-    raw_row.model_id = "vendor-raw-not-an-alias".into();
     empty.models.clear();
     empty.revision = format!("test-empty-pricing-{}", Utc::now().timestamp_micros());
     empty.activated_at = Utc::now().to_rfc3339();
@@ -387,7 +385,20 @@ async fn application_models_remains_available_with_empty_or_disjoint_pricing() {
     assert_no_application_model_side_effects(&h.state, &h.calls, Some(&before), &routing_before);
 
     let mut disjoint = h.state.pricing_snapshot().as_ref().clone();
-    disjoint.models = vec![raw_row];
+    disjoint.models = vec![ocg_core::kernel::pricing::PricingModel {
+        model_id: "vendor-raw-not-an-alias".into(),
+        display_name: "vendor-raw-not-an-alias".into(),
+        input: 0.0,
+        output: 0.0,
+        cache_read: 0.0,
+        cache_write: None,
+        usage: 0.0,
+        quota_multiplier: 1.0,
+        min_input_tokens: None,
+        max_input_tokens: None,
+        time_window: ocg_core::kernel::pricing::PricingTimeWindow::Always,
+        adjustments: Vec::new(),
+    }];
     disjoint.revision = format!("test-disjoint-pricing-{}", Utc::now().timestamp_micros());
     disjoint.activated_at = Utc::now().to_rfc3339();
     h.state.activate_pricing_snapshot(disjoint).unwrap();
@@ -503,9 +514,9 @@ async fn routes_all_client_formats_to_each_models_native_protocol() {
         let log = h.state.db.lock().list_forward_logs(1).unwrap().remove(0);
         assert_eq!((log.prompt_tokens, log.completion_tokens), (10, 2));
         assert_eq!(log.status, "success");
-        assert_eq!(log.cost_state, "priced");
-        assert!(log.cost.is_some());
-        assert!(log.pricing_revision_id.is_some());
+        assert_eq!(log.cost_state, "unknown");
+        assert!(log.cost.is_none());
+        assert!(log.pricing_revision_id.is_none());
         assert!(
             log.request_id
                 .as_deref()
@@ -2094,10 +2105,11 @@ async fn zen_free_is_anonymous_across_all_client_formats_and_logs_route_identity
     }));
     assert!(logs.iter().all(|log| {
         log.status == "success"
-            && log.cost_state == "free"
-            && log.raw_cost_usd == Some(0.0)
-            && log.quota_debit == Some(0.0)
-            && log.effective_paid_cost_usd == Some(0.0)
+            && log.cost_state == "unknown"
+            && log.cost.is_none()
+            && log.raw_cost_usd.is_none()
+            && log.quota_debit.is_none()
+            && log.effective_paid_cost_usd.is_none()
             && log.pricing_revision_id.is_none()
             && log.quota_multiplier.is_none()
             && log.local_adjustment_multiplier.is_none()
@@ -2193,11 +2205,12 @@ async fn zen_free_non_stream_success_without_usage_is_still_zero_cost_free() {
     let (status, body) = h.protocol("/v1/chat/completions", "mimo-v2.5-free").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let log = h.state.db.lock().list_forward_logs(1).unwrap().remove(0);
-    assert_eq!(log.status, "success");
-    assert_eq!(log.cost_state, "free");
-    assert_eq!(log.raw_cost_usd, Some(0.0));
-    assert_eq!(log.quota_debit, Some(0.0));
-    assert_eq!(log.effective_paid_cost_usd, Some(0.0));
+    assert_eq!(log.status, "success_no_usage");
+    assert_eq!(log.cost_state, "usage_missing");
+    assert!(log.cost.is_none());
+    assert!(log.raw_cost_usd.is_none());
+    assert!(log.quota_debit.is_none());
+    assert!(log.effective_paid_cost_usd.is_none());
     assert_eq!((log.prompt_tokens, log.completion_tokens), (0, 0));
 }
 
@@ -2211,11 +2224,12 @@ async fn zen_free_stream_success_without_usage_is_still_zero_cost_free() {
     let (status, body) = h.stream("/v1/chat/completions", "mimo-v2.5-free").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let log = h.state.db.lock().list_forward_logs(1).unwrap().remove(0);
-    assert_eq!(log.status, "success");
-    assert_eq!(log.cost_state, "free");
-    assert_eq!(log.raw_cost_usd, Some(0.0));
-    assert_eq!(log.quota_debit, Some(0.0));
-    assert_eq!(log.effective_paid_cost_usd, Some(0.0));
+    assert_eq!(log.status, "success_no_usage");
+    assert_eq!(log.cost_state, "usage_missing");
+    assert!(log.cost.is_none());
+    assert!(log.raw_cost_usd.is_none());
+    assert!(log.quota_debit.is_none());
+    assert!(log.effective_paid_cost_usd.is_none());
     assert_eq!((log.prompt_tokens, log.completion_tokens), (0, 0));
 }
 
@@ -2408,7 +2422,7 @@ async fn goat_loopback_adapter_routes_all_client_formats_with_its_own_auth_contr
         logs.iter().all(|log| {
             matches!(
                 (log.status.as_str(), log.cost_state.as_str()),
-                ("success_unpriced", "unpriced") | ("success_no_usage", "usage_missing")
+                ("success", "unknown") | ("success_no_usage", "usage_missing")
             ) && log.cost.is_none()
                 && log.raw_cost_usd.is_none()
                 && log.quota_debit.is_none()

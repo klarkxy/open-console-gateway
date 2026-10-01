@@ -265,23 +265,13 @@ async function save(): Promise<void> {
       await providersStore.editContractCatalogModel(source.legacy.id, plan.input, expectation);
     }
     if (!isCurrent(attempt)) return;
+    // The write receipt is the completion point: end editing and release
+    // saving here. Deferred projections below are independent reads whose
+    // failure is a warning, never a save failure — and never a model
+    // discovery, probe, or Key authorization.
     message.success(t("连接已保存"));
-    // Refresh only local projections used by Aliases and supplier details.
-    // Never discover models, probe an upstream, or authorize another Key.
-    const reads: Promise<unknown>[] = [
-      builtin ? destinationsStore.load() : providersStore.loadContracts(), providersStore.loadConnections(), providersStore.loadCatalog(),
-    ];
-    if (source.legacy.kind === "dynamic") {
-      providersStore.invalidateDefinition(source.legacy.id);
-      reads.push(providersStore.loadDefinition(source.legacy.id, true));
-    }
-    const results = await Promise.allSettled(reads);
-    if (!isCurrent(attempt)) return;
-    const failed = results.find((result) => result.status === "rejected");
-    if (failed?.status === "rejected") {
-      message.warning(t("加载供应商失败：{error}", { error: dashboardErrorDetail(failed.reason) }));
-    }
     resetEditor();
+    revalidateAfterModelSave(source, builtin);
   } catch (error) {
     if (!isCurrent(attempt)) return;
     if (isRevisionConflict(error)) {
@@ -294,6 +284,27 @@ async function save(): Promise<void> {
   } finally {
     if (isCurrent(attempt)) saving.value = false;
   }
+}
+
+function revalidateAfterModelSave(source: Destination, builtin: boolean): void {
+  // Refresh only local projections used by Aliases and supplier details.
+  // `generation` already advanced via resetEditor, so this callback is
+  // current only until the next editor/session change.
+  const attempt = generation;
+  const reads: Promise<unknown>[] = [
+    builtin ? destinationsStore.load() : providersStore.loadContracts(), providersStore.loadConnections(), providersStore.loadCatalog(),
+  ];
+  if (source.legacy.kind === "dynamic") {
+    providersStore.invalidateDefinition(source.legacy.id);
+    reads.push(providersStore.loadDefinition(source.legacy.id, true));
+  }
+  void Promise.allSettled(reads).then((results) => {
+    if (!isCurrent(attempt)) return;
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed?.status === "rejected") {
+      message.warning(t("加载供应商失败：{error}", { error: dashboardErrorDetail(failed.reason) }));
+    }
+  });
 }
 defineExpose({ editable, openEditor });
 </script>

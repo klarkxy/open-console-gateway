@@ -68,7 +68,7 @@ test("presentConnection maps the V4 wire row onto snake_case presentation fields
 });
 
 test("connectionsApi.list presents the V4 projection and syncs nested CAS tokens", async () => {
-  setupControlPlane(4, 11, "p1");
+  setupControlPlane(4, 11);
   installFetchMock(({ url, method }) => {
     if (url.endsWith("/connections") && method === "GET") {
       assert.match(url, /\/dashboard\/api\/v4\/connections$/);
@@ -87,7 +87,6 @@ test("connectionsApi.list presents the V4 projection and syncs nested CAS tokens
   const control = useControlPlaneStore();
   assert.equal(control.revision, 8);
   assert.equal(control.processGeneration, 11);
-  assert.equal(control.pricingRevision, "p2");
 });
 
 test("presentConnectionListSnapshot pairs the GET revision with presented rows", () => {
@@ -101,7 +100,7 @@ test("presentConnectionListSnapshot pairs the GET revision with presented rows",
 });
 
 test("connectionsApi.listSnapshot returns presented connections plus the GET pair", async () => {
-  setupControlPlane(9, 11, "p1");
+  setupControlPlane(9, 11);
   installFetchMock(({ url, method }) => {
     if (url.endsWith("/connections") && method === "GET") {
       return {
@@ -120,8 +119,8 @@ test("connectionsApi.listSnapshot returns presented connections plus the GET pai
 });
 
 test("connectionsApi.commitOnboarding uses a captured expectation even after the store advances", async () => {
-  setupControlPlane(4, 11, "p1");
-  useControlPlaneStore().sync({ revision: 8, processGeneration: 11, pricingRevision: "p1" });
+  setupControlPlane(4, 11);
+  useControlPlaneStore().sync({ revision: 8, processGeneration: 11 });
   const requests = installFetchMock(({ url, method }) => {
     if (url.endsWith("/onboarding/commit") && method === "POST") {
       return {
@@ -179,7 +178,7 @@ test("connectionsApi.commitOnboarding uses a captured expectation even after the
 });
 
 test("onboarding receipt keeps historic credential ids distinct from account ids", async () => {
-  setupControlPlane(4, 11, "p1");
+  setupControlPlane(4, 11);
   installFetchMock(({ url, method }) => {
     if (url.endsWith("/onboarding/commit") && method === "POST") {
       return {
@@ -211,7 +210,7 @@ test("onboarding receipt keeps historic credential ids distinct from account ids
 });
 
 test("connectionsApi.commitOnboarding does not replay a 409 revisionConflict", async () => {
-  setupControlPlane(4, 11, "p1");
+  setupControlPlane(4, 11);
   let commits = 0;
   const requests = installFetchMock(({ url, method }) => {
     if (url.endsWith("/onboarding/commit") && method === "POST") {
@@ -251,7 +250,7 @@ test("connectionsApi.commitOnboarding does not replay a 409 revisionConflict", a
 });
 
 test("connectionsApi.commitOnboarding publishes nested V4 CAS tokens", async () => {
-  setupControlPlane(4, 11, "p1");
+  setupControlPlane(4, 11);
   installFetchMock(({ url, method }) => {
     if (url.endsWith("/onboarding/commit") && method === "POST") {
       return {
@@ -283,7 +282,6 @@ test("connectionsApi.commitOnboarding publishes nested V4 CAS tokens", async () 
   const control = useControlPlaneStore();
   assert.equal(control.revision, 9);
   assert.equal(control.processGeneration, 11);
-  assert.equal(control.pricingRevision, "p3");
 });
 
 

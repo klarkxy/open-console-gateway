@@ -18,9 +18,6 @@
   <div v-else-if="isDraft" class="provider-unconfigured" role="status">
     <p>{{ draftDescription }}</p>
   </div>
-  <div v-else-if="capabilities.billingTierRequired && ollamaNeedsBilling" class="provider-unconfigured" role="status">
-    <p>{{ t("配置 Ollama 计费档位以显示本月额度") }}</p>
-  </div>
   <BillingPanel
     v-else-if="showsBilling"
     :account="account"
@@ -41,7 +38,7 @@
         {{ t("重试") }}
       </n-button>
     </div>
-    <ProviderQuotaSummary v-else :usage="providerUsage" :now="now" />
+    <ProviderQuotaSummary v-if="showQuotaSummary" :usage="quotaUsage" :now="now" />
   </div>
   <div v-else-if="showsModelCount || showsOfficialBalance" class="account-meta-row">
     <AccountCreditBalance
@@ -59,6 +56,7 @@
 
 <script setup lang="ts">
 import { useDestinationsStore } from "../stores/destinations.ts";
+import { useBillingStore } from "../stores/billing.ts";
 import { computed } from "vue";
 import { NButton } from "naive-ui";
 import type { Account } from "../api/dashboard";
@@ -78,6 +76,7 @@ import { accountCapabilities } from "../domain/account-capabilities.ts";
 import { findPlanDefinition } from "../domain/plans.ts";
 import { t } from "../i18n/index.ts";
 import { uniquePublicModelCount } from "../domain/platform-accounts.ts";
+import { billingBinding, manualReceiptQuotaView } from "../domain/billing.ts";
 import { accountInferenceEndpointUrl, officialBalanceSupported } from "../domain/upstream-balance.ts";
 import AccountCreditBalance from "./AccountCreditBalance.vue";
 import AccountFigure from "./AccountFigure.vue";
@@ -117,12 +116,12 @@ const emit = defineEmits<{
 }>();
 
 const destinations = useDestinationsStore();
+const billing = useBillingStore();
 const destination = computed(() => destinations.destinationForAccount(props.account.id));
 const capabilities = computed(() => accountCapabilities(props.account, props.catalog, destination.value));
 const showsModelCount = computed(() => (
   capabilities.value.endpointOnAccount && !props.hideModelCount
 ));
-const ollamaNeedsBilling = computed(() => !props.account.ollama_billing_tier);
 const plan = computed(() => findPlanDefinition(props.account.provider_id, props.catalog));
 const manualUsageCalibration = computed(() => (
   plan.value?.manual_usage_calibration ?? false
@@ -131,6 +130,23 @@ const usageRefreshAvailable = computed(() => plan.value?.usage_availability === 
 const inferenceEndpointUrl = computed(() => (
   accountInferenceEndpointUrl(props.account, props.identity, props.connections)
 ));
+const binding = computed(() => billingBinding(props.account.updated_at, inferenceEndpointUrl.value));
+const matchedSlot = computed(() => {
+  const slot = billing.slotFor(props.account.id).value;
+  return slot && slot.boundVersion === binding.value ? slot : null;
+});
+const receiptUsage = computed(() => {
+  const slot = matchedSlot.value;
+  if (!slot || slot.status?.usage) return null;
+  return manualReceiptQuotaView(slot.manualReceipt, props.account.id);
+});
+const quotaUsage = computed(() => {
+  if (receiptUsage.value) return receiptUsage.value;
+  const windows = props.providerUsage?.quota_windows;
+  if (!windows) return null;
+  return { quota_windows: windows };
+});
+const showQuotaSummary = computed(() => !props.usageLoadError || receiptUsage.value !== null);
 const balanceRefreshAvailable = computed(() => officialBalanceSupported(inferenceEndpointUrl.value, props.connections));
 const creditBalances = computed(() => props.providerUsage?.credit_balances ?? []);
 const showsOfficialBalance = computed(() => (
@@ -142,7 +158,7 @@ const usageDisplayAvailable = computed(() => (
 const showsBilling = computed(() => {
   if (props.hideModelCount) return false;
   if (plan.value?.model_source === "official_api_preset") return true;
-  if (usageDisplayAvailable.value || balanceRefreshAvailable.value) return true;
+  if (usageRefreshAvailable.value || balanceRefreshAvailable.value) return true;
   return plan.value?.kind === "custom" || plan.value?.dynamic === true;
 });
 const isDraft = computed(() => (

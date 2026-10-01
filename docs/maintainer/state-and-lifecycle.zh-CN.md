@@ -6,7 +6,7 @@
 
 `CoreStateInner`（`state.rs`）由 Gateway、面板与 CLI 共享。
 
-锁顺序：(1) `settings_update`，(2) `db`，(3) `config`，(4) `http_client`， (5) `gateway`，(6) `pricing`，(7) `zen_free_models`，(8) `provider_contracts`，(9) `routing`，(10) `credential_snapshot`。反向获取会造成死锁；持有 `routing` 锁时不应执行 DB 或网络 I/O。异步闸口：设置写同时重绑时， `settings_host_effects`（持久化 → 监听器重绑 → 补偿）先于 `gateway_lifecycle`。这些 await 期间应释放 `parking_lot` 锁。
+锁顺序：(1) `settings_update`，(2) `db`，(3) `config`，(4) `http_client`， (5) `gateway`，(6) `pricing`，(7) `zen_free_models`，(8) `provider_contracts`，(9) `routing`，(10) `credential_snapshot`。反向获取会造成死锁；持有 `routing` 锁时不应执行 DB 或网络 I/O。异步闸口：设置写同时重绑时， `settings_host_effects`（持久化 → 监听器重绑 → 补偿）先于 `gateway_lifecycle`。这些 await 期间应释放 `parking_lot` 锁。启动时不 seed、不修复、不激活价格快照，也不启动取价任务。打开数据库不会结算历史积分记录。计费读取报告的活动 `pendingRequests` 为 0。已保存回执保持原样。显式校准不被该回执阻挡，也不会删除它。已发布的 `GatewayPreparationSnapshot` 没有价格字段。锁序号 (6) `pricing` 仍是 `CoreStateInner` 上的内存价格快照锁。
 
 访问 Key 的权威表是 `access_keys`。两层凭证共用该表（当前 schema 版本，见[存储与迁移](storage-migration.zh-CN.md)）和一份鉴权快照：
 

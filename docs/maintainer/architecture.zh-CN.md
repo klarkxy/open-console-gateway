@@ -56,7 +56,7 @@ SPA 始终是 HTTP 客户端。Desktop capability 注册进 `CoreState`。
 推理实现位于 `crates/ocg-core/src/gateway/`：
 
 1. `handler.rs` 分配 request id、验证客户端 Key、解析客户端协议并解析模型身份。
-2. `GatewayExecutor` 在请求入口捕获一次价格、代理路由、合约与 Alias 解析快照。fallback
+2. `GatewayExecutor` 在请求入口捕获一次代理路由、合约与 Alias 解析快照，不为新请求捕获价格快照。fallback
    每轮重读实时账号状态、合格 Custom runtime 与 Zen Free 冷却。协议选择使用该次保存的
    合约。
 3. 候选物化先应用适配器上限和 effective 模型/协议状态，再由无 I/O selector 选择账号卡。
@@ -86,8 +86,7 @@ Provider 目录与合约先于账号凭据解析。保存的发现行只能激�
 
 Vue SPA 通过 `src/api/dashboard-v3.ts`（HTTP 基址 `/dashboard/api/v4`）调用挂回的操作处理器，通过 `src/api/dashboard-v4.ts` 调用原生 V4 路由（presenter 在 `src/api/connections.ts`）。
 `/dashboard/api/v3` 是 410 墓碑。活的面板 JSON 只走 V4。
-受 CAS 保护的变更携带 `expectedRevision` 与 `processGeneration`；价格写入另带
-`expectedPricingRevision`。不变更状态的操作读取与诊断跳过 CAS。
+受 CAS 保护的变更携带 `expectedRevision` 与 `processGeneration`。没有价格写入，也不发送 `expectedPricingRevision`。不变更状态的操作读取与诊断跳过 CAS。
 
 CLI 调用相同的 HTTP-neutral service，不带 argv CAS token。共享 service 负责持久化与
 revision bump，同时服务 CLI 与前端。

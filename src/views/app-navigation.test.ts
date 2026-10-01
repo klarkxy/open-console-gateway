@@ -68,18 +68,18 @@ test("provider deep-link query fields round-trip on the providers view", () => {
   const url = applyAppViewSearchParams(
     new URL("http://127.0.0.1:9042/dashboard/?view=accounts"),
     "providers",
-    { provider: "minimax", tab: "pricing" },
+    { provider: "minimax", tab: "models" },
   );
   assert.equal(url.searchParams.get("view"), "providers");
   assert.equal(url.searchParams.get("provider"), "minimax");
   assert.equal(url.searchParams.get("connection"), null);
-  assert.equal(url.searchParams.get("tab"), "pricing");
+  assert.equal(url.searchParams.get("tab"), "models");
   assert.deepEqual(readProviderPageQuery(url.search), {
     connection: null,
     provider: "minimax",
     destination: null,
     model: null,
-    tab: "pricing",
+    tab: "models",
     add: false,
     preset: null,
   });
@@ -182,10 +182,14 @@ test("legacy provider tab values map onto the detail tabs", () => {
   assert.equal(normalizeProviderDetailTab("catalog"), "models");
   assert.equal(normalizeProviderDetailTab(PROVIDER_OTHER_TAB), "settings");
   assert.equal(normalizeProviderDetailTab("models"), "models");
-  assert.equal(normalizeProviderDetailTab("pricing"), "pricing");
+  assert.equal(normalizeProviderDetailTab("pricing"), "models");
   assert.equal(normalizeProviderDetailTab("settings"), "settings");
   assert.equal(normalizeProviderDetailTab("nope"), null);
   assert.equal(normalizeProviderDetailTab(null), null);
+  assert.deepEqual(
+    readProviderPageQuery("?view=providers&provider=opencode&tab=pricing"),
+    { connection: null, provider: "opencode", destination: null, model: null, tab: "models", add: false, preset: null },
+  );
   assert.deepEqual(
     readProviderPageQuery("?view=providers&scope_kind=provider&scope_id=opencode&tab=other"),
     { connection: null, provider: "opencode", destination: null, model: null, tab: "settings", add: false, preset: null },
@@ -311,9 +315,9 @@ test("the Accounts add deep link survives a providers write untouched", () => {
 
 test("appViewRoute targets the named route with the legacy query semantics, minus view", () => {
   assert.deepEqual(appViewRoute("accounts"), { name: "accounts", query: {} });
-  assert.deepEqual(appViewRoute("providers", { destination: "dest-site", tab: "pricing" }), {
+  assert.deepEqual(appViewRoute("providers", { destination: "dest-site", tab: "models" }), {
     name: "providers",
-    query: { destination: "dest-site", tab: "pricing" },
+    query: { destination: "dest-site", tab: "models" },
   });
   assert.deepEqual(appViewRoute("accounts", undefined, { account_id: "acct-1" }), {
     name: "accounts",
@@ -327,13 +331,13 @@ test("appViewRoute targets the named route with the legacy query semantics, minu
 });
 
 test("routeQuerySearch round-trips into the legacy readers", () => {
-  const search = routeQuerySearch("providers", { destination: "dest-site", tab: "pricing" });
+  const search = routeQuerySearch("providers", { destination: "dest-site", tab: "models" });
   assert.deepEqual(readProviderPageQuery(search), {
     connection: null,
     provider: null,
     destination: "dest-site",
     model: null,
-    tab: "pricing",
+    tab: "models",
     add: false,
     preset: null,
   });

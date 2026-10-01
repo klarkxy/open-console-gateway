@@ -425,7 +425,7 @@ test("destination cards and pending loads are cleared on logout", async () => {
 
 test("account toggle refreshes the projected Key and revision before a layout write", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: "p1" });
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
   const calls = installDeferredFetch();
   const store = useDestinationsStore();
   const initial = store.load();

@@ -148,17 +148,17 @@ fn project_billing(
     let official_refresh = model != BillingModel::Credits
         && (descriptor.is_some_and(|entry| entry.card_actions.usage_refresh)
             || (configurable && crate::api_balance::probe_from_endpoint(endpoint).is_some()));
+    let percent_observed = usage.quota_windows.iter().any(|window| {
+        window.unit == "percent"
+            && window.limit_value == Some(100.0)
+            && window.observed_at.is_some()
+    });
     let source = if credits.is_some()
-        || matches!(
-            adapter,
-            AdapterKind::OpencodeGo | AdapterKind::Goat | AdapterKind::Ollama | AdapterKind::Zen
-        ) {
-        BillingSource::LocalEstimate
-    } else if cash
-        .as_ref()
-        .is_some_and(|value| !value.balances.is_empty())
+        || cash
+            .as_ref()
+            .is_some_and(|value| !value.balances.is_empty())
         || !usage.credit_balances.is_empty()
-        || !usage.quota_windows.is_empty()
+        || percent_observed
     {
         BillingSource::Official
     } else {

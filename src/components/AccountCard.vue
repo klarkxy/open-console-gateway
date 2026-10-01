@@ -107,7 +107,6 @@ const props = defineProps<{
   usageLoadError: string | null;
   usageRefreshLoading: boolean;
   purchaseDateSaving: boolean;
-  quotaLimitsFailed: boolean;
   menuOptions: AccountMenuOption[];
   accountNames?: Readonly<Record<string, string>>;
   connections?: readonly Connection[] | null;

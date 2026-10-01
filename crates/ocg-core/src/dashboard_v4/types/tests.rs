@@ -102,6 +102,27 @@ fn schema_catalog_names_v4_types_and_shared_error() {
         );
     }
     assert!(defs.contains_key("RoutingExplanation"));
+    for retired in [
+        "OfficialPriceRow",
+        "OfficialPriceSheet",
+        "OfficialApiPrices",
+    ] {
+        assert!(!CATALOG_TYPE_NAMES.contains(&retired), "{retired}");
+        assert!(!defs.contains_key(retired), "{retired}");
+    }
+    assert!(defs.contains_key("CreditConfigurationWrite"));
+    assert!(defs.contains_key("OfficialApiStatus"));
+    assert!(
+        defs["OfficialApiStatus"]["properties"]
+            .get("prices")
+            .is_none()
+    );
+    let write = defs["CreditConfigurationWrite"]["properties"]
+        .as_object()
+        .unwrap();
+    assert!(write.get("rates").is_none());
+    assert!(write.get("creditsPerCurrency").is_none());
+    assert!(write.contains_key("sourceUrl"));
 }
 
 #[test]

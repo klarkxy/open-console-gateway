@@ -2,11 +2,10 @@ use crate::crypto::KeyCipher;
 use crate::db::Database;
 use crate::desktop::DesktopCapabilities;
 use crate::gateway_runtime::GatewayRebindHost;
-use crate::kernel::pricing::{PricingEstimate, PricingSnapshot};
+use crate::kernel::pricing::{PricingLimits, PricingSnapshot};
 use crate::models::{
     AppConfig, normalize_client_root_url, normalize_opencode_invite_url, normalize_proxy_url,
 };
-use crate::pricing::{embedded_seed, ensure_current_adjustment_policy, ensure_seed_model_coverage};
 use crate::quota_recovery::QuotaEpisode;
 use crate::routing_runtime::RoutingRuntime;
 use parking_lot::{Mutex, RwLock};
@@ -41,8 +40,8 @@ const CLIENT_ROOT_URL_ENV: &str = "OCG_CLIENT_ROOT_URL";
 // zen_free_models → provider_contracts, then drops those before
 // `routing.reset()`. `reload_provider_contracts_locked` may already hold db
 // and then takes zen_free_models (read, dropped) before provider_contracts
-// (write). The desktop update-status mutex and the async pricing_refresh
-// guard are never held while acquiring another sync lock. The credential
+// (write). The desktop update-status mutex is never held while acquiring
+// another sync lock. The credential
 // snapshot write lock is always taken last (after db/config reads) and never
 // held while acquiring another lock; auth-path readers take only the
 // snapshot read lock. Never acquire in reverse order; always drop one before
@@ -107,7 +106,6 @@ pub struct CoreStateInner {
     pub dashboard_dir: Mutex<Option<PathBuf>>,
     http_client: Mutex<Arc<crate::http_client::ForwardRouteSet>>,
     pricing: RwLock<Arc<PricingSnapshot>>,
-    pub pricing_refresh: tokio::sync::Mutex<()>,
     zen_free_models: RwLock<Arc<crate::kernel::zen::ZenFreeModelCatalog>>,
     pub(crate) modelsdev_catalog: RwLock<Arc<crate::modelsdev::ModelsDevCatalog>>,
     cpa_models: RwLock<Arc<Vec<String>>>,
@@ -162,8 +160,8 @@ pub(crate) struct ImportedNodeRuntime {
 /// preparation needs from configuration-derived state.
 ///
 /// This replaces the old `settings_update` gate that every request acquired to
-/// keep several independent reads (routing projection, config, contracts-backed
-/// route set, pricing) from disagreeing with each other. Holding one published
+/// keep several independent reads (routing projection, config, and the
+/// contracts-backed route set) from disagreeing with each other. Holding one published
 /// value gives the same agreement without serializing ordinary traffic against
 /// dashboard writes: a writer mutates the database and installs its in-memory
 /// state under `settings_update`, then swaps a single `Arc`.
@@ -181,7 +179,6 @@ pub(crate) struct GatewayPreparationSnapshot {
     revision: u64,
     routing: crate::routing_snapshot::RoutingSnapshot,
     config: AppConfig,
-    pricing: Arc<PricingSnapshot>,
     routes: Arc<crate::http_client::ForwardRouteSet>,
 }
 
@@ -201,22 +198,35 @@ impl GatewayPreparationSnapshot {
         &self.config
     }
 
-    pub(crate) fn pricing(&self) -> Arc<PricingSnapshot> {
-        self.pricing.clone()
-    }
-
     pub(crate) fn routes(&self) -> Arc<crate::http_client::ForwardRouteSet> {
         self.routes.clone()
     }
 }
 
-/// The pricing-free half of [`GatewayPreparationSnapshot`], read separately so
-/// a writer holding the `pricing` write lock can assemble it in lock order. See
-/// `CoreStateInner::read_gateway_preparation_view`.
+/// Routing, config, and route set assembled for one preparation generation.
 struct GatewayPreparationView {
     routing: crate::routing_snapshot::RoutingSnapshot,
     config: AppConfig,
     routes: Arc<crate::http_client::ForwardRouteSet>,
+}
+
+/// In-memory placeholder when no historical pricing snapshot is stored.
+/// It is never inserted and never used to price a request.
+fn inert_pricing_snapshot() -> PricingSnapshot {
+    PricingSnapshot {
+        revision: String::new(),
+        activated_at: String::new(),
+        document_updated_at: String::new(),
+        source_url: String::new(),
+        content_hash: String::new(),
+        limits: PricingLimits {
+            window_5h: 0.0,
+            window_week: 0.0,
+            window_month: 0.0,
+        },
+        models: Vec::new(),
+        adjustment_policy_version: String::new(),
+    }
 }
 
 /// One exact upstream model id the executor can send, used by Settings
@@ -476,22 +486,9 @@ impl CoreStateInner {
         }
         let credential_snapshot =
             crate::gateway_keys::build_credential_snapshot(&db, &config.gateway_key)?;
-        let pricing = match db.latest_pricing_snapshot()? {
-            Some(snapshot) => {
-                let previous_revision = snapshot.revision.clone();
-                let snapshot = ensure_current_adjustment_policy(snapshot);
-                let snapshot = ensure_seed_model_coverage(snapshot);
-                if snapshot.revision != previous_revision {
-                    db.insert_pricing_snapshot(&snapshot)?;
-                }
-                snapshot
-            }
-            None => {
-                let snapshot = embedded_seed();
-                db.insert_pricing_snapshot(&snapshot)?;
-                snapshot
-            }
-        };
+        let pricing = db
+            .latest_pricing_snapshot()?
+            .unwrap_or_else(inert_pricing_snapshot);
         let zen_free_models = db.zen_free_model_catalog()?.unwrap_or_default();
         let modelsdev_catalog = crate::modelsdev::load(&db)?;
         let cpa_models = db
@@ -524,7 +521,6 @@ impl CoreStateInner {
             revision: settings_revision,
             routing: crate::routing_snapshot::RoutingSnapshot::load(&db)?,
             config: config.clone(),
-            pricing: pricing.clone(),
             routes: http_client.clone(),
         };
         Ok(Self {
@@ -551,7 +547,6 @@ impl CoreStateInner {
             dashboard_dir: Mutex::new(None),
             http_client: Mutex::new(http_client),
             pricing: RwLock::new(pricing),
-            pricing_refresh: tokio::sync::Mutex::new(()),
             zen_free_models: RwLock::new(Arc::new(zen_free_models)),
             modelsdev_catalog: RwLock::new(Arc::new(modelsdev_catalog)),
             cpa_models: RwLock::new(Arc::new(cpa_models)),
@@ -707,34 +702,21 @@ impl CoreStateInner {
     /// hold `settings_update` (or otherwise exclude concurrent writers) and must
     /// pass the same database view the in-memory state was installed from, so
     /// the published generation cannot mix new rows with old config.
-    ///
-    /// `pricing` is passed in rather than re-read so a writer that already holds
-    /// the `pricing` write lock can publish without re-entering it. Callers
-    /// holding that guard must use [`Self::publish_prepared_gateway_preparation`]
-    /// instead: this function reads `config` and `http_client`, which sit
-    /// *below* `pricing` in the lock ordering.
     fn assemble_gateway_preparation(
         &self,
         db: &Database,
-        pricing: Arc<PricingSnapshot>,
     ) -> crate::Result<GatewayPreparationSnapshot> {
         let view = self.read_gateway_preparation_view(db)?;
         Ok(GatewayPreparationSnapshot {
             revision: self.settings_revision.load(Ordering::Acquire),
             routing: view.routing,
             config: view.config,
-            pricing,
             routes: view.routes,
         })
     }
 
-    /// Read every part of the preparation aggregate except the pricing
-    /// pointer, in the documented order (db -> config -> http_client).
-    ///
-    /// Split out from [`Self::assemble_gateway_preparation`] so a writer that
-    /// already holds a higher-numbered lock — `pricing` — can read the rest of
-    /// the view *before* taking it, instead of acquiring a lower-numbered lock
-    /// while holding `pricing` and inverting the ordering.
+    /// Read the preparation aggregate in the documented order
+    /// (db -> config -> http_client).
     fn read_gateway_preparation_view(
         &self,
         db: &Database,
@@ -746,28 +728,11 @@ impl CoreStateInner {
         })
     }
 
-    /// Swap the aggregate from a view already read in lock order. Takes only
-    /// the innermost `gateway_preparation` lock, so it is safe to call while
-    /// holding `pricing`.
-    fn publish_prepared_gateway_preparation(
-        &self,
-        view: GatewayPreparationView,
-        pricing: Arc<PricingSnapshot>,
-    ) {
-        *self.gateway_preparation.write() = Arc::new(GatewayPreparationSnapshot {
-            revision: self.settings_revision.load(Ordering::Acquire),
-            routing: view.routing,
-            config: view.config,
-            pricing,
-            routes: view.routes,
-        });
-    }
-
     fn build_gateway_preparation(
         &self,
         db: &Database,
     ) -> crate::Result<GatewayPreparationSnapshot> {
-        self.assemble_gateway_preparation(db, self.pricing_snapshot())
+        self.assemble_gateway_preparation(db)
     }
 
     /// Republish the aggregate with a single `Arc` swap. Call this after any
@@ -777,7 +742,7 @@ impl CoreStateInner {
         // Assemble before taking the write guard: assembling reads `config` and
         // `http_client`, both of which sit above `gateway_preparation` in the
         // ordering.
-        let next = self.assemble_gateway_preparation(db, self.pricing_snapshot())?;
+        let next = self.assemble_gateway_preparation(db)?;
         *self.gateway_preparation.write() = Arc::new(next);
         Ok(())
     }
@@ -1164,44 +1129,10 @@ impl CoreStateInner {
         Ok(())
     }
 
+    /// Callers still pass a snapshot here. It is discarded; loaded history stays as read.
     pub fn activate_pricing_snapshot(&self, snapshot: PricingSnapshot) -> crate::Result<()> {
-        // Keep database persistence and the in-memory active pointer behind the
-        // documented db -> pricing lock order, so readers never observe a
-        // partially activated revision.
-        let db = self.db.lock();
-        // The rest of the view is read *before* the pricing write lock, so the
-        // only locks taken while `pricing` is held are `pricing` and the
-        // innermost `gateway_preparation`. Reading `config` or `http_client`
-        // under the pricing guard would invert the documented ordering.
-        let view = self.read_gateway_preparation_view(&db)?;
-        let mut active = self.pricing.write();
-        db.insert_pricing_snapshot(&snapshot)?;
-        let pricing = Arc::new(snapshot);
-        *active = pricing.clone();
-        // Swap before the pricing guard is released, so a request can never
-        // price against a revision the activation has not accepted yet, nor
-        // observe the new pointer alongside a stale aggregate.
-        self.publish_prepared_gateway_preparation(view, pricing);
+        let _ = snapshot;
         Ok(())
-    }
-
-    pub fn estimate_cost(
-        &self,
-        model: &str,
-        prompt: i64,
-        completion: i64,
-        cached: i64,
-        cache_creation: i64,
-        service_tier: Option<&str>,
-    ) -> PricingEstimate {
-        self.pricing_snapshot().estimate(
-            model,
-            prompt,
-            completion,
-            cached,
-            cache_creation,
-            service_tier,
-        )
     }
 
     pub fn active_gateway_port(&self) -> u16 {

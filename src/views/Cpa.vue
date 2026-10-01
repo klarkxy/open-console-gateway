@@ -5,6 +5,9 @@
     </n-alert>
 
     <template v-else-if="integration">
+      <n-alert v-if="integrationReadError" type="warning" :title="t('加载 CPA 失败：{error}', { error: integrationReadError })">
+        <n-button size="small" secondary @click="retryDisconnectedRead">{{ t("重试") }}</n-button>
+      </n-alert>
       <n-tabs v-model:value="activeTab" type="line" animated class="cpa-tabs" display-directive="if">
         <template #suffix>
           <n-button secondary size="small" :loading="loading" @click="load">
@@ -223,11 +226,14 @@
             </div>
           </n-alert>
 
-          <div v-if="keysLoading" class="cpa-state"><n-spin size="small" /></div>
-          <n-alert v-else-if="keysError" type="error" :title="t('加载客户端 Key 失败：{error}', { error: keysError })">
+          <div v-if="keysLoading && !keysLoaded" class="cpa-state"><n-spin size="small" /></div>
+          <n-alert v-else-if="keysError && !keysLoaded" type="error" :title="t('加载客户端 Key 失败：{error}', { error: keysError })">
             <n-button size="small" secondary @click="loadRuntimeKeys">{{ t("重试") }}</n-button>
           </n-alert>
           <template v-else>
+            <n-alert v-if="keysError" type="warning" :title="t('加载客户端 Key 失败：{error}', { error: keysError })">
+              <n-button size="small" secondary @click="loadRuntimeKeys">{{ t("重试") }}</n-button>
+            </n-alert>
             <div v-if="runtimeKeys.length" class="cpa-key-list">
               <CpaKeyRow
                 v-for="key in keyPartition.protectedKeys"
@@ -379,12 +385,16 @@
             </n-alert>
           </div>
 
-          <div v-if="accountsLoading" class="cpa-state"><n-spin size="small" /></div>
-          <n-alert v-else-if="accountsError" type="error" :title="t('CPA 账号操作失败：{error}', { error: accountsError })">
+          <div v-if="accountsLoading && !accountsLoaded" class="cpa-state"><n-spin size="small" /></div>
+          <n-alert v-else-if="accountsError && !accountsLoaded" type="error" :title="t('CPA 账号操作失败：{error}', { error: accountsError })">
             <n-button size="small" secondary @click="loadAccounts">{{ t("重试") }}</n-button>
           </n-alert>
-          <n-empty v-else-if="cpaAccounts.length === 0" :description="t('暂无账号')" />
-          <div v-else class="cpa-account-list">
+          <template v-else>
+            <n-alert v-if="accountsError" type="warning" :title="t('加载账号失败：{error}', { error: accountsError })">
+              <n-button size="small" secondary @click="loadAccounts">{{ t("重试") }}</n-button>
+            </n-alert>
+            <n-empty v-if="cpaAccounts.length === 0" :description="t('暂无账号')" />
+            <div v-else class="cpa-account-list">
             <article v-for="account in cpaAccounts" :key="cpaAccountKey(account)" class="cpa-account-row">
               <div class="cpa-account-main">
                 <div class="cpa-account-title">
@@ -416,6 +426,7 @@
               </n-space>
             </article>
           </div>
+          </template>
         </n-card>
       </section>
         </n-tab-pane>
@@ -453,12 +464,16 @@
           <n-alert v-if="!integration.configured" type="info" :title="t('先在概览中配置并启动 CPA，再刷新模型目录。')">
             <n-button size="small" @click="activeTab = 'overview'">{{ t('返回概览') }}</n-button>
           </n-alert>
-          <div v-else-if="catalogLoading" class="cpa-state"><n-spin size="small" /></div>
-          <n-alert v-else-if="catalogError" type="error" :title="t('加载模型目录失败：{error}', { error: catalogError })">
+          <div v-else-if="catalogLoading && !catalogLoaded" class="cpa-state"><n-spin size="small" /></div>
+          <n-alert v-else-if="catalogError && !catalogLoaded" type="error" :title="t('加载模型目录失败：{error}', { error: catalogError })">
             <n-button size="small" secondary @click="loadCatalog">{{ t("重试") }}</n-button>
           </n-alert>
-          <p v-else-if="catalogModels.length === 0" class="cpa-help">{{ t("尚未刷新模型目录；启用路由前需先刷新。") }}</p>
-          <div v-else class="cpa-catalog-groups">
+          <template v-else>
+            <n-alert v-if="catalogError" type="warning" :title="t('加载模型目录失败：{error}', { error: catalogError })">
+              <n-button size="small" secondary @click="loadCatalog">{{ t("重试") }}</n-button>
+            </n-alert>
+            <p v-if="catalogModels.length === 0" class="cpa-help">{{ t("尚未刷新模型目录；启用路由前需先刷新。") }}</p>
+            <div v-else class="cpa-catalog-groups">
             <section v-for="group in catalogGroups" :key="group.source || 'unknown'" class="cpa-catalog-group">
               <h3>{{ group.source || t("未知来源") }} · {{ group.models.length }}</h3>
               <div class="cpa-catalog-cards">
@@ -477,6 +492,7 @@
               </div>
             </section>
           </div>
+          </template>
         </n-card>
       </section>
         </n-tab-pane>
@@ -538,7 +554,6 @@ import type {
   CpaAccount,
   CpaCliImports,
   CpaConnectionReport,
-  CpaIntegration,
   CpaOAuthProvider,
   CpaOAuthStart,
   CpaRuntime,
@@ -550,8 +565,9 @@ import type {
 } from "../api/generated/dashboard-v3.ts";
 import { dashboardV3 } from "../api/dashboard-v3.ts";
 import { dashboardV4 } from "../api/dashboard-v4.ts";
-import type { CpaCatalog, CpaCatalogEntry } from "../api/generated/dashboard-v4.ts";
+import type { CpaCatalogEntry } from "../api/generated/dashboard-v4.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
+import { useCpaStore } from "../stores/cpa.ts";
 import { useSessionStore } from "../stores/session.ts";
 import { createRevalidateGate } from "../domain/revalidate.ts";
 import { t } from "../i18n/index.ts";
@@ -582,27 +598,62 @@ import CpaKeyRow from "../components/CpaKeyRow.vue";
 const dialog = useDialog();
 const message = useMessage();
 const controlPlane = useControlPlaneStore();
+const cpaStore = useCpaStore();
 const sessionStore = useSessionStore();
 const revalidateGate = createRevalidateGate(15_000);
-watch(() => sessionStore.authenticated, (ok) => { if (!ok) revalidateGate.reset(); });
+const integrationReadError = ref("");
+let integrationReadTicket = 0;
+watch(() => sessionStore.authenticated, (ok) => {
+  if (ok) return;
+  revalidateGate.reset();
+  // Session loss is a full teardown, not a page exit: wipe every cached read
+  // model and any one-time secret so late callbacks find nothing to revive.
+  teardownViewLifecycle();
+  cpaStore.clear();
+  revealedSecret.value = null;
+  clearCliImportConfirmation();
+});
 const { copiedTarget, copy, cleanup: cleanupClipboard } = useClipboard();
 
-const integration = ref<CpaIntegration | null>(null);
+// Server read models live in the CPA store; these aliases keep template and
+// computed reads unchanged. All writes go through store actions.
+const integration = computed(() => cpaStore.integration);
+const runtime = computed(() => cpaStore.runtime);
+const loadError = computed(() => cpaStore.error);
+const runtimeError = computed(() => cpaStore.runtimeError);
+const cpaAccounts = computed(() => cpaStore.cpaAccounts);
+const accountsLoading = computed(() => cpaStore.accountsLoading);
+const accountsLoaded = computed(() => cpaStore.accountsLoaded);
+const accountsError = computed(() => cpaStore.accountsError);
+const catalogModels = computed(() => cpaStore.catalogModels);
+const catalogSourceUrl = computed(() => cpaStore.catalogSourceUrl);
+const catalogLoading = computed(() => cpaStore.catalogLoading);
+const catalogLoaded = computed(() => cpaStore.catalogLoaded);
+const catalogError = computed(() => cpaStore.catalogError);
+const runtimeKeys = computed(() => cpaStore.runtimeKeys);
+const keysLoading = computed(() => cpaStore.keysLoading);
+const keysLoaded = computed(() => cpaStore.keysLoaded);
+const keysError = computed(() => cpaStore.keysError);
+
 const report = ref<CpaConnectionReport | null>(null);
-const cpaAccounts = ref<CpaAccount[]>([]);
 const loading = ref(false);
-const loadError = ref("");
 const saving = ref(false);
 const testing = ref(false);
 const refreshingModels = ref(false);
-const catalogModels = ref<CpaCatalogEntry[]>([]);
-const catalogSourceUrl = ref<string | null>(null);
-const catalogLoading = ref(false);
-const catalogError = ref("");
-const accountsLoading = ref(false);
-const accountsError = ref("");
 const accountAction = ref("");
+let accountActionTicket = 0;
+
+function claimAccountAction(actionKey: string): number {
+  accountActionTicket += 1;
+  accountAction.value = actionKey;
+  return accountActionTicket;
+}
+
+function releaseAccountAction(ticket: number): void {
+  if (ticket === accountActionTicket) accountAction.value = "";
+}
 const disconnecting = ref(false);
+let disconnectTicket = 0;
 const oauth = ref<CpaOAuthStart | null>(null);
 // Single-flight key `${provider}:${method}` for the start request in flight.
 const oauthStartingAction = ref<string | null>(null);
@@ -627,9 +678,13 @@ const cliImportNotice = ref<{ type: "success" | "warning"; text: string } | null
 // Providers confirmed imported this session. Complements account-name detection
 // so a successful import greys out immediately even if the account list is empty.
 const importedCliProviders = ref<CpaOAuthProvider[]>([]);
+let cliImportTicket = 0;
 
-const runtime = ref<CpaRuntime | null>(null);
-const runtimeError = ref("");
+function clearCliImportConfirmation(): void {
+  importedCliProviders.value = [];
+  cliImportNotice.value = null;
+}
+
 const runtimePollError = ref("");
 const runtimeCheck = ref<CpaRuntimeCheck | null>(null);
 const runtimeAction = ref("");
@@ -642,10 +697,18 @@ const logsError = ref("");
 
 const activeTab = ref("overview");
 
-const runtimeKeys = ref<CpaRuntimeKey[]>([]);
-const keysLoading = ref(false);
-const keysError = ref("");
 const keyAction = ref("");
+let keyActionTicket = 0;
+
+function claimKeyAction(label: string): number {
+  keyActionTicket += 1;
+  keyAction.value = label;
+  return keyActionTicket;
+}
+
+function releaseKeyAction(ticket: number): void {
+  if (ticket === keyActionTicket) keyAction.value = "";
+}
 // One-time reveal area: the only component state that ever holds a client-key
 // secret. Dismiss or any page refresh clears it; list rows stay secret-free.
 const revealedSecret = ref<{ fingerprint: string; hint: string; secret: string } | null>(null);
@@ -687,29 +750,13 @@ const catalogNoneEnabled = computed(() => catalogSelectedCount.value === 0);
 const catalogRefreshingLabel = computed(() => (
   refreshingModels.value ? t("正在刷新模型目录…") : t("刷新模型目录")
 ));
-// Catalog writes stay serial, but every click captures its own target snapshot
-// at enqueue time: a slow PUT response must never overwrite a newer selection.
-// Only the latest write of the current generation may apply a response or run
-// an error resync. Load, model refresh, disconnect, and page exit bump the
-// generation so queued writes from before them return quietly instead of
-// resurrecting a cleared integration or overwriting freshly loaded data.
-let catalogWriteGeneration = 0;
-let catalogWriteSeq = 0;
+// Catalog writes stay serial on this chain, but every click captures its own
+// target epoch (owned by the store) at enqueue time: a slow PUT response must
+// never overwrite a newer selection. Load, model refresh, disconnect, and
+// page exit bump the store's write generation so queued writes from before
+// them return quietly instead of resurrecting cleared state or overwriting
+// freshly loaded data.
 let catalogWriteChain = Promise.resolve();
-
-function bumpCatalogWriteGeneration(): void {
-  catalogWriteGeneration += 1;
-}
-
-type CatalogWriteEpoch = { generation: number; seq: number };
-
-function currentCatalogWrite(): CatalogWriteEpoch {
-  return { generation: catalogWriteGeneration, seq: catalogWriteSeq };
-}
-
-function isCurrentCatalogWrite(epoch: CatalogWriteEpoch): boolean {
-  return epoch.generation === catalogWriteGeneration && epoch.seq === catalogWriteSeq;
-}
 const stdoutTail = computed(() => cpaLogTail(logs.value?.stdout ?? ""));
 const stderrTail = computed(() => cpaLogTail(logs.value?.stderr ?? ""));
 
@@ -760,56 +807,46 @@ async function runMutation<T>(run: (expectation: MutationExpectation) => Promise
 async function load(): Promise<void> {
   bumpRuntimePollGeneration();
   bumpCliImportGeneration();
-  bumpCatalogWriteGeneration();
+  cpaStore.bumpCatalogWriteGeneration();
+  integrationReadTicket += 1;
+  integrationReadError.value = "";
   const generation = runtimePollGeneration;
+  const session = cpaStore.currentSession();
   loading.value = true;
-  loadError.value = "";
   runtimePollError.value = "";
   // A full refresh never keeps a previously revealed secret around.
   revealedSecret.value = null;
   try {
-    const value = await dashboardV3.getCpaIntegration();
-    if (generation !== runtimePollGeneration) return;
-    integration.value = value;
+    await cpaStore.load();
+    if (generation !== runtimePollGeneration || session !== cpaStore.currentSession()) return;
+    const value = integration.value;
+    if (loadError.value || !value) return;
     draft.value.baseUrl = value.baseUrl;
     // Secrets are write-only. Refreshing state must never repopulate either input.
     draft.value.inferenceKey = "";
     draft.value.managementKey = "";
-    runtimeError.value = "";
-    try {
-      const snapshot = await dashboardV3.getCpaRuntime();
-      if (generation !== runtimePollGeneration) return;
-      runtime.value = snapshot;
-      applyRuntimeSnapshot(snapshot);
-    } catch (error) {
-      if (generation !== runtimePollGeneration) return;
-      runtime.value = null;
-      runtimeError.value = dashboardErrorDetail(error);
-    }
     if (value.configured) {
       // These reads populate independent sections and must not form a waterfall.
       await Promise.all([loadAccounts(), loadCatalog(), loadCliImports()]);
     } else {
-      cpaAccounts.value = [];
-      resetCatalog();
+      cpaStore.resetAccounts();
+      cpaStore.resetCatalog();
       resetCliImports();
     }
     if (generation !== runtimePollGeneration) return;
     if (cpaClientKeysAvailable(runtime.value)) await loadRuntimeKeys();
-    else runtimeKeys.value = [];
+    else cpaStore.resetRuntimeKeys();
     if (generation !== runtimePollGeneration) return;
     syncRuntimePolling();
-  } catch (error) {
-    if (generation !== runtimePollGeneration) return;
-    loadError.value = dashboardErrorDetail(error);
   } finally {
-    loading.value = false;
+    if (generation === runtimePollGeneration) loading.value = false;
   }
 }
 
 async function save(): Promise<void> {
   if (saving.value || !integration.value) return;
   saving.value = true;
+  const session = cpaStore.currentSession();
   try {
     const updated = await runMutation((expectation) => dashboardV3.putCpaIntegration({
       ...(integration.value!.baseUrlReadOnly ? {} : { baseUrl: draft.value.baseUrl.trim() || null }),
@@ -817,14 +854,16 @@ async function save(): Promise<void> {
       ...(draft.value.managementKey.trim() ? { managementKey: draft.value.managementKey.trim() } : {}),
       enabled: integration.value!.enabled,
     }, expectation));
-    integration.value = updated;
+    if (session !== cpaStore.currentSession()) return;
+    cpaStore.commitIntegration(updated);
     draft.value.baseUrl = updated.baseUrl;
     draft.value.inferenceKey = "";
     draft.value.managementKey = "";
     message.success(t("CPA 配置已保存"));
-    await loadAccounts();
-    await loadCatalog();
+    void cpaStore.loadAccounts(session);
+    void cpaStore.loadCatalog(session);
   } catch (error) {
+    if (session !== cpaStore.currentSession()) return;
     message.error(t("CPA 配置失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
     saving.value = false;
@@ -850,8 +889,11 @@ async function testConnection(): Promise<void> {
 async function setRoutingEnabled(enabled: boolean): Promise<void> {
   if (!integration.value || saving.value) return;
   saving.value = true;
+  const session = cpaStore.currentSession();
   try {
-    integration.value = await runMutation((expectation) => dashboardV3.putCpaIntegration({ enabled }, expectation));
+    const updated = await runMutation((expectation) => dashboardV3.putCpaIntegration({ enabled }, expectation));
+    if (session !== cpaStore.currentSession()) return;
+    cpaStore.commitIntegration(updated);
   } catch (error) {
     message.error(t("CPA 配置失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
@@ -863,69 +905,27 @@ function catalogEnabledIds(models: readonly CpaCatalogEntry[]): string[] {
   return models.filter((model) => model.enabled).map((model) => model.id);
 }
 
-function applyCatalog(snapshot: Pick<CpaCatalog, "models" | "sourceUrl" | "refreshedAt">): void {
-  catalogModels.value = snapshot.models;
-  catalogSourceUrl.value = snapshot.sourceUrl;
-  catalogError.value = "";
-  if (integration.value) {
-    integration.value = {
-      ...integration.value,
-      modelCount: snapshot.models.length,
-      modelsRefreshedAt: snapshot.refreshedAt,
-    };
-  }
-}
-
-function resetCatalog(): void {
-  catalogModels.value = [];
-  catalogSourceUrl.value = null;
-  catalogError.value = "";
-}
-
-async function fetchCatalog(epoch?: CatalogWriteEpoch): Promise<void> {
-  const snapshot = await dashboardV4.getCpaCatalog();
-  // A read that started before a newer selection intent, or before a newer
-  // loaded generation, must not overwrite either one when it resolves.
-  if (epoch && !isCurrentCatalogWrite(epoch)) return;
-  applyCatalog(snapshot);
-}
-
-async function loadCatalog(): Promise<void> {
-  if (catalogLoading.value) return;
-  catalogLoading.value = true;
-  catalogError.value = "";
-  const epoch = currentCatalogWrite();
-  try {
-    await fetchCatalog(epoch);
-  } catch (error) {
-    catalogError.value = dashboardErrorDetail(error);
-  } finally {
-    catalogLoading.value = false;
-  }
-}
+const loadCatalog = () => cpaStore.loadCatalog();
 
 function persistCatalogSelection(): void {
-  const generation = catalogWriteGeneration;
-  const seq = (catalogWriteSeq += 1);
+  const epoch = cpaStore.nextCatalogWriteEpoch();
   const enabledIds = catalogEnabledIds(catalogModels.value);
-  const isCurrentWrite = () => generation === catalogWriteGeneration && seq === catalogWriteSeq;
   catalogWriteChain = catalogWriteChain.then(async () => {
-    if (!isCurrentWrite()) return;
+    if (!cpaStore.isCurrentCatalogWrite(epoch)) return;
     try {
       const snapshot = await runMutation((expectation) => dashboardV4.putCpaCatalog({ enabledIds }, expectation));
       // A newer click or a newer loaded generation owns the UI now.
-      if (!isCurrentWrite()) return;
-      applyCatalog(snapshot);
+      cpaStore.commitCatalog(snapshot, epoch);
     } catch (error) {
-      if (!isCurrentWrite()) return;
+      if (!cpaStore.isCurrentCatalogWrite(epoch)) return;
       const detail = dashboardErrorDetail(error);
       try {
-        await fetchCatalog({ generation, seq });
+        await cpaStore.fetchCatalog(epoch);
         // A newer click owns the selection now; its own save reports the outcome.
-        if (!isCurrentWrite()) return;
+        if (!cpaStore.isCurrentCatalogWrite(epoch)) return;
       } catch (reloadError) {
-        if (!isCurrentWrite()) return;
-        catalogError.value = dashboardErrorDetail(reloadError);
+        if (!cpaStore.isCurrentCatalogWrite(epoch)) return;
+        cpaStore.setCatalogError(dashboardErrorDetail(reloadError));
       }
       message.error(t("CPA 模型选择失败：{error}", { error: detail }));
     }
@@ -933,28 +933,30 @@ function persistCatalogSelection(): void {
 }
 
 function toggleCatalogModel(model: CpaCatalogEntry): void {
-  catalogModels.value = catalogModels.value.map((row) => (
+  cpaStore.setCatalogModels(catalogModels.value.map((row) => (
     row.id === model.id ? { ...row, enabled: !row.enabled } : row
-  ));
+  )));
   persistCatalogSelection();
 }
 
 function setCatalogEnabledAll(enabled: boolean): void {
-  catalogModels.value = catalogModels.value.map((row) => ({ ...row, enabled }));
+  cpaStore.setCatalogModels(catalogModels.value.map((row) => ({ ...row, enabled })));
   persistCatalogSelection();
 }
 
 async function refreshModels(): Promise<void> {
   if (refreshingModels.value) return;
-  bumpCatalogWriteGeneration();
-  const epoch = currentCatalogWrite();
+  cpaStore.bumpCatalogWriteGeneration();
+  const epoch = cpaStore.captureCatalogWrite();
+  const session = cpaStore.currentSession();
   refreshingModels.value = true;
   try {
     await runMutation((expectation) => dashboardV3.refreshCpaModels(expectation));
+    if (session !== cpaStore.currentSession()) return;
     const snapshot = await dashboardV4.getCpaCatalog();
     // A selection made while the refresh was in flight owns the UI now;
     // its own save applies instead of this older snapshot.
-    if (isCurrentCatalogWrite(epoch)) applyCatalog(snapshot);
+    cpaStore.commitCatalog(snapshot, epoch);
     message.success(t("模型目录已刷新，共 {count} 个模型", { count: snapshot.models.length }));
   } catch (error) {
     message.error(t("CPA 模型刷新失败：{error}", { error: dashboardErrorDetail(error) }));
@@ -963,47 +965,47 @@ async function refreshModels(): Promise<void> {
   }
 }
 
-async function loadAccounts(): Promise<void> {
-  accountsLoading.value = true;
-  accountsError.value = "";
-  try {
-    cpaAccounts.value = (await dashboardV3.getCpaAccounts()).accounts;
-  } catch (error) {
-    accountsError.value = dashboardErrorDetail(error);
-  } finally {
-    accountsLoading.value = false;
-  }
-}
+const loadAccounts = () => cpaStore.loadAccounts();
 
 async function setAccountStatus(account: CpaAccount, disabled: boolean): Promise<void> {
-  accountAction.value = cpaAccountKey(account);
+  const actionKey = cpaAccountKey(account);
+  const ticket = claimAccountAction(actionKey);
+  const session = cpaStore.currentSession();
   try {
     await runMutation((expectation) => dashboardV3.setCpaAccountStatus({
       name: account.name,
       authIndex: account.authIndex!,
       disabled,
     }, expectation));
-    await loadAccounts();
+    if (session !== cpaStore.currentSession()) return;
+    cpaStore.projectAccountDisabled(account, disabled);
+    void cpaStore.loadAccounts(session);
   } catch (error) {
+    if (session !== cpaStore.currentSession()) return;
     message.error(t("CPA 账号操作失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
-    accountAction.value = "";
+    releaseAccountAction(ticket);
   }
 }
 
 async function resetQuota(account: CpaAccount): Promise<void> {
   if (!account.authIndex) return;
-  accountAction.value = cpaAccountKey(account);
+  const actionKey = cpaAccountKey(account);
+  const ticket = claimAccountAction(actionKey);
+  const session = cpaStore.currentSession();
   try {
     await runMutation((expectation) => dashboardV3.resetCpaQuota({
       name: account.name,
       authIndex: account.authIndex!,
     }, expectation));
-    await loadAccounts();
+    if (session !== cpaStore.currentSession()) return;
+    cpaStore.projectAccountQuotaReset(account);
+    void cpaStore.loadAccounts(session);
   } catch (error) {
+    if (session !== cpaStore.currentSession()) return;
     message.error(t("CPA 账号操作失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
-    accountAction.value = "";
+    releaseAccountAction(ticket);
   }
 }
 
@@ -1018,21 +1020,26 @@ function confirmDeleteAccount(account: CpaAccount): void {
 }
 
 async function deleteAccount(account: CpaAccount): Promise<void> {
-  accountAction.value = cpaAccountKey(account);
+  const actionKey = cpaAccountKey(account);
+  const ticket = claimAccountAction(actionKey);
+  const session = cpaStore.currentSession();
   try {
     await runMutation((expectation) => dashboardV3.deleteCpaAccount({
       name: account.name,
       authIndex: account.authIndex!,
     }, expectation));
-    await loadAccounts();
+    if (session !== cpaStore.currentSession()) return;
+    cpaStore.removeAccount(account);
     const importedProvider = cpaOAuthProviderForCliAccount(account);
     if (importedProvider && !cpaCliImportAlreadyPresent(importedProvider, cpaAccounts.value)) {
       unmarkCliProviderImported(importedProvider);
     }
+    void cpaStore.loadAccounts(session);
   } catch (error) {
+    if (session !== cpaStore.currentSession()) return;
     message.error(t("CPA 账号操作失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
-    accountAction.value = "";
+    releaseAccountAction(ticket);
   }
 }
 
@@ -1042,11 +1049,12 @@ async function startOAuth(provider: CpaOAuthProvider, method: CpaOAuthMethod): P
   // A new flow invalidates any poll still in flight from a previous one.
   bumpOAuthPollGeneration();
   const generation = oauthPollGeneration;
+  const session = cpaStore.currentSession();
   oauthStartingAction.value = `${provider}:${method}`;
   codexBrowserFailure.value = null;
   try {
     const started = await runMutation((expectation) => dashboardV3.startCpaOAuth({ provider, method }, expectation));
-    if (generation !== oauthPollGeneration) {
+    if (generation !== oauthPollGeneration || session !== cpaStore.currentSession()) {
       // The page left or the flow was superseded while the start was in flight:
       // never adopt the session, but release it server-side on a best-effort basis.
       void runMutation((expectation) => dashboardV3.cancelCpaOAuth({ state: started.state }, expectation)).catch(() => {});
@@ -1103,6 +1111,7 @@ async function pollOAuth(): Promise<void> {
   }
   const generation = oauthPollGeneration;
   const flowState = active.state;
+  const session = cpaStore.currentSession();
   try {
     const status = await dashboardV3.getCpaOAuthStatus(flowState);
     // Cancel, leaving the page, or a newer flow invalidates this response.
@@ -1111,7 +1120,7 @@ async function pollOAuth(): Promise<void> {
       bumpOAuthPollGeneration();
       const finished = oauth.value;
       oauth.value = null;
-      if (isCpaOAuthSuccessStatus(status.status)) await loadAccounts();
+      if (isCpaOAuthSuccessStatus(status.status)) await cpaStore.loadAccounts(session);
       else {
         if (status.error) message.warning(status.error);
         if (finished?.provider === "codex" && finished.flow !== "device") {
@@ -1224,6 +1233,20 @@ function resetCliImports(): void {
   importedCliProviders.value = [];
 }
 
+// A committed account list reconciles import markers. The import's own
+// follow-up re-applies its marker when that call commits, including when the
+// list is empty. A later committed list that omits the account clears it.
+// Failed reads do not replace the list. No mutation is replayed.
+watch(() => cpaStore.cpaAccounts, (accounts) => {
+  if (importedCliProviders.value.length === 0) return;
+  const retained = importedCliProviders.value.filter((provider) => (
+    cpaCliImportAlreadyPresent(provider, accounts)
+  ));
+  if (retained.length !== importedCliProviders.value.length) {
+    importedCliProviders.value = retained;
+  }
+}, { flush: "sync" });
+
 // Discovery and import responses older than the latest load, disconnect, or
 // page exit are ignored: they must not mutate UI state, and an import that may
 // already be committed server-side is never "undone" from here.
@@ -1249,7 +1272,8 @@ async function loadCliImports(): Promise<void> {
     if (generation !== cliImportGeneration) return;
     cliImportsError.value = dashboardErrorDetail(error);
   } finally {
-    cliImportsLoading.value = false;
+    // A superseded discovery must not release a newer load's flag.
+    if (generation === cliImportGeneration) cliImportsLoading.value = false;
   }
 }
 
@@ -1259,34 +1283,51 @@ async function importCliAccount(source: CpaCliImportSource): Promise<void> {
   if (!integration.value?.configured || !source.supported || !source.available) return;
   if (cliImportAlreadyDone(source.provider)) return;
   const generation = cliImportGeneration;
+  const session = cpaStore.currentSession();
+  const ticket = ++cliImportTicket;
   cliImporting.value = source.provider;
   cliImportNotice.value = null;
+  const stillCurrent = () => generation === cliImportGeneration && session === cpaStore.currentSession();
   try {
     const result = await runMutation((expectation) => dashboardV3.importCpaCliAccount({ provider: source.provider }, expectation));
-    if (generation !== cliImportGeneration) return;
+    if (!stillCurrent()) return;
     if (result.outcome === "unconfirmed") {
       cliImportNotice.value = {
         type: "warning",
         text: t("导入结果未确认：先刷新账号列表确认是否已导入，再决定是否重试；重复导入按生成的文件名幂等处理，不会产生重复账号。"),
       };
-    } else {
-      // Product copy names the provider, never the hashed implementation file.
-      const provider = cliImportProviderLabel(result.provider);
-      markCliProviderImported(result.provider);
-      cliImportNotice.value = {
-        type: "success",
-        text: result.outcome === "alreadyImported"
-          ? t("{provider} 账号已存在，无需重复导入。", { provider })
-          : t("已导入 {provider} 账号。", { provider }),
-      };
-      await loadAccounts();
+      return;
     }
+    const provider = cliImportProviderLabel(result.provider);
+    markCliProviderImported(result.provider);
+    cliImportNotice.value = {
+      type: "success",
+      text: result.outcome === "alreadyImported"
+        ? t("{provider} 账号已存在，无需重复导入。", { provider })
+        : t("已导入 {provider} 账号。", { provider }),
+    };
+    void reconcileCliImport(session, generation, result.provider);
   } catch (error) {
-    if (generation !== cliImportGeneration) return;
+    if (!stillCurrent()) return;
     message.error(t("CPA 账号操作失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
-    cliImporting.value = null;
+    if (ticket === cliImportTicket) cliImporting.value = null;
   }
+}
+
+// The import's own list may be empty. Re-apply the marker only when that
+// call commits. A failed or superseded read leaves the ack in place, and a
+// later list reconciles through the account watch.
+async function reconcileCliImport(
+  session: number,
+  generation: number,
+  provider: CpaOAuthProvider,
+): Promise<void> {
+  if (generation !== cliImportGeneration || session !== cpaStore.currentSession()) return;
+  const committed = await cpaStore.loadAccounts(session);
+  if (generation !== cliImportGeneration || session !== cpaStore.currentSession()) return;
+  if (!committed) return;
+  markCliProviderImported(provider);
 }
 
 // The unconfirmed warning offers this as its only follow-up: a plain account
@@ -1306,23 +1347,58 @@ function confirmDisconnect(): void {
   });
 }
 
-async function disconnect(): Promise<void> {
-  bumpCliImportGeneration();
-  bumpCatalogWriteGeneration();
-  disconnecting.value = true;
+function retryDisconnectedRead(): void {
+  void revalidateDisconnectedIntegration(cpaStore.currentSession());
+}
+
+// The DELETE receipt ends the disconnect. This read only reconciles the
+// cleared projection; it never repeats the delete.
+async function revalidateDisconnectedIntegration(session: number): Promise<void> {
+  if (session !== cpaStore.currentSession()) return;
+  const readTicket = ++integrationReadTicket;
+  const draftUrl = draft.value.baseUrl;
   try {
-    await runMutation((expectation) => dashboardV3.deleteCpaIntegration(expectation));
-    integration.value = await dashboardV3.getCpaIntegration();
-    cpaAccounts.value = [];
-    resetCatalog();
+    const next = await cpaStore.refreshIntegration(session);
+    if (readTicket !== integrationReadTicket || session !== cpaStore.currentSession() || next === null) return;
+    integrationReadError.value = "";
+    if (
+      draft.value.inferenceKey === ""
+      && draft.value.managementKey === ""
+      && draft.value.baseUrl === draftUrl
+    ) {
+      draft.value = { ...draft.value, baseUrl: next.baseUrl };
+    }
+  } catch (error) {
+    if (readTicket !== integrationReadTicket || session !== cpaStore.currentSession()) return;
+    integrationReadError.value = dashboardErrorDetail(error);
+  }
+}
+
+async function disconnect(): Promise<void> {
+  if (disconnecting.value) return;
+  const ticket = ++disconnectTicket;
+  bumpCliImportGeneration();
+  cpaStore.bumpCatalogWriteGeneration();
+  disconnecting.value = true;
+  const session = cpaStore.currentSession();
+  const current = () => ticket === disconnectTicket && session === cpaStore.currentSession();
+  try {
+    const ack = await runMutation((expectation) => dashboardV3.deleteCpaIntegration(expectation));
+    if (!current()) return;
+    const cleared = cpaStore.commitClearedIntegration(ack);
     resetCliImports();
     report.value = null;
-    draft.value = { baseUrl: integration.value.baseUrl, inferenceKey: "", managementKey: "" };
+    integrationReadError.value = "";
+    if (cleared) {
+      draft.value = { baseUrl: cleared.baseUrl, inferenceKey: "", managementKey: "" };
+    }
     message.success(t("CPA 已断开"));
+    void revalidateDisconnectedIntegration(session);
   } catch (error) {
+    if (!current()) return;
     message.error(t("CPA 配置失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
-    disconnecting.value = false;
+    if (ticket === disconnectTicket) disconnecting.value = false;
   }
 }
 
@@ -1354,10 +1430,8 @@ async function pollRuntime(): Promise<void> {
   const generation = runtimePollGeneration;
   runtimePollError.value = "";
   try {
-    const next = await dashboardV3.getCpaRuntime();
-    if (generation !== runtimePollGeneration) return;
-    runtime.value = next;
-    applyRuntimeSnapshot(next);
+    const next = await cpaStore.refreshRuntime();
+    if (generation !== runtimePollGeneration || next === null) return;
     if (!isCpaPhaseBusy(next.phase)) {
       stopRuntimePoll();
       await refreshAfterRuntimeSettled();
@@ -1375,45 +1449,6 @@ function retryRuntimePoll(): Promise<void> {
   return pollRuntime();
 }
 
-/** Keep the Overview truthful while the full integration refresh is in flight. */
-function applyRuntimeSnapshot(snapshot: CpaRuntime): void {
-  if (!integration.value) return;
-  integration.value = {
-    ...integration.value,
-    currentOperation: snapshot.currentOperation,
-    installedVersion: snapshot.currentVersion,
-    latestVersion: snapshot.latestVersion,
-    runtimeOwned: snapshot.owned,
-    runtimeRunning: snapshot.running,
-    runtimeSupported: snapshot.supported,
-    runtimeUnavailableReason: snapshot.unavailableReason,
-    updateAvailable: snapshot.updateAvailable,
-  };
-}
-
-/** A settled lifecycle operation can change routing config, accounts, models, and key eligibility. */
-async function refreshAfterRuntimeSettled(): Promise<void> {
-  const generation = runtimePollGeneration;
-  try {
-    const next = await dashboardV3.getCpaIntegration();
-    if (generation !== runtimePollGeneration) return;
-    integration.value = next;
-  } catch {
-    // The runtime snapshot remains visible and the header retry can recover the integration read.
-    return;
-  }
-  if (integration.value.configured) {
-    await Promise.all([loadAccounts(), loadCatalog(), loadCliImports()]);
-  } else {
-    cpaAccounts.value = [];
-    resetCatalog();
-    resetCliImports();
-  }
-  if (generation !== runtimePollGeneration) return;
-  if (cpaClientKeysAvailable(runtime.value)) await loadRuntimeKeys();
-  else runtimeKeys.value = [];
-}
-
 async function runRuntimeAction(
   name: string,
   run: (expectation: MutationExpectation) => Promise<CpaRuntime>,
@@ -1421,15 +1456,15 @@ async function runRuntimeAction(
   if (runtimeAction.value) return;
   bumpRuntimePollGeneration();
   const generation = runtimePollGeneration;
+  const session = cpaStore.currentSession();
   runtimeAction.value = name;
   runtimePollError.value = "";
   // A lifecycle change invalidates the previous update check.
   runtimeCheck.value = null;
   try {
     const next = await runMutation(run);
-    if (generation !== runtimePollGeneration) return;
-    runtime.value = next;
-    applyRuntimeSnapshot(next);
+    if (generation !== runtimePollGeneration || session !== cpaStore.currentSession()) return;
+    cpaStore.commitRuntimeSnapshot(next);
     if (isCpaPhaseBusy(next.phase)) syncRuntimePolling();
     else {
       stopRuntimePoll();
@@ -1439,8 +1474,30 @@ async function runRuntimeAction(
     if (generation !== runtimePollGeneration) return;
     message.error(t("CPA 运行时操作失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
-    runtimeAction.value = "";
+    // A stale finally must not release a newer action's flag.
+    if (runtimeAction.value === name) runtimeAction.value = "";
   }
+}
+
+/** A settled lifecycle operation can change routing config, accounts, models, and key eligibility. */
+async function refreshAfterRuntimeSettled(): Promise<void> {
+  const generation = runtimePollGeneration;
+  const session = cpaStore.currentSession();
+  const next = await cpaStore.refreshIntegration(session).catch(() => null);
+  // A failed integration read keeps the runtime snapshot visible; the header
+  // retry can recover it. A superseded or ended session stays quiet.
+  if (generation !== runtimePollGeneration || session !== cpaStore.currentSession() || next === null) return;
+  if (next.configured) {
+    // These reads populate independent sections and must not form a waterfall.
+    await Promise.all([loadAccounts(), loadCatalog(), loadCliImports()]);
+  } else {
+    cpaStore.resetAccounts();
+    cpaStore.resetCatalog();
+    resetCliImports();
+  }
+  if (generation !== runtimePollGeneration) return;
+  if (cpaClientKeysAvailable(runtime.value)) await loadRuntimeKeys();
+  else cpaStore.resetRuntimeKeys();
 }
 
 function installRuntime(): Promise<void> {
@@ -1459,19 +1516,19 @@ async function checkUpdate(): Promise<void> {
   if (runtimeAction.value) return;
   bumpRuntimePollGeneration();
   const generation = runtimePollGeneration;
+  const session = cpaStore.currentSession();
   runtimeAction.value = "checkUpdate";
   try {
     runtimeCheck.value = await runMutation((expectation) => dashboardV3.checkCpaRuntimeUpdate(expectation));
-    if (generation !== runtimePollGeneration) return;
-    runtime.value = await dashboardV3.getCpaRuntime();
-    if (generation !== runtimePollGeneration) return;
-    applyRuntimeSnapshot(runtime.value);
+    if (generation !== runtimePollGeneration || session !== cpaStore.currentSession()) return;
+    const next = await cpaStore.refreshRuntime();
+    if (generation !== runtimePollGeneration || next === null) return;
     syncRuntimePolling();
   } catch (error) {
     if (generation !== runtimePollGeneration) return;
     message.error(t("CPA 运行时操作失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
-    runtimeAction.value = "";
+    if (runtimeAction.value === "checkUpdate") runtimeAction.value = "";
   }
 }
 
@@ -1522,43 +1579,48 @@ async function refreshLogs(): Promise<void> {
 
 // --- client keys ---
 
-async function loadRuntimeKeys(): Promise<void> {
-  keysLoading.value = true;
-  keysError.value = "";
-  try {
-    runtimeKeys.value = (await dashboardV3.getCpaRuntimeKeys()).keys;
-  } catch (error) {
-    keysError.value = dashboardErrorDetail(error);
-  } finally {
-    keysLoading.value = false;
-  }
-}
+const loadRuntimeKeys = () => cpaStore.loadRuntimeKeys();
 
 async function addClientKey(): Promise<void> {
   if (keyAction.value) return;
-  keyAction.value = "create";
+  const generation = runtimePollGeneration;
+  const session = cpaStore.currentSession();
+  const isCurrent = () => generation === runtimePollGeneration && session === cpaStore.currentSession();
+  const ticket = claimKeyAction("create");
   try {
     const created = await runMutation((expectation) => dashboardV3.createCpaRuntimeKey(expectation));
+    // An old-session or left-page completion is ignored entirely: it must not
+    // invalidate fresh reads, reveal, or message over newer state.
+    if (!isCurrent()) return;
+    cpaStore.invalidateRuntimeKeys();
     revealedSecret.value = { fingerprint: created.fingerprint, hint: created.hint, secret: created.secret };
-    await loadRuntimeKeys();
+    void cpaStore.loadRuntimeKeys(session);
   } catch (error) {
+    if (!isCurrent()) return;
     message.error(t("客户端 Key 操作失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
-    keyAction.value = "";
+    releaseKeyAction(ticket);
   }
 }
 
 async function rotateClientKey(key: CpaRuntimeKey): Promise<void> {
   if (keyAction.value) return;
-  keyAction.value = `rotate:${key.fingerprint}`;
+  const generation = runtimePollGeneration;
+  const session = cpaStore.currentSession();
+  const isCurrent = () => generation === runtimePollGeneration && session === cpaStore.currentSession();
+  const action = `rotate:${key.fingerprint}`;
+  const ticket = claimKeyAction(action);
   try {
     const rotated = await runMutation((expectation) => dashboardV3.rotateCpaRuntimeKey(key.fingerprint, expectation));
+    if (!isCurrent()) return;
+    cpaStore.projectRuntimeKeyHint(rotated.fingerprint, rotated.hint);
     revealedSecret.value = { fingerprint: rotated.fingerprint, hint: rotated.hint, secret: rotated.secret };
-    await loadRuntimeKeys();
+    void cpaStore.loadRuntimeKeys(session);
   } catch (error) {
+    if (!isCurrent()) return;
     message.error(t("客户端 Key 操作失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
-    keyAction.value = "";
+    releaseKeyAction(ticket);
   }
 }
 
@@ -1574,15 +1636,22 @@ function confirmDeleteClientKey(key: CpaRuntimeKey): void {
 }
 
 async function deleteClientKey(key: CpaRuntimeKey): Promise<void> {
-  keyAction.value = `delete:${key.fingerprint}`;
+  const generation = runtimePollGeneration;
+  const session = cpaStore.currentSession();
+  const isCurrent = () => generation === runtimePollGeneration && session === cpaStore.currentSession();
+  const action = `delete:${key.fingerprint}`;
+  const ticket = claimKeyAction(action);
   try {
     await runMutation((expectation) => dashboardV3.deleteCpaRuntimeKey(key.fingerprint, expectation));
+    if (!isCurrent()) return;
+    cpaStore.removeRuntimeKey(key.fingerprint);
     if (revealedSecret.value?.fingerprint === key.fingerprint) revealedSecret.value = null;
-    await loadRuntimeKeys();
+    void cpaStore.loadRuntimeKeys(session);
   } catch (error) {
+    if (!isCurrent()) return;
     message.error(t("客户端 Key 操作失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
-    keyAction.value = "";
+    releaseKeyAction(ticket);
   }
 }
 
@@ -1608,6 +1677,19 @@ const StatusCell = (props: { label: string; ready: boolean | null; detail?: stri
   props.detail ? h("span", { class: "cpa-status-detail" }, props.detail) : null,
 ]);
 
+// Shared view-lifecycle teardown: in-flight interactions die, and reads for
+// the page-owned resources lose their commit right. Cached store data stays
+// for the revalidation window.
+function teardownViewLifecycle(): void {
+  cancelOAuthOnLeave();
+  bumpRuntimePollGeneration();
+  bumpCliImportGeneration();
+  cpaStore.bumpCatalogWriteGeneration();
+  cpaStore.invalidateReads();
+  integrationReadTicket += 1;
+  integrationReadError.value = "";
+}
+
 onMounted(() => {
   window.addEventListener("pagehide", cancelOAuthOnLeave);
   void load();
@@ -1618,18 +1700,10 @@ onActivated(() => {
   revalidateGate.record();
   void load();
 });
-onDeactivated(() => {
-  cancelOAuthOnLeave();
-  bumpRuntimePollGeneration();
-  bumpCliImportGeneration();
-  bumpCatalogWriteGeneration();
-});
+onDeactivated(teardownViewLifecycle);
 onBeforeUnmount(() => {
   window.removeEventListener("pagehide", cancelOAuthOnLeave);
-  cancelOAuthOnLeave();
-  bumpRuntimePollGeneration();
-  bumpCliImportGeneration();
-  bumpCatalogWriteGeneration();
+  teardownViewLifecycle();
   cleanupClipboard();
 });
 </script>

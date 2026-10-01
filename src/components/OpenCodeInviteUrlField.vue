@@ -20,7 +20,7 @@
           v-model:value="inviteUrl"
           clearable
           class="mono"
-          :disabled="!loaded || saving || loading"
+          :disabled="!loaded || saving"
           :placeholder="DEFAULT_OPENCODE_INVITE_URL"
           :input-props="{ 'aria-label': t('OpenCode 邀请链接（注册新账号）') }"
           @blur="saveInviteUrl"
@@ -31,10 +31,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onActivated, onMounted, ref } from "vue";
+import { computed, onActivated, onMounted, ref, watch } from "vue";
 import { NAlert, NButton, NForm, NFormItem, NInput, useMessage } from "naive-ui";
-import { isRevisionConflict } from "../api/dashboard.ts";
 import { useSettingsStore } from "../stores/settings.ts";
+import { useSessionStore } from "../stores/session.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import {
@@ -44,6 +44,7 @@ import {
 
 const message = useMessage();
 const settingsStore = useSettingsStore();
+const sessionStore = useSessionStore();
 const inviteUrl = ref("");
 const savedInviteUrl = ref("");
 const loaded = ref(false);
@@ -51,6 +52,18 @@ const loading = ref(false);
 const saving = ref(false);
 const loadError = ref("");
 let activatedOnce = false;
+let inviteLoadGeneration = 0;
+
+watch(() => sessionStore.authenticated, (ok) => {
+  if (ok) return;
+  inviteLoadGeneration += 1;
+  inviteUrl.value = "";
+  savedInviteUrl.value = "";
+  loaded.value = false;
+  loading.value = false;
+  saving.value = false;
+  loadError.value = "";
+});
 
 const inviteUrlPreview = computed<{ status?: "error"; feedback: string }>(() => {
   try {
@@ -72,45 +85,29 @@ const inviteUrlPreview = computed<{ status?: "error"; feedback: string }>(() => 
 });
 
 async function loadInvite(): Promise<void> {
+  const generation = ++inviteLoadGeneration;
+  const epoch = sessionStore.sessionEpoch;
   loading.value = true;
   loadError.value = "";
   try {
     const settings = await settingsStore.loadPresented();
-    inviteUrl.value = settings.opencode_invite_url;
+    if (generation !== inviteLoadGeneration || sessionStore.sessionEpoch !== epoch) return;
+    const keepDraft = loaded.value && inviteUrl.value !== savedInviteUrl.value;
+    if (!keepDraft) inviteUrl.value = settings.opencode_invite_url;
     savedInviteUrl.value = settings.opencode_invite_url;
     loaded.value = true;
   } catch (error) {
-    loadError.value = dashboardErrorDetail(error);
+    if (generation !== inviteLoadGeneration || sessionStore.sessionEpoch !== epoch) return;
+    loadError.value = error instanceof Error ? dashboardErrorDetail(error) : "";
     message.error(t("加载设置失败：{error}", { error: loadError.value }));
   } finally {
-    loading.value = false;
-  }
-}
-
-async function persistInvite(normalized: string): Promise<boolean> {
-  const write = async (): Promise<boolean> => {
-    const current = await settingsStore.loadPresented();
-    if (current.opencode_invite_url === normalized) {
-      savedInviteUrl.value = normalized;
-      return false;
-    }
-    const result = await settingsStore.putPresented({
-      ...current,
-      opencode_invite_url: normalized,
-    });
-    savedInviteUrl.value = result.opencode_invite_url;
-    return true;
-  };
-  try {
-    return await write();
-  } catch (error) {
-    if (!isRevisionConflict(error)) throw error;
-    return await write();
+    if (generation === inviteLoadGeneration) loading.value = false;
   }
 }
 
 async function saveInviteUrl(): Promise<void> {
   if (!loaded.value || saving.value) return;
+  const epoch = sessionStore.sessionEpoch;
   let normalized: string;
   try {
     normalized = normalizeOpenCodeInviteUrl(inviteUrl.value);
@@ -122,11 +119,14 @@ async function saveInviteUrl(): Promise<void> {
   if (normalized === savedInviteUrl.value) return;
   saving.value = true;
   try {
-    if (await persistInvite(normalized)) {
-      message.success(t("邀请链接已保存"));
-    }
+    await settingsStore.patchPresented({ opencode_invite_url: normalized });
+    if (sessionStore.sessionEpoch !== epoch) return;
+    savedInviteUrl.value = normalized;
+    message.success(t("邀请链接已保存"));
   } catch (error) {
-    message.error(t("保存失败：{error}", { error: dashboardErrorDetail(error) }));
+    if (sessionStore.sessionEpoch !== epoch) return;
+    const detail = error instanceof Error ? dashboardErrorDetail(error) : "";
+    message.error(t("保存失败：{error}", { error: detail }));
   } finally {
     saving.value = false;
   }

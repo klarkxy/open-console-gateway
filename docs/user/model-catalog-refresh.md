@@ -24,4 +24,4 @@ OpenCode Go reads the public, keyless [`GET /zen/go/v1/models`](https://opencode
 
 MiMo Token Plan can refresh its documented `/models` directory. Its `mimo-v2.6-flash` seed uses Chat Completions, Responses, and Messages. Kimi remains a Chat Completions and Messages Provider. MiniMax CN/API and Global presets expose Chat Completions, Responses, and Messages; the exact saved regional routes and authentication determine a request. Do not infer an undocumented capability merely because another model or Provider supports it.
 
-Price coverage does not control model discovery or selection. Missing prices remain unknown/unpriced, never zero. Refresh pricing separately when needed.
+Catalog refresh does not fetch a price list or estimate request cost. A missing cost stays unknown. It is not shown as zero or free.

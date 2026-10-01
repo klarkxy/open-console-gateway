@@ -6,10 +6,12 @@ import {
   formatPayGoObservedAt,
 } from "./pay-go-meter.ts";
 
-test("pay-as-you-go meter labels stay on the three shared slots", () => {
-  assert.equal(PAY_GO_METER_LABEL_KEYS.remaining, "余额");
-  assert.equal(PAY_GO_METER_LABEL_KEYS.month, "本月");
-  assert.equal(PAY_GO_METER_LABEL_KEYS.history, "历史");
+test("pay-as-you-go meter keeps the remaining balance slot", () => {
+  assert.deepEqual(Object.keys(PAY_GO_METER_LABEL_KEYS), ["remaining"]);
+  assert.equal(typeof PAY_GO_METER_LABEL_KEYS.remaining, "string");
+  assert.ok(PAY_GO_METER_LABEL_KEYS.remaining.length > 0);
+  assert.equal("month" in PAY_GO_METER_LABEL_KEYS, false);
+  assert.equal("history" in PAY_GO_METER_LABEL_KEYS, false);
   assert.equal(PAY_GO_METER_EMPTY, "—");
 });
 

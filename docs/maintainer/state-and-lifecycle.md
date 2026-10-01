@@ -13,7 +13,11 @@ Never acquire in reverse. Do not hold the routing lock across DB or
 network I/O. Async gates: `settings_host_effects` (persist → listener
 rebind → compensation) is acquired before `gateway_lifecycle` when a
 settings write also rebinds. Never hold a `parking_lot` lock across those
-awaits.
+awaits. Startup does not seed, repair, or activate price snapshots and does not
+start a price-fetch task. Opening the database does not settle historical
+credit receipts. A billing read reports active `pendingRequests` as 0. The stored receipt stays exact. Explicit calibration is not blocked by that receipt and does not delete it. The published `GatewayPreparationSnapshot` has no price
+field. Lock ordinal (6) `pricing` remains the in-memory pricing snapshot
+lock on `CoreStateInner`.
 
 The authoritative table for access keys is `access_keys`. Two credential
 tiers share that table (current schema; see [storage migration](storage-migration.md)) and one auth snapshot:

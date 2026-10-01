@@ -8,19 +8,14 @@ const miniMax = {
   editable: false,
   deletable: false,
   managed_registration: false,
-  pricing_availability: "unpriced" as const,
-  model_source: "static",
 };
 
-test("unpriced fixed plans expose only models", () => {
-  for (const pricing_availability of ["unpriced", "unavailable", "not_applicable"] as const) {
-    assert.deepEqual(providerDetailTabs({ ...miniMax, pricing_availability }), ["models"]);
-  }
+test("fixed builtin plans expose only models", () => {
+  assert.deepEqual(providerDetailTabs(miniMax), ["models"]);
   assert.deepEqual(providerDetailTabs(null), ["models"]);
 });
 
-test("pricing and settings are independent capabilities", () => {
-  assert.deepEqual(providerDetailTabs({ ...miniMax, pricing_availability: "available" }), ["models", "pricing"]);
+test("settings follow registration and editability", () => {
   assert.deepEqual(providerDetailTabs({ ...miniMax, managed_registration: true }), ["models", "settings"]);
   assert.deepEqual(providerDetailTabs({ ...miniMax, provider_id: "custom" }), ["models", "settings"]);
   for (const origin of ["custom", "preset"] as const) {
@@ -30,8 +25,8 @@ test("pricing and settings are independent capabilities", () => {
   }
 });
 
-test("official API presets retain their balance and pricing panel before prices load", () => {
+test("official API presets keep models and settings", () => {
   assert.deepEqual(providerDetailTabs({
-    ...miniMax, origin: "preset", editable: true, model_source: "official_api_preset",
-  }), ["models", "pricing", "settings"]);
+    ...miniMax, origin: "preset", editable: true,
+  }), ["models", "settings"]);
 });

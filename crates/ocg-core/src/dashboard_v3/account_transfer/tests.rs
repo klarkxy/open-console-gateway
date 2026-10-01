@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 #[test]
 fn credit_v10_transfer_restores_new_accounts_but_never_refills_existing_accounts() {
     use crate::billing_types::{
-        CreditBalanceCorrection, CreditBucket, CreditBucketKind, CreditConfiguration, CreditRate,
+        CreditBalanceCorrection, CreditBucket, CreditBucketKind, CreditConfigurationWrite,
     };
     let account = "00000000-0000-4000-8000-0000000000a1";
     let (source_dir, source) = seed_ab_accounts("credit-transfer-source");
@@ -13,17 +13,9 @@ fn credit_v10_transfer_restores_new_accounts_but_never_refills_existing_accounts
     crate::db::billing::configure_on(
         &source.db.lock().conn,
         account,
-        CreditConfiguration {
+        CreditConfigurationWrite {
             name: "credits".into(),
             currency: "CNY".into(),
-            credits_per_currency: 1.0,
-            rates: vec![CreditRate {
-                model: "model".into(),
-                input_per_million: 1.0,
-                output_per_million: 2.0,
-                cache_read_per_million: None,
-                cache_write_per_million: None,
-            }],
             monthly: None,
             source_url: None,
         },

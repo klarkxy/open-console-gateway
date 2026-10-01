@@ -30,8 +30,9 @@ Preset creation shows searchable [channel presets](provider-presets.md) in one l
 
 Want to connect another upstream or contribute a built-in integration? Start with [Add a Provider](add-provider.md), which includes user-defined Providers, Custom API, and the sealed Adapter Registry path.
 
-**Providers** is the supplier control plane — the page you land on when an old
-bookmark still ends in `?view=pricing`.
+**Providers** is the supplier control plane. An old bookmark that still ends
+in `?view=pricing` opens this page. A leftover provider detail tab `pricing`
+opens **Models**.
 
 The Adapter Registry stays static and sealed. Sealed adapters and
 user-defined Providers share this page, labelled **Provider preset** or
@@ -45,17 +46,16 @@ account-owned path. Scopes are split like this:
 - Legacy `CustomEndpoint(account_id)` scopes remain as compatibility evidence,
   while their endpoint and mappings are edited on the owning connection.
 
-Provider-preset and user-defined Providers open the same detail shell with up to three tabs. **Models**
+Provider-preset and user-defined Providers open the same detail shell. **Models**
 is the default: provider-preset scopes show the model catalog (source line, refresh,
 and the protocol matrix), while user-defined
-Providers show their read-only model mappings with an edit entry. **Pricing**
-appears only when the selected Provider supports pricing; official API presets also retain their balance and pricing panel. Unpriced, unavailable, and not-applicable providers have no empty pricing tab. **Settings** appears only for edit/delete actions, account configuration, or managed signup; fixed adapters with no settings omit it. The **OpenCode Go** scope keeps the
+Providers show their read-only model mappings with an edit entry. There is no price-table tab, no price refresh, and no multiplier editor. Official balances stay on the account card. **Settings** appears only for edit/delete actions, account configuration, or managed signup; fixed adapters with no settings omit it. The **OpenCode Go** scope keeps the
 managed-signup **invite URL** here. It is a user-owned `opencode.ai` /
 `console.opencode.ai` HTTPS link (not a sealed origin). Fresh installs may
 ship a demo default; replace it with your own link before a real signup.
 Creating a managed draft can also edit and write this value back. Configurable
 HTTP connection settings are edited here; **Accounts** edits only the attached
-credentials and their routing bindings. User-defined Providers stay unpriced until an official preset or a per-account credit configuration supplies the rates.
+credentials and their routing bindings. A user-defined Provider does not estimate a request price. A manual credit balance, when you keep one on the account, is not reduced by a completed request.
 
 **Aliases** is a separate core page because its table spans every
 currently enabled account instead of the selected Provider. It lists only
@@ -113,52 +113,21 @@ If every model's enable switch is off, that Provider contributes no route. Authe
 
 Each supported model row has a **Test** action. It probes the exact selected saved route with one already authorized ready Key; it does not fall back to another route or account. Models must belong to the current provider catalog, including newly fetched models not yet in a static table. A confirmation warns that the minimal real request may consume quota. The receipt shows success, failure, or skipped state together with its scope, Key, configuration, protocol, and safe upstream detail when supplied. A probe never changes enablement, preference, grants, or route configuration.
 
-**Pricing** is scoped to the selected provider. The default catalog projection includes every `offering=plan` row whose V3 `pricingAvailability` is `available`, in catalog order. Snapshots are requested and cached by `provider_id`; the renderer selects the returned `models` or `values` structure, derives token-range/time-window/adjustment variants, and preserves unknown adjustment labels. Source links come only from the returned snapshot. Refresh requires V3 pricing availability, while multiplier editing additionally requires V4 `pricingMultiplierEditable=true`; if V4 is unavailable, pricing is read-only.
+There is no price table on this page. The gateway does not fetch a provider price list, apply a multiplier, or estimate a price for a new request. A cost that was not recorded stays unknown and is not shown as zero or free. Older stored prices stay on disk and are not recalculated.
 
-**Refresh price table** only hits the official source owned by that Provider. OpenCode and Command Code
-keep separate revisions and last-good snapshots; one failing does not touch
-the other. If a Provider later owns several priced Plans, the same action
-refreshes those Plans only. Refresh stays manual:
-
-- OpenCode Go shows revision, documentation timestamp, token rates, `Usage`
-  (labeled **Monthly limit** in the official docs),
-  and the quota-debit multiplier, and can fetch
-  `https://opencode.ai/docs/go/` after you press refresh. A failed fetch or
-  validation keeps the last successful snapshot. The allowance is not a quota
-  pool and does not route requests: it only derives that debit multiplier
-  (`account monthly window / model monthly limit`). Saving a temporary
-  override creates a new persistent revision for later estimates.
-- Command Code GOAT shows its saved official rate snapshot from
-  `https://commandcode.ai/docs/plans/goat`. Models with scheduled pricing retain
-  the official daily peak windows (01:00–04:00 and 06:00–10:00 UTC) and their
-  separate input, output, and cache-read rates. Each priced model's applied
-  multiplier can be edited and saved. The saved provider revision prices later
-  requests; missing or ambiguous rows stay unpriced. A refresh asks before
-  replacing edited multipliers. This remains separate from OpenCode Go. GOAT
-  account cards can explicitly **Refresh quota** to read the `$14 / $35 / $70`
-  windows from Command Code's first-party `/alpha/billing/credits` account
-  endpoint; that action also refreshes the GOAT model catalog. The official CLI uses this endpoint, although the public Provider
-  API does not document it. Priced OCG logs continue accumulating between
-  snapshots. The official snapshot is the baseline, and the timed windows can
-  be calibrated by hand afterwards. There is no automatic GOAT usage sync.
-- Zen Free is unpriced (egress-IP-shared free quota).
-- Custom API keeps USD cost unknown: successful forwards log `cost_state=unknown` with
-  no quota debit. Configured credit meters record native credits separately. There is no generic official usage window. Known-host current-balance
-  reads (DeepSeek / Moonshot / StepFun API) are display-only.
-- Ollama Cloud refreshes the public keyless directory `https://ollama.com/v1/models` without selecting an account. Discovered ids enable Chat Completions immediately; Responses and Messages are unsupported, and there is no protocol-probe entry. A refreshed catalog may append one routeable Ollama mapping to a Go-owned alias only when stripping the `:` tag leaves exactly one catalog match. Date-tagged snapshot ids come from the runtime catalog. Manual pricing refresh reads `https://ollama.com/pricing` (Model / Input / Cached input / Output) into the provider snapshot with quota multiplier `1.0`. New accounts require Pro/Max/Team plus a purchase date. Account cards estimate one monthly USD-Credits window from official per-request usage against that tier; used credit may exceed the soft limit, the bar clamps at 100%, and the meter never writes cooldown or changes routing. Existing accounts with no billing row stay routeable without a meter.
-- MiniMax CN and Kimi Code CN are unpriced in OCG, but their account cards can
-  manually read the official subscription windows (`/token_plan/remains` and
-  `/usages`). These snapshots are display-only and do not gate inference.
-- Custom API and user-defined Provider cards whose stored Endpoint host is
-  exactly `api.deepseek.com`, `api.moonshot.cn`, or `api.moonshot.ai` can
-  manually read that official current balance. Other Custom hosts are not
-  probed.
+- OpenCode Go account cards replace the 5-hour, weekly, and monthly windows with the official percentage and reset. A missing percentage stays unavailable and is not shown as 0. You can save a manual percentage on those three windows. A blank or null percentage is not stored as 0. Later requests do not add a price onto that percentage.
+- Command Code GOAT account cards can explicitly **Refresh quota** to read official percentage windows from Command Code's first-party `/alpha/billing/credits` endpoint. That action also refreshes the GOAT model catalog. The official CLI uses this endpoint, although the public Provider API does not document it. When the reading includes a percentage, the window uses it against a full window of 100 and keeps its reset. A dollar amount is not relabeled as a percentage. You can save a manual percentage afterwards. With no official reading and no manual percentage, the window stays unavailable and is not shown as 0. There is no automatic GOAT usage sync.
+- Zen Free uses an egress-IP-shared free quota. Successful requests keep token counts and are not given a local price.
+- Custom API keeps a missing cost unknown. It is not shown as zero or free, and it does not debit a timed quota window. A manual credit balance is recorded separately and is not reduced by the request. There is no generic official usage window. Known-host current-balance reads (DeepSeek / Moonshot / StepFun API) are display-only.
+- Ollama Cloud refreshes the public keyless directory `https://ollama.com/v1/models` without selecting an account. Discovered ids enable Chat Completions immediately; Responses and Messages are unsupported, and there is no protocol-probe entry. A refreshed catalog may append one routeable Ollama mapping to a Go-owned alias only when stripping the `:` tag leaves exactly one catalog match. Date-tagged snapshot ids come from the runtime catalog. Ollama has no official usage API in this product. The gateway does not fetch a price list or estimate a monthly credit meter from request prices. The account form still presents Pro, Max, or Team and a purchase date. A manual percentage does not require a price. A month percentage can be saved before a tier is chosen. A week percentage is not accepted. Without an official or manual usage observation, usage stays unavailable. Existing accounts stay routeable. Previously stored billing rows stay on disk and are not recalculated.
+- MiniMax CN and Kimi Code CN do not price requests in OCG, but their account cards can manually read the official subscription windows (`/token_plan/remains` and `/usages`). These snapshots are display-only and do not gate inference.
+- Custom API and user-defined Provider cards whose stored Endpoint host is exactly `api.deepseek.com`, `api.moonshot.cn`, or `api.moonshot.ai` can manually read that official current balance. Other Custom hosts are not probed.
 
 Request-time flow: Alias → account eligibility → adapter ceiling → saved
 contract → per-model/per-protocol effective state → passthrough or conversion.
 Protocol selection uses the saved contract. Authenticated `GET /v1/models` and
 protected `GET /dashboard/api/v4/application-models` publish only currently
-routable public names that have an effective enabled protocol. `application-models` stays Go aliases ∩ active pricing and excludes Custom.
+routable public names that have an effective enabled protocol. `application-models` lists Go names that resolve in the saved catalog and have an enabled protocol. It does not consult a price snapshot and excludes Custom.
 
 ---
 

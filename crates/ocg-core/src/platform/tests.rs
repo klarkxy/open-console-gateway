@@ -330,31 +330,10 @@ async fn new_api_key_only_reads_proven_models_and_key_quota() {
     assert_eq!(ids, vec!["gpt-4", "claude-sonnet"]);
     assert!(snapshot.models.iter().all(|m| m.source == SRC_V1_MODELS));
 
-    let gpt = snapshot
-        .prices
-        .iter()
-        .find(|p| p.model == "gpt-4")
-        .expect("gpt price");
-    assert_eq!(gpt.input, Some(2.5 * 2.0 / 500_000.0));
-    assert_eq!(gpt.output, Some(2.5 * 2.0 / 500_000.0 * 4.0));
-    assert_eq!(gpt.cache_read, Some(2.5 * 2.0 / 500_000.0 * 0.5));
-    assert_eq!(gpt.cache_write, Some(2.5 * 2.0 / 500_000.0 * 1.25));
-    assert_eq!(gpt.valid_until, now() + SNAPSHOT_TTL_SECS);
-    assert_eq!(
-        gpt.unavailable_reason.as_deref(),
-        Some("user_identity_required")
-    );
-
-    let claude = snapshot
-        .prices
-        .iter()
-        .find(|p| p.model == "claude-sonnet")
-        .expect("claude price");
-    assert_eq!(claude.unavailable_reason.as_deref(), Some(UNAVAIL_TIERED));
-    assert!(claude.input.is_none());
-    assert!(snapshot.prices.iter().all(|p| p.model != "storefront-only"));
+    assert!(snapshot.prices.is_empty(), "{:?}", snapshot.prices);
 
     let hits = captured.lock().unwrap();
+    assert!(hits.iter().all(|hit| hit.path != "/api/pricing"));
     assert!(hits.iter().all(|hit| {
         hit.authorization
             .as_deref()
@@ -584,10 +563,8 @@ async fn new_api_key_pricing_requires_authenticated_response_and_allowed_group_w
         )
         .await;
         assert!(snapshot.errors.is_empty(), "{:?}", snapshot.errors);
-        let price = snapshot.prices.iter().find(|p| p.model == "gpt-4").unwrap();
-        assert_eq!(price.unavailable_reason.as_deref(), expected_reason);
-        assert_eq!(price.input, Some(2.5 * 0.75 / 500_000.0));
-        assert_eq!(price.output, Some(2.5 * 0.75 / 500_000.0 * 4.0));
+        assert!(snapshot.prices.is_empty(), "{auth_version:?} {snapshot:?}");
+        assert!(snapshot.models.iter().any(|model| model.id == "gpt-4"));
         assert!(
             snapshot
                 .quotas
@@ -595,16 +572,12 @@ async fn new_api_key_pricing_requires_authenticated_response_and_allowed_group_w
                 .all(|q| !matches!(q.kind, PlatformQuotaKind::Wallet))
         );
         let hits = captured.lock().unwrap();
-        assert_eq!(hits.len(), 4);
+        assert_eq!(hits.len(), 3);
         assert!(hits.iter().all(|hit| matches!(
             hit.path.as_str(),
-            "/api/status" | "/v1/models" | "/api/usage/token/" | "/api/pricing"
+            "/api/status" | "/v1/models" | "/api/usage/token/"
         )));
-        let pricing_hit = hits.iter().find(|hit| hit.path == "/api/pricing").unwrap();
-        assert_eq!(
-            pricing_hit.authorization.as_deref(),
-            Some(format!("Bearer {USER}").as_str())
-        );
+        let _ = (expected_reason, group_enabled);
     }
 }
 
@@ -651,18 +624,7 @@ async fn new_api_auto_group_and_per_request_prices_are_unavailable() {
         },
     )
     .await;
-    let gpt = snapshot.prices.iter().find(|p| p.model == "gpt-4").unwrap();
-    assert_eq!(gpt.unavailable_reason.as_deref(), Some(UNAVAIL_AUTO));
-    assert!(gpt.input.is_none());
-    let image = snapshot
-        .prices
-        .iter()
-        .find(|p| p.model == "image-1")
-        .unwrap();
-    assert_eq!(
-        image.unavailable_reason.as_deref(),
-        Some(UNAVAIL_PER_REQUEST)
-    );
+    assert!(snapshot.prices.is_empty(), "{:?}", snapshot.prices);
     let key_quota = snapshot
         .quotas
         .iter()
@@ -805,34 +767,14 @@ async fn sub2_key_only_uses_billing_multiplier_and_ignores_plaza_catalog() {
     assert_eq!(key_quota.remaining, Some(27.5));
     assert_eq!(key_quota.limit, Some(40.0));
 
-    let billed = snapshot
-        .prices
-        .iter()
-        .find(|p| p.model == "claude-opus" && !p.official_reference)
-        .unwrap();
-    assert_eq!(billed.unavailable_reason.as_deref(), Some(UNAVAIL_TIME));
-    assert!(billed.input.is_none());
-    let official = snapshot
-        .prices
-        .iter()
-        .find(|p| p.model == "claude-opus" && p.official_reference)
-        .unwrap();
-    assert_eq!(official.input, Some(0.000015));
-    assert_eq!(official.output, Some(0.000075));
-    assert_eq!(official.valid_until, now() + SNAPSHOT_TTL_SECS);
-    assert!(
-        snapshot
-            .prices
-            .iter()
-            .all(|p| p.model != "plaza-only-model")
-    );
+    assert!(snapshot.prices.is_empty(), "{:?}", snapshot.prices);
 
     let hits = captured.lock().unwrap();
+    assert!(hits.iter().any(|h| h.path == "/v1/models"));
     assert!(hits.iter().any(|h| h.path == "/v1/usage"));
-    assert!(hits.iter().any(|h| h.path == "/v1/sub2api/billing"));
     assert!(
         hits.iter()
-            .any(|h| h.path == "/api/v1/model-plaza" && h.authorization.is_none())
+            .all(|h| { h.path != "/v1/sub2api/billing" && h.path != "/api/v1/model-plaza" })
     );
 }
 
@@ -937,7 +879,7 @@ async fn new_api_missing_completion_ratio_is_unavailable() {
             r#"{"success":true,"data":[{"model_name":"gpt-4","quota_type":0,"model_ratio":2.5}],"group_ratio":{"default":2}}"#,
         ),
     );
-    let (base, client, _) = spawn_mock(routes).await;
+    let (base, client, captured) = spawn_mock(routes).await;
     let group = group_with(Some("default"), &[]);
     let snapshot = read(
         &client,
@@ -951,13 +893,15 @@ async fn new_api_missing_completion_ratio_is_unavailable() {
         },
     )
     .await;
-    let price = snapshot.prices.iter().find(|p| p.model == "gpt-4").unwrap();
-    assert_eq!(
-        price.unavailable_reason.as_deref(),
-        Some(UNAVAIL_MISSING_RATE)
+    assert!(snapshot.models.iter().any(|model| model.id == "gpt-4"));
+    assert!(snapshot.prices.is_empty(), "{:?}", snapshot.prices);
+    assert!(
+        captured
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|hit| hit.path != "/api/pricing")
     );
-    assert!(price.input.is_none());
-    assert!(price.output.is_none());
 }
 
 #[tokio::test]
@@ -1506,8 +1450,12 @@ async fn sub2_key_refresh_does_not_fetch_management_wallet_subscriptions_or_grou
     }
     assert!(hits.iter().any(|hit| hit.path == "/v1/usage"
         && hit.authorization.as_deref() == Some(format!("Bearer {KEY}").as_str())));
-    assert!(hits.iter().any(|hit| hit.path == "/api/v1/model-plaza"
-        && hit.authorization.as_deref() == Some(format!("Bearer {USER}").as_str())));
+    assert!(hits.iter().any(|hit| hit.path == "/v1/models"
+        && hit.authorization.as_deref() == Some(format!("Bearer {KEY}").as_str())));
+    assert!(
+        hits.iter()
+            .all(|hit| { hit.path != "/api/v1/model-plaza" && hit.path != "/v1/sub2api/billing" })
+    );
 }
 
 /// Management observations and Key prices are requested independently. The
@@ -1702,42 +1650,14 @@ async fn assert_sub2_separate_observation_scopes(limited: bool) {
             .any(|m| m.platform.as_deref() == Some("anthropic"))
     );
     assert!(!child.models.iter().any(|m| m.id == "unpermitted"));
-    assert!(child.prices.iter().all(|p| p.model != "unpermitted"));
-    let billed = child
-        .prices
-        .iter()
-        .find(|p| p.model == "gpt-a" && !p.official_reference)
-        .expect("billed price");
-    assert_eq!(billed.unavailable_reason, None);
-    assert_eq!(billed.input, Some(0.000003 * 2.0));
-    assert_eq!(billed.output, Some(0.000006 * 2.0));
-    assert_eq!(billed.cache_read, Some(0.000001 * 2.0));
-    assert_eq!(billed.cache_write, Some(0.000004 * 2.0));
-    let official = child
-        .prices
-        .iter()
-        .find(|p| p.model == "gpt-a" && p.official_reference)
-        .expect("official price");
-    assert_eq!(official.input, Some(0.000002));
-    assert_eq!(official.output, Some(0.000004));
-    assert_eq!(official.valid_until, now() + SNAPSHOT_TTL_SECS);
+    assert!(child.prices.is_empty(), "{:?}", child.prices);
     let calls = hits.lock().unwrap();
-    assert_eq!(calls.len(), 4);
+    assert_eq!(calls.len(), 2);
     for call in calls.iter() {
-        if call.path == "/api/v1/model-plaza" {
-            assert_eq!(
-                call.authorization.as_deref(),
-                Some(format!("Bearer {USER}").as_str())
-            );
-        } else {
-            assert!(matches!(
-                call.path.as_str(),
-                "/v1/models" | "/v1/usage" | "/v1/sub2api/billing"
-            ));
-            assert_eq!(
-                call.authorization.as_deref(),
-                Some(format!("Bearer {KEY}").as_str())
-            );
-        }
+        assert!(matches!(call.path.as_str(), "/v1/models" | "/v1/usage"));
+        assert_eq!(
+            call.authorization.as_deref(),
+            Some(format!("Bearer {KEY}").as_str())
+        );
     }
 }

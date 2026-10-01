@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
-import { after, before, test } from "node:test";
+import { after, before, beforeEach, test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { build } from "vite";
 import vue from "@vitejs/plugin-vue";
+import { createPinia, setActivePinia, type Pinia } from "pinia";
 import { ssrContextKey, type App, type Component } from "vue";
 import {
   button,
@@ -24,6 +25,16 @@ type CpaApi = Record<string, (...args: unknown[]) => Promise<unknown>>;
 let buildDir: string;
 let Cpa: Component;
 let api: CpaApi;
+let testPinia: Pinia | null = null;
+
+if (typeof globalThis.MouseEvent !== "function") {
+  class MouseEvent extends Event {
+    constructor(type: string, init?: EventInit) {
+      super(type, init);
+    }
+  }
+  Object.defineProperty(globalThis, "MouseEvent", { configurable: true, value: MouseEvent });
+}
 
 function cpaHarnessPlugin() {
   const prefix = "\0cpa-component-harness:";
@@ -83,7 +94,10 @@ function cpaHarnessPlugin() {
     enforce: "pre" as const,
     resolveId(source: string, importer?: string) {
       if (source === "naive-ui") return `${prefix}naive`;
-      if (!importer?.replaceAll("\\", "/").includes("/src/views/Cpa.vue")) return null;
+      const importerPath = importer?.replaceAll("\\", "/") ?? "";
+      const cpaSurface = importerPath.includes("/src/views/Cpa.vue")
+        || importerPath.includes("/src/stores/cpa.ts");
+      if (!cpaSurface) return null;
       const module = sources[source];
       return module ? `${prefix}${module}` : null;
     },
@@ -143,6 +157,96 @@ function titledAlerts(root: HostNode, type: string): HostNode[] {
   );
 }
 
+function trackPromise(promise: Promise<void>): { status: () => "pending" | "settled" } {
+  let status: "pending" | "settled" = "pending";
+  void promise.then(
+    () => { status = "settled"; },
+    () => { status = "settled"; },
+  );
+  return { status: () => status };
+}
+
+function deferredRead<T>(): ReturnType<typeof deferred<T>> {
+  const gate = deferred<T>();
+  void gate.promise.catch(() => undefined);
+  return gate;
+}
+
+function uiClick(): MouseEvent {
+  return new MouseEvent("click", { bubbles: true });
+}
+
+function accountRow(name: string) {
+  return {
+    authIndex: "auth-synth",
+    disabled: false,
+    email: null,
+    label: null,
+    mutable: true,
+    name,
+    provider: "synthetic",
+    quota: null,
+    runtimeOnly: false,
+    status: null,
+    statusMessage: null,
+    unavailable: false,
+  };
+}
+
+function readNotices(root: HostNode): HostNode[] {
+  return walkHostNodes(root).filter((node) => {
+    if (node.type !== "div" || node.props.size !== undefined) return false;
+    const kind = node.props.type;
+    const role = node.props.role;
+    return kind === "error" || kind === "warning" || role === "alert" || role === "status";
+  });
+}
+
+function noticesWithMarker(root: HostNode, marker: string): HostNode[] {
+  return readNotices(root).filter((node) => (
+    String(node.props.title ?? "").includes(marker) || text(node).includes(marker)
+  ));
+}
+
+function isReadErrorNotice(node: HostNode): boolean {
+  if (node.props.type === "error") return true;
+  if (node.props.type === "warning") return false;
+  return node.props.role === "alert";
+}
+
+function isReadWarningNotice(node: HostNode): boolean {
+  if (node.props.type === "warning") return true;
+  if (node.props.type === "error") return false;
+  return node.props.role === "status";
+}
+
+function retryControl(notice: HostNode): HostNode {
+  const control = walkHostNodes(notice).find((node) => node.type === "button");
+  assert.ok(control, "the read notice must expose a retry control");
+  return control!;
+}
+
+function assertBackgroundReadWarning(root: HostNode, marker: string): HostNode {
+  const marked = noticesWithMarker(root, marker);
+  const warning = marked.find(isReadWarningNotice);
+  assert.ok(warning, "a failed background read must surface a warning carrying the fixture marker");
+  assert.equal(
+    marked.some(isReadErrorNotice),
+    false,
+    "a failed background read must not use the first-load error surface",
+  );
+  retryControl(warning);
+  return warning;
+}
+
+async function waitForCount(read: () => number, count: number, label: string): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (read() >= count) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail(`${label}: expected ${count} requests, saw ${read()}`);
+}
+
 function hasButton(root: HostNode, label: string): boolean {
   return walkHostNodes(root).some(
     (node) => node.type === "button" && text(node).trim() === label,
@@ -169,6 +273,10 @@ async function mount(componentApi: CpaApi): Promise<{ app: App; root: HostNode; 
   (globalThis as { __cpaComponentApi?: CpaApi }).__cpaComponentApi = api;
   const root: HostNode = { children: [], props: {}, type: "root" };
   const app = renderer.createApp(Cpa);
+  const pinia = testPinia ?? createPinia();
+  testPinia = pinia;
+  setActivePinia(pinia);
+  app.use(pinia);
   app.provide(ssrContextKey, { modules: new Set<string>() });
   app.mount(root);
   await settle();
@@ -189,10 +297,15 @@ before(async () => {
         formats: ["es"],
       },
       outDir: buildDir,
-      rollupOptions: { external: ["vue"] },
+      rollupOptions: { external: ["vue", "pinia"] },
     },
   });
   Cpa = (await import(pathToFileURL(path.join(buildDir, "cpa.mjs")).href)).default;
+});
+
+beforeEach(() => {
+  testPinia = createPinia();
+  setActivePinia(testPinia);
 });
 
 after(async () => { await rm(buildDir, { force: true, recursive: true }); });
@@ -828,3 +941,151 @@ test("CLI discovery and import responses after unmount are ignored", async () =>
   await settle();
   assert.equal(accountReads, accountReadsBeforeUnmount, "the late import response does not refresh accounts after unmount");
 });
+
+const CONFIRMED_IMPORTS = [
+  { outcome: "imported" as const, provider: "codex", label: "Codex", name: "ocg-cli-codex-a1b2c3.json" },
+  { outcome: "alreadyImported" as const, provider: "anthropic", label: "Claude", name: "ocg-cli-anthropic-f0e1d2.json" },
+];
+
+for (const row of CONFIRMED_IMPORTS) {
+  test(`confirmed ${row.outcome} CLI import settles at ack; its empty GET cannot erase the marker`, async () => {
+    const followup = deferredRead<{ accounts: unknown[] }>();
+    let accountReads = 0;
+    let imports = 0;
+    const mounted = await mount(oauthComponentApi({
+      getCpaCliImports: async () => ({ sources: [
+        { provider: row.provider, source: `${row.provider}-cli`, supported: true, available: true, reason: null },
+      ] }),
+      importCpaCliAccount: async (input: unknown) => {
+        imports += 1;
+        assert.deepEqual(input, { provider: row.provider });
+        return {
+          provider: row.provider,
+          name: row.name,
+          outcome: row.outcome,
+          revision: 2,
+          processGeneration: 1,
+        };
+      },
+      getCpaAccounts: async () => {
+        accountReads += 1;
+        if (accountReads === 1) return { accounts: [] };
+        if (accountReads === 2) return followup.promise;
+        return { accounts: [] };
+      },
+    }));
+    await settle(40);
+    const importing = Promise.resolve(
+      (importButton(mounted.root, row.label).props.onClick as () => Promise<void> | void)(),
+    );
+    const trackedAction = trackPromise(importing);
+    try {
+      await waitForCount(() => accountReads, 2, `${row.outcome} follow-up account GET`);
+      assert.equal(trackedAction.status(), "settled", "the import handler must settle at the ack");
+      assert.equal(imports, 1);
+      assert.equal(accountReads, 2, "confirmed import issues exactly one follow-up GET");
+      assert.equal(importButton(mounted.root, row.label).props.loading, false, "the import ticket unlocks at ack");
+      assert.ok(importButton(mounted.root, row.label).props.disabled, "the session marker greys the source at ack");
+      assert.ok(
+        !button(mounted.root, "Codex 浏览器登录").props.disabled,
+        "unlocking the import ticket leaves fresh-login starts available",
+      );
+      const notices = oauthStatusAlerts(mounted.root, "success");
+      assert.equal(notices.length, 1, "the confirmed import notice is shown at ack");
+      assert.match(text(notices[0]), new RegExp(row.label));
+      assert.doesNotMatch(text(mounted.root), new RegExp(row.name.replace(".", "\\.")));
+      followup.resolve({ accounts: [] });
+      await settle();
+      assert.equal(imports, 1, "the import's own empty read must not replay the write");
+      assert.equal(accountReads, 2);
+      assert.ok(
+        importButton(mounted.root, row.label).props.disabled,
+        "the import's own successful empty read cannot erase the marker",
+      );
+      await (button(mounted.root, "刷新").props.onClick as () => Promise<void>)();
+      await settle(40);
+      assert.ok(accountReads > 2, "a later independent account read runs");
+      assert.equal(imports, 1, "the independent read never replays the import");
+      assert.ok(
+        !importButton(mounted.root, row.label).props.disabled,
+        "a later independent successful missing-account read enables reimport",
+      );
+    } finally {
+      followup.reject(new Error("unsettled import follow-up GET"));
+      await importing.then(() => undefined, () => undefined);
+      mounted.app.unmount();
+    }
+  });
+}
+
+for (const row of CONFIRMED_IMPORTS) {
+  test(`confirmed ${row.outcome} CLI import keeps its projection when the follow-up GET rejects`, async () => {
+    const followup = deferredRead<{ accounts: unknown[] }>();
+    let accountReads = 0;
+    let imports = 0;
+    const marker = `${row.outcome}-import-revalidation-failed`;
+    const token = row.provider === "anthropic" ? "claude" : row.provider;
+    const listedName = `ocg-cli-${token}-present.json`;
+    const receiptName = row.name.replace(".", "\\.");
+    const mounted = await mount(oauthComponentApi({
+      getCpaCliImports: async () => ({ sources: [
+        { provider: row.provider, source: `${row.provider}-cli`, supported: true, available: true, reason: null },
+      ] }),
+      importCpaCliAccount: async (input: unknown) => {
+        imports += 1;
+        assert.deepEqual(input, { provider: row.provider });
+        return {
+          provider: row.provider,
+          name: row.name,
+          outcome: row.outcome,
+          revision: 2,
+          processGeneration: 1,
+        };
+      },
+      getCpaAccounts: async () => {
+        accountReads += 1;
+        if (accountReads === 1) return { accounts: [] };
+        if (accountReads === 2) return followup.promise;
+        if (accountReads === 3) return { accounts: [accountRow(listedName)] };
+        throw new Error("import retry must issue only one GET");
+      },
+    }));
+    await settle(40);
+    const importing = Promise.resolve(
+      (importButton(mounted.root, row.label).props.onClick as () => Promise<void> | void)(),
+    );
+    const trackedAction = trackPromise(importing);
+    try {
+      await waitForCount(() => accountReads, 2, `${row.outcome} follow-up account GET`);
+      assert.equal(trackedAction.status(), "settled", "the import handler must settle at the ack");
+      assert.equal(imports, 1);
+      assert.equal(accountReads, 2, "confirmed import issues exactly one follow-up GET");
+      assert.ok(importButton(mounted.root, row.label).props.disabled, "the session marker greys the source at ack");
+      assert.equal(oauthStatusAlerts(mounted.root, "success").length, 1, "the confirmed import notice is shown at ack");
+      followup.reject(new Error(marker));
+      await settle();
+      assert.equal(imports, 1, "a failed read must not replay the import");
+      assert.equal(accountReads, 2);
+      assert.ok(importButton(mounted.root, row.label).props.disabled, "the marker stays after the failed revalidation GET");
+      assert.equal(oauthStatusAlerts(mounted.root, "success").length, 1, "the confirmed import notice stays after the failed read");
+      assert.doesNotMatch(text(mounted.root), new RegExp(receiptName));
+      const warning = assertBackgroundReadWarning(mounted.root, marker);
+      await Promise.resolve(
+        (retryControl(warning).props.onClick as ((event: MouseEvent) => Promise<void> | void) | undefined)?.(uiClick()),
+      );
+      await settle();
+      await waitForCount(() => accountReads, 3, `${row.outcome} retry GET`);
+      assert.equal(accountReads, 3, "retry issues exactly one GET");
+      assert.equal(imports, 1, "retry must not issue a second write");
+      assert.equal(noticesWithMarker(mounted.root, marker).length, 0, "a successful retry clears the read warning");
+      assert.ok(importButton(mounted.root, row.label).props.disabled, "a successful retry that still lists the account keeps the marker");
+      assert.equal(oauthStatusAlerts(mounted.root, "success").length, 1);
+      assert.match(text(mounted.root), new RegExp(listedName.replace(".", "\\.")));
+      assert.doesNotMatch(text(mounted.root), new RegExp(receiptName));
+    } finally {
+      followup.reject(new Error("unsettled import follow-up GET"));
+      await importing.then(() => undefined, () => undefined);
+      mounted.app.unmount();
+    }
+  });
+}

@@ -118,10 +118,21 @@ pub struct BillingStatus {
     pub process_generation: u64,
 }
 
+/// Manual credit setup. Token rates and the currency conversion factor are not writable.
+/// Stored historical rates stay on the meter and are not replaced by this body.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreditConfigurationWrite {
+    pub name: String,
+    pub currency: String,
+    pub monthly: Option<MonthlyCredits>,
+    pub source_url: Option<String>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreditConfigureRequest {
-    pub configuration: CreditConfiguration,
+    pub configuration: CreditConfigurationWrite,
     /// Required for initial setup; omitted for a rate/settings edit so balances survive.
     pub initial_buckets: Option<Vec<CreditBucket>>,
     #[serde(flatten)]

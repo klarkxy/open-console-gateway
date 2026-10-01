@@ -116,7 +116,6 @@ function dynamicCatalog(providerId: string): ProviderCatalogEntry {
     verification_runtime_availability: "not_applicable",
     routable: true,
     managed_registration: false,
-    pricing_availability: "unpriced",
     usage_availability: "unavailable",
     manual_usage_calibration: false,
     quota_unit: "",
@@ -445,6 +444,6 @@ test("expiry display uses declared cadence instead of the legacy provider identi
   };
   assert.equal(accountExpiryDisplay(account(), identity(), null, destination), "hidden");
   assert.equal(accountExpiryDisplay(account({ provider_id: "custom" }), null, null, {
-    ...destination, plan: { expiry_cadence: "monthly", manual_calibration: false, pricing_source: "unpriced", usage_source: "none", windows: [{ kind: "month" }] },
+    ...destination, plan: { expiry_cadence: "monthly", manual_calibration: false, usage_source: "none", windows: [{ kind: "month" }] },
   }), "v3");
 });

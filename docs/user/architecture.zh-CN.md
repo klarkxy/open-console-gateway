@@ -37,7 +37,7 @@ Free 没有凭据。Vue SPA 只通过 HTTP Dashboard V4 通信；仅保留 auth 
 | --- | --- | --- |
 | **访问密钥** | 面向客户端的主 Key 与子 Key | 账号凭据在 **账号** |
 | **账号** | 账号 Key、启停、顺序、备注、冷却与用量状态 | 目录与协议合约在 **供应商** |
-| **供应商** | 内置目录、模型/协议合约、价格范围，以及用户定义 Provider 的 Endpoint/鉴权/映射 | Custom API 映射留在账号卡 |
+| **供应商** | 内置目录、模型/协议合约，以及用户定义 Provider 的 Endpoint/鉴权/映射 | Custom API 映射留在账号卡 |
 | **Custom API 账号** | 一个 API URL、一个账号级上游协议、公开模型 → 上游 ID 映射 | 共享 Provider 定义在 **供应商** |
 | **扩展 / CPA** | 一个静态本机外部集成边界 | 内置路由家族仍在 **账号** / **供应商** |
 | **应用 / DSH** | 安装到 DSH `web` profile 的 OCG 自有插件 | 客户端使用普通 Gateway API |
@@ -52,7 +52,7 @@ Configurable HTTP。
 | Endpoint | 公布内容 |
 | --- | --- |
 | 已鉴权 `GET /v1/models` | 当前可路由的代码持有 Alias、已保存 Zen/Command/CN 映射、用户定义 Provider 公开模型，以及符合条件的 Custom 声明 ID |
-| `GET /dashboard/api/v4/application-models` | Go 可路由 Alias 与当前 Go 价格快照的交集；不含 Custom API、用户定义 Provider 与 CN Plan |
+| `GET /dashboard/api/v4/application-models` | 已保存目录中可解析且协议已启用的 Go 名称；不查阅价格快照。不含 Custom API、用户定义 Provider 与 CN Plan |
 
 含 `/` 的 Command id 会公布唯一的最后一节小写 kebab Alias；其他无法匹配的目录行在代码分配 Alias 前只保留精确 raw pin。与已公布内置 Alias 冲突的
 Custom ID 不会进入公布列表。

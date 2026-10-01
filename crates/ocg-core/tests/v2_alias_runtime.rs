@@ -346,8 +346,9 @@ async fn successful_alias_chat_persists_requested_alias_and_upstream() {
         attribution.upstream_model.as_deref(),
         Some("deepseek-v4-flash")
     );
-    assert!(attribution.native_cost_value.is_some());
-    assert_eq!(attribution.native_cost_unit.as_deref(), Some("usd"));
+    assert!(attribution.native_cost_value.is_none());
+    assert!(attribution.native_cost_unit.is_none());
+    assert!(attribution.native_cost_currency.is_none());
 
     stop(state, dir, gateway_handle, stop_mock);
 }
@@ -435,8 +436,9 @@ async fn successful_alias_chat_stream_preserves_identity_after_finalize() {
         attribution.upstream_model.as_deref(),
         Some("deepseek-v4-flash")
     );
-    assert!(attribution.native_cost_value.is_some());
-    assert_eq!(attribution.native_cost_unit.as_deref(), Some("usd"));
+    assert!(attribution.native_cost_value.is_none());
+    assert!(attribution.native_cost_unit.is_none());
+    assert!(attribution.native_cost_currency.is_none());
 
     stop(state, dir, gateway_handle, stop_mock);
 }

@@ -412,7 +412,6 @@ async fn dashboard_v3_go_usage_uses_live_pricing_limits_for_seeded_windows() {
     let harness = start_loopback("usage-go-seed").await;
     let go_id = create_go(&harness).await;
     let limits = harness.state.pricing_snapshot().limits.clone();
-    let pricing_revision = harness.state.pricing_snapshot().revision.clone();
     harness
         .state
         .db
@@ -441,13 +440,10 @@ async fn dashboard_v3_go_usage_uses_live_pricing_limits_for_seeded_windows() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_usage_shape(&body, &harness);
     let parsed = parse_usage(&body);
-    assert!((parsed.window_5h - limits.window_5h * 0.5).abs() < 1e-9);
-    assert!((parsed.window_week - limits.window_week * 0.2).abs() < 1e-9);
-    assert!((parsed.window_month - limits.window_month * 0.1).abs() < 1e-9);
-    assert_eq!(
-        parsed.pricing_revision.as_deref(),
-        Some(pricing_revision.as_str())
-    );
+    assert_eq!(parsed.window_5h, Some(50.0));
+    assert_eq!(parsed.window_week, Some(20.0));
+    assert_eq!(parsed.window_month, Some(10.0));
+    assert_eq!(parsed.pricing_revision, None);
     assert!(parsed.resets_in_5h.is_some());
     assert!(parsed.resets_in_week.is_some());
 
@@ -466,37 +462,58 @@ async fn dashboard_v3_go_usage_uses_live_pricing_limits_for_seeded_windows() {
     );
     assert!(!provider.experimental);
     assert_eq!(provider.quota_windows.len(), 3);
-    assert_eq!(
-        provider.pricing_revision.as_deref(),
-        Some(pricing_revision.as_str())
-    );
+    assert_eq!(provider.pricing_revision, None);
     let rolling = provider
         .quota_windows
         .iter()
         .find(|window| window.window_kind == "five_hours")
         .unwrap();
-    assert_eq!(rolling.source, "opencode-go-live");
-    assert!((rolling.used - limits.window_5h * 0.5).abs() < 1e-9);
-    assert_eq!(rolling.limit_value, Some(limits.window_5h));
+    assert_eq!(rolling.source, "manual-percent");
+    assert!((rolling.used - 50.0).abs() < 1e-9);
+    assert_eq!(rolling.limit_value, Some(100.0));
+    assert_eq!(rolling.unit, "percent");
 
     harness.stop();
 }
 
 #[tokio::test]
-async fn dashboard_v3_goat_estimates_priced_logs_and_allows_local_calibration() {
-    let harness = start_loopback("usage-goat-local-estimate").await;
+async fn dashboard_v3_goat_priced_logs_stay_unknown_and_manual_percent_is_stored() {
+    let harness = start_loopback("usage-goat-manual-percent").await;
     let goat_id = create_goat(&harness).await;
     seed_priced_goat_request(&harness, &goat_id, 2.8);
+    let logged = harness.state.db.lock().list_forward_logs(10).unwrap();
+    assert_eq!(logged.len(), 1);
+    assert_eq!(logged[0].cost, None);
+    assert_eq!(logged[0].cost_state, "unknown");
     let before = harness.state.settings_revision();
 
     let (status, estimated) = harness
         .get_json(&format!("{}/accounts/{goat_id}/usage", harness.v3_base))
         .await;
     assert_eq!(status, StatusCode::OK, "{estimated}");
-    assert_eq!(estimated["window5h"], 2.8);
-    assert_eq!(estimated["windowWeek"], 2.8);
-    assert_eq!(estimated["windowMonth"], 2.8);
+    assert_eq!(estimated["window5h"], Value::Null);
+    assert_eq!(estimated["windowWeek"], Value::Null);
+    assert_eq!(estimated["windowMonth"], Value::Null);
     assert_eq!(estimated["pricingRevision"], Value::Null);
+
+    let (status, body) = send_json(
+        &harness,
+        Method::PATCH,
+        &format!("/accounts/{goat_id}/usage"),
+        &cas(
+            &harness,
+            json!({
+                "window": "window_5h",
+                "percent": 0.0,
+                "resetsInMinutes": 180
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["usage"]["window5h"], 0.0);
+    assert_eq!(body["usage"]["windowWeek"], Value::Null);
+    assert_eq!(body["usage"]["windowMonth"], Value::Null);
 
     let (status, body) = send_json(
         &harness,
@@ -513,18 +530,18 @@ async fn dashboard_v3_goat_estimates_priced_logs_and_allows_local_calibration() 
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["usage"]["window5h"], 7.0);
-    assert_eq!(body["usage"]["windowWeek"], 2.8);
-    assert_eq!(body["usage"]["windowMonth"], 2.8);
+    assert_eq!(body["usage"]["window5h"], 50.0);
+    assert_eq!(body["usage"]["windowWeek"], Value::Null);
+    assert_eq!(body["usage"]["windowMonth"], Value::Null);
     assert_eq!(harness.state.settings_revision(), before);
 
     let (status, body) = harness
         .get_json(&format!("{}/accounts/{goat_id}/usage", harness.v3_base))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["window5h"], 7.0);
-    assert_eq!(body["windowWeek"], 2.8);
-    assert_eq!(body["windowMonth"], 2.8);
+    assert_eq!(body["window5h"], 50.0);
+    assert_eq!(body["windowWeek"], Value::Null);
+    assert_eq!(body["windowMonth"], Value::Null);
 
     let (status, provider) = harness
         .get_json(&format!(
@@ -536,21 +553,13 @@ async fn dashboard_v3_goat_estimates_priced_logs_and_allows_local_calibration() 
     assert_eq!(provider["availability"], "available");
     assert_eq!(provider["pricingRevision"], Value::Null);
     let provider = parse_provider_usage(&provider);
-    assert_eq!(provider.quota_windows.len(), 3);
-    for (kind, limit, used) in [
-        ("five_hours", 14.0, 7.0),
-        ("week", 35.0, 2.8),
-        ("month", 70.0, 2.8),
-    ] {
-        let window = provider
-            .quota_windows
-            .iter()
-            .find(|window| window.window_kind == kind)
-            .unwrap();
-        assert_eq!(window.limit_value, Some(limit));
-        assert!((window.used - used).abs() < 1e-9);
-        assert_eq!(window.source, "command-code-goat-local");
-    }
+    assert_eq!(provider.quota_windows.len(), 1);
+    let window = &provider.quota_windows[0];
+    assert_eq!(window.window_kind, "five_hours");
+    assert_eq!(window.limit_value, Some(100.0));
+    assert!((window.used - 50.0).abs() < 1e-9);
+    assert_eq!(window.unit, "percent");
+    assert_eq!(window.source, "manual-percent");
     harness.stop();
 }
 
@@ -594,8 +603,28 @@ async fn dashboard_v3_zen_provider_usage_is_the_synthetic_free_window() {
             harness.v3_base
         ))
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{usage}");
-    assert_v3_error(&usage, ERROR_INVALID_REQUEST);
+    assert_eq!(status, StatusCode::OK, "{usage}");
+    assert_eq!(usage["accountId"], ZEN_FREE_ACCOUNT_ID);
+    assert_eq!(usage["window5h"], Value::Null);
+    assert_eq!(usage["windowWeek"], Value::Null);
+    assert_eq!(usage["windowMonth"], Value::Null);
+    assert_eq!(usage["pricingRevision"], Value::Null);
+    let (status, rejected) = send_json(
+        &harness,
+        Method::PATCH,
+        &format!("/accounts/{ZEN_FREE_ACCOUNT_ID}/usage"),
+        &cas(
+            &harness,
+            json!({
+                "window": "window_5h",
+                "percent": 10,
+                "resetsInMinutes": 60
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+    assert_v3_error(&rejected, ERROR_INVALID_REQUEST);
 
     harness.stop();
 }
@@ -696,8 +725,28 @@ async fn dashboard_v3_unsupported_provider_usage_is_unavailable_and_empty() {
     let (status, custom_usage) = harness
         .get_json(&format!("{}/accounts/{custom_id}/usage", harness.v3_base))
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{custom_usage}");
-    assert_v3_error(&custom_usage, ERROR_INVALID_REQUEST);
+    assert_eq!(status, StatusCode::OK, "{custom_usage}");
+    assert_eq!(custom_usage["accountId"], custom_id);
+    assert_eq!(custom_usage["window5h"], Value::Null);
+    assert_eq!(custom_usage["windowWeek"], Value::Null);
+    assert_eq!(custom_usage["windowMonth"], Value::Null);
+    assert_eq!(custom_usage["pricingRevision"], Value::Null);
+    let (status, rejected) = send_json(
+        &harness,
+        Method::PATCH,
+        &format!("/accounts/{custom_id}/usage"),
+        &cas(
+            &harness,
+            json!({
+                "window": "window_5h",
+                "percent": 10,
+                "resetsInMinutes": 60
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+    assert_v3_error(&rejected, ERROR_INVALID_REQUEST);
 
     harness.stop();
 }
@@ -822,7 +871,7 @@ async fn dashboard_v3_usage_patch_clamps_percent_and_parses_resets() {
         .get_json(&format!("{}/accounts/{go_id}/usage", harness.v3_base))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["window5h"], 0.0);
+    assert_eq!(body["window5h"], Value::Null);
     assert_eq!(harness.state.settings_revision(), before);
 
     harness.stop();
@@ -869,7 +918,7 @@ async fn dashboard_v3_stale_revision_or_generation_does_not_write_usage() {
         .get_json(&format!("{}/accounts/{go_id}/usage", harness.v3_base))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["window5h"], 0.0);
+    assert_eq!(body["window5h"], Value::Null);
     assert_eq!(harness.state.settings_revision(), revision);
 
     harness.stop();

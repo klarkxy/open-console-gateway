@@ -33,7 +33,6 @@ function entry(extra: Partial<ProviderCatalogEntry> = {}): ProviderCatalogEntry 
     verification_runtime_availability: "not_applicable",
     routable: true,
     managed_registration: false,
-    pricing_availability: "available",
     usage_availability: "available",
     manual_usage_calibration: false,
     quota_unit: "usd",

@@ -80,7 +80,7 @@
           :cells="walletMeterCells"
           :caption="walletMeterCaption"
         />
-        <PlatformPriceTable v-if="parent?.snapshot" :snapshot="parent.snapshot" />
+        <PlatformModelTable v-if="parent?.snapshot" :snapshot="parent.snapshot" />
 
         <n-alert
           v-if="parent && pendingLink && pendingLink.parentId === parent.id"
@@ -178,7 +178,7 @@ import {
 import AccountCardFrame, { type AccountCardTone } from "./AccountCardFrame.vue";
 import ApiPriceMeter, { type ApiPriceMeterCell } from "./ApiPriceMeter.vue";
 import type { CredentialFigure } from "./CredentialBody.vue";
-import PlatformPriceTable from "./PlatformPriceTable.vue";
+import PlatformModelTable from "./PlatformModelTable.vue";
 
 const props = defineProps<{
   group: DestinationGroup;
@@ -411,12 +411,12 @@ const walletMeterCells = computed<ApiPriceMeterCell[]>(() => {
     },
     {
       key: "month",
-      label: t(PAY_GO_METER_LABEL_KEYS.month),
+      label: t("本月"),
       value: meter.monthUsed == null ? PAY_GO_METER_EMPTY : money(meter.monthUsed),
     },
     {
       key: "history",
-      label: t(PAY_GO_METER_LABEL_KEYS.history),
+      label: t("历史"),
       value: meter.historyUsed == null ? PAY_GO_METER_EMPTY : money(meter.historyUsed),
     },
   ];

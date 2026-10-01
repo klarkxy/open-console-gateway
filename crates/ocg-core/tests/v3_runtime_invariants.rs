@@ -69,24 +69,13 @@ fn disable_all_go_protocols(state: &Arc<ocg_core::state::CoreStateInner>) {
     state.reload_provider_contracts().unwrap();
 }
 
-fn inflate_active_pricing(state: &Arc<ocg_core::state::CoreStateInner>, model_id: &str) -> String {
+fn activate_inert_pricing(state: &Arc<ocg_core::state::CoreStateInner>) {
     let mut snapshot = (*state.pricing_snapshot()).clone();
-    let mut found = false;
-    for model in &mut snapshot.models {
-        if model.model_id == model_id {
-            model.quota_multiplier *= 100.0;
-            found = true;
-        }
-    }
-    assert!(
-        found,
-        "priced model {model_id} must exist in the seed snapshot"
-    );
     snapshot.revision = format!("v3-inflated-{}", uuid::Uuid::new_v4());
     snapshot.activated_at = Utc::now().to_rfc3339();
-    let revision = snapshot.revision.clone();
+    let before = state.pricing_snapshot().revision.clone();
     state.activate_pricing_snapshot(snapshot).unwrap();
-    revision
+    assert_eq!(state.pricing_snapshot().revision, before);
 }
 
 fn go_state_with_keys(keys: &[&str]) -> (Arc<ocg_core::state::CoreStateInner>, std::path::PathBuf) {
@@ -180,13 +169,11 @@ fn closed_upstream_url() -> String {
 }
 
 #[tokio::test]
-async fn entry_pricing_snapshot_survives_midflight_activation() {
+async fn entry_request_keeps_fallback_and_does_not_price() {
     let (state, dir) = go_state_with_keys(&["key-1", "key-2"]);
     let captured_revision = state.pricing_snapshot().revision.clone();
-    let expected_cost = state.estimate_cost(GO_MODEL, 10, 2, 0, 0, None).quota_debit;
 
     let state_for_cb = state.clone();
-    let captured_for_cb = captured_revision.clone();
     let (base_url, calls, stop) = start_scripted_upstream(
         vec![
             ScriptedReply {
@@ -200,8 +187,7 @@ async fn entry_pricing_snapshot_survives_midflight_activation() {
         ],
         Arc::new(move |index| {
             if index == 0 {
-                let inflated = inflate_active_pricing(&state_for_cb, GO_MODEL);
-                assert_ne!(inflated, captured_for_cb);
+                activate_inert_pricing(&state_for_cb);
             }
         }),
     )
@@ -220,17 +206,12 @@ async fn entry_pricing_snapshot_survives_midflight_activation() {
         .iter()
         .find(|log| log.status.starts_with("success"))
         .expect("fallback success row");
-    assert_eq!(
-        success.pricing_revision_id.as_deref(),
-        Some(captured_revision.as_str()),
-        "in-flight fallback must keep the entry pricing revision"
-    );
-    assert_eq!(success.quota_debit, expected_cost);
-    assert_ne!(
-        state.pricing_snapshot().revision,
-        captured_revision,
-        "live pricing must have flipped after the first attempt"
-    );
+    assert!(success.pricing_revision_id.is_none(), "{success:?}");
+    assert!(success.quota_debit.is_none(), "{success:?}");
+    assert!(success.cost.is_none(), "{success:?}");
+    assert_ne!(success.cost_state, "priced");
+    assert_ne!(success.cost_state, "free");
+    assert_eq!(state.pricing_snapshot().revision, captured_revision);
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop.send(());

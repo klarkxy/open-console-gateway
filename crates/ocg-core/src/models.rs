@@ -184,7 +184,7 @@ impl ForwardLogNativeAttribution {
         let usd = raw_cost_usd.or(cost);
         let has_usd = matches!(cost_state, "priced" | "legacy_estimate" | "free") && usd.is_some();
         (
-            usd,
+            has_usd.then_some(usd.unwrap_or(0.0)).filter(|_| has_usd),
             has_usd.then_some("usd".to_string()),
             has_usd.then_some("USD".to_string()),
         )
@@ -600,45 +600,21 @@ impl ForwardMetrics {
     /// intentionally left alone, while an explicitly attributed provider can
     /// never inherit OpenCode Go pricing by accident.
     pub(crate) fn scope_to_provider(&mut self, provider_id: Option<&str>, successful: bool) {
-        let Some(provider_id) = provider_id else {
+        let Some(_provider_id) = provider_id else {
             return;
         };
-        if self.pricing_provider_id.as_deref() == Some(provider_id) {
-            return;
-        }
-
-        let has_cost_outcome = matches!(self.cost_state, "priced" | "unpriced" | "free");
         self.cost = 0.0;
+        self.raw_cost_usd = None;
+        self.quota_debit = None;
+        self.effective_paid_cost_usd = None;
         self.pricing_revision_id = None;
         self.quota_multiplier = None;
         self.local_adjustment_multiplier = None;
         self.pricing_provider_id = None;
-
-        match crate::dynamic::adapter_kind_for(provider_id, &[]) {
-            Some(crate::provider::ProviderAdapterKind::ZenFree)
-                if successful || has_cost_outcome =>
-            {
-                self.raw_cost_usd = Some(0.0);
-                self.quota_debit = Some(0.0);
-                self.effective_paid_cost_usd = Some(0.0);
-                self.cost_state = "free";
-            }
-            Some(crate::provider::ProviderAdapterKind::ConfigurableHttp) => {
-                self.raw_cost_usd = None;
-                self.quota_debit = None;
-                self.effective_paid_cost_usd = None;
-                if successful || has_cost_outcome {
-                    self.cost_state = "unknown";
-                }
-            }
-            _ => {
-                self.raw_cost_usd = None;
-                self.quota_debit = None;
-                self.effective_paid_cost_usd = None;
-                if has_cost_outcome {
-                    self.cost_state = "unpriced";
-                }
-            }
+        match self.cost_state {
+            "usage_missing" | "outcome_unknown" => {}
+            "not_applicable" if !successful => {}
+            _ => self.cost_state = "unknown",
         }
     }
 }
@@ -649,7 +625,8 @@ pub struct ForwardLogSummary {
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
     pub cached_tokens: i64,
-    pub cost: f64,
+    /// Sum of historical priced rows. `None` when the filter has no priced or legacy-estimate row.
+    pub cost: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -795,9 +772,10 @@ pub struct DashboardSummary {
     pub total_accounts: usize,
     pub available_accounts: usize,
     pub gateway_running: bool,
-    pub today_cost: f64,
-    pub week_cost: f64,
-    pub month_cost: f64,
+    /// Historical priced spend. `None` when that window has no priced or legacy-estimate row.
+    pub today_cost: Option<f64>,
+    pub week_cost: Option<f64>,
+    pub month_cost: Option<f64>,
 }
 
 /// One row of "daily tokens per model" aggregation for the dashboard chart.

@@ -8,7 +8,6 @@ export type DashboardApiV3 =
   | ControlRevision
   | MutationAck
   | MutationExpectation
-  | PricingRevision
   | V3Error
   | ConnectionInfo
   | ConnectionSubKey
@@ -57,20 +56,6 @@ export type DashboardApiV3 =
   | ProtocolProbeRequest
   | ProtocolProbeResult
   | ProtocolProbeResponse
-  | PricingSnapshot
-  | PricingLimits
-  | PricingModel
-  | PricingAdjustment
-  | PricingTimeWindow
-  | PricingRefresh
-  | PricingRefreshStatus
-  | PricingMultiplierChange
-  | PricingRefreshUpdate
-  | PricingRefreshPolicy
-  | PricingMultipliersUpdate
-  | PricingMultiplierWrite
-  | ProviderPricing
-  | PricingAvailability
   | GatewayStatus
   | ApplicationModels
   | DashboardSummary
@@ -118,10 +103,6 @@ export type DashboardApiV3 =
   | UsageRefreshThrottleError
   | ProviderModelsRefreshUpdate
   | ProviderModels
-  | ProviderPricingSnapshot
-  | ProviderPricingValue
-  | ProviderPricingRefresh
-  | ProviderPricingRefreshUpdate
   | AccountExportRequest
   | AccountExport
   | AccountImportPreviewRequest
@@ -247,22 +228,6 @@ export type ContractEvidenceSource = "static" | "preset" | "probe_confirmed" | "
  */
 export type ContractScopeKind = "provider" | "custom_endpoint";
 /**
- * Official Peak / Off-Peak row. Wire values stay snake_case.
- */
-export type PricingTimeWindow = "always" | "off_peak" | "peak";
-/**
- * Refresh outcome. Wire values stay snake_case.
- */
-export type PricingRefreshStatus = "success" | "unchanged" | "needs_confirmation" | "failed_no_change";
-/**
- * Refresh confirmation policy. Wire values stay snake_case.
- */
-export type PricingRefreshPolicy = "keep_current" | "use_official";
-/**
- * Registry pricing availability. Wire values stay snake_case.
- */
-export type PricingAvailability = "available" | "unavailable" | "not_applicable" | "unpriced";
-/**
  * Registry usage availability. Wire values stay snake_case.
  */
 export type UsageAvailability = "available" | "unavailable" | "local_state";
@@ -316,12 +281,6 @@ export interface MutationAck {
 export interface MutationExpectation {
   expectedRevision: number;
   processGeneration: number;
-}
-/**
- * Pricing snapshot identity. Distinct from the u64 settings CAS token.
- */
-export interface PricingRevision {
-  pricingRevision: string;
 }
 /**
  * Stable non-2xx JSON envelope for every Dashboard V3 error.
@@ -938,148 +897,6 @@ export interface ProtocolProbeResponse {
   revision: number;
 }
 /**
- * Dashboard V3 pricing snapshot. Distinct from `kernel::pricing::PricingSnapshot`
- * and from the stored provider pricing blob.
- *
- * `revision` is the settings CAS token. The official snapshot id is
- * `pricingRevision` and must never be named `revision` on this wire type.
- */
-export interface PricingSnapshot {
-  activatedAt: string;
-  adjustmentPolicyVersion: string;
-  contentHash: string;
-  documentUpdatedAt: string;
-  limits: PricingLimits;
-  models: PricingModel[];
-  pricingRevision: string;
-  processGeneration: number;
-  revision: number;
-  sourceUrl: string;
-}
-/**
- * OpenCode Go 5h / week / month usage windows.
- */
-export interface PricingLimits {
-  window5h: number;
-  windowMonth: number;
-  windowWeek: number;
-}
-/**
- * One official model row, including optional cache-write and token-tier bounds.
- */
-export interface PricingModel {
-  adjustments: PricingAdjustment[];
-  cacheRead: number;
-  cacheWrite: number | null;
-  displayName: string;
-  input: number;
-  maxInputTokens: number | null;
-  minInputTokens: number | null;
-  modelId: string;
-  output: number;
-  quotaMultiplier: number;
-  timeWindow: PricingTimeWindow;
-  usage: number;
-}
-/**
- * One documented local adjustment on a model row.
- */
-export interface PricingAdjustment {
-  appliesTo: string;
-  label: string;
-  multiplier: number;
-}
-/**
- * Pricing refresh result. Nested `snapshot` is required; nullable fields emit `T | null`.
- */
-export interface PricingRefresh {
-  error: string | null;
-  multiplierChanges: PricingMultiplierChange[];
-  officialContentHash: string | null;
-  refreshStatus: PricingRefreshStatus;
-  snapshot: PricingSnapshot;
-}
-/**
- * One model whose official multiplier differs from the active snapshot.
- */
-export interface PricingMultiplierChange {
-  currentMultiplier: number;
-  modelId: string;
-  officialMultiplier: number;
-}
-/**
- * POST pricing-refresh body. CAS tokens and `expectedPricingRevision` are
- * required; `policy` and `expectedOfficialContentHash` may be omitted.
- */
-export interface PricingRefreshUpdate {
-  expectedOfficialContentHash?: string | null;
-  expectedPricingRevision: string;
-  expectedRevision: number;
-  policy?: PricingRefreshPolicy | null;
-  processGeneration: number;
-}
-/**
- * PUT provider pricing-multipliers body. CAS tokens,
- * `expectedPricingRevision` (the selected provider's active revision), and
- * `multipliers` are required.
- */
-export interface PricingMultipliersUpdate {
-  expectedPricingRevision: string;
-  expectedRevision: number;
-  multipliers: PricingMultiplierWrite[];
-  processGeneration: number;
-}
-/**
- * One multiplier write. Handlers validate model id, range, and uniqueness.
- */
-export interface PricingMultiplierWrite {
-  modelId: string;
-  multiplier: number;
-}
-/**
- * Provider-scoped pricing. `snapshot` is required `T | null` and never
- * carries a raw stored pricing blob.
- */
-export interface ProviderPricing {
-  availability: PricingAvailability;
-  pricingRevision: string;
-  processGeneration: number;
-  providerId: string;
-  providerPricingRevision: string;
-  providerSnapshot: ProviderPricingSnapshot | null;
-  revision: number;
-  snapshot: PricingSnapshot | null;
-}
-/**
- * Provider-neutral immutable pricing snapshot. GOAT uses this shape both for
- * dashboard display and provider-scoped per-request cost attribution.
- */
-export interface ProviderPricingSnapshot {
-  activatedAt: string;
-  contentHash: string;
-  documentUpdatedAt: string | null;
-  evidence: string;
-  revision: string;
-  sourceUrl: string;
-  values: ProviderPricingValue[];
-}
-export interface ProviderPricingValue {
-  cacheReadPerMillion: number | null;
-  cacheWritePerMillion: number | null;
-  currency: string | null;
-  displayName: string;
-  inputPerMillion: number | null;
-  maxInputTokens: number | null;
-  minInputTokens: number | null;
-  modelAllowance: number | null;
-  modelId: string;
-  outputPerMillion: number | null;
-  paidPlanPrice: number | null;
-  planLimit: number | null;
-  quotaMultiplier: number | null;
-  timeWindow: PricingTimeWindow;
-}
-/**
  * Secret-free gateway listener view. The plaintext Key lives only on
  * [`ConnectionInfo`].
  */
@@ -1108,13 +925,13 @@ export interface ApplicationModels {
 export interface DashboardSummary {
   availableAccounts: number;
   gatewayRunning: boolean;
-  monthCost: number;
+  monthCost: number | null;
   pricingRevision: string;
   processGeneration: number;
   revision: number;
-  todayCost: number;
+  todayCost: number | null;
   totalAccounts: number;
-  weekCost: number;
+  weekCost: number | null;
 }
 /**
  * One UTC day / model token bucket. `date` is `YYYY-MM-DD`.
@@ -1209,7 +1026,7 @@ export interface ForwardLog {
 export interface ForwardLogSummary {
   cachedTokens: number;
   completionTokens: number;
-  cost: number;
+  cost: number | null;
   promptTokens: number;
   totalRequests: number;
 }
@@ -1287,8 +1104,10 @@ export interface DailyTokensQuery {
 /**
  * GET `/accounts/{id}/usage` body. Distinct from `models::UsageWindow`.
  *
- * `revision` is the settings CAS token and is not advanced by calibration.
- * `pricingRevision` is present when the projection uses the live Go snapshot.
+ * Window fields are observed percent used against a limit of 100.
+ * `None` means no official or manual percent evidence. `revision` is the
+ * settings CAS token and is not advanced by calibration. `pricingRevision`
+ * is always absent: usage is no longer a pricing CAS token.
  */
 export interface UsageWindow {
   accountId: string;
@@ -1298,9 +1117,9 @@ export interface UsageWindow {
   resetsInMonth: string | null;
   resetsInWeek: string | null;
   revision: number;
-  window5h: number;
-  windowMonth: number;
-  windowWeek: number;
+  window5h: number | null;
+  windowMonth: number | null;
+  windowWeek: number | null;
 }
 /**
  * PATCH `/accounts/{id}/usage` envelope. Calibration does not bump revision.
@@ -1326,8 +1145,7 @@ export interface AccountUsageUpdate {
 /**
  * GET `/accounts/{id}/provider-usage` body. Distinct from stored quota rows.
  *
- * `pricingRevision` is present when live Go quota windows use one captured
- * pricing snapshot.
+ * `pricingRevision` is always absent. Usage is no longer a pricing CAS token.
  */
 export interface ProviderUsage {
   accountId: string;
@@ -1609,38 +1427,6 @@ export interface ProviderModels {
   refreshedAt: string;
   revision: number;
   sourceUrl: string;
-}
-/**
- * Result of refreshing the priced snapshot owned by one Provider. Provider
- * failures are isolated: this response never represents a cross-Provider
- * transaction.
- */
-export interface ProviderPricingRefresh {
-  error: string | null;
-  multiplierChanges: PricingMultiplierChange[];
-  officialContentHash: string | null;
-  pricingRevision: string;
-  processGeneration: number;
-  providerId: string;
-  providerPricingRevision: string;
-  refreshStatus: PricingRefreshStatus;
-  revision: number;
-  /**
-   * The refreshed Go snapshot. Provider-neutral plans expose their active
-   * snapshot through the provider pricing read endpoint instead.
-   */
-  snapshot: PricingSnapshot | null;
-}
-/**
- * POST Provider pricing-refresh body. The Provider-local pricing revision is
- * distinct from the global Go `pricingRevision` control token.
- */
-export interface ProviderPricingRefreshUpdate {
-  expectedOfficialContentHash?: string | null;
-  expectedProviderPricingRevision: string;
-  expectedRevision: number;
-  policy?: PricingRefreshPolicy | null;
-  processGeneration: number;
 }
 /**
  * POST `/accounts/transfer/export` body. The password is write-only and used

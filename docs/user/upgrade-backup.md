@@ -14,9 +14,9 @@ existing installation directory. The installer never uninstalls first. The
 upgrade keeps the data directory and auto-start setting and migrates existing
 desktop and Start-menu shortcuts. Uninstall only from Windows **Installed apps**.
 
-## Database Migration And Access Keys (Schema v63)
+## Database Migration And Access Keys (Schema v64)
 
-The database schema is **v63**; historical databases migrate in place on
+The database schema is **v64**; historical databases migrate in place on
 startup. The primary access key keeps the fixed id
 `00000000-0000-0000-0000-000000000001`, so clients keep authenticating with
 the same value across upgrades. The `access_keys` table holds the primary key
@@ -27,7 +27,7 @@ Before protected schema migrations (v27, v35, v42, v48, v58, v59), the migrator 
 a unique, never-overwritten sibling snapshot — `data.sqlite.pre-v3.<timestamp>.bak`,
 `data.sqlite.pre-v35.<timestamp>.bak`, `data.sqlite.pre-v42.<timestamp>.bak`,
 `data.sqlite.pre-v48.<timestamp>.bak`, `data.sqlite.pre-v58.<timestamp>.bak`, or `data.sqlite.pre-v59.<timestamp>.bak` — plus a SHA-256 sidecar. Very old databases (schema 1–22 / 1–23) also write `data.sqlite.pre-v22.` / `pre-v23.` snapshots. A fresh
-empty data directory creates schema v63 directly and skips the snapshot. That
+empty data directory creates schema v64 directly and skips the snapshot. That
 snapshot is a rollback point, not a substitute for a complete backup: verify
 the sidecar before restoring it, and restore it only onto a binary that can
 open that schema version or to retry an upgrade that never committed. Never
@@ -51,7 +51,7 @@ file. The maintainer-facing payload policy is documented in [Runtime invariants]
 
 Supplier card IDs, grouping and order travel in V9 backups. Multiple cards can reference the same supplier without duplicating its configuration or Keys. During a merge, existing accounts keep their order and card membership; source grouping applies to newly imported accounts. Older backups retain their saved credential priority and receive matching cards on import.
 
-V10 also carries each account's credit configuration, remaining buckets and monthly issuance cursor. Existing target meters survive a merge; older backups do not reset them. In-flight requests are represented as uncertainty in the exported estimate, since their local settlement receipts do not transfer.
+V10 also carries each account's stored credit configuration, remaining buckets, and monthly issuance cursor. A merge keeps the destination's existing balance; an older backup does not reset it. Export and import do not reprice stored balances or settle a historical pending receipt. Import keeps legacy rates with that history. The monthly expiry, expired buckets, configuration, counters, and monthly cursor stay exact. Binding and meter ids are new. The configuration you edit is the name, currency, monthly amount, and source URL. A new request does not deduct this balance.
 
 ## Backup
 

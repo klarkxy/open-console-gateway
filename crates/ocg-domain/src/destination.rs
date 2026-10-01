@@ -600,7 +600,7 @@ pub fn sealed_plan(provider_id: &str) -> Option<Plan> {
             ]),
             expiry_cadence: Some(ExpiryCadence::Monthly),
             pricing_source: PricingSource::Official,
-            manual_calibration: false,
+            manual_calibration: true,
         }),
         AdapterKind::Zen => Some(Plan {
             usage_source: UsageSource::None,

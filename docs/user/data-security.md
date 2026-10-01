@@ -35,8 +35,7 @@ Protect the data directory: there is no remote recovery if it is lost.
   their older host-local cooldown behavior); see [Upgrade and backup](upgrade-backup.md). V7 began preserving destinations,
   credentials, identity grouping, credential and binding IDs, model
   restrictions, quota-pool relationships, and cooldown deadlines, and import never
-  shortens a later destination cooldown. From V10 the payload also carries each
-  account's credit configuration, and V11 adds explicit HTTP protocol routes —
+  shortens a later destination cooldown. From V10 the payload also carries each account's stored credit configuration. Import keeps that history, including legacy rates, and does not reprice it or settle an old pending receipt. The monthly expiry, expired buckets, configuration, counters, and monthly cursor stay exact. Binding and meter ids are new. The configuration you edit is the name, currency, monthly amount, and source URL. V11 adds explicit HTTP protocol routes —
   a pre-V11 package carrying nonempty explicit routes is rejected rather than
   losing them. Browser profiles, login passwords, logs,
   usage, and machine-local host settings are not included. For a rollback,

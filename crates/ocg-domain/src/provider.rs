@@ -475,7 +475,7 @@ pub const BUILTIN_PROVIDERS: [BuiltinProvider; 8] = [
         managed_registration: true,
         pricing_availability: "available",
         usage_availability: "available",
-        manual_usage_calibration: false,
+        manual_usage_calibration: true,
         quota_unit: "usd",
         model_source: "builtin_go_protocol_table",
         key_prefix: None,

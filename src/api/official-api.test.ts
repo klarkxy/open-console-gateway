@@ -18,15 +18,7 @@ test("official financial GETs stay local and balance POST uses captured CAS with
   assert.equal(seen.length, 1);
   await officialApi.refreshBalance("account/one", { expectedRevision: 3, processGeneration: 12 });
   assert.equal(seen.length, 2);
-});
-
-test("pricing refresh is scoped to the selected provider and never supplies an upstream URL", async () => {
-  setupControlPlane(4, 11, "price");
-  installFetchMock(({ url, method, body }) => {
-    assert.match(url, /\/dashboard\/api\/v4\/providers\/provider%2Fone\/official-api\/pricing$/);
-    if (method === "POST") assert.deepEqual(body, { expectedRevision: 4, processGeneration: 11 });
-    return { revision: 4, processGeneration: 11, prices: { rows: [] } };
-  });
-  await officialApi.prices("provider/one");
-  await officialApi.refreshPrices("provider/one", { expectedRevision: 4, processGeneration: 11 });
+  for (const line of seen) {
+    assert.doesNotMatch(line, /\/official-api\/pricing|\/pricing\/multipliers|\/providers\/[^/]+\/pricing/);
+  }
 });

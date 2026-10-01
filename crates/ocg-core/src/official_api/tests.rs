@@ -1,5 +1,4 @@
 use super::*;
-use chrono::Duration;
 use serde_json::json;
 
 pub(crate) fn runtime(kind: OfficialApiKind) -> DynamicProviderRuntime {
@@ -26,9 +25,6 @@ fn at() -> DateTime<Utc> {
         .unwrap()
         .with_timezone(&Utc)
 }
-const DEEPSEEK: &str = include_str!("../../tests/fixtures/official-api/deepseek-pricing.html");
-const ZHIPU: &str = include_str!("../../tests/fixtures/official-api/zhipu-pricing.md");
-
 #[test]
 fn official_api_financial_capability_requires_provenance_and_fixed_destination() {
     for kind in [OfficialApiKind::Deepseek, OfficialApiKind::Zhipu] {
@@ -62,80 +58,21 @@ fn official_api_financial_capability_requires_provenance_and_fixed_destination()
     ));
 }
 #[test]
-fn official_api_parsers_preserve_units_and_reject_partial_or_ambiguous_prices() {
-    let ds = pricing::parse(OfficialApiKind::Deepseek, DEEPSEEK, at()).unwrap();
-    assert_eq!(ds.rows.len(), 8);
-    let flash = ds
-        .rows
-        .iter()
-        .find(|r| r.model == "deepseek-flash" && r.period == "peak")
-        .unwrap();
-    assert_eq!(flash.input_per_million, 0.3);
-    assert_eq!(flash.currency, "USD");
-    for doc in [
-        "",
-        "<table></table>",
-        &DEEPSEEK.replace("$1.32", "missing"),
-        &DEEPSEEK.replace("Monday through Friday", "Every day"),
-        &format!("{DEEPSEEK}{DEEPSEEK}"),
+fn official_attempt_price_does_not_compute_an_amount() {
+    for (kind, model) in [
+        (OfficialApiKind::Deepseek, "deepseek-flash"),
+        (OfficialApiKind::Zhipu, "glm-5.3"),
     ] {
-        assert!(pricing::parse(OfficialApiKind::Deepseek, doc, at()).is_err());
+        let price = OfficialAttemptPrice {
+            provider_id: "fixture".into(),
+            sheet: pricing::seed(kind),
+            model: model.into(),
+            at: at(),
+        };
+        assert_eq!(price.amount(1_000_000, 100_000, 100_000, 0), None);
+        assert_eq!(price.amount(0, 0, 0, 0), None);
+        assert_eq!(price.amount(100, 100, 0, 0), None);
     }
-    let glm = pricing::parse(OfficialApiKind::Zhipu, ZHIPU, at()).unwrap();
-    assert_eq!(glm.rows.len(), 3);
-    assert_eq!(glm.rows[0].currency, "CNY");
-    assert_eq!(glm.rows[0].output_per_million, 28.0);
-    assert!(
-        !glm.rows
-            .iter()
-            .any(|r| r.model == "glm-5.1" || r.model == "glm-4v")
-    );
-    assert_eq!(glm.rows[2].input_per_million, 0.0);
-    for doc in [
-        "",
-        &ZHIPU.replace("元/百万 Tokens", "美元/千 Tokens"),
-        &ZHIPU.replace("| 8 | 28 |", "| ? | 28 |"),
-        &ZHIPU.replace(
-            "### 视觉理解",
-            "| GLM-5.3 | 1M | 8 | 28 | 限时免费 | 2 |\n### 视觉理解",
-        ),
-    ] {
-        assert!(pricing::parse(OfficialApiKind::Zhipu, doc, at()).is_err());
-    }
-    let mut corrupt = ds.clone();
-    corrupt.rows[0].input_per_million = 999.0;
-    assert!(pricing::validate(&corrupt).is_err());
-}
-#[test]
-fn official_api_money_estimates_are_exactly_scoped_cached_and_time_bounded() {
-    let mut price = OfficialAttemptPrice {
-        provider_id: "fixture".into(),
-        sheet: pricing::seed(OfficialApiKind::Deepseek),
-        model: "deepseek-flash".into(),
-        at: at(),
-    };
-    assert!((price.amount(1_000_000, 100_000, 100_000, 0).unwrap() - 0.3906).abs() < 1e-12);
-    price.at += Duration::hours(3);
-    assert!((price.amount(1_000_000, 100_000, 100_000, 0).unwrap() - 0.1953).abs() < 1e-12);
-    price.at = DateTime::parse_from_rfc3339("2026-09-19T01:00:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
-    assert!(!peak_at(price.at));
-    assert!(price.amount(100, 100, 101, 0).is_none());
-    assert!(price.amount(100, 100, 0, 1).is_none());
-    assert!(price.amount(-1, 100, 0, 0).is_none());
-    price.model = "unknown".into();
-    assert!(price.amount(100, 100, 0, 0).is_none());
-    price.model = "deepseek-flash".into();
-    price.at = price.sheet.valid_until;
-    assert!(price.amount(100, 100, 0, 0).is_none());
-    let glm = OfficialAttemptPrice {
-        provider_id: "other".into(),
-        sheet: pricing::seed(OfficialApiKind::Zhipu),
-        model: "glm-5.3".into(),
-        at: at(),
-    };
-    assert_eq!(glm.amount(1_000, 1_000, 0, 0), Some(0.036));
 }
 #[test]
 fn official_api_balances_keep_total_and_components_separate_and_missing_unknown() {
@@ -224,42 +161,4 @@ async fn official_api_http_never_follows_redirects_and_bounds_headerless_bodies(
         assert_eq!(leaks.load(Ordering::SeqCst), 0);
     }
     server.abort();
-}
-
-#[tokio::test]
-#[ignore = "explicit public documentation compatibility check; no live Key or inference"]
-async fn live_official_api_public_price_documents_parse() {
-    let config = crate::models::AppConfig {
-        proxy_mode: crate::models::ProxyMode::Direct,
-        ..Default::default()
-    };
-    for kind in [OfficialApiKind::Deepseek, OfficialApiKind::Zhipu] {
-        let bytes = balance::fetch_bytes(&config, kind.pricing_url(), None, 2 * 1024 * 1024, 0)
-            .await
-            .unwrap();
-        let sheet = pricing::parse(kind, std::str::from_utf8(&bytes).unwrap(), Utc::now()).unwrap();
-        assert!(!sheet.rows.is_empty());
-        assert_eq!(sheet.source_url, kind.pricing_url());
-    }
-}
-
-#[tokio::test]
-#[ignore = "explicit public seed evidence check; no Key or inference"]
-async fn live_official_api_seed_rates_match_public_documents() {
-    let config = crate::models::AppConfig {
-        proxy_mode: crate::models::ProxyMode::Direct,
-        ..Default::default()
-    };
-    for kind in [OfficialApiKind::Deepseek, OfficialApiKind::Zhipu] {
-        let bytes = balance::fetch_bytes(&config, kind.pricing_url(), None, 2 * 1024 * 1024, 0)
-            .await
-            .unwrap();
-        let sheet = pricing::parse(kind, std::str::from_utf8(&bytes).unwrap(), Utc::now()).unwrap();
-        for seed in pricing::seed(kind).rows {
-            assert!(
-                sheet.rows.contains(&seed),
-                "seed has no matching public price evidence: {seed:?}"
-            );
-        }
-    }
 }

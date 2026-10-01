@@ -132,7 +132,7 @@ test("identityJoinKey distinguishes account and platform_account rows", () => {
 });
 
 test("identitiesApi.listSnapshot presents the V4 projection and syncs nested CAS tokens", async () => {
-  setupControlPlane(4, 11, "p1");
+  setupControlPlane(4, 11);
   installFetchMock(({ url, method }) => {
     if (url.endsWith("/accounts") && method === "GET") {
       assert.match(url, /\/dashboard\/api\/v4\/accounts$/);
@@ -152,11 +152,10 @@ test("identitiesApi.listSnapshot presents the V4 projection and syncs nested CAS
   const control = useControlPlaneStore();
   assert.equal(control.revision, 8);
   assert.equal(control.processGeneration, 11);
-  assert.equal(control.pricingRevision, "p2");
 });
 
 test("identitiesApi.rotateCredential posts CAS tokens and publishes nested revision", async () => {
-  setupControlPlane(4, 11, "p1");
+  setupControlPlane(4, 11);
   const requests = installFetchMock(({ url, method }) => {
     if (url.endsWith("/credentials/cred-1/rotate") && method === "POST") {
       assert.match(url, /\/dashboard\/api\/v4\/credentials\/cred-1\/rotate$/);
@@ -187,11 +186,10 @@ test("identitiesApi.rotateCredential posts CAS tokens and publishes nested revis
   const control = useControlPlaneStore();
   assert.equal(control.revision, 9);
   assert.equal(control.processGeneration, 11);
-  assert.equal(control.pricingRevision, "p3");
 });
 
 test("identitiesApi.rotateCredential does not replay a 409 revisionConflict", async () => {
-  setupControlPlane(4, 11, "p1");
+  setupControlPlane(4, 11);
   let rotates = 0;
   const requests = installFetchMock(({ url, method }) => {
     if (url.includes("/credentials/") && url.endsWith("/rotate") && method === "POST") {
@@ -223,7 +221,7 @@ test("identitiesApi.rotateCredential does not replay a 409 revisionConflict", as
 });
 
 test("identitiesApi.patchBinding sends enabled and exact modelScope and does not replay 409", async () => {
-  setupControlPlane(4, 11, "p1");
+  setupControlPlane(4, 11);
   let patches = 0;
   const requests = installFetchMock(({ url, method }) => {
     if (url.endsWith("/bindings/bind-1") && method === "PATCH") {
@@ -262,7 +260,7 @@ test("identitiesApi.patchBinding sends enabled and exact modelScope and does not
   });
   assert.equal(useControlPlaneStore().revision, 10);
 
-  setupControlPlane(10, 11, "p4");
+  setupControlPlane(10, 11);
   installFetchMock(({ url, method }) => {
     if (url.endsWith("/bindings/bind-1") && method === "PATCH") {
       return new Response(JSON.stringify({
@@ -284,8 +282,8 @@ test("identitiesApi.patchBinding sends enabled and exact modelScope and does not
 });
 
 test("identitiesApi.rotateCredential uses a captured expectation even after the store advances", async () => {
-  setupControlPlane(4, 11, "p1");
-  useControlPlaneStore().sync({ revision: 8, processGeneration: 11, pricingRevision: "p1" });
+  setupControlPlane(4, 11);
+  useControlPlaneStore().sync({ revision: 8, processGeneration: 11 });
   const requests = installFetchMock(({ url, method }) => {
     if (url.endsWith("/credentials/cred-1/rotate") && method === "POST") {
       return {
@@ -312,7 +310,7 @@ test("identitiesApi.rotateCredential uses a captured expectation even after the 
 });
 
 test("identitiesApi.rotateCredential keeps the original 409 when GET /contract fails", async () => {
-  setupControlPlane(4, 11, "p1");
+  setupControlPlane(4, 11);
   const requests = installFetchMock(({ url, method }) => {
     if (url.includes("/credentials/") && url.endsWith("/rotate") && method === "POST") {
       return new Response(JSON.stringify({
@@ -339,7 +337,7 @@ test("identitiesApi.rotateCredential keeps the original 409 when GET /contract f
 });
 
 test("identitiesApi.listSnapshot returns presented identities plus the GET pair", async () => {
-  setupControlPlane(9, 11, "p1");
+  setupControlPlane(9, 11);
   installFetchMock(({ url, method }) => {
     if (url.endsWith("/accounts") && method === "GET") {
       return {
@@ -358,8 +356,8 @@ test("identitiesApi.listSnapshot returns presented identities plus the GET pair"
 });
 
 test("identitiesApi.createIdentityCredential posts the exact body with a captured pair", async () => {
-  setupControlPlane(4, 11, "p1");
-  useControlPlaneStore().sync({ revision: 8, processGeneration: 11, pricingRevision: "p1" });
+  setupControlPlane(4, 11);
+  useControlPlaneStore().sync({ revision: 8, processGeneration: 11 });
   const requests = installFetchMock(({ url, method }) => {
     if (url.endsWith("/identities/ident-1/credentials") && method === "POST") {
       return {
@@ -444,7 +442,7 @@ test("identitiesApi.createIdentityCredential posts the exact body with a capture
 });
 
 test("identitiesApi.createIdentityCredential does not replay a 409 revisionConflict", async () => {
-  setupControlPlane(4, 11, "p1");
+  setupControlPlane(4, 11);
   let creates = 0;
   const requests = installFetchMock(({ url, method }) => {
     if (url.includes("/identities/") && url.endsWith("/credentials") && method === "POST") {
@@ -476,7 +474,7 @@ test("identitiesApi.createIdentityCredential does not replay a 409 revisionConfl
 });
 
 test("identitiesApi.patchBinding omits grant fields unless both lists are submitted", async () => {
-  setupControlPlane(4, 11, "p1");
+  setupControlPlane(4, 11);
   const omitted = installFetchMock(({ url, method }) => {
     if (url.endsWith("/bindings/bind-1") && method === "PATCH") {
       return {

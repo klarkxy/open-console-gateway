@@ -80,15 +80,6 @@
         </n-button>
       </n-alert>
 
-      <n-alert v-if="quotaLimitsError" type="warning" :title="t('用量加载失败')">
-        <n-button
-          size="small"
-          secondary
-          :loading="quotaLimitsLoading"
-          @click="retryQuotaLimits"
-        >{{ t("重试") }}</n-button>
-      </n-alert>
-
       <n-alert
         v-if="identitiesError"
         type="warning"
@@ -861,9 +852,6 @@ const catalogError = ref("");
 const platformMutating = computed(() => platformStore.mutating);
 
 const {
-  quotaLimits,
-  quotaLimitsLoading,
-  quotaLimitsError,
   usageLimitsFor,
   usageFor,
   providerUsageFor,
@@ -879,11 +867,9 @@ const {
   saveUsage,
   refreshAccountUsage,
   automaticRefreshTarget,
-  loadQuotaLimits,
   loadAccountUsage,
   ensureAccountUsage,
   revalidateAccountUsage,
-  retryQuotaLimits,
   forgetAccount,
 } = useAccountUsage(accounts, now, providerCatalog, {
   endpointUrlFor: (account) => accountInferenceEndpointUrl(
@@ -896,6 +882,7 @@ const {
     providersStore.connections,
   ),
   afterUsageRefresh: (accountId, isCurrent) => refreshCompanionCatalog(accountId, isCurrent),
+  calibrationPlanFor: (accountId) => destinationsStore.destinationForAccount(accountId)?.plan ?? null,
 });
 
 // The saved routing-card snapshot is the only ordering source; the visible
@@ -1337,14 +1324,12 @@ function credentialRowBindingsFor(credential: DestinationCredential, destination
     providerCatalog.value,
     usage,
     providerUsage,
-    quotaLimits.value,
     usageEdits.value[overlayId] ?? null,
     usageLoadingFor(overlayId),
     usageLoadErrorFor(overlayId),
     usageRefreshLoadingFor(overlayId),
     !!purchaseDateSaving.value[overlayId],
     busy.value,
-    !!quotaLimitsError.value,
     accountNamesById.value,
     providersStore.connections ?? null,
   ], () => ({
@@ -1361,7 +1346,6 @@ function credentialRowBindingsFor(credential: DestinationCredential, destination
     usageLoadError: usageLoadErrorFor(overlayId),
     usageRefreshLoading: usageRefreshLoadingFor(overlayId),
     purchaseDateSaving: !!purchaseDateSaving.value[overlayId],
-    quotaLimitsFailed: !!quotaLimitsError.value,
     accountNames: accountNamesById.value,
     connections: providersStore.connections,
   }));
@@ -1585,12 +1569,16 @@ function openTransfer(mode: "import" | "export"): void {
   showTransfer.value = true;
 }
 
-async function handleAccountsImported(count: number): Promise<void> {
-  await Promise.allSettled([
+// The modal emits only after a committed import receipt, so the success
+// message belongs to the receipt itself; the list reload is an independent
+// revalidation whose failure surfaces on its own alert, never as an import
+// failure.
+function handleAccountsImported(count: number): void {
+  message.success(t("节点配置迁移完成：处理 {count} 项账号。", { count }));
+  void Promise.allSettled([
     loadAccounts(),
     providersStore.loadConnections(),
   ]);
-  message.success(t("节点配置迁移完成：处理 {count} 项账号。", { count }));
 }
 
 // The chooser's embedded platform form delegates the write to the section so
@@ -1769,11 +1757,13 @@ async function refreshAccountsAndIdentities(): Promise<void> {
 }
 
 // Projection reloads after a confirmed credential write run off the page
-// lock; a failure reports itself next to the already-committed write.
-async function revalidateAccountsAndIdentities(): Promise<void> {
+// lock; a failure reports itself next to the already-committed write. The
+// session fence keeps a late failure from posting into a newer session.
+async function revalidateAccountsAndIdentities(session: number): Promise<void> {
   try {
     await refreshAccountsAndIdentities();
   } catch (refreshError) {
+    if (session !== accountViewSession) return;
     message.error(t("加载账号失败：{error}", { error: dashboardErrorDetail(refreshError) }));
   }
 }
@@ -1802,7 +1792,10 @@ async function revalidateAfterIdentityCredentialCreate(
 
 async function recoverCredentialMutationConflict(error: unknown): Promise<boolean> {
   if (!isRevisionConflict(error)) return false;
+  const session = accountViewSession;
   const reloaded = await reloadControlPlaneView();
+  // A session change during the reload leaves the dead flow silent.
+  if (session !== accountViewSession) return true;
   if (reloaded) {
     credentialModalExpectation.value = identitiesStore.snapshotExpectation;
     createModalExpectation.value = identitiesStore.snapshotExpectation;
@@ -1821,6 +1814,7 @@ async function onRotateCredential(payload: { secretInput: string }): Promise<voi
     message.warning(t(support?.unsupportedReason ?? "无法确定当前卡片的凭据"));
     return;
   }
+  const capturedSession = accountViewSession;
   busy.value = true;
   try {
     await identitiesApi.rotateCredential(
@@ -1828,16 +1822,18 @@ async function onRotateCredential(payload: { secretInput: string }): Promise<voi
       payload,
       credentialModalExpectation.value ?? undefined,
     );
+    if (capturedSession !== accountViewSession) return;
     showCredentialModal.value = false;
     credentialModalAccountId.value = null;
     credentialModalExpectation.value = null;
     message.success(t("Key 已轮换"));
-    void revalidateAccountsAndIdentities();
+    void revalidateAccountsAndIdentities(capturedSession);
   } catch (error) {
+    if (capturedSession !== accountViewSession) return;
     if (await recoverCredentialMutationConflict(error)) return;
     message.error(t("轮换 Key 失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
-    busy.value = false;
+    if (capturedSession === accountViewSession) busy.value = false;
   }
 }
 
@@ -1849,6 +1845,7 @@ async function onPatchBinding(payload: BindingPatchInput): Promise<void> {
     message.warning(t(support?.unsupportedReason ?? "无法确定当前卡片的凭据"));
     return;
   }
+  const capturedSession = accountViewSession;
   busy.value = true;
   try {
     await identitiesApi.patchBinding(
@@ -1856,16 +1853,18 @@ async function onPatchBinding(payload: BindingPatchInput): Promise<void> {
       payload,
       credentialModalExpectation.value ?? undefined,
     );
+    if (capturedSession !== accountViewSession) return;
     showCredentialModal.value = false;
     credentialModalAccountId.value = null;
     credentialModalExpectation.value = null;
     message.success(t("绑定已更新"));
-    void revalidateAccountsAndIdentities();
+    void revalidateAccountsAndIdentities(capturedSession);
   } catch (error) {
+    if (capturedSession !== accountViewSession) return;
     if (await recoverCredentialMutationConflict(error)) return;
     message.error(t("更新绑定失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
-    busy.value = false;
+    if (capturedSession === accountViewSession) busy.value = false;
   }
 }
 
@@ -1918,7 +1917,7 @@ async function onCreateIdentityCredential(payload: IdentityCredentialCreateInput
       message.error(t("添加 Key 失败：{error}", { error: dashboardErrorDetail(error) }));
     }
   } finally {
-    busy.value = false;
+    if (capturedSession === accountViewSession) busy.value = false;
   }
 }
 
@@ -2141,11 +2140,12 @@ function normalizeManagedInviteDraft(): void {
 
 async function ensureInviteUrlSaved(inviteUrl: string): Promise<void> {
   if (inviteUrl === opencodeInviteUrl.value) return;
-  const settings = await dashboardApi.getSettings();
-  await dashboardApi.updateSettings({
-    ...settings,
-    opencode_invite_url: inviteUrl,
-  });
+  const session = accountViewSession;
+  // Partial presentation write through the settings owner. The ack is not a
+  // canonical snapshot; ignore it. A session that ended during the await
+  // must not update the local cache or continue into credential creation.
+  await settingsStore.patchPresented({ opencode_invite_url: inviteUrl });
+  if (session !== accountViewSession) return;
   opencodeInviteUrl.value = inviteUrl;
 }
 
@@ -2276,49 +2276,62 @@ async function createManagedAccount(): Promise<void> {
     return;
   }
   managedDraft.value.inviteUrl = inviteUrl;
+  // Capture immutable parameters before any await; the draft refs may change.
+  const username = managedDraft.value.username.trim();
+  const session = accountViewSession;
   busy.value = true;
   try {
     await ensureInviteUrlSaved(inviteUrl);
-    const username = managedDraft.value.username.trim();
+    if (session !== accountViewSession) return;
     const created = await dashboardApi.createManagedAccount({
       name,
       ...(username ? { username } : {}),
     });
+    if (session !== accountViewSession) return;
     addAccount(created);
     message.success(t("注册草稿已创建"));
     showManagedCreate.value = false;
     managedWizardAccountId.value = created.id;
     showManagedWizard.value = true;
-    void revalidateAfterManagedCreate(accountViewSession);
+    void revalidateAfterManagedCreate(session);
   } catch (error) {
+    if (session !== accountViewSession) return;
     if (await recoverAccountMutationConflict(error)) return;
+    if (session !== accountViewSession) return;
     message.error(t("创建注册草稿失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
-    busy.value = false;
+    if (session === accountViewSession) busy.value = false;
   }
 }
 
 async function advanceManagedSetup(accountId: string, setupStep: AccountSetupStep): Promise<void> {
   if (busy.value) return;
+  const session = accountViewSession;
   busy.value = true;
   try {
     const updated = await dashboardApi.advanceAccountSetup(accountId, setupStep);
+    if (session !== accountViewSession) return;
     replaceAccount(updated);
     message.success(t("注册进度已保存"));
   } catch (error) {
+    if (session !== accountViewSession) return;
     if (await recoverAccountMutationConflict(error)) return;
+    if (session !== accountViewSession) return;
     await recoverManagedSetupConflict(accountId, error);
+    if (session !== accountViewSession) return;
     message.error(t("保存注册进度失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
-    busy.value = false;
+    if (session === accountViewSession) busy.value = false;
   }
 }
 
 async function verifyManagedKey(accountId: string, key: string): Promise<void> {
   if (busy.value) return;
+  const session = accountViewSession;
   busy.value = true;
   try {
     const updated = await dashboardApi.verifyManagedAccountKey(accountId, key);
+    if (session !== accountViewSession) return;
     replaceAccount(updated);
     if (accountIsReady(updated)) {
       showManagedWizard.value = false;
@@ -2328,14 +2341,17 @@ async function verifyManagedKey(accountId: string, key: string): Promise<void> {
       message.success(isCooling(updated, now.value)
         ? t("Key 有效，账号已启用并按上游响应进入冷却")
         : t("Key 验证成功，账号已启用"));
-      void revalidateAfterManagedKeyReady(updated, accountViewSession);
+      void revalidateAfterManagedKeyReady(updated, session);
     }
   } catch (error) {
+    if (session !== accountViewSession) return;
     if (await recoverAccountMutationConflict(error)) return;
+    if (session !== accountViewSession) return;
     await recoverManagedSetupConflict(accountId, error);
+    if (session !== accountViewSession) return;
     message.error(t("Key 验证失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
-    busy.value = false;
+    if (session === accountViewSession) busy.value = false;
   }
 }
 
@@ -2355,8 +2371,15 @@ async function openAccountBrowser(accountId: string, target: BrowserTarget): Pro
     remoteTab.opener = null;
   }
   openingBrowserTarget.value = target;
+  const session = accountViewSession;
   try {
     const result = await dashboardApi.openAccountBrowser(accountId, target);
+    // A late receipt after session teardown only closes the blank tab this
+    // call opened; it never navigates or notifies into the new session.
+    if (session !== accountViewSession) {
+      remoteTab?.close();
+      return;
+    }
     if (result.mode === "remote") {
       if (!result.session_token) throw new Error(t("服务未返回远程浏览器会话令牌"));
       if (!remoteTab) throw new Error(t("浏览器模式已变化，请重试"));
@@ -2368,22 +2391,27 @@ async function openAccountBrowser(accountId: string, target: BrowserTarget): Pro
     }
   } catch (error) {
     remoteTab?.close();
+    if (session !== accountViewSession) return;
     message.error(t("打开浏览器失败：{error}", { error: dashboardErrorDetail(error) }));
   } finally {
-    openingBrowserTarget.value = null;
+    if (session === accountViewSession) openingBrowserTarget.value = null;
   }
 }
 
 async function resetBrowserProfile(accountId: string): Promise<void> {
+  const session = accountViewSession;
   try {
     const updated = await dashboardApi.resetAccountBrowserProfile(accountId);
+    if (session !== accountViewSession) return;
     replaceAccount(updated);
     if (!accountIsReady(updated)) {
       forgetAccount(accountId);
     }
     message.success(t("官网登录状态已重置"));
   } catch (error) {
+    if (session !== accountViewSession) return;
     if (await recoverAccountMutationConflict(error)) return;
+    if (session !== accountViewSession) return;
     message.error(t("重置官网登录状态失败：{error}", { error: dashboardErrorDetail(error) }));
   }
 }
@@ -2397,16 +2425,19 @@ function addAccount(account: Account): void {
   accountsStore.upsertAccount(account);
 }
 
-async function refreshCatalogIfNewProvider(account: Account): Promise<void> {
+async function refreshCatalogIfNewProvider(account: Account, session: number): Promise<void> {
   if (!isFirstReadyProviderAccount(account, accounts.value)) return;
   const surface = findPlanDefinition(account.provider_id, providerCatalog.value);
   if (!surface || surface.dynamic || surface.kind === "custom") return;
   try {
     const contracts = await providersStore.loadContracts();
+    if (session !== accountViewSession) return;
     if (!shouldRefreshCatalogForNewProviderAccount(account, accounts.value, contracts)) return;
     await providersStore.refreshContractCatalog("provider", account.provider_id);
+    if (session !== accountViewSession) return;
     message.success(t("已刷新模型目录"));
   } catch (error) {
+    if (session !== accountViewSession) return;
     message.warning(t("刷新模型目录失败：{error}", { error: dashboardErrorDetail(error) }));
     message.info(`${t("供应商")} → ${t("刷新模型目录")}`);
   }
@@ -2422,7 +2453,7 @@ async function revalidateAfterManagedCreate(session: number): Promise<void> {
 async function revalidateAfterManagedKeyReady(account: Account, session: number): Promise<void> {
   await loadAccountUsage(account.id);
   if (session !== accountViewSession) return;
-  await refreshCatalogIfNewProvider(account);
+  await refreshCatalogIfNewProvider(account, session);
 }
 
 const companionCatalogInflight = new Set<string>();
@@ -2551,7 +2582,10 @@ function accountHasUsageDisplay(account: Account): boolean {
 }
 
 async function refreshAccountState(id: string): Promise<Account | null> {
+  const session = accountViewSession;
   const loaded = await accountsStore.loadPresented();
+  // A session change during the reload leaves the dead recovery flow silent.
+  if (session !== accountViewSession) return null;
   const account = loaded.find((item) => item.id === id);
   if (!account) {
     removeAccountState(id);
@@ -2568,8 +2602,10 @@ async function refreshAccountState(id: string): Promise<Account | null> {
 
 async function recoverManagedSetupConflict(accountId: string, error: unknown): Promise<void> {
   if (!(error instanceof DashboardRequestError) || ![404, 409].includes(error.status)) return;
+  const session = accountViewSession;
   try {
     const account = await refreshAccountState(accountId);
+    if (session !== accountViewSession) return;
     if (!account || accountIsReady(account)) {
       showManagedWizard.value = false;
       managedWizardAccountId.value = null;
@@ -2661,11 +2697,9 @@ async function loadProviderCatalog(): Promise<void> {
 }
 
 async function initializeAccounts() {
-  // Catalog and quota limits gate nothing but the usage fan-out inside
-  // loadAccounts, so they fetch in parallel; the account list follows so
-  // usage display decisions read the settled catalog.
+  // The account list follows the catalog so usage display reads the settled rows.
   const registrationOptions = loadRegistrationOptions();
-  await Promise.allSettled([loadProviderCatalog(), loadQuotaLimits()]);
+  await loadProviderCatalog();
   await loadAccounts();
   // loadAccounts already waits for the first connections snapshot.
   if (!providersStore.connections) await providersStore.loadConnections().catch(() => undefined);
@@ -2783,7 +2817,7 @@ async function revalidateAfterAccountSave(
     ),
     notifyProjectionFailure: notifyDestinationRefreshFailure,
     loadConnections: () => providersStore.loadConnections(),
-    refreshCatalogForNewProvider: () => refreshCatalogIfNewProvider(account),
+    refreshCatalogForNewProvider: () => refreshCatalogIfNewProvider(account, session),
     loadUsage: (accountId) => loadAccountUsage(accountId),
   });
 }
@@ -2798,20 +2832,27 @@ async function updatePurchaseDate(accountId: string, purchaseDate: string): Prom
     || purchaseDateSaving.value[accountId]
   ) return;
 
+  const session = accountViewSession;
   purchaseDateSaving.value[accountId] = true;
   try {
     const saved = await dashboardApi.updateAccount(accountId, {
       purchase_date: purchaseDate,
     });
+    if (session !== accountViewSession) return;
+    // The confirmed receipt ends the edit: commit, notify, and the finally
+    // releases the row state now. The usage read is a read-only follow-up that
+    // billing owns; it never postpones or rewrites the saved result.
     replaceAccount(saved);
-    if (accountHasUsageDisplay(saved)) await loadAccountUsage(saved.id);
     message.success(t("购买日期已更新"));
+    if (accountHasUsageDisplay(saved)) void loadAccountUsage(saved.id);
   } catch (error) {
+    if (session !== accountViewSession) return;
     if (!(await recoverAccountMutationConflict(error))) {
+      if (session !== accountViewSession) return;
       message.error(t("保存失败：{error}", { error: dashboardErrorDetail(error) }));
     }
   } finally {
-    purchaseDateSaving.value[accountId] = false;
+    if (session === accountViewSession) purchaseDateSaving.value[accountId] = false;
   }
 }
 
@@ -2832,18 +2873,24 @@ async function toggleAccount(id: string) {
     await saveZenProviderSettings(account, !account.enabled);
     return;
   }
+  const session = accountViewSession;
   try {
     const updated = await dashboardApi.toggleAccount(id);
+    if (session !== accountViewSession) return;
     replaceAccount(updated);
     const destRefreshed = await refreshDestinationProjection();
+    if (session !== accountViewSession) return;
     if (!destRefreshed) notifyDestinationRefreshFailure();
   } catch (e) {
+    if (session !== accountViewSession) return;
     if (await recoverAccountMutationConflict(e)) return;
+    if (session !== accountViewSession) return;
     message.error(t("切换失败：{error}", { error: dashboardErrorDetail(e) }));
   }
 }
 
 async function reloadControlPlaneView(): Promise<boolean> {
+  const session = accountViewSession;
   const knownIds = new Set(accounts.value.map(({ id }) => id));
   let loaded: Account[];
   try {
@@ -2851,6 +2898,9 @@ async function reloadControlPlaneView(): Promise<boolean> {
   } catch {
     return false;
   }
+  // A session change during the reload must not let the recovery write
+  // removals, modal state, or editing targets into the cleared/new session.
+  if (session !== accountViewSession) return false;
 
   const loadedIds = new Set(loaded.map(({ id }) => id));
   for (const id of knownIds) {
@@ -2862,6 +2912,7 @@ async function reloadControlPlaneView(): Promise<boolean> {
     loadIdentitiesOverlay(),
     destinationsStore.load(),
   ]);
+  if (session !== accountViewSession) return false;
   if (editingAccount.value) {
     const stillListed = reconcileEditingAccount(loaded, editingAccount.value.id);
     editingAccount.value = stillListed;
@@ -2896,7 +2947,10 @@ async function recoverAccountMutationConflict(error: unknown): Promise<boolean> 
   // verify, reorder set mismatch, refresh already running, …) keep the actual
   // backend message and the user's draft instead of a misleading reload.
   if (!isRevisionConflict(error)) return false;
+  const session = accountViewSession;
   await reloadAfterControlPlaneConflict();
+  // A session change during the reload leaves the dead flow silent.
+  if (session !== accountViewSession) return true;
   message.warning(t("账号设置已被其他操作修改，已重新加载最新状态，请重试"));
   return true;
 }
@@ -2913,35 +2967,47 @@ async function saveZenProviderSettings(
   successMessage?: string,
 ): Promise<void> {
   if (providerSettingsSaving.value[account.id]) return;
+  const session = accountViewSession;
   providerSettingsSaving.value[account.id] = true;
   try {
     const result = await providerApi.updateProviderSettings(account.id, {
       enabled,
     });
+    if (session !== accountViewSession) return;
     replaceAccount(result.account);
     const destRefreshed = await refreshDestinationProjection();
+    if (session !== accountViewSession) return;
     if (!destRefreshed) notifyDestinationRefreshFailure();
     if (successMessage) message.success(successMessage);
   } catch (error) {
+    if (session !== accountViewSession) return;
     if (!(await recoverAccountMutationConflict(error))) {
+      if (session !== accountViewSession) return;
       message.error(t("保存失败：{error}", { error: dashboardErrorDetail(error) }));
     }
   } finally {
-    providerSettingsSaving.value[account.id] = false;
+    if (session === accountViewSession) providerSettingsSaving.value[account.id] = false;
   }
 }
 
 async function deleteAccount(id: string) {
+  const session = accountViewSession;
   try {
     await dashboardApi.deleteAccount(id);
+    // A late DELETE receipt after session teardown must not re-mark removals
+    // or reschedule persistence in the cleared store.
+    if (session !== accountViewSession) return;
     message.success(t("账号已删除"));
     removeAccountState(id);
     const destRefreshed = await refreshDestinationProjection("deleted_refresh_failed");
+    if (session !== accountViewSession) return;
     if (!destRefreshed) notifyDestinationRefreshFailure();
     void identitiesStore.loadPresented().catch(() => undefined);
     void providersStore.loadConnections().catch(() => undefined);
   } catch (e) {
+    if (session !== accountViewSession) return;
     if (await recoverAccountMutationConflict(e)) return;
+    if (session !== accountViewSession) return;
     message.error(t("删除失败：{error}", { error: dashboardErrorDetail(e) }));
   }
 }
@@ -2951,26 +3017,35 @@ const quotaRetrying = ref<Record<string, boolean>>({});
 async function retryQuotaRecovery(credentialId: string) {
   const credential = destinationsStore.credentials.find((row) => row.id === credentialId);
   if (!quotaRetryRequestNeeded(credential?.quota_recovery) || quotaRetrying.value[credentialId]) return;
+  const session = accountViewSession;
   quotaRetrying.value = { ...quotaRetrying.value, [credentialId]: true };
   try {
     await destinationsStore.retryQuotaRecovery(credentialId);
   } catch (e) {
+    if (session !== accountViewSession) return;
     if (await recoverAccountMutationConflict(e)) return;
+    if (session !== accountViewSession) return;
     message.error(t("重新尝试失败：{error}", { error: dashboardErrorDetail(e) }));
   } finally {
-    const next = { ...quotaRetrying.value };
-    delete next[credentialId];
-    quotaRetrying.value = next;
+    if (session === accountViewSession) {
+      const next = { ...quotaRetrying.value };
+      delete next[credentialId];
+      quotaRetrying.value = next;
+    }
   }
 }
 
 async function resetCooldown(id: string) {
+  const session = accountViewSession;
   try {
     const updated = await dashboardApi.resetAccountCooldown(id);
+    if (session !== accountViewSession) return;
     replaceAccount(updated);
     message.success(t("冷却已重置"));
   } catch (e) {
+    if (session !== accountViewSession) return;
     if (await recoverAccountMutationConflict(e)) return;
+    if (session !== accountViewSession) return;
     message.error(t("重置失败：{error}", { error: dashboardErrorDetail(e) }));
   }
 }

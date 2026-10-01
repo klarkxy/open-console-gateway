@@ -1557,7 +1557,7 @@ async fn fetched_catalog_model_probes_all_protocols_and_writes_request_logs() {
             && row.provider_id.as_deref() == Some(OPENCODE_PROVIDER_ID)
             && row.status == "success"
             && row.http_status == Some(200)
-            && row.cost_state == "not_applicable"
+            && row.cost_state == "unknown"
             && row.prompt_tokens == 0
             && row.completion_tokens == 0
             && row.client_key_id.is_none()

@@ -6,6 +6,7 @@ import { mergeUnsavedSettings } from "./settings-merge.ts";
 function config(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
     revision: 1,
+    process_generation: 3,
     gateway_port: 9042,
     gateway_port_from_env: false,
     proxy_mode: "auto",
@@ -38,6 +39,7 @@ test("settings conflict merge preserves local edits and accepts unrelated remote
   });
   const latest = config({
     revision: 2,
+    process_generation: 8,
     gateway_port: 9142,
     non_stream_timeout_secs: 1_200,
   });
@@ -45,6 +47,7 @@ test("settings conflict merge preserves local edits and accepts unrelated remote
   const merged = mergeUnsavedSettings(latest, current, saved);
 
   assert.equal(merged.revision, 2);
+  assert.equal(merged.process_generation, 8);
   assert.equal(merged.proxy_mode, "manual");
   assert.equal(merged.proxy_url, "http://127.0.0.1:7890");
   assert.equal(merged.connect_timeout_secs, 45);

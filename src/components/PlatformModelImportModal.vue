@@ -10,7 +10,7 @@
     @update:show="setVisible"
   >
     <n-alert type="info" :show-icon="false" style="margin-bottom: 12px">
-      {{ t("仅导入勾选的候选；价格刷新不会自动添加模型。候选不代表该 Key 拥有调用权限。") }}
+      {{ t("分组归属不代表该 Key 拥有对应模型的调用权限。") }}
     </n-alert>
     <n-empty
       v-if="candidates.length === 0"
@@ -35,14 +35,6 @@
           <n-tag v-if="candidate.alreadyMapped" size="small" type="success" :bordered="false">
             {{ t("已存在") }}
           </n-tag>
-          <span v-if="candidate.price" class="platform-import-price mono">
-            <template v-if="candidate.price.unavailableReason">
-              {{ t("不可用：{reason}", { reason: reasonText(candidate.price.unavailableReason) }) }}
-            </template>
-            <template v-else>
-              {{ priceSummary(candidate.price) }}
-            </template>
-          </span>
         </div>
       </div>
     </n-checkbox-group>
@@ -73,13 +65,9 @@ import {
   NTag,
 } from "naive-ui";
 import type { Account } from "../api/dashboard.ts";
-import type { PlatformLink, PlatformPrice } from "../api/platform-accounts.ts";
-import {
-  formatPlatformRate,
-  platformModelCandidates,
-  platformUnavailableReasonKey,
-} from "../domain/platform-accounts.ts";
-import { locale, t, type MessageKey } from "../i18n/index.ts";
+import type { PlatformLink } from "../api/platform-accounts.ts";
+import { platformModelCandidates } from "../domain/platform-accounts.ts";
+import { t } from "../i18n/index.ts";
 import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
 
 const props = defineProps<{
@@ -106,21 +94,6 @@ const candidates = computed(() => platformModelCandidates(
 watch(() => props.show, (show) => {
   if (show) selectedIds.value = [];
 });
-
-function reasonText(reason: string): string {
-  const key = platformUnavailableReasonKey(reason);
-  return key ? t(key as MessageKey) : reason;
-}
-
-function priceSummary(price: PlatformPrice): string {
-  const input = formatPlatformRate(price.input, price.currency, locale.value);
-  const output = formatPlatformRate(price.output, price.currency, locale.value);
-  const parts = [
-    input ? `${t("输入")} ${input.label}` : null,
-    output ? `${t("输出")} ${output.label}` : null,
-  ].filter((part) => part !== null);
-  return parts.length ? parts.join(" / ") : t("未知");
-}
 
 function setVisible(show: boolean): void {
   if (!show && props.busy) return;
@@ -153,11 +126,5 @@ function submit(): void {
 
 .platform-import-row.is-mapped {
   opacity: 0.65;
-}
-
-.platform-import-price {
-  margin-left: auto;
-  font-size: var(--ocg-font-xs);
-  color: var(--ocg-muted);
 }
 </style>

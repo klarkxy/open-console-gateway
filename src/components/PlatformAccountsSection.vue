@@ -139,6 +139,13 @@ watch(() => platformStore.error, (error) => {
   }
 });
 
+// The store's write operations now return at their receipt, so a destination
+// projection refresh can settle later; forward it to the parent's projection
+// error surface whenever it lands instead of checking once at the call site.
+watch(() => platformStore.destinationRefreshError, (error) => {
+  if (error) emit("destinationRefreshFailed", error);
+});
+
 function notifyConflict(): void {
   message.warning(t("账号设置已被其他操作修改，已重新加载最新状态，请重试"));
   emit("changed");
@@ -221,9 +228,6 @@ async function deletePlatform(parent: PlatformAccount): Promise<void> {
     else if (outcome === "ok") {
       message.success(t("平台账号已删除"));
       emit("changed");
-      if (platformStore.destinationRefreshError) {
-        emit("destinationRefreshFailed", platformStore.destinationRefreshError);
-      }
     }
   } catch (error) {
     mutationError(error, "删除失败：{error}");

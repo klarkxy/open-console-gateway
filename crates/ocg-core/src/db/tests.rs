@@ -111,7 +111,7 @@ fn v64_renames_only_safe_preset_names_and_preserves_routing_scope() {
 const TEST_HOST_SECRET: &str = "ocg-db-v27-test-host";
 
 fn billing_open_fixture(dir: &Path) -> (Database, i64, crate::billing::CreditAttempt) {
-    use crate::billing_types::{CreditBucket, CreditBucketKind, CreditConfiguration, CreditRate};
+    use crate::billing_types::{CreditBucket, CreditBucketKind, CreditConfigurationWrite};
     let db = open_with_host_cipher(dir.to_path_buf()).unwrap();
     let mut draft = account("billing-open");
     draft.provider_id = CUSTOM_PROVIDER_ID.into();
@@ -135,17 +135,9 @@ fn billing_open_fixture(dir: &Path) -> (Database, i64, crate::billing::CreditAtt
     billing::configure_on(
         &db.conn,
         &draft.id,
-        CreditConfiguration {
+        CreditConfigurationWrite {
             name: "Personal".into(),
             currency: "CNY".into(),
-            credits_per_currency: 1.0,
-            rates: vec![CreditRate {
-                model: "model".into(),
-                input_per_million: 10.0,
-                output_per_million: 20.0,
-                cache_read_per_million: None,
-                cache_write_per_million: None,
-            }],
             monthly: None,
             source_url: None,
         },
@@ -197,7 +189,7 @@ fn finish_billing_open_attempt(
         )
         .unwrap();
         tx.commit().unwrap();
-        assert_billing_open_state(db, 65.0, 0, 0);
+        assert_billing_open_state(db, 75.0, 0, 1);
     }
 }
 
@@ -206,59 +198,62 @@ fn billing_open_live_receipt_survives_concurrent_open_and_settles_once() {
     let dir = temp_data_dir("billing-live-open");
     let (db, log_id, attempt) = billing_open_fixture(&dir);
     let second = open_with_host_cipher(dir.clone()).unwrap();
-    assert_billing_open_state(&second, 75.0, 1, 0);
+    assert_billing_open_state(&second, 75.0, 0, 0);
     finish_billing_open_attempt(&db, log_id, &attempt);
-    assert_billing_open_state(&second, 65.0, 0, 0);
+    assert_billing_open_state(&second, 75.0, 0, 1);
     drop(db);
     drop(second);
     let reopened = open_with_host_cipher(dir.clone()).unwrap();
-    assert_billing_open_state(&reopened, 65.0, 0, 0);
+    assert_billing_open_state(&reopened, 75.0, 0, 1);
     drop(reopened);
     fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
-fn billing_open_recovers_uncertainty_only_after_last_handle_closes() {
+fn billing_open_leaves_pending_receipts_pending() {
     let dir = temp_data_dir("billing-cold-open");
     let (db, _, _) = billing_open_fixture(&dir);
     let second = open_with_host_cipher(dir.clone()).unwrap();
     drop(db);
     let third = open_with_host_cipher(dir.clone()).unwrap();
-    assert_billing_open_state(&third, 75.0, 1, 0);
+    assert_billing_open_state(&third, 75.0, 0, 0);
     drop(second);
     drop(third);
     for _ in 0..2 {
         let reopened = open_with_host_cipher(dir.clone()).unwrap();
-        assert_billing_open_state(&reopened, 75.0, 0, 1);
+        assert_billing_open_state(&reopened, 75.0, 0, 0);
     }
     fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
-fn billing_open_failed_recovery_rolls_back_and_releases_lifetime_lock() {
+fn open_does_not_rewrite_pending_credit_receipts() {
     let dir = temp_data_dir("billing-failed-open");
-    let (db, _, _) = billing_open_fixture(&dir);
+    let (db, log_id, attempt) = billing_open_fixture(&dir);
     db.conn.execute_batch("CREATE TRIGGER block_receipt BEFORE UPDATE OF credit_receipt_json ON forward_logs BEGIN SELECT RAISE(ABORT,'fixture recovery failure'); END;").unwrap();
     drop(db);
-    assert!(open_with_host_cipher(dir.clone()).is_err());
-    let guard = open_guard::DatabaseOpenGuard::acquire(&dir).unwrap();
-    assert!(
-        guard.can_recover_pending(),
-        "failed open must release its lock"
-    );
-    let conn = Connection::open(dir.join("data.sqlite")).unwrap();
-    let state = billing::load_on(&conn, "billing-open").unwrap().unwrap();
-    assert_eq!(state.unpriced_requests, 0, "failed recovery must roll back");
-    assert_eq!(
-        billing::pending_count_on(&conn, &state.credential_id, &state.meter_id).unwrap(),
-        1
-    );
-    conn.execute_batch("DROP TRIGGER block_receipt;").unwrap();
-    drop(conn);
-    drop(guard);
-    let recovered = open_with_host_cipher(dir.clone()).unwrap();
-    assert_billing_open_state(&recovered, 75.0, 0, 1);
-    drop(recovered);
+    let opened = open_with_host_cipher(dir.clone()).unwrap();
+    assert_billing_open_state(&opened, 75.0, 0, 0);
+    let blocked = {
+        let tx = opened.conn.unchecked_transaction().unwrap();
+        let result = billing::settle_on(
+            &tx,
+            log_id,
+            &attempt,
+            ocg_domain::billing::BillingTokens::new(1_000_000, 0, 0, 0),
+            "success",
+            Utc::now(),
+        );
+        result
+    };
+    assert!(blocked.is_err(), "a blocked receipt write must not commit");
+    assert_billing_open_state(&opened, 75.0, 0, 0);
+    opened
+        .conn
+        .execute_batch("DROP TRIGGER block_receipt;")
+        .unwrap();
+    finish_billing_open_attempt(&opened, log_id, &attempt);
+    drop(opened);
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -319,7 +314,7 @@ fn billing_open_waiter_recovers_when_cold_initializer_fails() {
         .unwrap()
         .unwrap();
     second.join().unwrap();
-    assert_billing_open_state(&recovered, 75.0, 0, 1);
+    assert_billing_open_state(&recovered, 75.0, 0, 0);
     drop(recovered);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -344,11 +339,11 @@ fn billing_open_subprocess() {
     };
     let dir = PathBuf::from(dir);
     let db = open_with_host_cipher(dir.clone()).unwrap();
-    assert_billing_open_state(&db, 75.0, 1, 0);
+    assert_billing_open_state(&db, 75.0, 0, 0);
     fs::write(dir.join("child-opened"), b"ready").unwrap();
     let mut signal = [0];
     std::io::stdin().read_exact(&mut signal).unwrap();
-    assert_billing_open_state(&db, 65.0, 0, 0);
+    assert_billing_open_state(&db, 75.0, 0, 1);
 }
 
 #[test]
@@ -392,7 +387,7 @@ fn billing_open_cross_process_receipt_survives_and_settles_once() {
     assert!(output.status.success(), "{output:?}");
     drop(db);
     let reopened = open_with_host_cipher(dir.clone()).unwrap();
-    assert_billing_open_state(&reopened, 65.0, 0, 0);
+    assert_billing_open_state(&reopened, 75.0, 0, 1);
     drop(reopened);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -6242,6 +6237,13 @@ fn create_v21_fixture(dir: &Path, include_reserved_account_conflict: bool) {
         .expect("representative account should save");
     db.log_forward(&forward_log("rollback-account", "success", 4.25))
         .expect("representative forward log should save");
+    db.conn
+        .execute(
+            "UPDATE forward_logs SET cost = 4.25, cost_state = 'legacy_estimate'
+             WHERE account_id = 'rollback-account'",
+            [],
+        )
+        .expect("historical v21 cost should stay on the fixture row");
     if !include_reserved_account_conflict {
         db.conn
             .execute(
@@ -6681,6 +6683,17 @@ fn sanitation_snapshot(db: &Database, id: &str) -> SanitationSnapshot {
     }
 }
 
+fn stamp_historical_cost(db: &Database, id: i64, cost: f64) {
+    db.conn
+        .execute(
+            "UPDATE forward_logs
+             SET cost = ?1, cost_state = 'legacy_estimate'
+             WHERE id = ?2",
+            params![cost, id],
+        )
+        .unwrap();
+}
+
 fn forward_log(account_id: &str, status: &str, cost: f64) -> ForwardLog {
     ForwardLog {
         id: 0,
@@ -6879,7 +6892,7 @@ fn managed_setup_requires_order_and_matching_verified_key() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(month_offset, 0.0);
+    assert_eq!(month_offset, 1.0);
     assert!(
         db.save_managed_key_for_verification("managed", "candidate")
             .unwrap()
@@ -7122,6 +7135,52 @@ fn assert_cost(actual: f64, expected: f64) {
     );
 }
 
+fn assert_scheduler_zero_without_percent(db: &Database, id: &str) {
+    let observed = db.observed_percent_usage(id).unwrap();
+    assert_eq!(observed.window_5h, None, "{id}");
+    assert_eq!(observed.window_week, None, "{id}");
+    assert_eq!(observed.window_month, None, "{id}");
+    assert!(observed.resets_in_5h.is_none(), "{id}");
+    assert!(observed.resets_in_week.is_none(), "{id}");
+    assert!(observed.resets_in_month.is_none(), "{id}");
+    let usage = db.opencode_go_account_usage(id).unwrap();
+    assert_cost(usage.window_5h, 0.0);
+    assert_cost(usage.window_week, 0.0);
+    assert_cost(usage.window_month, 0.0);
+    assert!(usage.resets_in_5h.is_none(), "{id}");
+    assert!(usage.resets_in_week.is_none(), "{id}");
+    assert!(usage.resets_in_month.is_none(), "{id}");
+    let offsets = usage_offset_row(db, id);
+    assert!(offsets.0.is_none(), "{id}");
+    assert_cost(offsets.1, 0.0);
+    assert!(offsets.2.is_none(), "{id}");
+    assert_cost(offsets.3, 0.0);
+    assert_cost(offsets.4, 0.0);
+}
+
+fn assert_historical_usd_month_is_not_a_percent(db: &Database, account_id: &str, used: f64) {
+    let observed = db.observed_percent_usage(account_id).unwrap();
+    assert_eq!(observed.window_5h, None);
+    assert_eq!(observed.window_week, None);
+    assert_eq!(observed.window_month, None);
+    let month = db
+        .list_quota_windows(account_id)
+        .unwrap()
+        .into_iter()
+        .find(|window| window.window_kind == QUOTA_WINDOW_MONTH)
+        .expect("v22 keeps the historical usd month row");
+    assert_eq!(month.unit, "usd");
+    assert_eq!(month.source, "migration-v22");
+    assert!(month.observed_at.is_none());
+    assert_cost(month.used, used);
+    assert_cost(
+        db.opencode_go_account_usage(account_id)
+            .unwrap()
+            .window_month,
+        0.0,
+    );
+}
+
 fn create_v6_database(
     dir: &std::path::Path,
     extra_cooldown_columns: &str,
@@ -7305,9 +7364,25 @@ fn v4_migration_preserves_uncalibrated_usage() {
             .purchase_date,
         now[..10]
     );
-    assert_cost(usage.window_5h, 2.5);
-    assert_cost(usage.window_week, 2.5);
-    assert_cost(usage.window_month, 2.5);
+    let stored = db.list_quota_windows("old").unwrap();
+    for kind in [
+        QUOTA_WINDOW_FIVE_HOURS,
+        QUOTA_WINDOW_WEEK,
+        QUOTA_WINDOW_MONTH,
+    ] {
+        let window = stored
+            .iter()
+            .find(|window| window.window_kind == kind)
+            .unwrap_or_else(|| panic!("{kind} migration row should exist"));
+        assert_eq!(window.unit, "usd");
+        assert_eq!(window.source, "migration-v22");
+        assert!(window.observed_at.is_none());
+        assert_cost(window.used, 2.5);
+    }
+    assert_cost(usage.window_5h, 0.0);
+    assert_cost(usage.window_week, 0.0);
+    assert_cost(usage.window_month, 0.0);
+    assert!(usage.resets_in_5h.is_none());
 
     drop(db);
     fs::remove_dir_all(dir).expect("test data dir should be removed");
@@ -7514,12 +7589,7 @@ fn v9_migration_preserves_charged_legacy_errors() {
             ("success".to_string(), 2.0, "legacy_estimate".to_string()),
         ]
     );
-    assert_cost(
-        db.opencode_go_account_usage("legacy")
-            .expect("legacy usage should load")
-            .window_month,
-        3.25,
-    );
+    assert_historical_usd_month_is_not_a_percent(&db, "legacy", 3.25);
 
     drop(db);
     fs::remove_dir_all(dir).expect("test data dir should be removed");
@@ -7595,12 +7665,7 @@ fn v10_migration_repairs_charged_errors_from_original_v9() {
             (4.0, "unpriced".to_string()),
         ]
     );
-    assert_cost(
-        db.opencode_go_account_usage("legacy")
-            .expect("legacy usage should load")
-            .window_month,
-        1.25,
-    );
+    assert_historical_usd_month_is_not_a_percent(&db, "legacy", 1.25);
 
     drop(db);
     fs::remove_dir_all(dir).expect("test data dir should be removed");
@@ -8174,8 +8239,14 @@ fn v13_migration_preserves_legacy_manual_usage_calibration() {
     acct.key_cipher = fixture_account_key_cipher();
     acct.purchase_date = local_today();
     db.create_account(&acct).expect("account should be created");
-    finalize_success(&db, "legacy-calibration", 2.0, Utc::now());
-    finalize_success(&db, "legacy-calibration", 1.0, Utc::now());
+    let first = db
+        .log_forward(&forward_log("legacy-calibration", "success", 2.0))
+        .unwrap();
+    let second = db
+        .log_forward(&forward_log("legacy-calibration", "success", 1.0))
+        .unwrap();
+    stamp_historical_cost(&db, first, 2.0);
+    stamp_historical_cost(&db, second, 1.0);
     drop(db);
     reverse_current_to_v34(&dir);
     {
@@ -8216,14 +8287,26 @@ fn v13_migration_preserves_legacy_manual_usage_calibration() {
     }
 
     let db = open_with_host_cipher(dir.clone()).expect("legacy database should migrate");
+    let stored = db.list_quota_windows("legacy-calibration").unwrap();
+    for (kind, used) in [
+        (QUOTA_WINDOW_FIVE_HOURS, 7.0),
+        (QUOTA_WINDOW_WEEK, 13.0),
+        (QUOTA_WINDOW_MONTH, 16.0),
+    ] {
+        let window = stored
+            .iter()
+            .find(|window| window.window_kind == kind)
+            .unwrap_or_else(|| panic!("{kind} should keep the migrated dollar row"));
+        assert_eq!(window.unit, "usd");
+        assert_eq!(window.source, "migration-v22");
+        assert_cost(window.used, used);
+    }
     let usage = db
         .opencode_go_account_usage("legacy-calibration")
         .expect("migrated usage should load");
-    // Old effective values: 50% * 12 + 1, 40% * 30 + 1,
-    // and 25% * 60 + 1. The migration must preserve all three.
-    assert_cost(usage.window_5h, 7.0);
-    assert_cost(usage.window_week, 13.0);
-    assert_cost(usage.window_month, 16.0);
+    assert_cost(usage.window_5h, 0.0);
+    assert_cost(usage.window_week, 0.0);
+    assert_cost(usage.window_month, 0.0);
 
     let remaining_baselines: i64 = db
         .conn
@@ -8237,13 +8320,26 @@ fn v13_migration_preserves_legacy_manual_usage_calibration() {
         .expect("migration state should load");
     assert_eq!(remaining_baselines, 0);
 
-    finalize_success(&db, "legacy-calibration", 2.0, Utc::now());
+    db.log_forward(&forward_log("legacy-calibration", "success", 2.0))
+        .unwrap();
+    let stored_after = db.list_quota_windows("legacy-calibration").unwrap();
+    for (kind, used) in [
+        (QUOTA_WINDOW_FIVE_HOURS, 7.0),
+        (QUOTA_WINDOW_WEEK, 13.0),
+        (QUOTA_WINDOW_MONTH, 16.0),
+    ] {
+        let window = stored_after
+            .iter()
+            .find(|window| window.window_kind == kind)
+            .unwrap();
+        assert_cost(window.used, used);
+    }
     let usage = db
         .opencode_go_account_usage("legacy-calibration")
-        .expect("new usage should accumulate after migration");
-    assert_cost(usage.window_5h, 9.0);
-    assert_cost(usage.window_week, 15.0);
-    assert_cost(usage.window_month, 18.0);
+        .expect("new usage should not reprice the migrated rows");
+    assert_cost(usage.window_5h, 0.0);
+    assert_cost(usage.window_week, 0.0);
+    assert_cost(usage.window_month, 0.0);
 
     drop(db);
     fs::remove_dir_all(dir).expect("test data dir should be removed");
@@ -8456,17 +8552,15 @@ fn diagnostic_retention_removes_only_old_json() {
 }
 
 #[test]
-fn fixed_window_5h_anchors_at_the_first_unexpired_success() {
+fn historical_success_logs_do_not_seed_a_percent_window() {
     let dir = temp_data_dir("fixed-5h-windows");
     let db = Database::open(dir.clone()).unwrap();
-    for (id, history, expected_cost, expected_minutes) in [
-        ("active", &[(4, 1.0), (3, 2.0)][..], 3.0, 60),
-        ("after-expiry", &[(6, 10.0), (1, 5.0)][..], 5.0, 240),
+    for (id, history) in [
+        ("active", &[(4, 1.0), (3, 2.0)][..]),
+        ("after-expiry", &[(6, 10.0), (1, 5.0)][..]),
         (
             "after-multiple",
             &[(19, 10.0), (13, 5.0), (7, 3.0), (1, 2.0)][..],
-            2.0,
-            240,
         ),
     ] {
         db.create_account(&account(id)).unwrap();
@@ -8474,14 +8568,7 @@ fn fixed_window_5h_anchors_at_the_first_unexpired_success() {
         for &(hours_ago, cost) in history {
             finalize_success(&db, id, cost, now - Duration::hours(hours_ago));
         }
-        let usage = db.opencode_go_account_usage(id).unwrap();
-        assert_cost(usage.window_5h, expected_cost);
-        let reset = usage.resets_in_5h.expect("active window must have a reset");
-        let remaining = (reset - Utc::now()).num_minutes();
-        assert!(
-            (expected_minutes - 5..=expected_minutes + 5).contains(&remaining),
-            "{id}: expected ~{expected_minutes}min remaining, got {remaining}"
-        );
+        assert_scheduler_zero_without_percent(&db, id);
     }
     drop(db);
     fs::remove_dir_all(dir).unwrap();
@@ -8498,12 +8585,7 @@ fn fixed_window_treats_exact_end_as_the_next_window_start() {
     let exact_end = first + Duration::hours(5);
     finalize_success(&db, "boundary", 10.0, first);
     finalize_success(&db, "boundary", 2.0, exact_end);
-
-    let usage = db
-        .opencode_go_account_usage("boundary")
-        .expect("usage should load");
-    assert_cost(usage.window_5h, 2.0);
-    assert!(usage.resets_in_5h.is_some());
+    assert_scheduler_zero_without_percent(&db, "boundary");
 
     drop(db);
     fs::remove_dir_all(dir).expect("test data dir should be removed");
@@ -8547,6 +8629,7 @@ fn fixed_window_5h_advances_through_multiple_expired_windows_in_one_call() {
         .expect("usage should load again");
     assert_cost(usage2.window_5h, 0.0);
     assert!(usage2.resets_in_5h.is_none());
+    assert_scheduler_zero_without_percent(&db, "cycle");
 
     drop(db);
     fs::remove_dir_all(dir).expect("test data dir should be removed");
@@ -8559,12 +8642,7 @@ fn fixed_window_5h_with_no_usage_returns_zero_and_full_window_remaining() {
     db.create_account(&account("empty"))
         .expect("account should be created");
 
-    let usage = db
-        .opencode_go_account_usage("empty")
-        .expect("usage should load");
-    assert_cost(usage.window_5h, 0.0);
-    // 没用过：倒计时为 None（前端显示"5h0min"由默认值决定）
-    assert!(usage.resets_in_5h.is_none());
+    assert_scheduler_zero_without_percent(&db, "empty");
 
     drop(db);
     fs::remove_dir_all(dir).expect("test data dir should be removed");
@@ -8578,17 +8656,18 @@ fn month_window_accumulates_from_purchase_date_to_expires_on() {
     acct.purchase_date = "2026-07-01".into();
     db.create_account(&acct).expect("account should be created");
 
-    // 模拟一条历史成功请求（任何时间都算，月窗口从 purchase_date 累计）
     finalize_success(&db, "monthly", 5.0, Utc::now());
+    assert_scheduler_zero_without_percent(&db, "monthly");
 
+    db.calibrate_account_usage("monthly", UsageWindowKind::Month, 50.0, None, 100.0)
+        .expect("month percent should save");
     let usage = db
         .opencode_go_account_usage("monthly")
         .expect("usage should load");
-    assert_cost(usage.window_month, 5.0);
+    assert_cost(usage.window_month, 50.0);
     let reset = usage
         .resets_in_month
         .expect("month window reset should be purchase_date + 1 month");
-    // 2026-07-01 + 1 自然月 = 2026-08-01 00:00
     let expected = DateTime::parse_from_rfc3339("2026-08-01T00:00:00+00:00")
         .unwrap()
         .with_timezone(&Utc);
@@ -8596,6 +8675,7 @@ fn month_window_accumulates_from_purchase_date_to_expires_on() {
         (reset - expected).num_seconds().abs() < 86400,
         "expected ~2026-08-01, got {reset}"
     );
+    assert_cost(usage_offset_row(&db, "monthly").4, 0.0);
 
     drop(db);
     fs::remove_dir_all(dir).expect("test data dir should be removed");
@@ -8608,15 +8688,13 @@ fn manual_calibrate_5h_window_sets_started_at_and_cost_offset() {
     db.create_account(&account("calib"))
         .expect("account should be created");
 
-    // 用户在别处已用 50%，距上游重置还剩 3 小时
     db.calibrate_account_usage("calib", UsageWindowKind::FiveHours, 50.0, Some(180), 12.0)
         .expect("calibrate should save");
 
     let usage = db
         .opencode_go_account_usage("calib")
         .expect("usage should load");
-    // 5h 限额 12.0，50% = 6.0
-    assert_cost(usage.window_5h, 6.0);
+    assert_cost(usage.window_5h, 50.0);
     let reset = usage
         .resets_in_5h
         .expect("5h window reset should be set after manual calibrate");
@@ -8625,13 +8703,17 @@ fn manual_calibrate_5h_window_sets_started_at_and_cost_offset() {
         (175..=185).contains(&remaining_min),
         "expected ~180min remaining, got {remaining_min}"
     );
+    assert_cost(usage_offset_row(&db, "calib").1, 0.0);
 
-    // 后续网关内的请求累加到偏移之上
     finalize_success(&db, "calib", 1.0, Utc::now());
     let usage = db
         .opencode_go_account_usage("calib")
         .expect("usage should reload");
-    assert_cost(usage.window_5h, 7.0);
+    assert_cost(usage.window_5h, 50.0);
+    assert_eq!(
+        db.observed_percent_usage("calib").unwrap().window_5h,
+        Some(50.0)
+    );
 
     drop(db);
     fs::remove_dir_all(dir).expect("test data dir should be removed");
@@ -8639,36 +8721,40 @@ fn manual_calibrate_5h_window_sets_started_at_and_cost_offset() {
 
 #[test]
 fn calibrate_subtracts_existing_window_usage_from_offset() {
-    // 回归测试：活跃账号（窗口内已有 forward_logs）校准时，
-    // offset 必须 = target_cost - actual_cost，否则 compute_fixed_window
-    // 返回 offset + actual_cost，显示百分比会高于用户输入。
     let dir = temp_data_dir("calibrate-with-usage");
     let db = Database::open(dir.clone()).expect("db should open");
     db.create_account(&account("active"))
         .expect("account should be created");
 
-    // 1 小时前已用 $3（落在 5h 窗口内）
     let ts = Utc::now() - Duration::hours(1);
     finalize_success(&db, "active", 3.0, ts);
+    let id: i64 = db
+        .conn
+        .query_row(
+            "SELECT MAX(id) FROM forward_logs WHERE account_id = 'active'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    stamp_historical_cost(&db, id, 3.0);
 
-    // 用户说"我在别处用到了 50%"（5h 限额 12.0 → target_cost = 6.0）
-    // 期望：offset = 6.0 - 3.0 = 3.0，compute_fixed_window 返回 3.0 + 3.0 = 6.0 = 50%
-    // 修复前 bug：offset = 6.0，compute_fixed_window 返回 6.0 + 3.0 = 9.0 = 75%
-    // 用 resets_in_minutes=180 让新窗口的 started_at = now + 3h - 5h = now - 2h，
-    // 把 1 小时前的 log 稳稳包含进窗口（避开 finalize 与 calibrate 之间的微秒级时序差）。
     db.calibrate_account_usage("active", UsageWindowKind::FiveHours, 50.0, Some(180), 12.0)
         .expect("calibrate should save with existing usage");
     let usage = db
         .opencode_go_account_usage("active")
         .expect("usage should load");
-    assert_cost(usage.window_5h, 6.0);
+    assert_cost(usage.window_5h, 50.0);
+    assert_cost(usage_offset_row(&db, "active").1, 0.0);
 
-    // 后续请求继续累加：offset=3.0 + actual=3.0 + new=2.0 = 8.0
     finalize_success(&db, "active", 2.0, Utc::now());
     let usage = db
         .opencode_go_account_usage("active")
         .expect("usage should reload");
-    assert_cost(usage.window_5h, 8.0);
+    assert_cost(usage.window_5h, 50.0);
+    assert_eq!(
+        db.observed_percent_usage("active").unwrap().window_5h,
+        Some(50.0)
+    );
 
     drop(db);
     fs::remove_dir_all(dir).expect("test data dir should be removed");
@@ -8676,30 +8762,34 @@ fn calibrate_subtracts_existing_window_usage_from_offset() {
 
 #[test]
 fn calibrate_below_actual_usage_allows_negative_offset() {
-    // 回归测试（Bug 1.5）：用户校准的百分比低于窗口内实际 cost 时，offset 允许为负数，
-    // 让 compute_fixed_window 返回 offset + actual = target_cost，与用户输入一致。
-    // 之前 max(0, target - actual) 钳制 + schema CHECK (offset >= 0) 约束让向左拉
-    // 滑块时被锁死在实际 cost 对应的百分比（9.0 / 12.0 * 100 = 75%，对应用户看到的 40.2%）。
     let dir = temp_data_dir("calibrate-below-usage");
     let db = Database::open(dir.clone()).expect("db should open");
     db.create_account(&account("clamp"))
         .expect("account should be created");
 
-    // 已用 $9
     let ts = Utc::now() - Duration::hours(1);
     finalize_success(&db, "clamp", 9.0, ts);
+    let id: i64 = db
+        .conn
+        .query_row(
+            "SELECT MAX(id) FROM forward_logs WHERE account_id = 'clamp'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    stamp_historical_cost(&db, id, 9.0);
 
-    // 用户校准到 20%（target_cost = 2.4，但实际已用 9.0）
-    // offset = 2.4 - 9.0 = -6.6；compute_fixed_window 返回 -6.6 + 9.0 = 2.4 = 20%。
-    // 用 resets_in_minutes=180 让新窗口的 started_at = now - 2h，把 1 小时前的
-    // $9 log 稳稳包含进窗口（避开 finalize 与 calibrate 之间的微秒级时序差）。
     db.calibrate_account_usage("clamp", UsageWindowKind::FiveHours, 20.0, Some(180), 12.0)
-        .expect("calibrate below actual usage should allow negative offset");
+        .expect("calibrate below historical cost stores the entered percent");
     let usage = db
         .opencode_go_account_usage("clamp")
         .expect("usage should load");
-    // 显示的 cost = offset(-6.6) + actual(9.0) = 2.4（用户输入的 20%）
-    assert_cost(usage.window_5h, 2.4);
+    assert_cost(usage.window_5h, 20.0);
+    assert_cost(usage_offset_row(&db, "clamp").1, 0.0);
+    assert_eq!(
+        db.observed_percent_usage("clamp").unwrap().window_5h,
+        Some(20.0)
+    );
 
     drop(db);
     fs::remove_dir_all(dir).expect("test data dir should be removed");
@@ -8707,27 +8797,21 @@ fn calibrate_below_actual_usage_allows_negative_offset() {
 
 #[test]
 fn calibrate_month_window_writes_offset_without_started_at() {
-    // 回归测试（Bug 2）：月窗口必须支持手动校准。
-    // 月窗口不写 started_at 列（起点固定为 purchase_date），只更新 cost_offset。
-    // resets_in_minutes 被忽略——窗口由 purchase_date/expires_on 决定。
     let dir = temp_data_dir("calibrate-month");
     let db = Database::open(dir.clone()).expect("db should open");
     let mut acct = account("monthly-calib");
     acct.purchase_date = "2026-07-01".into();
     db.create_account(&acct).expect("account should be created");
 
-    // 已用 $5（落在月窗口内：purchase_date 00:00 起）
     finalize_success(&db, "monthly-calib", 5.0, Utc::now());
 
-    // 用户校准到 50%（月限额 100.0 → target_cost = 50.0）
-    // 期望：offset = 50.0 - 5.0 = 45.0；compute_month_window 返回 45.0 + 5.0 = 50.0 = 50%。
     db.calibrate_account_usage("monthly-calib", UsageWindowKind::Month, 50.0, None, 100.0)
         .expect("month window calibrate should save");
     let usage = db
         .opencode_go_account_usage("monthly-calib")
         .expect("usage should load");
     assert_cost(usage.window_month, 50.0);
-    // resets_in_month 仍是 purchase_date + 1 自然月（不受 resets_in_minutes 影响）
+    assert_cost(usage_offset_row(&db, "monthly-calib").4, 0.0);
     let reset = usage
         .resets_in_month
         .expect("month window reset should be purchase_date + 1 month");
@@ -8744,7 +8828,7 @@ fn calibrate_month_window_writes_offset_without_started_at() {
 }
 
 #[test]
-fn changing_purchase_date_resets_month_calibration_offset() {
+fn changing_purchase_date_keeps_historical_month_cost_offset() {
     let dir = temp_data_dir("month-renewal-reset");
     let db = Database::open(dir.clone()).expect("db should open");
     let new_purchase_date = local_today();
@@ -8755,9 +8839,22 @@ fn changing_purchase_date_resets_month_calibration_offset() {
     acct.purchase_date = old_purchase_date;
     db.create_account(&acct).expect("account should be created");
 
-    finalize_success(&db, "monthly-renewal", 5.0, Utc::now() - Duration::days(2));
+    db.conn
+        .execute(
+            "UPDATE credentials SET usage_month_window_cost_offset = ?1
+             WHERE legacy_account_id = ?2",
+            params![-6.6_f64, "monthly-renewal"],
+        )
+        .unwrap();
     db.calibrate_account_usage("monthly-renewal", UsageWindowKind::Month, 0.0, None, 100.0)
-        .expect("month calibration should save a negative offset");
+        .expect("explicit zero percent should save");
+    assert_eq!(
+        db.observed_percent_usage("monthly-renewal")
+            .unwrap()
+            .window_month,
+        Some(0.0)
+    );
+    assert_cost(usage_offset_row(&db, "monthly-renewal").4, -6.6);
     assert_cost(
         db.opencode_go_account_usage("monthly-renewal")
             .expect("usage should load")
@@ -8789,7 +8886,13 @@ fn changing_purchase_date_resets_month_calibration_offset() {
             |row| row.get(0),
         )
         .expect("month offset should load");
-    assert_cost(offset, 0.0);
+    assert_cost(offset, -6.6);
+    assert_eq!(
+        db.observed_percent_usage("monthly-renewal")
+            .unwrap()
+            .window_month,
+        Some(0.0)
+    );
     assert_cost(
         db.opencode_go_account_usage("monthly-renewal")
             .expect("renewed usage should load")
@@ -8798,12 +8901,64 @@ fn changing_purchase_date_resets_month_calibration_offset() {
     );
 
     finalize_success(&db, "monthly-renewal", 2.0, Utc::now());
+    let offset_after_request: f64 = db
+        .conn
+        .query_row(
+            "SELECT usage_month_window_cost_offset FROM credentials WHERE legacy_account_id = ?1",
+            ["monthly-renewal"],
+            |row| row.get(0),
+        )
+        .expect("month offset should load after the new request");
+    assert_cost(offset_after_request, -6.6);
+    assert_eq!(
+        db.observed_percent_usage("monthly-renewal")
+            .unwrap()
+            .window_month,
+        Some(0.0)
+    );
     assert_cost(
         db.opencode_go_account_usage("monthly-renewal")
             .expect("new cycle usage should load")
             .window_month,
-        2.0,
+        0.0,
     );
+
+    drop(db);
+    fs::remove_dir_all(dir).expect("test data dir should be removed");
+}
+
+#[test]
+fn usage_read_keeps_historical_cost_offsets() {
+    let dir = temp_data_dir("usage-read-keeps-offset");
+    let db = Database::open(dir.clone()).expect("db should open");
+    let mut acct = account("read-offset");
+    acct.purchase_date = "2026-07-01".into();
+    db.create_account(&acct).expect("account should be created");
+    let started = "2026-07-01T00:00:00+00:00";
+    db.conn
+        .execute(
+            "UPDATE credentials SET
+                usage_5h_window_started_at = ?1,
+                usage_5h_window_cost_offset = ?2,
+                usage_week_window_started_at = ?1,
+                usage_week_window_cost_offset = ?3,
+                usage_month_window_cost_offset = ?4
+             WHERE legacy_account_id = 'read-offset'",
+            params![started, 4.5_f64, -2.5_f64, 7.25_f64],
+        )
+        .unwrap();
+
+    for _ in 0..2 {
+        let _ = db
+            .opencode_go_account_usage("read-offset")
+            .expect("usage read should succeed");
+        let offsets = usage_offset_row(&db, "read-offset");
+        assert_eq!(offsets.0.as_deref(), Some(started));
+        assert_eq!(offsets.2.as_deref(), Some(started));
+        assert_cost(offsets.1, 4.5);
+        assert_cost(offsets.3, -2.5);
+        assert_cost(offsets.4, 7.25);
+    }
 
     drop(db);
     fs::remove_dir_all(dir).expect("test data dir should be removed");
@@ -8937,16 +9092,32 @@ fn calibrate_rejects_reset_outside_fixed_window_without_panicking() {
 
     for (window, minutes) in [
         (UsageWindowKind::FiveHours, -1),
-        (UsageWindowKind::FiveHours, 301),
-        (UsageWindowKind::Week, 10_081),
         (UsageWindowKind::FiveHours, i64::MAX),
     ] {
         assert!(
             db.calibrate_account_usage("reset-bounds", window, 50.0, Some(minutes), 100.0,)
                 .is_err(),
-            "{window:?} should reject {minutes} minutes"
+            "{window:?} should reject {minutes} minutes without panicking"
         );
     }
+    assert!(
+        db.calibrate_account_usage(
+            "reset-bounds",
+            UsageWindowKind::FiveHours,
+            50.0,
+            Some(301),
+            12.0,
+        )
+        .expect("a reset longer than five hours is a percent timestamp, not a cost window")
+    );
+    let offsets = usage_offset_row(&db, "reset-bounds");
+    assert_eq!(offsets.1, 0.0);
+    assert_eq!(offsets.3, 0.0);
+    assert_eq!(offsets.4, 0.0);
+    assert_eq!(
+        db.observed_percent_usage("reset-bounds").unwrap().window_5h,
+        Some(50.0)
+    );
 
     drop(db);
     fs::remove_dir_all(dir).expect("test data dir should be removed");
@@ -9007,6 +9178,7 @@ fn calibrate_account_usage_snapshot_updates_all_three_windows() {
     finalize_success(&db, "snap-ok", 3.0, Utc::now() - Duration::hours(1));
 
     let limits = snapshot_limits();
+    let before_offsets = usage_offset_row(&db, "snap-ok");
     let usage = db
         .calibrate_account_usage_snapshot(
             "snap-ok",
@@ -9014,9 +9186,18 @@ fn calibrate_account_usage_snapshot_updates_all_three_windows() {
             &limits,
         )
         .expect("snapshot calibrate should save");
-    assert_cost(usage.window_5h, 6.0);
-    assert_cost(usage.window_week, 6.0);
+    assert_cost(usage.window_5h, 50.0);
+    assert_cost(usage.window_week, 20.0);
     assert_cost(usage.window_month, 10.0);
+    assert_eq!(usage_offset_row(&db, "snap-ok"), before_offsets);
+    let stored = db.list_quota_windows("snap-ok").unwrap();
+    assert_eq!(stored.len(), 3);
+    assert!(stored.iter().all(|window| {
+        window.unit == "percent"
+            && window.limit_value == Some(100.0)
+            && window.observed_at.is_some()
+            && window.source == "manual-percent"
+    }));
     let remaining_5h =
         (usage.resets_in_5h.expect("5h reset should be set") - Utc::now()).num_minutes();
     assert!(
@@ -9133,11 +9314,11 @@ fn calibrate_account_usage_snapshot_rolls_back_when_second_window_fails() {
     assert!(
         db.calibrate_account_usage_snapshot(
             "snap-week",
-            &usage_calibration(80.0, 90.0, 40.0, 180, 10_081),
+            &usage_calibration(80.0, f64::NAN, 40.0, 180, 1_440),
             &limits
         )
         .is_err(),
-        "weekly minutes outside the 7-day window should fail"
+        "a non-finite weekly percent must abort the whole snapshot"
     );
 
     assert_eq!(usage_offset_row(&db, "snap-week"), before);
@@ -9174,8 +9355,8 @@ fn calibrate_account_usage_snapshot_rolls_back_when_third_window_fails() {
     db.conn
         .execute_batch(
             "CREATE TRIGGER reject_month_calibrate
-                 BEFORE UPDATE OF usage_month_window_cost_offset ON credentials
-                 WHEN NEW.legacy_account_id = 'snap-month'
+                 BEFORE UPDATE ON quota_windows
+                 WHEN NEW.account_id = 'snap-month' AND NEW.window_kind = 'month'
                  BEGIN
                      SELECT RAISE(ABORT, 'forced month calibrate failure');
                  END;",
@@ -9357,7 +9538,16 @@ fn forward_logs_success_filter_includes_unpriced_rows() {
     let db = Database::open(dir.clone()).unwrap();
     db.log_forward(&forward_log("acct", "success", 1.0))
         .unwrap();
-    db.log_forward(&forward_log("acct", "success_unpriced", 2.0))
+    let mut historical = forward_log("acct", "success", 2.0);
+    historical.request_id = Some("historical-unpriced".into());
+    db.log_forward(&historical).unwrap();
+    db.conn
+        .execute(
+            "UPDATE forward_logs
+             SET status = 'success_unpriced', cost = 2.0, cost_state = 'legacy_estimate'
+             WHERE request_id = 'historical-unpriced'",
+            [],
+        )
         .unwrap();
     db.log_forward(&forward_log("acct", "error", 4.0)).unwrap();
 
@@ -9395,11 +9585,16 @@ fn forward_logs_success_filter_includes_unpriced_rows() {
 fn forward_logs_filter_by_key_and_unattributed_sentinel() {
     let dir = temp_data_dir("forward-key-filter");
     let db = Database::open(dir.clone()).unwrap();
-    db.log_forward(&attributed_log("acct", Some("key-a"), 1.0))
+    let key_a_id = db
+        .log_forward(&attributed_log("acct", Some("key-a"), 1.0))
         .unwrap();
-    db.log_forward(&attributed_log("acct", Some("key-b"), 2.0))
+    let key_b_id = db
+        .log_forward(&attributed_log("acct", Some("key-b"), 2.0))
         .unwrap();
-    db.log_forward(&attributed_log("acct", None, 4.0)).unwrap();
+    let unattributed_id = db.log_forward(&attributed_log("acct", None, 4.0)).unwrap();
+    stamp_historical_cost(&db, key_a_id, 1.0);
+    stamp_historical_cost(&db, key_b_id, 2.0);
+    stamp_historical_cost(&db, unattributed_id, 4.0);
 
     let query = |key_id: Option<&str>| {
         db.query_forward_logs(ForwardLogQueryOptions {
@@ -9427,13 +9622,13 @@ fn forward_logs_filter_by_key_and_unattributed_sentinel() {
 
     let key_a = query(Some("key-a"));
     assert_eq!(key_a.summary.total_requests, 1);
-    assert_eq!(key_a.summary.cost, 1.0);
+    assert_eq!(key_a.summary.cost, Some(1.0));
     assert_eq!(key_a.items[0].client_key_id.as_deref(), Some("key-a"));
     assert_eq!(key_a.items[0].client_key_name.as_deref(), Some("Key-key-a"));
 
     let unattributed = query(Some(UNATTRIBUTED_KEY_FILTER));
     assert_eq!(unattributed.summary.total_requests, 1);
-    assert_eq!(unattributed.summary.cost, 4.0);
+    assert_eq!(unattributed.summary.cost, Some(4.0));
     assert!(unattributed.items[0].client_key_id.is_none());
 
     let keys = db.list_forward_log_keys().unwrap();
@@ -9561,7 +9756,9 @@ fn insert_identity_log(
     alias: Option<&str>,
     upstream: Option<&str>,
 ) -> i64 {
+    let cost = log.cost.unwrap_or(0.0);
     let id = db.log_forward(&log).unwrap();
+    stamp_historical_cost(db, id, cost);
     db.set_forward_log_native_attribution(
         id,
         &ForwardLogNativeAttribution {
@@ -9597,6 +9794,7 @@ fn forward_logs_model_filter_matches_each_identity_and_legacy_fallback() {
     legacy.model = "needle".into();
     legacy.prompt_tokens = 1;
     let legacy_id = db.log_forward(&legacy).unwrap();
+    stamp_historical_cost(&db, legacy_id, 1.0);
     clear_v23_identity(&db, legacy_id);
 
     let mut requested_only = forward_log("acct", "success", 2.0);
@@ -9669,7 +9867,7 @@ fn forward_logs_model_filter_matches_each_identity_and_legacy_fallback() {
     );
     assert_eq!(page.summary.total_requests, 5);
     assert_eq!(page.summary.prompt_tokens, 16);
-    assert!((page.summary.cost - 16.0).abs() < f64::EPSILON);
+    assert!((page.summary.cost.expect("historical costs still sum") - 16.0).abs() < f64::EPSILON);
 
     let requested = db
         .query_forward_logs(ForwardLogQueryOptions {
@@ -9823,7 +10021,9 @@ fn forward_logs_model_filter_ands_other_filters_before_pagination() {
     assert_eq!(first_page.items[0].id, first);
     assert_eq!(first_page.summary.total_requests, 3);
     assert_eq!(first_page.summary.prompt_tokens, 6);
-    assert!((first_page.summary.cost - 6.0).abs() < f64::EPSILON);
+    assert!(
+        (first_page.summary.cost.expect("historical costs still sum") - 6.0).abs() < f64::EPSILON
+    );
 
     let second_page = db.query_forward_logs(filtered(1, 1)).unwrap();
     assert_eq!(second_page.items.len(), 1);
@@ -9847,7 +10047,8 @@ fn backfill_attributes_null_rows_in_chunks_with_resume_and_completion() {
     for index in 0..7 {
         let mut log = forward_log("acct", "success", index as f64);
         log.client_key_id = (index % 2 == 0).then(|| "already-set".to_string());
-        db.log_forward(&log).unwrap();
+        let id = db.log_forward(&log).unwrap();
+        stamp_historical_cost(&db, id, index as f64);
     }
 
     // Chunk size 3 covers rowids 1..=7 in three steps; already-attributed
@@ -9889,8 +10090,10 @@ fn backfill_attributes_null_rows_in_chunks_with_resume_and_completion() {
     // New NULL rows written by an older binary (a downgrade window)
     // restart the scan instead of staying "unattributed" forever.
     for cost in [9.0, 11.0] {
-        db.log_forward(&forward_log("acct", "success", cost))
+        let id = db
+            .log_forward(&forward_log("acct", "success", cost))
             .unwrap();
+        stamp_historical_cost(&db, id, cost);
     }
     assert!(
         db.backfill_forward_logs_client_key_step("primary", "Primary", 3)
@@ -9934,8 +10137,10 @@ fn backfill_resumes_from_persisted_watermark_after_interruption() {
     let dir = temp_data_dir("backfill-resume");
     let db = Database::open(dir.clone()).unwrap();
     for index in 0..5 {
-        db.log_forward(&forward_log("acct", "success", index as f64))
+        let id = db
+            .log_forward(&forward_log("acct", "success", index as f64))
             .unwrap();
+        stamp_historical_cost(&db, id, index as f64);
     }
 
     // Simulate a crash after the first chunk: the watermark persists but
@@ -10049,14 +10254,16 @@ fn fresh_go_accounts_project_live_provider_quota_windows() {
     let windows = db
         .live_opencode_go_quota_windows("fresh-go", &limits)
         .unwrap();
-    assert_eq!(windows.len(), 3);
+    assert_eq!(windows.len(), 1);
     let rolling = windows
         .iter()
         .find(|window| window.window_kind == QUOTA_WINDOW_FIVE_HOURS)
         .unwrap();
-    assert!((rolling.used - limits.window_5h * 0.5).abs() < 1e-9);
-    assert_eq!(rolling.limit_value, Some(limits.window_5h));
-    assert_eq!(rolling.source, "opencode-go-live");
+    assert!((rolling.used - 50.0).abs() < 1e-9);
+    assert_eq!(rolling.limit_value, Some(100.0));
+    assert_eq!(rolling.unit, "percent");
+    assert_eq!(rolling.source, "manual-percent");
+    assert!(rolling.observed_at.is_some());
 
     drop(db);
     fs::remove_dir_all(dir).unwrap();
@@ -10085,20 +10292,20 @@ fn v21_to_v22_creates_one_usable_rollback_backup() {
     let live = db
         .live_opencode_go_quota_windows("rollback-account", &limits)
         .unwrap();
-    let live_rolling = live
-        .iter()
+    assert!(
+        live.is_empty(),
+        "a new unknown request must not become a percent window"
+    );
+    let stored_rolling = db
+        .list_quota_windows("rollback-account")
+        .unwrap()
+        .into_iter()
         .find(|window| window.window_kind == QUOTA_WINDOW_FIVE_HOURS)
         .unwrap();
-    assert!((live_rolling.used - (migrated_rolling + 1.5)).abs() < 1e-9);
+    assert_eq!(stored_rolling.unit, "usd");
     assert_eq!(
-        db.list_quota_windows("rollback-account")
-            .unwrap()
-            .iter()
-            .find(|window| window.window_kind == QUOTA_WINDOW_FIVE_HOURS)
-            .unwrap()
-            .used,
-        migrated_rolling,
-        "frozen migration rows must not be the provider API authority"
+        stored_rolling.used, migrated_rolling,
+        "a new request must not rewrite the frozen migration row"
     );
     drop(db);
 
@@ -10420,6 +10627,13 @@ fn create_v22_fixture(dir: &Path) {
         .expect("representative GOAT account should save");
     db.log_forward(&forward_log("v22-account", "success", 3.5))
         .expect("representative forward log should save");
+    db.conn
+        .execute(
+            "UPDATE forward_logs SET cost = 3.5, cost_state = 'legacy_estimate'
+             WHERE account_id = 'v22-account'",
+            [],
+        )
+        .expect("historical v22 cost should stay on the fixture row");
     drop(db);
     reverse_current_to_v34(dir);
 
@@ -10981,9 +11195,9 @@ fn forward_logs_dual_write_native_usd_attribution() {
     log.cost_state = "priced".into();
     let id = db.log_forward(&log).unwrap();
     let attribution = db.forward_log_native_attribution(id).unwrap().unwrap();
-    assert_eq!(attribution.native_cost_value, Some(1.25));
-    assert_eq!(attribution.native_cost_unit.as_deref(), Some("usd"));
-    assert_eq!(attribution.native_cost_currency.as_deref(), Some("USD"));
+    assert_eq!(attribution.native_cost_value, None);
+    assert_eq!(attribution.native_cost_unit, None);
+    assert_eq!(attribution.native_cost_currency, None);
     assert_eq!(attribution.upstream_model.as_deref(), Some("test"));
 
     db.set_forward_log_native_attribution(
@@ -11047,18 +11261,19 @@ fn update_forward_log_finalizes_native_usd_with_cost_fields() {
         .forward_log_native_attribution(streaming_id)
         .unwrap()
         .unwrap();
-    assert_eq!(finalized.native_cost_value, Some(1.25));
-    assert_eq!(finalized.native_cost_unit.as_deref(), Some("usd"));
-    assert_eq!(finalized.native_cost_currency.as_deref(), Some("USD"));
-    let stored_cost: f64 = db
+    assert_eq!(finalized.native_cost_value, None);
+    assert_eq!(finalized.native_cost_unit, None);
+    assert_eq!(finalized.native_cost_currency, None);
+    let stored_cost: (f64, String) = db
         .conn
         .query_row(
-            "SELECT cost FROM forward_logs WHERE id = ?1",
+            "SELECT cost, cost_state FROM forward_logs WHERE id = ?1",
             [streaming_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert!((stored_cost - 1.25).abs() < 1e-9);
+    assert_eq!(stored_cost.0, 0.0);
+    assert_eq!(stored_cost.1, "unknown");
 
     let zero_id = db
         .log_forward(&forward_log("stream", "streaming", 0.0))
@@ -11068,7 +11283,7 @@ fn update_forward_log_finalizes_native_usd_with_cost_fields() {
             .unwrap()
             .unwrap()
             .native_cost_value,
-        Some(0.0)
+        None
     );
     db.update_forward_log(
         zero_id,
@@ -11089,7 +11304,7 @@ fn update_forward_log_finalizes_native_usd_with_cost_fields() {
             .unwrap()
             .unwrap()
             .native_cost_value,
-        Some(2.5)
+        None
     );
 
     let mut zen = forward_log("stream", "streaming", 0.0);
@@ -11113,8 +11328,8 @@ fn update_forward_log_finalizes_native_usd_with_cost_fields() {
     )
     .unwrap();
     let zen_native = db.forward_log_native_attribution(zen_id).unwrap().unwrap();
-    assert_eq!(zen_native.native_cost_value, Some(0.0));
-    assert_eq!(zen_native.native_cost_unit.as_deref(), Some("usd"));
+    assert_eq!(zen_native.native_cost_value, None);
+    assert_eq!(zen_native.native_cost_unit, None);
     let zen_cost: (f64, String) = db
         .conn
         .query_row(
@@ -11124,7 +11339,7 @@ fn update_forward_log_finalizes_native_usd_with_cost_fields() {
         )
         .unwrap();
     assert_eq!(zen_cost.0, 0.0);
-    assert_eq!(zen_cost.1, "free");
+    assert_eq!(zen_cost.1, "unknown");
 
     drop(db);
     fs::remove_dir_all(dir).unwrap();
@@ -15349,7 +15564,7 @@ fn ollama_billing_tier_round_trip_and_cascade() {
 }
 
 #[test]
-fn ollama_tier_change_clears_month_offset_same_tier_preserves() {
+fn ollama_tier_change_keeps_month_cost_offset() {
     let dir = temp_data_dir("ollama-tier-offset");
     let db = Database::open(dir.clone()).unwrap();
     let mut ollama = account("ollama-offset");
@@ -15385,14 +15600,14 @@ fn ollama_tier_change_clears_month_offset_same_tier_preserves() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(offset, 0.0);
+    assert_eq!(offset, 12.5);
     assert_eq!(db.list_forward_logs(10).unwrap().len(), 0);
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
-fn ollama_month_window_is_half_open_and_exposes_overage() {
+fn ollama_priced_logs_do_not_become_a_percent_window() {
     use chrono::TimeZone;
     let dir = temp_data_dir("ollama-month-bounds");
     let db = Database::open(dir.clone()).unwrap();
@@ -15443,15 +15658,347 @@ fn ollama_month_window_is_half_open_and_exposes_overage() {
     after.timestamp = end + chrono::Duration::hours(1);
     db.log_forward(&after).unwrap();
 
+    db.conn
+        .execute(
+            "UPDATE forward_logs SET cost = 80, cost_state = 'priced' WHERE account_id = ?1",
+            ["ollama-month"],
+        )
+        .unwrap();
+    assert!(
+        db.live_ollama_month_quota_window("ollama-month", 60.0)
+            .unwrap()
+            .is_empty()
+    );
+    let (used, reset) = db.ollama_month_usage("ollama-month").unwrap();
+    assert_eq!(used, None);
+    assert_eq!(reset, None);
+    let offset_before: f64 = db
+        .conn
+        .query_row(
+            "SELECT usage_month_window_cost_offset FROM credentials WHERE legacy_account_id = ?1",
+            ["ollama-month"],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert!(
+        db.calibrate_ollama_month_usage("ollama-month", 80.0, 60.0, Utc::now())
+            .unwrap()
+    );
     let windows = db
         .live_ollama_month_quota_window("ollama-month", 60.0)
         .unwrap();
     assert_eq!(windows.len(), 1);
     assert_eq!(windows[0].used, 80.0);
-    assert_eq!(windows[0].limit_value, Some(60.0));
+    assert_eq!(windows[0].limit_value, Some(100.0));
+    assert_eq!(windows[0].unit, "percent");
+    assert_eq!(windows[0].source, "ollama-manual-percent");
+    assert!(windows[0].observed_at.is_some());
+    let expected_reset = chrono::NaiveDate::parse_from_str(&expires, "%Y-%m-%d")
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc();
     let (used, reset) = db.ollama_month_usage("ollama-month").unwrap();
-    assert_eq!(used, 80.0);
-    assert_eq!(reset, Some(end));
+    assert_eq!(used, Some(80.0));
+    assert_eq!(reset, Some(expected_reset));
+    assert!(
+        db.calibrate_ollama_month_usage("ollama-month", 0.0, 60.0, Utc::now())
+            .unwrap()
+    );
+    assert_eq!(db.ollama_month_usage("ollama-month").unwrap().0, Some(0.0));
+    let offset_after: f64 = db
+        .conn
+        .query_row(
+            "SELECT usage_month_window_cost_offset FROM credentials WHERE legacy_account_id = ?1",
+            ["ollama-month"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(offset_after, offset_before);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn null_or_blank_purchase_date_month_calibration_keeps_history() {
+    for (label, stored_purchase_date) in [("null", None), ("blank", Some(""))] {
+        let id = format!("ollama-month-{label}");
+        let dir = temp_data_dir(&format!("ollama-null-purchase-{label}"));
+        let db = Database::open(dir.clone()).unwrap();
+        let mut ollama = account(&id);
+        ollama.provider_id = OLLAMA_PROVIDER_ID.to_string();
+        db.create_account(&ollama).unwrap();
+        let started = "2026-07-01T00:00:00+00:00";
+        db.conn
+            .execute(
+                "UPDATE credentials SET
+                    purchase_date = ?2,
+                    usage_5h_window_started_at = ?3,
+                    usage_5h_window_cost_offset = ?4,
+                    usage_week_window_started_at = ?3,
+                    usage_week_window_cost_offset = ?5,
+                    usage_month_window_cost_offset = ?6
+                 WHERE legacy_account_id = ?1",
+                params![
+                    id,
+                    stored_purchase_date,
+                    started,
+                    1.25_f64,
+                    -3.5_f64,
+                    9.75_f64
+                ],
+            )
+            .unwrap();
+        let before = history_row(&db, &id);
+        assert_eq!(before.purchase_date.as_deref(), stored_purchase_date);
+        assert_eq!(db.ollama_cloud_billing_tier(&id).unwrap(), None);
+        let pricing_before = table_count(&db, "provider_pricing_snapshots");
+        let legacy_pricing_before = table_count(&db, "pricing_snapshots");
+        let credits_before = table_count(&db, "credit_balances");
+
+        let now = Utc::now();
+        assert!(
+            db.calibrate_ollama_month_usage(&id, 42.5, 100.0, now)
+                .unwrap()
+        );
+        let (used, reset) = db.ollama_month_usage(&id).unwrap();
+        assert_eq!(used, Some(42.5));
+        assert_eq!(reset, None);
+        assert_eq!(month_window_row(&db, &id), (42.5, None));
+
+        assert!(
+            db.calibrate_ollama_month_usage(&id, 0.0, 100.0, now)
+                .unwrap()
+        );
+        let (used, reset) = db.ollama_month_usage(&id).unwrap();
+        assert_eq!(used, Some(0.0));
+        assert_eq!(reset, None);
+        assert_eq!(month_window_row(&db, &id), (0.0, None));
+
+        let after = history_row(&db, &id);
+        assert_eq!(after, before);
+        assert_eq!(db.ollama_cloud_billing_tier(&id).unwrap(), None);
+        assert_eq!(
+            table_count(&db, "ollama_cloud_billing"),
+            0,
+            "{label} must not gain a billing tier"
+        );
+        assert_eq!(db.list_forward_logs(10).unwrap().len(), 0);
+        assert_eq!(
+            table_count(&db, "provider_pricing_snapshots"),
+            pricing_before
+        );
+        assert_eq!(table_count(&db, "pricing_snapshots"), legacy_pricing_before);
+        assert_eq!(table_count(&db, "credit_balances"), credits_before);
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct MonthHistoryRow {
+    purchase_date: Option<String>,
+    account_type: String,
+    setup_step: String,
+    credential_kind: String,
+    quota_scope: String,
+    provider_id: String,
+    started_5h: Option<String>,
+    offset_5h: f64,
+    started_week: Option<String>,
+    offset_week: f64,
+    offset_month: f64,
+}
+
+fn history_row(db: &Database, id: &str) -> MonthHistoryRow {
+    db.conn
+        .query_row(
+            "SELECT purchase_date, account_type, setup_step, credential_kind, quota_scope,
+                    provider_id, usage_5h_window_started_at, usage_5h_window_cost_offset,
+                    usage_week_window_started_at, usage_week_window_cost_offset,
+                    usage_month_window_cost_offset
+             FROM credentials WHERE legacy_account_id = ?1",
+            [id],
+            |row| {
+                Ok(MonthHistoryRow {
+                    purchase_date: row.get(0)?,
+                    account_type: row.get(1)?,
+                    setup_step: row.get(2)?,
+                    credential_kind: row.get(3)?,
+                    quota_scope: row.get(4)?,
+                    provider_id: row.get(5)?,
+                    started_5h: row.get(6)?,
+                    offset_5h: row.get(7)?,
+                    started_week: row.get(8)?,
+                    offset_week: row.get(9)?,
+                    offset_month: row.get(10)?,
+                })
+            },
+        )
+        .expect("credential history row should load")
+}
+
+fn month_window_row(db: &Database, id: &str) -> (f64, Option<String>) {
+    db.conn
+        .query_row(
+            "SELECT used, resets_at FROM quota_windows
+             WHERE account_id = ?1 AND window_kind = 'month'",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("month percent window should load")
+}
+
+fn table_count(db: &Database, table: &str) -> i64 {
+    db.conn
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap_or_else(|error| panic!("{table} count should load: {error}"))
+}
+
+#[test]
+fn historical_price_rows_survive_reopen_deletion_and_new_requests_stay_unknown() {
+    let dir = temp_data_dir("historical-price-inert");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let mut historical = account("hist-price");
+    historical.key_cipher = fixture_account_key_cipher();
+    db.create_account(&historical).unwrap();
+    let id = db
+        .log_forward(&forward_log("hist-price", "success", 9.0))
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE forward_logs
+             SET cost = 4.5,
+                 cost_state = 'priced',
+                 raw_cost_usd = 4.5,
+                 pricing_revision_id = 'hist-rev',
+                 quota_multiplier = 1.5,
+                 native_cost_value = 4.5,
+                 native_cost_unit = 'usd',
+                 native_cost_currency = 'USD'
+             WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    let now = Utc::now().to_rfc3339();
+    db.insert_pricing_snapshot(&PricingSnapshot {
+        revision: "hist-snap".into(),
+        activated_at: now.clone(),
+        document_updated_at: now,
+        source_url: "https://example.invalid/prices".into(),
+        content_hash: "hist-hash".into(),
+        limits: snapshot_limits(),
+        models: Vec::new(),
+        adjustment_policy_version: "historical".into(),
+    })
+    .unwrap();
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    let created = Utc::now();
+    db.create_dynamic_provider_definition(&crate::dynamic::DynamicProviderRuntime {
+        preset_id: Some("tencent-token-global".into()),
+        id: provider_id.clone(),
+        name: "Hist".into(),
+        endpoint_url: "http://127.0.0.1:9".into(),
+        upstream_protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+        auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
+        mappings: vec![ocg_domain::dynamic::DynamicModelMapping {
+            public_model: "hist-model".into(),
+            upstream_model: "hist/upstream".into(),
+            upstream_override: None,
+        }],
+        created_at: created,
+        updated_at: created,
+        origin: ocg_domain::provider::ProviderOrigin::Preset,
+        offering: "plan".into(),
+    })
+    .unwrap();
+    db.delete_dynamic_provider(&provider_id).unwrap();
+    drop(db);
+
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let stored: (f64, String, Option<f64>, Option<String>, Option<f64>) = db
+        .conn
+        .query_row(
+            "SELECT cost, cost_state, raw_cost_usd, pricing_revision_id, native_cost_value
+             FROM forward_logs WHERE id = ?1",
+            [id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(stored.0, 4.5);
+    assert_eq!(stored.1, "priced");
+    assert_eq!(stored.2, Some(4.5));
+    assert_eq!(stored.3.as_deref(), Some("hist-rev"));
+    assert_eq!(stored.4, Some(4.5));
+    let historical = db
+        .list_forward_logs(10)
+        .unwrap()
+        .into_iter()
+        .find(|log| log.id == id)
+        .unwrap();
+    assert_eq!(historical.cost, Some(4.5));
+
+    let fresh = db
+        .log_forward(&forward_log("hist-price", "success", 9.0))
+        .unwrap();
+    let fresh_row: (f64, String) = db
+        .conn
+        .query_row(
+            "SELECT cost, cost_state FROM forward_logs WHERE id = ?1",
+            [fresh],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(fresh_row, (0.0, "unknown".to_string()));
+    let fresh_log = db
+        .list_forward_logs(10)
+        .unwrap()
+        .into_iter()
+        .find(|log| log.id == fresh)
+        .unwrap();
+    assert_eq!(fresh_log.cost, None);
+    assert_eq!(fresh_log.cost_state, "unknown");
+    let (today, _, _) = db.total_usage().unwrap();
+    assert_cost(
+        today.expect("historical priced cost stays in the read summary"),
+        4.5,
+    );
+
+    let snap_count: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM pricing_snapshots", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let provider_count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM provider_pricing_snapshots",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(snap_count, 1);
+    assert_eq!(provider_count, 1);
+    let kept: String = db
+        .conn
+        .query_row("SELECT revision FROM pricing_snapshots", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(kept, "hist-snap");
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }

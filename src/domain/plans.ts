@@ -10,7 +10,7 @@ export type PlanKind = "quota" | "free" | "api-key" | "custom";
 
 /**
  * Open frontend projection of one V3 Provider Catalog row. `id` is the
- * backend-owned provider id used by filters, dialogs, pricing, and cards.
+ * backend-owned provider id used by filters, dialogs, and cards.
  */
 export interface ProviderSurface extends ProviderCatalogEntry {
   id: string;
@@ -53,7 +53,6 @@ const OFFLINE_SURFACES: readonly ProviderSurface[] = [
     verification_runtime_availability: "available",
     routable: true,
     managed_registration: true,
-    pricing_availability: "available",
     usage_availability: "available",
     manual_usage_calibration: false,
     quota_unit: "tokens",
@@ -86,7 +85,6 @@ const OFFLINE_SURFACES: readonly ProviderSurface[] = [
     verification_runtime_availability: "not_applicable",
     routable: true,
     managed_registration: false,
-    pricing_availability: "not_applicable",
     usage_availability: "unavailable",
     manual_usage_calibration: false,
     quota_unit: "requests",

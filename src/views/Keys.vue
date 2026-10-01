@@ -8,6 +8,12 @@
         </p>
       </div>
 
+      <n-alert v-if="connectionStore.refreshError" type="warning" :title="t('接入 Key 加载失败，请重试')">
+        <div class="keys-load-error">
+          <span>{{ t("加载接入 Key 失败：{error}", { error: connectionStore.refreshError }) }}</span>
+          <n-button size="small" secondary :loading="loading" @click="loadConnection">{{ t("重试") }}</n-button>
+        </div>
+      </n-alert>
       <n-alert v-if="loadError" type="error" :title="t('接入 Key 加载失败，请重试')">
         <div class="keys-load-error">
           <span>{{ loadError }}</span>
@@ -21,7 +27,7 @@
             <span class="gateway-key-name">{{ t("主 Key") }}</span>
             <span class="gateway-key-badge">{{ t("恒为有效") }}</span>
           </div>
-          <code class="gateway-key-value">{{ maskConnectionKey(connection.primary_key) }}</code>
+          <code class="gateway-key-value">{{ presentConnectionKey(connection.primary_key) }}</code>
           <div class="gateway-key-actions">
             <n-tooltip trigger="hover">
               <template #trigger>
@@ -100,7 +106,7 @@
               </n-tooltip>
             </template>
           </div>
-          <code class="gateway-key-value">{{ maskConnectionKey(entry.value) }}</code>
+          <code class="gateway-key-value">{{ presentConnectionKey(entry.value) }}</code>
           <div class="gateway-key-actions">
             <n-tooltip trigger="hover">
               <template #trigger>
@@ -204,7 +210,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onActivated, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   NAlert,
   NButton,
@@ -235,7 +241,12 @@ const message = useMessage();
 const connectionStore = useConnectionStore();
 const sessionStore = useSessionStore();
 const revalidateGate = createRevalidateGate(60_000);
-watch(() => sessionStore.authenticated, (ok) => { if (!ok) revalidateGate.reset(); });
+watch(() => sessionStore.authenticated, (ok) => {
+  if (ok) return;
+  revalidateGate.reset();
+  cancelRename();
+  newKeyName.value = "";
+});
 const { copiedTarget: keyCopied, copy, cleanup } = useClipboard();
 const loaded = ref(false);
 const loading = ref(false);
@@ -246,6 +257,57 @@ const renamingKeyId = ref("");
 const renameDraft = ref("");
 const keyMutation = ref("");
 let loadGeneration = 0;
+let keyFlow = 0;
+
+type KeyFlowMark = { flow: number; connection: number | null; shell: number | undefined };
+
+function captureKeyFlow(): KeyFlowMark {
+  const current = connectionStore.currentSession;
+  return {
+    flow: ++keyFlow,
+    connection: typeof current === "function" ? current() : null,
+    shell: typeof sessionStore.sessionEpoch === "number" ? sessionStore.sessionEpoch : undefined,
+  };
+}
+
+function keyFlowCurrent(mark: KeyFlowMark): boolean {
+  if (mark.flow !== keyFlow) return false;
+  const current = connectionStore.currentSession;
+  if (typeof current === "function" && mark.connection !== null && current() !== mark.connection) return false;
+  if (typeof sessionStore.sessionEpoch === "number" && mark.shell !== undefined && sessionStore.sessionEpoch !== mark.shell) return false;
+  return true;
+}
+
+/** Page-local only. A shared connection read may still commit after navigation. */
+function invalidateKeyPage(): void {
+  keyFlow += 1;
+  loadGeneration += 1;
+  mutating.value = false;
+  keyMutation.value = "";
+  loading.value = false;
+}
+
+function operationPlaintext(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object" && "value" in value) {
+    const inner = (value as { value?: unknown }).value;
+    if (typeof inner === "string") return inner;
+  }
+  return "";
+}
+
+function readableError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  return "";
+}
+
+type KeyReceipt = { value?: unknown; revalidation?: Promise<unknown> };
+
+function asKeyReceipt(value: unknown): KeyReceipt | null {
+  if (!value || typeof value !== "object") return null;
+  return value as KeyReceipt;
+}
 
 const EMPTY_CONNECTION: ConnectionInfo = {
   gateway_port: 9042,
@@ -255,6 +317,12 @@ const EMPTY_CONNECTION: ConnectionInfo = {
   revision: 0,
 };
 const connection = computed(() => connectionStore.info ?? EMPTY_CONNECTION);
+
+/** A loaded key with no cached secret is unknown plaintext, not an unconfigured key. */
+function presentConnectionKey(value: string): string {
+  if (!value && connectionStore.info) return t("未知");
+  return maskConnectionKey(value);
+}
 
 function applyConnection(next: ConnectionInfo): void {
   if (renamingKeyId.value && !next.sub_keys.some((entry) => entry.id === renamingKeyId.value)) {
@@ -291,79 +359,75 @@ async function runKeyMutation(
   mutation: string,
   action: () => Promise<unknown>,
   successText: () => string,
-): Promise<boolean> {
-  if (!loaded.value || mutating.value) return false;
+): Promise<KeyFlowMark | null> {
+  if (!loaded.value || mutating.value) return null;
+  const mark = captureKeyFlow();
   const generation = ++loadGeneration;
   keyMutation.value = mutation;
   mutating.value = true;
-  let mutationError: unknown = null;
   try {
-    try {
-      await action();
-    } catch (error) {
-      mutationError = error;
-    }
-    try {
-      // A successful mutation already reloads plaintext. Reload here only when
-      // that read failed, or when a conflict may have changed another Key.
-      const latest = connectionStore.info && mutationError === null && !isConflict(mutationError)
-        ? connectionStore.info
-        : await connectionStore.load();
-      if (generation !== loadGeneration) return false;
-      applyConnection(latest);
-      if (mutationError === null) {
-        message.success(successText());
-        return true;
+    await action();
+    if (!keyFlowCurrent(mark) || generation !== loadGeneration) return null;
+    message.success(successText());
+    return mark;
+  } catch (error) {
+    if (!keyFlowCurrent(mark) || generation !== loadGeneration) return null;
+    if (isConflict(error)) {
+      try {
+        const latest = await connectionStore.load();
+        if (keyFlowCurrent(mark) && generation === loadGeneration) applyConnection(latest);
+      } catch {
+        // A failed read does not replay the write or clear the local draft.
       }
-      if (isConflict(mutationError)) {
+      if (keyFlowCurrent(mark)) {
         message.warning(t("接入 Key 已被其他操作修改，已刷新列表并保留本地修改，请再次保存"));
-      } else {
-        message.error(t("操作失败：{error}", { error: String(mutationError) }));
       }
-      return false;
-    } catch (reloadError) {
-      if (generation !== loadGeneration) return false;
-      loaded.value = false;
-      loadError.value = reloadError instanceof Error ? reloadError.message : String(reloadError);
-      if (mutationError === null) {
-        message.success(successText());
-      } else if (isConflict(mutationError)) {
-        message.warning(t("接入 Key 已被其他操作修改，已刷新列表并保留本地修改，请再次保存"));
-      } else {
-        message.error(t("操作失败：{error}", { error: String(mutationError) }));
-      }
-      message.error(t("加载接入 Key 失败：{error}", { error: loadError.value }));
-      return mutationError === null;
+      return null;
     }
+    message.error(t("操作失败：{error}", { error: readableError(error) }));
+    return null;
   } finally {
-    mutating.value = false;
-    keyMutation.value = "";
+    if (keyFlowCurrent(mark)) {
+      mutating.value = false;
+      keyMutation.value = "";
+    }
+  }
+}
+
+async function copyReceiptValue(receipt: unknown, mark: KeyFlowMark): Promise<void> {
+  const record = asKeyReceipt(receipt);
+  if (record?.revalidation) await record.revalidation;
+  if (!keyFlowCurrent(mark)) return;
+  const secret = operationPlaintext(record?.value);
+  if (!secret) return;
+  try {
+    await copy(`keys-secret-${mark.flow}`, secret, "Key");
+    if (!keyFlowCurrent(mark)) return;
+    message.success(t("新 Key 值已复制到剪贴板"));
+  } catch {
+    if (!keyFlowCurrent(mark)) return;
+    message.warning(t("自动复制失败，请在列表中手动复制新 Key"));
   }
 }
 
 async function rotatePrimaryKey(): Promise<void> {
-  let nextValue = "";
-  const ok = await runKeyMutation(
+  let receipt: unknown;
+  const mark = await runKeyMutation(
     "rotate-primary",
     async () => {
-      nextValue = await connectionStore.regeneratePrimaryKey();
+      receipt = await connectionStore.regeneratePrimaryKey();
+      return receipt;
     },
     () => t("Key 已刷新"),
   );
-  if (ok && nextValue) {
-    try {
-      await copy(`keys-rotated-${Date.now()}`, nextValue, "Key");
-      message.success(t("新 Key 值已复制到剪贴板"));
-    } catch {
-      message.warning(t("自动复制失败，请在列表中手动复制新 Key"));
-    }
-  }
+  if (mark) await copyReceiptValue(receipt, mark);
 }
 
 async function copyPrimaryKey(): Promise<void> {
-  if (!connection.value.primary_key) return;
+  const secret = operationPlaintext(connection.value.primary_key);
+  if (!secret) return;
   try {
-    await copy("keys-primary", connection.value.primary_key, "Key");
+    await copy("keys-primary", secret, "Key");
     message.success(t("Key 已复制"));
   } catch (error) {
     message.error(error instanceof Error ? error.message : t("复制失败"));
@@ -373,23 +437,18 @@ async function copyPrimaryKey(): Promise<void> {
 async function createKey(): Promise<void> {
   const name = newKeyName.value.trim();
   if (!name || mutating.value || !loaded.value) return;
-  let createdValue = "";
-  const ok = await runKeyMutation(
+  let receipt: unknown;
+  const mark = await runKeyMutation(
     "create",
     async () => {
-      createdValue = (await connectionStore.createKey(name)).value;
+      receipt = await connectionStore.createKey(name);
+      return receipt;
     },
     () => t("Key 已创建"),
   );
-  if (ok && createdValue) {
-    newKeyName.value = "";
-    try {
-      await copy(`keys-created-${Date.now()}`, createdValue, "Key");
-      message.success(t("新 Key 值已复制到剪贴板"));
-    } catch {
-      message.warning(t("自动复制失败，请在列表中手动复制新 Key"));
-    }
-  }
+  if (!mark) return;
+  newKeyName.value = "";
+  await copyReceiptValue(receipt, mark);
 }
 
 function startRename(entry: ConnectionSubKey): void {
@@ -408,12 +467,12 @@ async function commitRename(entry: ConnectionSubKey): Promise<void> {
     cancelRename();
     return;
   }
-  await runKeyMutation(
+  const mark = await runKeyMutation(
     `rename:${entry.id}`,
     () => connectionStore.updateKey(entry.id, { name }),
     () => t("Key 名称已保存"),
   );
-  cancelRename();
+  if (mark) cancelRename();
 }
 
 async function toggleKey(entry: ConnectionSubKey, enabled: boolean): Promise<void> {
@@ -425,9 +484,10 @@ async function toggleKey(entry: ConnectionSubKey, enabled: boolean): Promise<voi
 }
 
 async function copyEntryKey(entry: ConnectionSubKey): Promise<void> {
-  if (!entry.value) return;
+  const secret = operationPlaintext(entry.value);
+  if (!secret) return;
   try {
-    await copy(`keys-${entry.id}`, entry.value, "Key");
+    await copy(`keys-${entry.id}`, secret, "Key");
     message.success(t("Key 已复制"));
   } catch (error) {
     message.error(error instanceof Error ? error.message : t("复制失败"));
@@ -435,22 +495,16 @@ async function copyEntryKey(entry: ConnectionSubKey): Promise<void> {
 }
 
 async function regenerateEntryKey(entry: ConnectionSubKey): Promise<void> {
-  let nextValue = "";
-  const ok = await runKeyMutation(
+  let receipt: unknown;
+  const mark = await runKeyMutation(
     `regenerate:${entry.id}`,
     async () => {
-      nextValue = (await connectionStore.regenerateKey(entry.id)).value;
+      receipt = await connectionStore.regenerateKey(entry.id);
+      return receipt;
     },
     () => t("Key 已重新生成"),
   );
-  if (ok && nextValue) {
-    try {
-      await copy(`keys-regenerated-${Date.now()}`, nextValue, "Key");
-      message.success(t("新 Key 值已复制到剪贴板"));
-    } catch {
-      message.warning(t("自动复制失败，请在列表中手动复制新 Key"));
-    }
-  }
+  if (mark) await copyReceiptValue(receipt, mark);
 }
 
 async function deleteEntryKey(entry: ConnectionSubKey): Promise<void> {
@@ -470,7 +524,11 @@ onActivated(() => {
   revalidateGate.record();
   void loadConnection();
 });
-onUnmounted(cleanup);
+onDeactivated(invalidateKeyPage);
+onUnmounted(() => {
+  invalidateKeyPage();
+  cleanup();
+});
 </script>
 
 <style scoped>

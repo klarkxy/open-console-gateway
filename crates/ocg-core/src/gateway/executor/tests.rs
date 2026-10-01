@@ -1,4 +1,33 @@
 #[test]
+fn live_route_order_follows_current_credential_rank() {
+    let order = super::order_indexes_by_ids(
+        ["go", "zen", "goat"].into_iter(),
+        ["goat", "go", "zen"].into_iter(),
+    );
+    assert_eq!(order, vec![2, 0, 1]);
+}
+
+#[test]
+fn live_route_order_keeps_relative_order_and_trails_missing_accounts() {
+    let order =
+        super::order_indexes_by_ids(["a", "b", "a", "gone"].into_iter(), ["b", "a"].into_iter());
+    assert_eq!(order, vec![1, 0, 2, 3]);
+}
+
+#[test]
+fn live_route_order_is_identity_when_published_rank_matches() {
+    let order =
+        super::order_indexes_by_ids(["a", "b"].into_iter(), ["a", "b", "extra"].into_iter());
+    assert_eq!(order, vec![0, 1]);
+}
+
+#[test]
+fn live_route_order_uses_the_first_live_position_for_a_repeated_id() {
+    let order = super::order_indexes_by_ids(["b", "a"].into_iter(), ["a", "a", "b"].into_iter());
+    assert_eq!(order, vec![1, 0]);
+}
+
+#[test]
 fn selector_invariant_maps_to_internal_error() {
     for (label, failure, expected) in [
         (

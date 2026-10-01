@@ -62,7 +62,6 @@ function catalogEntry(
     verification_runtime_availability: "available",
     routable: true,
     managed_registration: false,
-    pricing_availability: "available",
     usage_availability: usageAvailability,
     manual_usage_calibration: false,
     quota_unit: "tokens",

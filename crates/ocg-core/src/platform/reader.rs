@@ -21,7 +21,7 @@
 //! Inference stays Custom HTTP. This leaf only reads account-owned metadata.
 
 use super::{
-    PlatformGroup, PlatformKind, PlatformModel, PlatformPrice, PlatformQuota, PlatformQuotaKind,
+    PlatformGroup, PlatformKind, PlatformModel, PlatformQuota, PlatformQuotaKind,
     PlatformReadRequest, PlatformSnapshot,
 };
 use crate::custom_http::join_inference_endpoint;
@@ -56,19 +56,6 @@ const CODE_SECRET: &str = "secret_reflected";
 
 const SRC_V1_MODELS: &str = "v1_models";
 const SRC_TOKEN_LIMITS: &str = "token_limits";
-const SRC_NEW_API_PRICING: &str = "new_api.pricing";
-const SRC_SUB2_OFFICIAL: &str = "sub2api.official_pricing";
-const SRC_SUB2_BILLED: &str = "sub2api.billed_pricing";
-
-const UNAVAIL_EXPRESSION: &str = "expression";
-const UNAVAIL_TIERED: &str = "tiered";
-const UNAVAIL_TIME: &str = "time_varying";
-const UNAVAIL_AUTO: &str = "auto_group";
-const UNAVAIL_PER_REQUEST: &str = "per_request";
-const UNAVAIL_MISSING_RATE: &str = "missing_rate";
-const UNAVAIL_MISSING_UNIT: &str = "missing_quota_per_unit";
-const UNAVAIL_MISSING_MULT: &str = "missing_multiplier";
-
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
@@ -642,31 +629,7 @@ async fn read_new_api(
             Err(error) => push_error(snapshot, error),
         }
     }
-
-    match get_json(
-        client,
-        base,
-        "api/pricing",
-        "new_api.pricing",
-        bearer,
-        new_api_user,
-    )
-    .await
-    {
-        Ok(fetched) => match new_api_data(&fetched.value, "new_api.pricing") {
-            Ok(_) => parse_new_api_pricing(
-                &fetched.value,
-                request,
-                user_group.as_deref(),
-                fetched.new_api_user_authenticated,
-                quota_per_unit,
-                &allowed_models,
-                snapshot,
-            ),
-            Err(error) => push_error(snapshot, error),
-        },
-        Err(error) => push_error(snapshot, error),
-    }
+    let _ = (bearer, new_api_user, request, user_group, quota_per_unit);
 }
 
 /// New API stores wallet/token amounts as integer quota points. The site
@@ -966,165 +929,6 @@ fn collect_models(
     Ok(())
 }
 
-fn parse_new_api_pricing(
-    value: &Value,
-    request: &PlatformReadRequest<'_>,
-    user_group: Option<&str>,
-    user_authenticated: bool,
-    quota_per_unit: Option<f64>,
-    allowed_models: &BTreeSet<String>,
-    snapshot: &mut PlatformSnapshot,
-) {
-    if let Some(auto) = value.get("auto_groups").and_then(Value::as_array) {
-        let groups: Vec<String> = auto
-            .iter()
-            .filter_map(|item| json_str(Some(item)).map(str::to_string))
-            .collect();
-        if !groups.is_empty() {
-            if let Some(existing) = snapshot
-                .groups
-                .iter_mut()
-                .find(|group| group.id.as_deref() == Some("auto"))
-            {
-                if existing.auto_groups.is_empty() {
-                    existing.auto_groups = groups;
-                }
-            } else {
-                snapshot.groups.push(PlatformGroup {
-                    subscription_type: None,
-                    id: Some("auto".to_string()),
-                    platform: None,
-                    auto_groups: groups,
-                    verified: true,
-                });
-            }
-        }
-    }
-
-    let selected = request
-        .group
-        .id
-        .as_deref()
-        .or(user_group)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let auto_selected = selected == Some("auto");
-    let group_ratios = value.get("group_ratio").and_then(Value::as_object);
-    let multiplier = if auto_selected {
-        None
-    } else {
-        selected.and_then(|name| json_f64(group_ratios.and_then(|map| map.get(name))))
-    };
-
-    let valid_until = snapshot_expiry(request.now);
-    let Some(rows) = payload(value).as_array() else {
-        push_error(snapshot, component_error("new_api.pricing", CODE_PARSE));
-        return;
-    };
-    if allowed_models.is_empty() {
-        return;
-    }
-    for row in rows {
-        let model = match json_str(row.get("model_name")).or_else(|| json_str(row.get("model"))) {
-            Some(name) if allowed_models.contains(name) => name.to_string(),
-            _ => continue,
-        };
-        let mut price = PlatformPrice {
-            model,
-            group_id: selected.map(str::to_string),
-            currency: "USD".to_string(),
-            input: None,
-            output: None,
-            cache_read: None,
-            cache_write: None,
-            source: SRC_NEW_API_PRICING.to_string(),
-            official_reference: false,
-            unavailable_reason: None,
-            valid_until,
-        };
-        let billing_mode = json_str(row.get("billing_mode")).unwrap_or("");
-        let billing_expr = json_str(row.get("billing_expr")).unwrap_or("");
-        if billing_mode.contains("expr")
-            || billing_mode.contains("tier")
-            || !billing_expr.is_empty()
-        {
-            price.unavailable_reason = Some(
-                if billing_mode.contains("tier") {
-                    UNAVAIL_TIERED
-                } else {
-                    UNAVAIL_EXPRESSION
-                }
-                .to_string(),
-            );
-            snapshot.prices.push(price);
-            continue;
-        }
-        let Some(quota_type) = json_i64(row.get("quota_type")) else {
-            price.unavailable_reason = Some(UNAVAIL_MISSING_RATE.into());
-            snapshot.prices.push(price);
-            continue;
-        };
-        if quota_type != 0 {
-            price.unavailable_reason = Some(UNAVAIL_PER_REQUEST.to_string());
-            snapshot.prices.push(price);
-            continue;
-        }
-        if auto_selected {
-            price.unavailable_reason = Some(UNAVAIL_AUTO.to_string());
-            snapshot.prices.push(price);
-            continue;
-        }
-        let Some(unit) = quota_per_unit else {
-            price.unavailable_reason = Some(UNAVAIL_MISSING_UNIT.to_string());
-            snapshot.prices.push(price);
-            continue;
-        };
-        let Some(group_ratio) = multiplier else {
-            price.unavailable_reason = Some(UNAVAIL_MISSING_MULT.to_string());
-            snapshot.prices.push(price);
-            continue;
-        };
-        let Some(model_ratio) = json_f64(row.get("model_ratio")) else {
-            price.unavailable_reason = Some(UNAVAIL_MISSING_RATE.to_string());
-            snapshot.prices.push(price);
-            continue;
-        };
-        // Currency per token = model_ratio * group_ratio / quota_per_unit.
-        // group_ratio is applied exactly once.
-        let input = (model_ratio * group_ratio) / unit;
-        let Some(completion) = json_f64(row.get("completion_ratio")) else {
-            price.unavailable_reason = Some(UNAVAIL_MISSING_RATE.to_string());
-            snapshot.prices.push(price);
-            continue;
-        };
-        price.input = Some(input);
-        price.output = Some(input * completion);
-        if let Some(cache_ratio) = json_f64(row.get("cache_ratio")) {
-            price.cache_read = Some(input * cache_ratio);
-        }
-        if let Some(create_ratio) = json_f64(row.get("create_cache_ratio")) {
-            price.cache_write = Some(input * create_ratio);
-        }
-        // Authenticated pricing already applies user group-to-group overrides.
-        // A supplied bearer can fall through TryUserAuth as anonymous, and Key
-        // refresh intentionally does not fetch user/self just to learn a group.
-        if !user_authenticated {
-            price.unavailable_reason = Some("user_identity_required".into());
-        } else if !row
-            .get("enable_groups")
-            .and_then(Value::as_array)
-            .is_some_and(|groups| {
-                groups
-                    .iter()
-                    .any(|g| g.as_str() == Some("all") || g.as_str() == selected)
-            })
-        {
-            price.unavailable_reason = Some("group_model_unavailable".into());
-        }
-        snapshot.prices.push(price);
-    }
-}
-
 async fn read_sub2(
     client: &reqwest::Client,
     base: &reqwest::Url,
@@ -1134,8 +938,6 @@ async fn read_sub2(
     snapshot: &mut PlatformSnapshot,
 ) {
     let mut allowed_models: BTreeSet<String> = BTreeSet::new();
-    let mut billing_multiplier: Option<f64> = None;
-    let mut peak_enabled = false;
 
     if let Some(user) = user
         && key.is_none()
@@ -1218,52 +1020,8 @@ async fn read_sub2(
             }
             Err(error) => push_error(snapshot, error),
         }
-
-        match get_json(
-            client,
-            base,
-            "v1/sub2api/billing",
-            "sub2api.billing",
-            Some(key),
-            None,
-        )
-        .await
-        {
-            Ok(fetched) => match parse_sub2_billing(&fetched.value) {
-                Ok((multiplier, peak)) => {
-                    billing_multiplier = multiplier;
-                    peak_enabled = peak;
-                }
-                Err(error) => push_error(snapshot, error),
-            },
-            Err(error) => push_error(snapshot, error),
-        }
     }
-
-    let plaza_auth = user;
-    match get_json(
-        client,
-        base,
-        "api/v1/model-plaza",
-        "sub2api.plaza",
-        plaza_auth,
-        None,
-    )
-    .await
-    {
-        Ok(fetched) => match sub2_data(&fetched.value, "sub2api.plaza") {
-            Ok(data) => parse_sub2_plaza_prices(
-                data,
-                request,
-                &allowed_models,
-                billing_multiplier,
-                peak_enabled,
-                snapshot,
-            ),
-            Err(error) => push_error(snapshot, error),
-        },
-        Err(error) => push_error(snapshot, error),
-    }
+    let _ = (user, request, allowed_models);
 }
 
 fn parse_sub2_profile(data: &Value, snapshot: &mut PlatformSnapshot) {
@@ -1416,22 +1174,6 @@ fn parse_sub2_usage(value: &Value, snapshot: &mut PlatformSnapshot) -> Result<()
     }
 }
 
-fn parse_sub2_billing(value: &Value) -> Result<(Option<f64>, bool), String> {
-    let object = json_str(value.get("object"));
-    let multiplier = json_f64(value.get("effective_rate_multiplier"))
-        .or_else(|| json_f64(value.get("resolved_rate_multiplier")));
-    if object != Some("sub2api.key_billing")
-        || json_i64(value.get("schema_version")) != Some(1)
-        || json_str(value.get("billing_scope")) != Some("token")
-    {
-        return Err(component_error("sub2api.billing", CODE_PARSE));
-    }
-    Ok((
-        multiplier,
-        json_bool(value.get("peak_rate_enabled")).unwrap_or(false),
-    ))
-}
-
 fn parse_sub2_subscriptions(data: &Value, snapshot: &mut PlatformSnapshot) {
     if !data.is_object() {
         push_error(
@@ -1528,238 +1270,6 @@ fn parse_sub2_groups(data: &Value, snapshot: &mut PlatformSnapshot) {
             verified: true,
         });
     }
-}
-
-fn parse_sub2_plaza_prices(
-    data: &Value,
-    request: &PlatformReadRequest<'_>,
-    allowed_models: &BTreeSet<String>,
-    billing_multiplier: Option<f64>,
-    billing_peak_enabled: bool,
-    snapshot: &mut PlatformSnapshot,
-) {
-    if allowed_models.is_empty() {
-        return;
-    }
-    let Some(groups) = data.get("groups").and_then(Value::as_array) else {
-        push_error(snapshot, component_error("sub2api.plaza", CODE_PARSE));
-        return;
-    };
-    let valid_until = snapshot_expiry(request.now);
-    let selected = request.group.id.as_deref();
-
-    for group in groups {
-        let group_id = json_i64(group.get("id"))
-            .map(|id| id.to_string())
-            .or_else(|| json_str(group.get("id")).map(str::to_string));
-        if let Some(selected) = selected
-            && group_id.as_deref() != Some(selected)
-            && json_str(group.get("name")) != Some(selected)
-        {
-            continue;
-        }
-        let peak_enabled =
-            billing_peak_enabled || json_bool(group.get("peak_rate_enabled")).unwrap_or(false);
-        let time_varying = peak_enabled
-            || group
-                .get("time_pricing")
-                .is_some_and(|value| !value.is_null());
-        let group_multiplier = json_f64(group.get("user_rate_multiplier"))
-            .or_else(|| json_f64(group.get("rate_multiplier")));
-        // ChannelModelPricing / userSupportedModelPricing are USD per token
-        // copies (toUserPricing does not apply group rate). Apply the resolved
-        // multiplier exactly once on the billed row only.
-        let billed_multiplier = billing_multiplier.or(group_multiplier);
-
-        let models = group
-            .get("models")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        for model in models {
-            let id = match json_str(model.get("name")).or_else(|| json_str(model.get("id"))) {
-                Some(name) if allowed_models.contains(name) => name.to_string(),
-                _ => continue,
-            };
-            if model
-                .get("time_pricing")
-                .is_some_and(|value| !value.is_null())
-            {
-                snapshot.prices.push(unavailable_price(
-                    &id,
-                    group_id.clone(),
-                    SRC_SUB2_BILLED,
-                    false,
-                    UNAVAIL_TIME,
-                    valid_until,
-                ));
-            } else {
-                snapshot.prices.push(sub2_billed_price(
-                    &model,
-                    &id,
-                    group_id.clone(),
-                    billed_multiplier,
-                    time_varying,
-                    valid_until,
-                ));
-            }
-            snapshot.prices.push(sub2_official_price(
-                &model,
-                &id,
-                group_id.clone(),
-                valid_until,
-            ));
-        }
-    }
-}
-
-fn unavailable_price(
-    model: &str,
-    group_id: Option<String>,
-    source: &str,
-    official: bool,
-    reason: &str,
-    valid_until: i64,
-) -> PlatformPrice {
-    PlatformPrice {
-        model: model.to_string(),
-        group_id,
-        currency: "USD".to_string(),
-        input: None,
-        output: None,
-        cache_read: None,
-        cache_write: None,
-        source: source.to_string(),
-        official_reference: official,
-        unavailable_reason: Some(reason.to_string()),
-        valid_until,
-    }
-}
-
-fn copy_official_rates(from: &Value, into: &mut PlatformPrice) {
-    into.input = json_f64(from.get("input_price"));
-    into.output = json_f64(from.get("output_price"));
-    into.cache_read = json_f64(from.get("cache_read_price"));
-    into.cache_write = json_f64(from.get("cache_write_price"));
-}
-
-fn sub2_official_price(
-    model: &Value,
-    id: &str,
-    group_id: Option<String>,
-    valid_until: i64,
-) -> PlatformPrice {
-    let mut price = PlatformPrice {
-        model: id.to_string(),
-        group_id,
-        currency: "USD".to_string(),
-        input: None,
-        output: None,
-        cache_read: None,
-        cache_write: None,
-        source: SRC_SUB2_OFFICIAL.to_string(),
-        official_reference: true,
-        unavailable_reason: None,
-        valid_until,
-    };
-    let Some(official) = model
-        .get("official_pricing")
-        .filter(|value| !value.is_null())
-    else {
-        price.unavailable_reason = Some(UNAVAIL_MISSING_RATE.to_string());
-        return price;
-    };
-    if official
-        .get("intervals")
-        .and_then(Value::as_array)
-        .is_some_and(|rows| !rows.is_empty())
-    {
-        price.unavailable_reason = Some(UNAVAIL_TIERED.to_string());
-        return price;
-    }
-    copy_official_rates(official, &mut price);
-    if price.input.is_none()
-        && price.output.is_none()
-        && price.cache_read.is_none()
-        && price.cache_write.is_none()
-    {
-        price.unavailable_reason = Some(UNAVAIL_MISSING_RATE.to_string());
-    }
-    price
-}
-
-fn sub2_billed_price(
-    model: &Value,
-    id: &str,
-    group_id: Option<String>,
-    multiplier: Option<f64>,
-    time_varying: bool,
-    valid_until: i64,
-) -> PlatformPrice {
-    let mut price = PlatformPrice {
-        model: id.to_string(),
-        group_id,
-        currency: "USD".to_string(),
-        input: None,
-        output: None,
-        cache_read: None,
-        cache_write: None,
-        source: SRC_SUB2_BILLED.to_string(),
-        official_reference: false,
-        unavailable_reason: None,
-        valid_until,
-    };
-    if time_varying {
-        price.unavailable_reason = Some(UNAVAIL_TIME.to_string());
-        return price;
-    }
-    let Some(pricing) = model.get("pricing").filter(|value| !value.is_null()) else {
-        price.unavailable_reason = Some(UNAVAIL_MISSING_RATE.to_string());
-        return price;
-    };
-    let billing_mode = json_str(pricing.get("billing_mode")).unwrap_or("unknown");
-    if json_f64(pricing.get("max_reasoning_effort_multiplier")).is_some_and(|m| m != 1.0) {
-        price.unavailable_reason = Some("reasoning_multiplier".into());
-        return price;
-    }
-    if billing_mode != "token" {
-        price.unavailable_reason = Some(
-            if billing_mode.contains("tier") {
-                UNAVAIL_TIERED
-            } else {
-                UNAVAIL_PER_REQUEST
-            }
-            .to_string(),
-        );
-        return price;
-    }
-    if pricing
-        .get("per_request_price")
-        .is_some_and(|value| !value.is_null())
-    {
-        price.unavailable_reason = Some(UNAVAIL_PER_REQUEST.to_string());
-        return price;
-    }
-    if pricing
-        .get("intervals")
-        .and_then(Value::as_array)
-        .is_some_and(|rows| !rows.is_empty())
-    {
-        price.unavailable_reason = Some(UNAVAIL_TIERED.to_string());
-        return price;
-    }
-    let Some(multiplier) = multiplier else {
-        price.unavailable_reason = Some(UNAVAIL_MISSING_MULT.to_string());
-        return price;
-    };
-    price.input = json_f64(pricing.get("input_price")).map(|rate| rate * multiplier);
-    price.output = json_f64(pricing.get("output_price")).map(|rate| rate * multiplier);
-    price.cache_read = json_f64(pricing.get("cache_read_price")).map(|rate| rate * multiplier);
-    price.cache_write = json_f64(pricing.get("cache_write_price")).map(|rate| rate * multiplier);
-    if price.input.is_none() || price.output.is_none() {
-        price.unavailable_reason = Some(UNAVAIL_MISSING_RATE.to_string());
-    }
-    price
 }
 
 fn parse_rfc3339_secs(value: &str) -> Option<i64> {

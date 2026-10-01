@@ -25,7 +25,7 @@
 
 编辑通过 `PATCH /dashboard/api/v4/providers/{id}` 整份替换供应商配置。供应商 id 不可变。从无鉴权改为需要 Key 时必须显式填写替换 Key，并且只写到那张单例账号。已经带 Key 的供应商会拒绝供应商更新里的 Key；请在 **账号** 页轮换 Key。只有先删除全部引用账号后才能删除供应商；不会级联删除。
 
-供应商所有字段留在 **供应商** 页。账号 **Key**、启停、顺序、备注、冷却和测试留在 **账号** 页。用户定义供应商始终未定价：没有官方用量、额度估算或价格行。请求日志仍会归因供应商、账号和模型。
+供应商所有字段留在 **供应商** 页。账号 **Key**、启停、顺序、备注、冷却和测试留在 **账号** 页。用户定义供应商不会估算请求价格，也不显示价格表。请求日志仍会归因供应商、账号和模型。没有记录到的费用保持未知，不会显示成零或免费。
 
 节点备份以当前 payload 导出，携带目的地、凭据、模型解析策略与按模型路由覆盖；导入接受 V4 至当前导出版本。当前 payload 与 schema 版本见[升级与备份](upgrade-backup.zh-CN.md)。当前 SQLite schema 把可配置 HTTP 连接存在 destinations 与 `destination_models` 上；遗留 Custom 连接保持独立并可挂多把 Key。密封 builtin 仍编译在代码里。
 
@@ -80,16 +80,16 @@ OCG 根据协议派生鉴权。它不会同时发送两类鉴权头，不会在 
 
 ## 新增内置供应商
 
-只有当供应商需要产品持有的身份、目录、账号生命周期、路由、价格/用量或 Custom API 无法表达的其他语义时，才适合新增内置集成。以当前代码为准。
+只有当供应商需要产品持有的身份、目录、账号生命周期、路由、官方用量或 Custom API 无法表达的其他语义时，才适合新增内置集成。以当前代码为准。
 
 1. 在 `crates/ocg-domain/src/ids.rs` 与 `provider.rs` 定义一个稳定的 `provider_id`、对应 Provider 行、凭据/额度语义，并穷尽扩展 `ProviderAdapterKind` 映射。Provider 与 Plan 共用 `provider_id`。
 2. 只把已经验证的协议事实加入 `crates/ocg-domain/src/protocol.rs`。请求路由使用已保存的合约。
 3. 在 `crates/ocg-gateway/src/alias.rs` 添加由代码持有的客户端 Alias 映射。保留准确上游 ID，拒绝有歧义的 raw ID；发现的新目录行不能擅自创造公开 Alias。
 4. 在 `ocg-core` 实现宿主路由 resolver。适配器只返回 `AttemptSpec`；数据库访问、Key 解密、代理选择和出站 HTTP 继续由宿主持有。
-5. 补齐账号与 **供应商** 控制面/UI 流程；只在该供应商真实支持时加入目录刷新、启停、验证、错误、冷却、价格和用量。所有面板变更都带 CAS，且只走 `/dashboard/api/v4`：用户定义供应商的创建走 onboarding commit；供应商定义编辑、账号操作、Key 轮换、绑定编辑与身份内新增凭据走挂回或原生的 V4 路由。`/dashboard/api/v3` 是 410 墓碑。
+5. 补齐账号与 **供应商** 控制面/UI 流程；只在该供应商真实支持时加入目录刷新、启停、验证、错误、冷却和官方用量。所有面板变更都带 CAS，且只走 `/dashboard/api/v4`：用户定义供应商的创建走 onboarding commit；供应商定义编辑、账号操作、Key 轮换、绑定编辑与身份内新增凭据走挂回或原生的 V4 路由。`/dashboard/api/v3` 是 410 墓碑。
 6. 更新成对用户文档与测试。按[开发](../maintainer/development.zh-CN.md)对改动的 crate 与 UI 跑对应检查。
 
-提交贡献前，请写清上游来源、鉴权方式、目录来源、支持的模型/协议组合、流式行为、错误语义、额度/价格来源，以及不产生费用的验证方案。在完整路由与控制面路径真正存在前，让新家族保持 fail closed。
+提交贡献前，请写清上游来源、鉴权方式、目录来源、支持的模型/协议组合、流式行为、错误语义、额度或余额来源，以及不产生费用的验证方案。在完整路由与控制面路径真正存在前，让新家族保持 fail closed。
 
 仓库架构细节继续阅读[扩展 Open Console Gateway](../maintainer/extending.zh-CN.md)与[运行时不变量](../maintainer/runtime-invariants.zh-CN.md)。
 

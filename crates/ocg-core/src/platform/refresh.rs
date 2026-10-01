@@ -114,6 +114,10 @@ pub(crate) fn merge_snapshot(
             .filter(|row| source_failed(incoming, &row.source))
             .cloned(),
     );
+    // A refresh that no longer carries prices must not erase the stored sheet.
+    if incoming.prices.is_empty() {
+        saved.prices.clone_from(&previous.prices);
+    }
 
     // The legacy group DTO has no source field. Retain missing last-known
     // groups only when a group-producing endpoint failed, and keep the whole

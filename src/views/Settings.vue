@@ -111,6 +111,10 @@
               <p v-if="config.gateway_port_from_env">
                 {{ t("由环境变量 OCG_GATEWAY_PORT 管理，修改后重启生效。") }}
               </p>
+              <p v-if="portRecoveryHref" class="field-caption">
+                <a :href="portRecoveryHref">{{ t(SETTINGS_RECONNECT_KIND_KEYS["manual-recovery"]) }}</a>
+                <n-button size="tiny" quaternary @click="loadSettings">{{ t("重试") }}</n-button>
+              </p>
             </div>
           </n-form-item>
           <n-form-item
@@ -154,8 +158,8 @@
             :value="config.auto_start"
             @update:value="handleAutoStartToggle"
             :aria-label="t('随系统登录自动启动 Open Console Gateway')"
-            :disabled="!loaded || saving"
-            :loading="saving"
+            :disabled="!loaded || saving || hostSaving"
+            :loading="hostSaving"
           >
             <template #checked>{{ t("开启") }}</template>
             <template #unchecked>{{ t("关闭") }}</template>
@@ -171,8 +175,8 @@
             :value="config.show_dock_icon"
             @update:value="handleDockVisibilityToggle"
             :aria-label="t('在 Dock 中显示 Open Console Gateway')"
-            :disabled="!loaded || saving"
-            :loading="saving"
+            :disabled="!loaded || saving || hostSaving"
+            :loading="hostSaving"
           >
             <template #checked>{{ t("开启") }}</template>
             <template #unchecked>{{ t("关闭") }}</template>
@@ -227,6 +231,12 @@
           </n-form-item>
         </section>
       </n-form>
+      <n-alert v-if="settingsStore.refreshError" type="warning" :title="t('设置加载失败，请重试')">
+        <div class="settings-load-error">
+          <span>{{ t("加载设置失败：{error}", { error: settingsStore.refreshError }) }}</span>
+          <n-button size="small" secondary @click="loadSettings">{{ t("重试") }}</n-button>
+        </div>
+      </n-alert>
       <n-alert v-if="settingsLoadError" type="error" :title="t('设置加载失败，请重试')">
         <div class="settings-load-error">
           <span>{{ settingsLoadError }}</span>
@@ -409,7 +419,7 @@ import {
   BgColorsOutlined,
   CloudSyncOutlined,
 } from "@vicons/antd";
-import { DashboardRequestError, dashboardApi } from "../api/dashboard";
+import { DashboardRequestError, dashboardApi, isRevisionConflict } from "../api/dashboard";
 import { useSettingsStore } from "../stores/settings.ts";
 import { useSessionStore } from "../stores/session.ts";
 import { createRevalidateGate } from "../domain/revalidate.ts";
@@ -428,6 +438,7 @@ import {
   resolveConnectionUrls,
 } from "./dashboard-connection";
 import { DEFAULT_OPENCODE_INVITE_URL } from "../domain/managed-account.ts";
+import { planSettingsReconnect, SETTINGS_RECONNECT_KIND_KEYS } from "../domain/settings-reconnect.ts";
 import { mergeUnsavedSettings } from "./settings-merge";
 import { normalizeProxyUrl, proxyModelKey, validateProxyList } from "./settings-proxy";
 import {
@@ -450,8 +461,9 @@ const message = useMessage();
 const settingsStore = useSettingsStore();
 const sessionStore = useSessionStore();
 const revalidateGate = createRevalidateGate(60_000);
-watch(() => sessionStore.authenticated, (ok) => { if (!ok) revalidateGate.reset(); });
 const saving = ref(false);
+const hostSaving = ref(false);
+const portRecoveryHref = ref("");
 const testingProxy = ref(false);
 const proxyTestResult = ref<{
   type: "success" | "error";
@@ -474,35 +486,131 @@ let updatePollDeadline = 0;
 let updatePollGeneration = 0;
 let updateDisposed = true;
 let settingsLoadGeneration = 0;
+let settingsPageEpoch = 0;
+
+type SettingsFlowMark = {
+  epoch: number;
+  session: number | undefined;
+  authenticated: boolean | undefined;
+};
+
+function captureSettingsFlow(): SettingsFlowMark {
+  const epoch = sessionStore.sessionEpoch;
+  const authenticated = sessionStore.authenticated;
+  return {
+    epoch: settingsPageEpoch,
+    session: typeof epoch === "number" ? epoch : undefined,
+    authenticated: typeof authenticated === "boolean" ? authenticated : undefined,
+  };
+}
+
+function settingsFlowOwns(mark: SettingsFlowMark): boolean {
+  if (mark.epoch !== settingsPageEpoch) return false;
+  if (mark.authenticated === true && sessionStore.authenticated === false) return false;
+  const epoch = sessionStore.sessionEpoch;
+  if (typeof epoch === "number" && mark.session !== undefined && epoch !== mark.session) return false;
+  return true;
+}
+
+function invalidateSettingsFlows(): void {
+  settingsPageEpoch += 1;
+  settingsLoadGeneration += 1;
+  saving.value = false;
+  hostSaving.value = false;
+}
+
+let settingsPageMark = captureSettingsFlow();
 
 const UPDATE_POLL_INTERVAL_MS = 1_000;
 const UPDATE_INSTALL_TIMEOUT_MS = 15 * 60_000;
 const savedConfig = ref<AppConfig | null>(null);
 let pendingSettingsMerge: { current: AppConfig; saved: AppConfig } | null = null;
+/** Last canonical snapshot applied to the editor. A later snapshot that repeats a field must not erase a local edit of that field. */
+let acceptedCanonical: AppConfig | null = null;
+
+const CANONICAL_EDIT_KEYS = [
+  "gateway_port",
+  "proxy_mode",
+  "proxy_url",
+  "proxy_list_direction",
+  "proxy_list_models",
+  "client_root_url",
+  "auto_start",
+  "show_dock_icon",
+  "connect_timeout_secs",
+  "non_stream_timeout_secs",
+  "stream_idle_timeout_secs",
+] as const satisfies readonly (keyof AppConfig)[];
+
+function sameSettingValue(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((value, index) => value === b[index]);
+  }
+  return a === b;
+}
+
+function readableSettingsError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  return "";
+}
 
 // ponytail: keep this pre-load fallback in sync with AppConfig::default().
-const config = ref<AppConfig>({
-  revision: 0,
-  gateway_port: 9042,
-  gateway_port_from_env: false,
-  proxy_mode: "auto",
-  proxy_url: "",
-  proxy_list_direction: "whitelist",
-  proxy_list_models: [],
-  proxy_supported_models: [],
-  opencode_invite_url: DEFAULT_OPENCODE_INVITE_URL,
-  client_root_url: "",
-  client_root_url_from_env: false,
-  auto_start: false,
-  auto_start_supported: false,
-  show_dock_icon: true,
-  dock_visibility_supported: false,
-  connect_timeout_secs: 30,
-  non_stream_timeout_secs: 900,
-  stream_idle_timeout_secs: 300,
-  routing_mode: "strict-priority",
-  conversation_sticky: false,
+function defaultSettingsConfig(): AppConfig {
+  return {
+    revision: 0,
+    process_generation: 0,
+    gateway_port: 9042,
+    gateway_port_from_env: false,
+    proxy_mode: "auto",
+    proxy_url: "",
+    proxy_list_direction: "whitelist",
+    proxy_list_models: [],
+    proxy_supported_models: [],
+    opencode_invite_url: DEFAULT_OPENCODE_INVITE_URL,
+    client_root_url: "",
+    client_root_url_from_env: false,
+    auto_start: false,
+    auto_start_supported: false,
+    show_dock_icon: true,
+    dock_visibility_supported: false,
+    connect_timeout_secs: 30,
+    non_stream_timeout_secs: 900,
+    stream_idle_timeout_secs: 300,
+    routing_mode: "strict-priority",
+    conversation_sticky: false,
+  };
+}
+
+const config = ref<AppConfig>(defaultSettingsConfig());
+
+function resetSettingsEditor(): void {
+  invalidateSettingsFlows();
+  loaded.value = false;
+  savedConfig.value = null;
+  acceptedCanonical = null;
+  pendingSettingsMerge = null;
+  portRecoveryHref.value = "";
+  settingsLoadError.value = "";
+  config.value = defaultSettingsConfig();
+  revalidateGate.reset();
+}
+
+watch(() => sessionStore.authenticated, (ok) => {
+  if (!ok) resetSettingsEditor();
+  else settingsPageMark = captureSettingsFlow();
 });
+
+// The store stamps a PUT receipt onto the last displayed snapshot and clears
+// canonicalConfirmed. That object is not a fetched resource. Only a committed
+// GET may advance revision, process, and normalized or capability fields.
+watch(
+  () => (settingsStore.canonicalConfirmed ? settingsStore.settings : null),
+  (canonical) => {
+    if (!canonical || !settingsFlowOwns(settingsPageMark)) return;
+    acceptSettingsSnapshot(canonical);
+  },
+);
 
 const proxyModeHelp = computed(() => {
   const help: Record<ProxyMode, MessageKey> = {
@@ -732,30 +840,80 @@ async function loadSettings(): Promise<boolean> {
 
 async function loadSettingsOnce(generation: number): Promise<boolean> {
   try {
-    const nextConfig = await settingsStore.loadPresented();
+    await settingsStore.loadPresented();
     if (generation !== settingsLoadGeneration) return false;
-    acceptSettingsSnapshot(nextConfig);
+    // The store returns the raw body even when a newer write invalidated it.
+    // The editor adopts only the canonical snapshot that write actually committed.
+    const canonical = confirmedCanonical();
+    if (!canonical) return false;
+    acceptSettingsSnapshot(canonical);
     return true;
   } catch (e) {
     if (generation !== settingsLoadGeneration) return false;
-    settingsLoadError.value = e instanceof Error ? e.message : String(e);
+    settingsLoadError.value = readableSettingsError(e);
     message.error(t("加载设置失败：{error}", { error: settingsLoadError.value }));
     return false;
   }
 }
 
+function confirmedCanonical(): AppConfig | null {
+  if (!settingsStore.canonicalConfirmed) return null;
+  return settingsStore.settings;
+}
+
+/** A confirmed snapshot that replaced the object observed before this write. */
+function freshCanonical(before: AppConfig | null): AppConfig | null {
+  const now = confirmedCanonical();
+  if (!now || now === before) return null;
+  return now;
+}
+
+function applyAckMetadata(projection: AppConfig, submitted: AppConfig): void {
+  config.value = {
+    ...config.value,
+    revision: projection.revision,
+    process_generation: projection.process_generation,
+  };
+  savedConfig.value = {
+    ...submitted,
+    revision: projection.revision,
+    process_generation: projection.process_generation,
+  };
+}
+
 async function reloadSettingsAfterConflict(
   error: unknown,
-  current = { ...config.value },
-  saved = savedConfig.value ? { ...savedConfig.value } : null,
+  mark: SettingsFlowMark,
+  before: AppConfig | null,
+  saved: AppConfig | null,
 ): Promise<boolean> {
   if (!(error instanceof DashboardRequestError) || error.status !== 409) return false;
-  pendingSettingsMerge = saved ? { current, saved } : null;
+  if (!settingsFlowOwns(mark)) return true;
+  const recovered = freshCanonical(before);
+  if (recovered) {
+    pendingSettingsMerge = saved ? { current: { ...config.value }, saved } : null;
+    acceptSettingsSnapshot(recovered);
+    if (settingsFlowOwns(mark)) {
+      message.warning(t("设置已被其他操作修改，已合并最新设置并保留本地修改，请再次保存"));
+    }
+    return true;
+  }
+  // The store already attempted the conflict reload. A second GET would hide
+  // a failed recovery and must not replay the rejected write.
+  if (isRevisionConflict(error)) {
+    if (settingsFlowOwns(mark)) {
+      message.error(t("保存失败：{error}", { error: readableSettingsError(error) }));
+    }
+    return true;
+  }
+  pendingSettingsMerge = saved ? { current: { ...config.value }, saved } : null;
   if (await loadSettings()) {
+    if (!settingsFlowOwns(mark)) return true;
     message.warning(t("设置已被其他操作修改，已合并最新设置并保留本地修改，请再次保存"));
   } else {
+    if (!settingsFlowOwns(mark)) return true;
     pendingSettingsMerge = null;
-    message.error(t("保存失败：{error}", { error: String(error) }));
+    message.error(t("保存失败：{error}", { error: readableSettingsError(error) }));
   }
   return true;
 }
@@ -767,21 +925,41 @@ async function saveSettings() {
   if (!normalizeProxyInput()) return;
   if (!normalizeProxyListInput()) return;
   if (!validateTimeouts()) return;
+  const mark = captureSettingsFlow();
   saving.value = true;
   const payload = { ...config.value };
   const saved = savedConfig.value ? { ...savedConfig.value } : null;
+  const previousGatewayPort = saved?.gateway_port ?? payload.gateway_port;
+  const before = settingsStore.settings;
   try {
-    const result = await settingsStore.putPresented(payload);
-    payload.revision = result.revision;
-    config.value.revision = result.revision;
-    savedConfig.value = { ...payload };
+    const projection = await settingsStore.putPresented(payload);
+    if (!settingsFlowOwns(mark)) return;
+    const canonical = freshCanonical(before);
+    if (canonical) {
+      // The detached GET already committed. Merge against the submitted draft
+      // so in-flight edits survive and server normalization still lands.
+      pendingSettingsMerge = { current: { ...config.value }, saved: payload };
+      acceptSettingsSnapshot(canonical);
+    } else {
+      applyAckMetadata(projection, payload);
+    }
+    if (!settingsFlowOwns(mark)) return;
     message.success(t("设置已保存"));
+    const plan = planSettingsReconnect({
+      href: window.location.href,
+      previousGatewayPort,
+      nextGatewayPort: payload.gateway_port,
+      dev: import.meta.env.DEV,
+    });
+    portRecoveryHref.value = plan.kind === "manual-recovery" ? plan.href : "";
   } catch (e) {
-    if (!(await reloadSettingsAfterConflict(e, payload, saved))) {
-      message.error(t("保存失败：{error}", { error: String(e) }));
+    if (!settingsFlowOwns(mark)) return;
+    if (!(await reloadSettingsAfterConflict(e, mark, before, saved))) {
+      if (!settingsFlowOwns(mark)) return;
+      message.error(t("保存失败：{error}", { error: readableSettingsError(e) }));
     }
   } finally {
-    saving.value = false;
+    if (settingsFlowOwns(mark)) saving.value = false;
   }
 }
 
@@ -864,50 +1042,64 @@ async function testProxyConnection() {
   }
 }
 
-async function handleAutoStartToggle(newValue: boolean) {
-  if (!loaded.value || !savedConfig.value) return;
-  const saved = { ...savedConfig.value };
-  const current = { ...config.value, auto_start: newValue };
-  const next = { ...saved, auto_start: newValue };
-  saving.value = true;
+async function patchHostToggle(
+  field: "auto_start" | "show_dock_icon",
+  newValue: boolean,
+  failure: MessageKey,
+): Promise<void> {
+  if (!loaded.value || saving.value || hostSaving.value) return;
+  const previous = config.value[field];
+  config.value[field] = newValue;
+  const mark = captureSettingsFlow();
+  const before = settingsStore.settings;
+  hostSaving.value = true;
+  const patch = field === "auto_start"
+    ? { auto_start: newValue }
+    : { show_dock_icon: newValue };
   try {
-    const result = await settingsStore.putPresented(next);
-    next.revision = result.revision;
-    savedConfig.value = { ...next };
-    config.value.auto_start = newValue;
-    config.value.revision = result.revision;
+    await settingsStore.patchPresented(patch);
+    if (!settingsFlowOwns(mark)) return;
+    const canonical = freshCanonical(before);
+    if (canonical && savedConfig.value) {
+      pendingSettingsMerge = {
+        current: { ...config.value },
+        saved: { ...savedConfig.value, ...patch },
+      };
+      acceptSettingsSnapshot(canonical);
+    } else if (savedConfig.value) {
+      savedConfig.value = { ...savedConfig.value, ...patch };
+    }
+    if (!settingsFlowOwns(mark)) return;
     message.success(t("设置已保存"));
-  } catch (e) {
-    if (!(await reloadSettingsAfterConflict(e, current, saved))) {
-      config.value.auto_start = savedConfig.value.auto_start;
-      message.error(t("自动启动设置失败：{error}", { error: String(e) }));
+  } catch (error) {
+    if (!settingsFlowOwns(mark)) return;
+    const recovered = freshCanonical(before);
+    const canonical = confirmedCanonical();
+    if (isRevisionConflict(error) && recovered) {
+      pendingSettingsMerge = savedConfig.value
+        ? { current: { ...config.value }, saved: { ...savedConfig.value } }
+        : null;
+      acceptSettingsSnapshot(recovered);
+      message.warning(t("设置已被其他操作修改，已合并最新设置并保留本地修改，请再次保存"));
+    } else if (isRevisionConflict(error) && canonical) {
+      config.value[field] = canonical[field];
+      if (savedConfig.value) savedConfig.value = { ...savedConfig.value, [field]: canonical[field] };
+      message.warning(t("设置已被其他操作修改，已合并最新设置并保留本地修改，请再次保存"));
+    } else {
+      config.value[field] = previous;
+      message.error(t(failure, { error: readableSettingsError(error) }));
     }
   } finally {
-    saving.value = false;
+    if (settingsFlowOwns(mark)) hostSaving.value = false;
   }
 }
 
+async function handleAutoStartToggle(newValue: boolean) {
+  await patchHostToggle("auto_start", newValue, "自动启动设置失败：{error}");
+}
+
 async function handleDockVisibilityToggle(newValue: boolean) {
-  if (!loaded.value || !savedConfig.value) return;
-  const saved = { ...savedConfig.value };
-  const current = { ...config.value, show_dock_icon: newValue };
-  const next = { ...saved, show_dock_icon: newValue };
-  saving.value = true;
-  try {
-    const result = await settingsStore.putPresented(next);
-    next.revision = result.revision;
-    savedConfig.value = { ...next };
-    config.value.show_dock_icon = newValue;
-    config.value.revision = result.revision;
-    message.success(t("设置已保存"));
-  } catch (e) {
-    if (!(await reloadSettingsAfterConflict(e, current, saved))) {
-      config.value.show_dock_icon = savedConfig.value.show_dock_icon;
-      message.error(t("Dock 图标设置失败：{error}", { error: String(e) }));
-    }
-  } finally {
-    saving.value = false;
-  }
+  await patchHostToggle("show_dock_icon", newValue, "Dock 图标设置失败：{error}");
 }
 
 function normalizeClientRootInput(): boolean {
@@ -937,10 +1129,25 @@ function validateTimeouts(): boolean {
 
 function acceptSettingsSnapshot(latest: AppConfig) {
   const pending = pendingSettingsMerge;
+  const current = pending?.current ?? { ...config.value };
+  const saved = pending?.saved ?? (savedConfig.value ? { ...savedConfig.value } : null);
+  const previous = acceptedCanonical;
+  let merged = loaded.value && saved
+    ? mergeUnsavedSettings(latest, current, saved)
+    : { ...latest };
+  // A canonical field that is unchanged from the last committed snapshot is
+  // not new server state. Keep the editor's value, including an edit that
+  // was just acknowledged and would otherwise look clean.
+  if (loaded.value && previous) {
+    for (const key of CANONICAL_EDIT_KEYS) {
+      if (sameSettingValue(latest[key], previous[key])) {
+        merged = { ...merged, [key]: current[key] };
+      }
+    }
+  }
+  acceptedCanonical = { ...latest };
   savedConfig.value = { ...latest };
-  config.value = pending
-    ? mergeUnsavedSettings(latest, pending.current, pending.saved)
-    : latest;
+  config.value = merged;
   pendingSettingsMerge = null;
   loaded.value = true;
   settingsLoadError.value = "";
@@ -1185,6 +1392,7 @@ async function installAvailableUpdate() {
 
 onMounted(() => {
   updateDisposed = false;
+  settingsPageMark = captureSettingsFlow();
   void loadSettings();
   void restoreUpdateState();
 });
@@ -1201,6 +1409,7 @@ onActivated(() => {
   void loadSettings();
 });
 onUnmounted(() => {
+  invalidateSettingsFlows();
   updateDisposed = true;
   cancelUpdatePolling();
 });

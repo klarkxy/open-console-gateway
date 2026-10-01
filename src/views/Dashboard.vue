@@ -53,7 +53,7 @@
                       @click="selectGatewayKey(entry.id)"
                     >
                       <span class="col-start-1 flex min-w-0 items-center gap-2"><span class="overflow-hidden text-ellipsis whitespace-nowrap text-[length:var(--ocg-font-sm)]">{{ entry.name }}</span><span v-if="entry.id === PRIMARY_KEY_ID" class="flex-none text-[length:var(--ocg-font-xs)] text-muted">{{ t("主 Key") }}</span></span>
-                      <code class="col-start-1 font-mono text-[length:var(--ocg-font-xs)] text-muted">{{ maskConnectionKey(entry.value) }}</code>
+                      <code class="col-start-1 font-mono text-[length:var(--ocg-font-xs)] text-muted">{{ presentConnectionKey(entry.value) }}</code>
                       <n-icon v-if="entry.id === selectedKey?.id" class="col-start-2 row-span-2 row-start-1 text-primary" size="14" aria-hidden="true"><CheckOutlined /></n-icon>
                     </button>
                   </div>
@@ -64,20 +64,15 @@
             <div class="row-actions">
               <n-popconfirm :positive-text="t('生成新 Key')" :negative-text="t('取消')" @positive-click="regenerateKey">
                 <template #trigger>
-                  <OcgTooltip :delay="200">
-                    <template #trigger>
-                      <n-button circle quaternary size="small" :aria-label="t('刷新 Key')" :loading="refreshingKey" :disabled="refreshingKey || loading || !selectedKey">
-                        <template #icon><n-icon :component="ReloadOutlined" /></template>
-                      </n-button>
-                    </template>
-                    {{ t("刷新 Key") }}
-                  </OcgTooltip>
+                  <n-button circle quaternary size="small" :aria-label="t('刷新 Key')" :title="t('刷新 Key')" :loading="refreshingKey" :disabled="refreshingKey || loading || !selectedKey">
+                    <template #icon><n-icon :component="ReloadOutlined" /></template>
+                  </n-button>
                 </template>
                 {{ t("仅当前 Key 的旧值立即失效，其他 Key 不受影响。确定生成新值？") }}
               </n-popconfirm>
               <OcgTooltip :delay="200">
                 <template #trigger>
-                  <n-button circle quaternary size="small" :aria-label="t('复制 Key')" :disabled="refreshingKey || !selectedKey" @click="copyConnection('key', selectedKey?.value ?? '', t('Key'))">
+                  <n-button circle quaternary size="small" :aria-label="t('复制 Key')" :disabled="refreshingKey || !selectedKey?.value" @click="copyConnection('key', selectedKey?.value ?? '', t('Key'))">
                     <template #icon><n-icon :component="copiedTarget === 'key' ? CheckOutlined : CopyOutlined" /></template>
                   </n-button>
                 </template>
@@ -92,6 +87,12 @@
             </div>
           </div>
         </div>
+        <n-alert v-if="connectionStore.refreshError" type="warning" :title="t('接入 Key 加载失败，请重试')">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <span>{{ t("加载接入 Key 失败：{error}", { error: connectionStore.refreshError }) }}</span>
+            <n-button size="small" secondary :loading="connectionReadLoading" @click="reloadConnection">{{ t("重试") }}</n-button>
+          </div>
+        </n-alert>
         <p v-if="connectionUrls.insecureHttp" class="connection-warning" role="status">{{ t("非本机 HTTP 会明文传输 Key 与请求内容，仅在可信网络中使用。") }}</p>
       </div>
       <img :src="characterImage" alt="" class="hero-character" aria-hidden="true" />
@@ -145,7 +146,6 @@ import type { Account, ConnectionInfo, DailyModelTokens, DashboardSummary } from
 import { CHART_PALETTE } from "../theme";
 import { t } from "../i18n/index.ts";
 import { formatNumber, formatTokens, useClipboard } from "../utils/format.ts";
-import { userFacingError } from "../utils/errors.ts";
 import { accountExpiry } from "../domain/account-display.ts";
 import { accountExpiryText } from "./account-status-text.ts";
 import { maskConnectionKey, resolveConnectionUrls } from "./dashboard-connection";
@@ -173,6 +173,8 @@ const summaryLoaded = ref(false);
 const tokensLoaded = ref(false);
 const dashboardError = ref(false);
 const refreshingKey = ref(false);
+const connectionReadLoading = ref(false);
+let connectionReadGeneration = 0;
 const lifecycleNow = ref(Date.now());
 const EMPTY_CONNECTION: ConnectionInfo = { gateway_port: 9042, client_root_url: "", primary_key: "", sub_keys: [], revision: 0 };
 const serviceConfig = computed(() => connectionStore.info ?? EMPTY_CONNECTION);
@@ -184,15 +186,21 @@ const legendModels = computed(() => {
   return [...totals.keys()].sort((a, b) => totals.get(b)! - totals.get(a)!).map((model, index) => ({ model, color: CHART_PALETTE[index % CHART_PALETTE.length] }));
 });
 const totalChartTokens = computed(() => dailyTokens.value.reduce((sum, row) => sum + row.tokens, 0));
-const maskedKey = computed(() => maskConnectionKey(selectedKey.value?.value ?? ""));
+/** A loaded key with no cached secret is unknown plaintext, not an unconfigured key. */
+function presentConnectionKey(value: string): string {
+  if (!value && connectionStore.info) return t("未知");
+  return maskConnectionKey(value);
+}
+const maskedKey = computed(() => presentConnectionKey(selectedKey.value?.value ?? ""));
 const enabledGatewayKeys = computed<SwitcherKey[]>(() => [
   { id: PRIMARY_KEY_ID, name: t("主 Key"), value: serviceConfig.value.primary_key },
   ...serviceConfig.value.sub_keys.filter((entry) => entry.enabled).map((entry) => ({ id: entry.id, name: entry.name, value: entry.value })),
 ]);
 const keyMenuOpen = ref(false);
 const selectedKey = computed<SwitcherKey | null>(() => {
+  if (!connectionStore.info) return null;
   const keys = enabledGatewayKeys.value;
-  if (keys.length === 0 || !keys[0].value) return null;
+  if (keys.length === 0) return null;
   return keys.find((entry) => entry.id === selectedKeyId.value) ?? keys[0];
 });
 watch(enabledGatewayKeys, (keys) => {
@@ -227,23 +235,51 @@ function attentionTagType(reason: AttentionReason): "error" | "warning" | "info"
 }
 function attentionItemAriaLabel(item: AttentionItem): string { return `${item.accountName} · ${attentionLabel(item)}`; }
 async function copyConnection(target: ConnectionTarget, value: string, label: string) {
+  if (typeof value !== "string" || (target === "key" && value.length === 0)) return;
   try { await copy(target, value, label); message.success(t("已复制 {label}", { label })); }
   catch (e) { message.error(e instanceof Error ? e.message : t("复制失败")); }
+}
+let keyFlow = 0;
+function dashboardKeyCurrent(flow: number, connectionEpoch: number | null, shellEpoch: number | undefined): boolean {
+  if (flow !== keyFlow) return false;
+  const current = connectionStore.currentSession;
+  if (typeof current === "function" && connectionEpoch !== null && current() !== connectionEpoch) return false;
+  if (typeof sessionStore.sessionEpoch === "number" && shellEpoch !== undefined && sessionStore.sessionEpoch !== shellEpoch) return false;
+  return true;
 }
 async function regenerateKey() {
   const target = selectedKey.value;
   if (refreshingKey.value || dashboardRequestActive || !target) return;
+  const flow = ++keyFlow;
+  const connectionEpoch = typeof connectionStore.currentSession === "function" ? connectionStore.currentSession() : null;
+  const shellEpoch = typeof sessionStore.sessionEpoch === "number" ? sessionStore.sessionEpoch : undefined;
   const isPrimary = target.id === PRIMARY_KEY_ID;
   refreshingKey.value = true;
   try {
     if (isPrimary) await connectionStore.regeneratePrimaryKey();
     else await connectionStore.regenerateKey(target.id);
+    if (!dashboardKeyCurrent(flow, connectionEpoch, shellEpoch)) return;
     selectedKeyId.value = target.id;
     message.success(t("Key 已刷新"));
   } catch (error) {
-    dashboardError.value = true;
-    message.error(t("刷新 Key 失败：{error}", { error: userFacingError(error, t("无法连接到本地服务，请确认程序正在运行后重试")) }));
+    if (!dashboardKeyCurrent(flow, connectionEpoch, shellEpoch)) return;
+    const detail = error instanceof Error
+      ? error.message
+      : t("无法连接到本地服务，请确认程序正在运行后重试");
+    message.error(t("刷新 Key 失败：{error}", { error: detail }));
   } finally { refreshingKey.value = false; }
+}
+async function reloadConnection(): Promise<void> {
+  if (connectionReadLoading.value) return;
+  const generation = ++connectionReadGeneration;
+  connectionReadLoading.value = true;
+  try {
+    await connectionStore.load();
+  } catch {
+    // A failed read keeps the last connection snapshot and the selected key.
+  } finally {
+    if (generation === connectionReadGeneration) connectionReadLoading.value = false;
+  }
 }
 function goToAccounts() { emit("navigate", "accounts"); }
 function goToKeys() { emit("navigate", "keys"); }

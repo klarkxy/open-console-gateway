@@ -282,8 +282,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, onActivated, onMounted, onUnmounted, ref, watch } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { computed, h, nextTick, onActivated, onMounted, onUnmounted, ref, watch } from "vue";
+import { useRoute, useRouter, onBeforeRouteUpdate, type LocationQuery } from "vue-router";
 import {
   NAlert,
   NButton,
@@ -346,7 +346,6 @@ const sortValues = new Set<SortBy>([
 
 const route = useRoute();
 const router = useRouter();
-const query = new URLSearchParams(routeQuerySearch("logs", route.query));
 const message = useMessage();
 const accountsStore = useAccountsStore();
 const providersStore = useProvidersStore();
@@ -357,36 +356,34 @@ const {
   models, clientKeys,
 } = storeToRefs(observabilityStore);
 const { copiedTarget, copy, cleanup } = useClipboard();
-const activeTab = ref<LogTab>(query.get("tab") === "gateway" ? "gateway" : "forward");
+const activeTab = ref<LogTab>("forward");
 const accounts = computed(() => accountsStore.accounts);
 const providerCatalog = computed(() => providersStore.catalog);
-const queryStatus = query.get("status") ?? "";
-const statusFilter = ref<string>(queryStatus === "success_unpriced" ? "success" : queryStatus);
-const accountFilter = ref<string>(query.get("account") ?? "");
-const modelFilter = ref<string>(query.get("model") ?? "");
-const keyFilter = ref<string>(query.get("key") ?? "");
-const providerFilter = ref<string>(query.get("provider") ?? "");
-const routeAccountFilter = ref<string>(query.get("route_account") ?? "");
-const credentialAccountFilter = ref<string>(query.get("credential_account") ?? "");
-const requestIdFilter = ref<string>(query.get("request_id") ?? "");
-const gatewayLevelFilter = ref<GatewayLogLevel>(parseGatewayLogLevel(query.get("level")));
-const gatewayCategoryFilter = ref(query.get("category") ?? "");
-const querySort = query.get("sort");
-const queryOrder = query.get("order");
-const sortBy = ref<SortBy>(
-  querySort !== null && sortValues.has(querySort as SortBy) ? querySort as SortBy : "timestamp",
-);
-const sortOrder = ref<SortOrder>(queryOrder === "asc" || queryOrder === "desc" ? queryOrder : "desc");
+const statusFilter = ref<string>("");
+const accountFilter = ref<string>("");
+const modelFilter = ref<string>("");
+const keyFilter = ref<string>("");
+const providerFilter = ref<string>("");
+const routeAccountFilter = ref<string>("");
+const credentialAccountFilter = ref<string>("");
+const requestIdFilter = ref<string>("");
+const gatewayLevelFilter = ref<GatewayLogLevel>("");
+const gatewayCategoryFilter = ref("");
+const sortBy = ref<SortBy>("timestamp");
+const sortOrder = ref<SortOrder>("desc");
 const advancedFilterCount = computed(() => [
   requestIdFilter.value, accountFilter.value, keyFilter.value, providerFilter.value,
   routeAccountFilter.value, credentialAccountFilter.value,
   sortBy.value !== 'timestamp' ? sortBy.value : '',
 ].filter(Boolean).length);
-const showAdvancedFilters = ref(advancedFilterCount.value > 0);
+const timeRange = ref<[number, number] | null>(resolveTimeRange("last24h", null));
+const activePreset = ref<TimePreset>("last24h");
+const customTimeRange = ref<[number, number] | null>(timeRange.value);
+const showTimePanel = ref(false);
 
-function parseQueryTimeRange(): [number, number] | null {
-  const start = query.get("start");
-  const end = query.get("end");
+function parseQueryTimeRange(params: URLSearchParams): [number, number] | null {
+  const start = params.get("start");
+  const end = params.get("end");
   if (!start || !end) return null;
   const startMs = Date.parse(start);
   const endMs = Date.parse(end);
@@ -394,20 +391,53 @@ function parseQueryTimeRange(): [number, number] | null {
   return [startMs, endMs];
 }
 
-const initialTimeRange = parseQueryTimeRange();
-const queryPreset = query.get("range");
-const initialPreset: TimePreset = initialTimeRange
-  ? "custom"
-  : queryPreset !== null
-      && queryPreset !== "custom"
-      && timePresetValues.has(queryPreset as TimePreset)
-    ? queryPreset as TimePreset
-    : "last24h";
-const initialRange = initialTimeRange ?? resolveTimeRange(initialPreset, null);
-const timeRange = ref<[number, number] | null>(initialRange);
-const activePreset = ref<TimePreset>(initialPreset);
-const customTimeRange = ref<[number, number] | null>(initialRange);
-const showTimePanel = ref(false);
+function sameTimeRange(a: [number, number] | null, b: [number, number] | null): boolean {
+  return a === b || (a !== null && b !== null && a[0] === b[0] && a[1] === b[1]);
+}
+
+// Restore filter state from a logs URL. Setup runs this once for the inbound
+// deep link; the route watcher further down reuses it for same-instance
+// navigations. Values that round-trip our own syncQueryState writes compare
+// equal and are kept as-is, so router.replace echoes never look like changes.
+function applyRouteQuery(search: string): void {
+  const params = new URLSearchParams(search);
+  activeTab.value = params.get("tab") === "gateway" ? "gateway" : "forward";
+  const status = params.get("status") ?? "";
+  statusFilter.value = status === "success_unpriced" ? "success" : status;
+  accountFilter.value = params.get("account") ?? "";
+  modelFilter.value = params.get("model") ?? "";
+  keyFilter.value = params.get("key") ?? "";
+  providerFilter.value = params.get("provider") ?? "";
+  routeAccountFilter.value = params.get("route_account") ?? "";
+  credentialAccountFilter.value = params.get("credential_account") ?? "";
+  requestIdFilter.value = params.get("request_id") ?? "";
+  gatewayLevelFilter.value = parseGatewayLogLevel(params.get("level"));
+  gatewayCategoryFilter.value = params.get("category") ?? "";
+  const sort = params.get("sort");
+  sortBy.value = sort !== null && sortValues.has(sort as SortBy) ? sort as SortBy : "timestamp";
+  const order = params.get("order");
+  sortOrder.value = order === "asc" || order === "desc" ? order : "desc";
+  const queryRange = parseQueryTimeRange(params);
+  const preset = params.get("range");
+  const nextPreset: TimePreset = queryRange
+    ? "custom"
+    : preset !== null
+        && preset !== "custom"
+        && timePresetValues.has(preset as TimePreset)
+      ? preset as TimePreset
+      : "last24h";
+  // A preset window re-anchors only when the preset changes; loaders resolve
+  // the live window from the preset, so the stored range is just a display
+  // anchor and reusing it avoids echo writes that would read as a change.
+  const nextRange = queryRange
+    ?? (nextPreset === activePreset.value ? timeRange.value : resolveTimeRange(nextPreset, null));
+  activePreset.value = nextPreset;
+  if (!sameTimeRange(timeRange.value, nextRange)) timeRange.value = nextRange;
+  if (!sameTimeRange(customTimeRange.value, nextRange)) customTimeRange.value = nextRange;
+}
+
+applyRouteQuery(routeQuerySearch("logs", route.query));
+const showAdvancedFilters = ref(advancedFilterCount.value > 0);
 const forwardPage = ref(1);
 const gatewayPage = ref(1);
 const pageSize = 20;
@@ -477,7 +507,7 @@ const sortOptions = computed(() => [
   { label: t("输入"), value: "prompt_tokens" },
   { label: t("输出"), value: "completion_tokens" },
   { label: t("缓存"), value: "cached_tokens" },
-  { label: t("额度消耗（估算）"), value: "cost" },
+  { label: t("旧口径"), value: "cost" },
 ]);
 // Provider options come from the loaded accounts' provider ids;
 // route/credential account options reuse the same account list. All three are
@@ -547,17 +577,21 @@ function applyCustomTimeRange(value: [number, number] | null) {
 }
 
 function formatQuotaCost(row: ForwardLog): string {
-  if (row.cost_state === "free") {
-    return t("免费");
-  }
-  if (row.cost === null || row.cost_state === "unpriced" || row.cost_state === "outcome_unknown") {
+  const cost = row.cost;
+  if (
+    cost === null
+    || row.cost_state === "free"
+    || row.cost_state === "unpriced"
+    || row.cost_state === "outcome_unknown"
+    || !Number.isFinite(cost)
+    || cost <= 0
+  ) {
     return "—";
   }
-  return formatCost(row.cost, 5);
+  return formatCost(cost, 5);
 }
 
-// Original-currency platform token estimate; never a quota debit or wallet
-// charge, so it renders in its own column and is never summed with USD.
+// Stored native amount from an earlier record. Missing and non-positive values stay blank.
 function formatNativeCost(row: ForwardLog): string {
   const estimate = forwardLogNativeEstimate(row);
   return estimate ? formatNativeCostEstimate(estimate, locale.value) : "—";
@@ -641,10 +675,7 @@ const forwardColumns = computed(() => [
         ? { label: sourceLabel, type: row.error_source === "downstream" ? "warning" as const : "error" as const }
         : statusMeta.value[presentedStatus] ?? { label: presentedStatus, type: "default" as const };
       const tags = [h(NTag, { type: meta.type, size: "small", bordered: false }, { default: () => meta.label })];
-      if (row.cost_state === "free") {
-        tags.push(h(NTag, { type: "success", size: "small", bordered: false }, { default: () => t("免费") }));
-      }
-      if (row.cost_state === "legacy_estimate") {
+      if (row.cost_state === "legacy_estimate" && formatQuotaCost(row) !== "—") {
         tags.push(h(NTag, { type: "default", size: "small", bordered: false }, { default: () => t("旧口径") }));
       }
       return h("div", { class: "status-tags" }, tags);
@@ -657,8 +688,8 @@ const forwardColumns = computed(() => [
   { title: t("输出"), key: "completion_tokens", width: 92, align: "right" as const, render: (row: ForwardLog) => formatNumber(row.completion_tokens) },
   { title: t("缓存"), key: "cached_tokens", width: 92, align: "right" as const, render: (row: ForwardLog) => formatNumber(row.cached_tokens) },
   { title: t("缓存写"), key: "cache_creation_tokens", width: 92, align: "right" as const, render: (row: ForwardLog) => formatNumber(row.cache_creation_tokens) },
-  { title: t("额度消耗（估算）"), key: "cost", width: 152, align: "right" as const, render: formatQuotaCost },
-  { title: t("平台估算（原始货币）"), key: "native_cost", width: 150, align: "right" as const, render: formatNativeCost },
+  { title: t("旧口径"), key: "cost", width: 152, align: "right" as const, render: formatQuotaCost },
+  { title: t("原始供应商成本"), key: "native_cost", width: 150, align: "right" as const, render: formatNativeCost },
   { title: t("错误"), key: "error_message", minWidth: 220, ellipsis: { tooltip: true } },
 ]);
 
@@ -703,6 +734,76 @@ function syncQueryState() {
   if (sortOrder.value) query.order = sortOrder.value;
   void router.replace({ query });
 }
+
+// Query keys this view writes and reads back; a navigation carrying any of
+// them is a logs deep link that owns the filter state.
+const LOGS_QUERY_KEYS = [
+  "tab", "status", "account", "model", "key", "provider", "route_account",
+  "credential_account", "request_id", "level", "category", "start", "end",
+  "range", "sort", "order",
+];
+
+// Set while a route-driven restore assigns filters; the filter watchers skip
+// their own sync/load then, so one navigation commits one consolidated round
+// of requests instead of one per watcher.
+let applyingRouteQuery = false;
+
+function forwardQuerySignature(): string {
+  const range = timeRange.value;
+  return [
+    statusFilter.value, accountFilter.value, modelFilter.value, keyFilter.value,
+    providerFilter.value, routeAccountFilter.value, credentialAccountFilter.value,
+    requestIdFilter.value, activePreset.value,
+    range ? `${range[0]}:${range[1]}` : "", sortBy.value, sortOrder.value,
+  ].join(" ");
+}
+
+function gatewayQuerySignature(): string {
+  return [gatewayLevelFilter.value, gatewayCategoryFilter.value, requestIdFilter.value].join(" ");
+}
+
+// KeepAlive reuses this instance across /logs navigations, so the URL can
+// change under a live view (deep links, Back/Forward, leaving and returning
+// with a different query). Restore the filters an inbound query carries and
+// reload once per real change; navigations without logs params (plain menu
+// revisits) and round-trips of our own writes keep local filters untouched.
+// Neither path writes back to the router — UI→URL sync stays with the filter
+// watchers — so an inbound navigation cannot loop or strand a pending replace
+// that would collide with a following Back/Forward.
+function applyInboundQuery(query: LocationQuery): void {
+  if (!LOGS_QUERY_KEYS.some((key) => key in query)) return;
+  const tabBefore = activeTab.value;
+  const forwardBefore = forwardQuerySignature();
+  const gatewayBefore = gatewayQuerySignature();
+  applyingRouteQuery = true;
+  applyRouteQuery(routeQuerySearch("logs", query));
+  void nextTick(() => {
+    applyingRouteQuery = false;
+  });
+  const tabChanged = activeTab.value !== tabBefore;
+  const forwardChanged = forwardQuerySignature() !== forwardBefore;
+  const gatewayChanged = gatewayQuerySignature() !== gatewayBefore;
+  if (!tabChanged && !forwardChanged && !gatewayChanged) return;
+  if (forwardChanged) forwardPage.value = 1;
+  if (gatewayChanged) gatewayPage.value = 1;
+  if ((tabChanged && activeTab.value === "forward") || forwardChanged) void loadForwardLogs();
+  if ((tabChanged && activeTab.value === "gateway") || gatewayChanged) void loadGatewayLogs();
+}
+
+// Same-record navigations (another /logs link, Back/Forward between logs
+// entries) are applied from the update guard, which runs while the navigation
+// is still resolving instead of only after the route commits.
+onBeforeRouteUpdate((to) => {
+  applyInboundQuery(to.query);
+});
+
+// Re-entry (leave, then return with a different query) is not an update of
+// the cached record, so the watcher covers it after the route commits; the
+// signature check keeps it from duplicating a navigation the guard applied.
+watch(() => route.query, (query) => {
+  if (route.name !== "logs") return;
+  applyInboundQuery(query);
+});
 
 // Auto-refresh on activation skips resources loaded recently, and never
 // duplicates a load that is already in flight (the loading flags cover
@@ -780,6 +881,7 @@ function changeGatewayPage(page: number) {
 }
 
 watch(gatewayLevelFilter, () => {
+  if (applyingRouteQuery) return;
   gatewayPage.value = 1;
   syncQueryState();
   void loadGatewayLogs();
@@ -787,6 +889,7 @@ watch(gatewayLevelFilter, () => {
 
 let categoryDebounce: ReturnType<typeof setTimeout> | null = null;
 watch(gatewayCategoryFilter, () => {
+  if (applyingRouteQuery) return;
   if (categoryDebounce !== null) clearTimeout(categoryDebounce);
   gatewayPage.value = 1;
   categoryDebounce = setTimeout(() => {
@@ -797,6 +900,7 @@ watch(gatewayCategoryFilter, () => {
 });
 
 watch(activeTab, (tab) => {
+  if (applyingRouteQuery) return;
   syncQueryState();
   // The shared request ID may have changed while this tab was hidden.
   if (tab === "gateway") void loadGatewayLogs();
@@ -805,6 +909,7 @@ watch(activeTab, (tab) => {
 watch(
   [statusFilter, accountFilter, modelFilter, keyFilter, providerFilter, routeAccountFilter, credentialAccountFilter, timeRange, activePreset, sortBy, sortOrder],
   () => {
+    if (applyingRouteQuery) return;
     forwardPage.value = 1;
     syncQueryState();
     void loadForwardLogs();
@@ -814,6 +919,7 @@ watch(
 // batch turns into at most one round-trip per list.
 let requestIdDebounce: ReturnType<typeof setTimeout> | null = null;
 watch(requestIdFilter, () => {
+  if (applyingRouteQuery) return;
   if (requestIdDebounce !== null) clearTimeout(requestIdDebounce);
   forwardPage.value = 1;
   gatewayPage.value = 1;

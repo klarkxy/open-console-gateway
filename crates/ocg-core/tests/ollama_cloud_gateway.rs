@@ -232,8 +232,8 @@ async fn ollama_cloud_attempt_normalizes_wire_and_never_sends_cookies() {
     let log = state.db.lock().list_forward_logs(1).unwrap().remove(0);
     assert_eq!(log.provider_id.as_deref(), Some(OLLAMA_PROVIDER_ID));
     assert_eq!(log.model, "gpt-oss:120b");
-    assert_eq!(log.status, "success_unpriced");
-    assert_eq!(log.cost_state, "unpriced", "the family has no price table");
+    assert_eq!(log.status, "success");
+    assert_eq!(log.cost_state, "unknown", "the family has no price table");
     assert!(log.cost.is_none());
     assert!(log.pricing_revision_id.is_none());
     assert_eq!(log.route, "direct", "the attempt's route leg is recorded");
@@ -374,8 +374,8 @@ async fn mixed_candidate_chain_keeps_go_attempt_bytes_identical() {
         log.provider_id.as_deref(),
         Some(ocg_core::provider::OPENCODE_PROVIDER_ID)
     );
-    assert_eq!(log.cost_state, "priced");
-    assert!(log.pricing_revision_id.is_some());
+    assert_eq!(log.cost_state, "unknown");
+    assert!(log.pricing_revision_id.is_none());
     assert_eq!(
         log.model, "deepseek-v4-flash",
         "client-facing name is preserved"
@@ -414,7 +414,7 @@ async fn shared_alias_served_by_ollama_is_unpriced_and_uses_the_snapshot_id_upst
 
     let log = state.db.lock().list_forward_logs(1).unwrap().remove(0);
     assert_eq!(log.provider_id.as_deref(), Some(OLLAMA_PROVIDER_ID));
-    assert_eq!(log.cost_state, "unpriced");
+    assert_eq!(log.cost_state, "unknown");
     assert!(log.cost.is_none());
     assert!(log.raw_cost_usd.is_none());
     assert!(log.pricing_revision_id.is_none());

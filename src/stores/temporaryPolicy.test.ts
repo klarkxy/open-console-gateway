@@ -148,7 +148,7 @@ test("a stale configuration load cannot overwrite a newer snapshot or a cleared 
 
 test("a stale mutation cannot write back after a later load", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 3, processGeneration: 99, pricingRevision: "p" });
+  useControlPlaneStore().sync({ revision: 3, processGeneration: 99 });
   const store = useTemporaryPolicyStore();
   const mutation = installDeferredFetch();
   const pendingSave = store.saveRules([sampleRule]).then(() => "ok", (error: unknown) => error);
@@ -192,7 +192,7 @@ test("dropSession clears snapshots so a later load cannot write back", async () 
 
 test("dropSession during a deferred save clears busy flags and ignores the receipt", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 3, processGeneration: 99, pricingRevision: "p" });
+  useControlPlaneStore().sync({ revision: 3, processGeneration: 99 });
   const store = useTemporaryPolicyStore();
   const mutation = installDeferredFetch();
   const pending = store.saveRules([sampleRule]).then(() => "ok", (error: unknown) => error);
@@ -228,7 +228,7 @@ test("a previous session request cannot clear the new session loading flag", asy
 
 test("CAS conflict reloads configuration, keeps the error, and does not replay the PUT", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 3, processGeneration: 99, pricingRevision: "p" });
+  useControlPlaneStore().sync({ revision: 3, processGeneration: 99 });
   const store = useTemporaryPolicyStore();
   const calls = installDeferredFetch();
   const pendingLoad = store.loadConfiguration();
@@ -268,7 +268,7 @@ test("CAS conflict reloads configuration, keeps the error, and does not replay t
 
 test("a failed save keeps the last successful snapshot for retry", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 3, processGeneration: 99, pricingRevision: "p" });
+  useControlPlaneStore().sync({ revision: 3, processGeneration: 99 });
   const store = useTemporaryPolicyStore();
   const calls = installDeferredFetch();
   const pendingLoad = store.loadConfiguration();
@@ -363,7 +363,7 @@ test("restriction diagnostics are GET-only and never send a probe", async () => 
 
 test("clear restriction posts the id, commits the refreshed list, and does not replay on 409", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 3, processGeneration: 99, pricingRevision: "p" });
+  useControlPlaneStore().sync({ revision: 3, processGeneration: 99 });
   const store = useTemporaryPolicyStore();
   const calls = installDeferredFetch();
   const pendingLoad = store.loadRestrictions();

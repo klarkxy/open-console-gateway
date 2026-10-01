@@ -173,9 +173,12 @@ async fn refresh_calibrates_all_goat_windows_and_throttles_repeats() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let refresh: UsageRefresh = serde_json::from_value(body.clone()).unwrap();
     assert_eq!(refresh.source, "official_command_code_usage");
-    assert!((refresh.usage.window_5h - 7.0).abs() < 0.000001);
-    assert!((refresh.usage.window_week - 7.0).abs() < 0.000001);
-    assert!((refresh.usage.window_month - 7.0).abs() < 0.000001);
+    let window_5h = refresh.usage.window_5h.expect("official 5h percent");
+    let window_week = refresh.usage.window_week.expect("official week percent");
+    let window_month = refresh.usage.window_month.expect("official month percent");
+    assert!((window_5h - (7.0 / 14.0 * 100.0)).abs() < 1e-6);
+    assert!((window_week - (7.0 / 35.0 * 100.0)).abs() < 1e-6);
+    assert!((window_month - ((70.0 - 63.0) / 70.0 * 100.0)).abs() < 1e-6);
     assert_eq!(refresh.usage.pricing_revision, None);
     assert_eq!(refresh.revision, revision);
     assert_eq!(harness.state.settings_revision(), revision);
@@ -321,7 +324,9 @@ async fn provider_usage_refresh_uses_response_time_and_shares_legacy_throttle() 
     assert_eq!(reset, started_at + Duration::hours(3));
     assert_eq!(rolling["observedAt"], observed_at.to_rfc3339());
     assert_eq!(body["syncState"]["lastSuccessAt"], observed_at.to_rfc3339());
-    assert!((rolling["used"].as_f64().unwrap() - 7.0).abs() < 0.000001);
+    assert!((rolling["used"].as_f64().unwrap() - 50.0).abs() < 0.000001);
+    assert!((rolling["limitValue"].as_f64().unwrap() - 100.0).abs() < 1e-9);
+    assert_eq!(rolling["unit"], json!("percent"));
     assert_no_inference_cooldown(&harness, &account_id);
     assert_eq!(
         authorization.await.unwrap().as_deref(),
@@ -365,10 +370,13 @@ async fn refresh_success_returns_goat_limits_and_releases_locks() {
     .expect("official usage refresh must return without re-locking");
     assert_eq!(status, StatusCode::OK, "{body}");
     let refresh: UsageRefresh = serde_json::from_value(body.clone()).unwrap();
-    assert!((refresh.usage.window_5h - 13.0).abs() < 0.001, "{body}");
-    assert!(refresh.usage.window_5h > 12.0, "{body}");
-    assert!((refresh.usage.window_month - 65.0).abs() < 0.001, "{body}");
-    assert!(refresh.usage.window_month > 60.0, "{body}");
+    let window_5h = refresh.usage.window_5h.expect("official 5h percent");
+    assert!((window_5h - (13.0 / 14.0 * 100.0)).abs() < 0.001, "{body}");
+    let window_month = refresh.usage.window_month.expect("official month percent");
+    assert!(
+        (window_month - ((70.0 - 5.0) / 70.0 * 100.0)).abs() < 0.001,
+        "{body}"
+    );
     assert_secret_free(&body);
 
     let (settings_status, settings) = tokio::time::timeout(

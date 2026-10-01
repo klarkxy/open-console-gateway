@@ -76,8 +76,9 @@ Remounted kernel (`crates/ocg-core/src/dashboard_v3/`):
   reset; custom config and model capabilities; usage and provider-usage
   reads and refresh (including Command Code usage refresh); per-account
   model tests and connection verify.
-- **Providers** (`providers`, `pricing`, `dynamic_providers` modules):
-  sealed and static provider rows with pricing multipliers; user-defined
+- **Providers** (`providers`, `dynamic_providers` modules):
+  sealed and static provider rows. Pricing module routes are not registered
+  and answer with the ordinary V4 404. User-defined
   Provider CRUD, model discovery, and live connection test; Zen `-free`
   rows and model refresh.
 - **Provider contracts and model protocols** (the `provider-contracts`
@@ -104,7 +105,11 @@ Remounted kernel (`crates/ocg-core/src/dashboard_v3/`):
 V4-native (`crates/ocg-core/src/dashboard_v4/`):
 
 - **Control plane**: `GET /contract` is the V4-native ControlRevision
-  (`revision`, `processGeneration`, `pricingRevision`); `/templates`,
+  (`revision`, `processGeneration`). Generated `ControlRevision` still
+  includes `pricingRevision` as a legacy read string. It is not a CAS token
+  and it is not removed. The live client does not publish it and does
+  not send `expectedPricingRevision`.
+  `/templates`,
   `/connections`, and `/accounts` list creation templates, connections,
   and account identities.
 - **Destinations and catalog** (`destinations`, `destination_catalog`
@@ -113,11 +118,15 @@ V4-native (`crates/ocg-core/src/dashboard_v4/`):
   configurable HTTP rows; sealed and platform-managed rows are immutable.
 - **Credentials** (`credentials` module): rotate a credential and retry
   its quota state.
-- **Billing** (`billing` module): per-account credit configuration,
-  calibration, and grants — all local estimates.
+- **Billing** (`billing` module): per-account manual credit buckets,
+  calibration, and grants. A read reports active `pendingRequests` as 0.
+  The stored historical receipt stays exact. Explicit calibration is not
+  blocked by that receipt and does not settle or delete it. Reads do not
+  settle or reprice stored balances. A new request does not debit personal
+  credit.
 - **Official API references** (`official_api` module): official-API status
-  and balance refresh for matching presets, and the official price table
-  per provider.
+  and balance refresh for matching presets. Price-table routes are not
+  registered.
 - **Platform Keys** (`platform_keys` module): import platform Keys into an
   account.
 - **Onboarding and bindings** (`onboarding`, `bindings`, `identities`

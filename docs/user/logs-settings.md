@@ -8,7 +8,7 @@ The **Logs** view opens on **Request Logs** and is the rolling receipt tape for
 requests the gateway forwards plus explicit provider protocol probes: timestamp,
 selected provider, route account, credential account, model, status
 code, the upstream error if any, and the streamed usage when the upstream emits
-a usage chunk. Probe rows carry zero token values and no applicable cost, have no client Key
+a usage chunk. Probe rows carry zero token values, do not record a request price, have no client Key
 attribution, and never appear in Runtime Logs. Filters cover provider, route
 account, credential account, model, status, time range, and client Key.
 Authenticated parse, validation, or routing failures that happen before account
@@ -22,36 +22,10 @@ identity:
 - `upstream_model` — the exact model ID actually sent to that account's upstream
 
 plus `provider_id`. The model filter exact-matches
-any of those identities or the `model` column. Native cost
-(`native_cost_value`, `native_cost_unit`, `native_cost_currency`) is optional
-and present only when the provider supplies enough pricing evidence.
+any of those identities or the `model` column.
 
-Each row also stores raw supplier cost, quota debit, and effective paid cost
-when the selected provider supplies enough pricing evidence. An allowance only
-changes the quota-debit multiplier.
-
-- Chat streaming requests set `stream_options.include_usage` so OpenAI-compatible
-  upstreams emit a usage chunk. Rows with `success_no_usage` mean the stream
-  still finished without one. A usage chunk makes token counts accurate; the
-  summary shows total tokens (input + output). Quota use is estimated from the
-  selected provider's verified pricing snapshot: OpenCode Go uses its active
-  snapshot, while Command Code GOAT uses its separately refreshed model prices
-  and multipliers. Ollama Cloud prices from the manual `https://ollama.com/pricing`
-  snapshot with quota multiplier `1.0`; those priced rows feed one monthly
-  USD-credits window and may exceed the soft Pro/Max/Team limit without changing
-  routing. Existing rows are not retroactively repriced. Registered
-  Zen free models (`big-pickle`, `mimo-v2.5-free`, and other ids on the Zen
-  allowlist) record tokens with `cost_state=free` and do not enter Go quota
-  totals. Custom API rows record `cost_state=unknown` with no provider quota
-  debit. The list shows time, attempt, model alias, and status. Expand a row to
-  see the plan, account, request ID, and diagnostic
-  detail. A completed request without a price is shown as success; missing
-  prices are ordinary and are not a separate status. Filtering by success
-  includes those rows. The stored status can still be `success_unpriced`, and
-  its quota cost stays empty.
-- An `outcome_unknown` row means the upstream may already have completed and
-  charged the request, but the gateway lost the response or timed out. Such a
-  request is not replayed automatically and its local cost remains unknown.
+- Chat streaming requests set `stream_options.include_usage` so OpenAI-compatible upstreams emit a usage chunk. A finished request without one still counts as success. The summary shows total tokens (input + output) when usage arrived. The gateway does not estimate a price for a new request. A cost that was not recorded stays unknown and is not shown as zero or free. Older rows keep a cost only when one was stored at the time, and they are not recalculated. The list shows time, attempt, model alias, and status. Expand a row to see the plan, account, request ID, and diagnostic detail. Filtering by success includes rows that have no recorded cost.
+- An `outcome_unknown` row means the upstream may already have completed and charged the request, but the gateway lost the response or timed out. Such a request is not replayed automatically, and Open Console Gateway does not invent a local price for it.
 - The **Key** filter narrows rows and the summary totals to one client key.
   Options come from the log table itself, so disabled, deleted, and otherwise
   unknown keys stay filterable. **Unattributed** selects rows with no client-Key
@@ -67,6 +41,7 @@ The **Settings** view holds the gateway's persistent configuration:
 - **Gateway Port** — the port the gateway binds (default `9042`). Desktop builds
   also accept the read-only `OCG_GATEWAY_PORT` runtime override; while it is set,
   the Settings field is disabled and the saved value is unchanged.
+  Saving the port is finished when the gateway confirms the save. If the page cannot reload the saved settings, the port is still saved. Reload to read it again. Do not submit the change again only because that reload failed. If the gateway cannot open the new port, the save did not succeed. The page does not move to that port and does not treat the change as applied. When this browser is connected directly to the gateway and the listen port changes, the page offers a link to the new address. Open the link yourself. The page does not go there on its own, including when the new port is on this computer. The link keeps the same scheme, host name, path, query, and hash. If you opened the dashboard through a reverse proxy, the page stays on that proxy.
 - **Outbound proxy** — shared by every account. Automatic, manual, and force
   direct apply one process-wide policy; **Per-model list** (below) splits chat
   forwarding by model instead.
@@ -80,7 +55,7 @@ The **Settings** view holds the gateway's persistent configuration:
   the policy covers model forwarding (OpenCode Go, Zen Free, Command Code
   GOAT, MiniMax CN, Kimi Code CN, and Custom API),
   account-key tests and Custom verification, official OpenCode Go usage API,
-  pricing refreshes, release checks, and signed desktop installer downloads;
+  release checks, and signed desktop installer downloads;
   authenticated `GET /v1/models` and protected
   `GET /dashboard/api/v4/application-models` are local lists and do not use
   this outbound path. The browser sidecar is outside its scope. A managed CPA
@@ -105,7 +80,7 @@ The **Settings** view holds the gateway's persistent configuration:
   direct). The **blacklist** direction inverts this: listed models connect
   directly and everything else uses the proxy URL. Both directions require the
   proxy URL; an empty list or an empty URL cannot be saved. Non-chat outbound
-  traffic (pricing refreshes, official usage sync, update checks, and signed
+  traffic (official usage sync, update checks, and signed
   downloads) always follows the direction's default leg: direct for a
   whitelist, the proxy URL for a blacklist — so switching from `Manual HTTP
   proxy` to a whitelist changes that traffic to direct. The account-key test

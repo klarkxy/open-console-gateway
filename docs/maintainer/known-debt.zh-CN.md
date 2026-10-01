@@ -30,7 +30,7 @@
 - GOAT 官方权威用量 API，或把其公开目录当作 Key 验证。
 - `/embeddings`、Gemini `embedContent`（501），或把 Gemini `countTokens` 做成真实上游计数（501 供 Gemini CLI 回退本地估算）。
 - Gemini 作为上游协议。
-- 自动轮询价格或 Zen 目录。
+- 价格表抓取、倍率和按价格估算都不是功能。Zen 目录刷新保持手动。
 - 旧 WebView Profile 跨引擎复用。
 - 数据库降级，或让旧二进制打开更新后的 schema。
 - Windows/Linux ARM64 桌面包、32 位 x86、RPM、Snap、应用商店包、Windows Authenticode 或 Apple 公证；此项不排除已支持的 Linux ARM64 容器镜像。

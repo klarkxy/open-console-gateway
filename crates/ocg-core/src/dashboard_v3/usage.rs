@@ -18,9 +18,7 @@ use crate::models::{
     Account as ModelAccount, CreditBalance as ModelCreditBalance, ProviderUsageSyncState,
     QuotaWindow as ModelQuotaWindow, UsageWindow as ModelUsageWindow, UsageWindowKind,
 };
-use crate::provider::{
-    OllamaBillingTier, ProviderAdapterKind, ProviderRegistry, QUOTA_WINDOW_FREE,
-};
+use crate::provider::{ProviderAdapterKind, ProviderRegistry, QUOTA_WINDOW_FREE};
 use crate::state::CoreState;
 use crate::usage_sync::{
     CalibrationOutcome, ControlRevision, ProviderUsageRefreshGate, UsageSyncCommitAuthorization,
@@ -340,43 +338,21 @@ async fn refresh_go_provider_usage(
 
 fn account_usage_locked(state: &CoreState, id: &str) -> Result<UsageWindow, V3ApiError> {
     let _settings_update = state.settings_update.lock();
-    let pricing = captured_pricing(state);
     let db = state.db.lock();
     let account = load_account(&db, state, id)?;
+    let mut observed = db
+        .observed_percent_usage(id)
+        .map_err(V3ApiError::internal)?;
     if matches!(
         ProviderAdapterKind::from_provider_id(&account.provider_id),
         Some(ProviderAdapterKind::OllamaCloud)
     ) {
-        let _limit = db
-            .ollama_cloud_billing_tier(&account.id)
-            .map_err(V3ApiError::internal)?
-            .map(OllamaBillingTier::monthly_credit_limit)
-            .ok_or_else(|| {
-                V3ApiError::invalid_request_at(
-                    state,
-                    "manual usage calibration is unavailable for this account",
-                )
-            })?;
-        let (used, reset) = db.ollama_month_usage(id).map_err(V3ApiError::internal)?;
-        return Ok(usage_window_from_model(
-            state,
-            ModelUsageWindow {
-                account_id: id.to_string(),
-                window_5h: 0.0,
-                window_week: 0.0,
-                window_month: used,
-                resets_in_5h: None,
-                resets_in_week: None,
-                resets_in_month: reset,
-            },
-            None,
-        ));
+        observed.window_5h = None;
+        observed.window_week = None;
+        observed.resets_in_5h = None;
+        observed.resets_in_week = None;
     }
-    let (limits, pricing_revision) = account_usage_limits(state, &db, &account, &pricing)?;
-    let usage = db
-        .account_usage_with_limits(id, &limits)
-        .map_err(V3ApiError::internal)?;
-    Ok(usage_window_from_model(state, usage, pricing_revision))
+    Ok(usage_window_from_observed(state, id, &observed))
 }
 
 fn patch_account_usage_locked(
@@ -389,7 +365,7 @@ fn patch_account_usage_locked(
     let pricing = captured_pricing(state);
     let db = state.db.lock();
     let account = load_account(&db, state, id)?;
-    let (limits, pricing_revision) = account_usage_limits(state, &db, &account, &pricing)?;
+    let (limits, _pricing_revision) = account_usage_limits(state, &db, &account, &pricing)?;
     let window = parse_usage_window(state, &input.window)?;
     if matches!(
         ProviderAdapterKind::from_provider_id(&account.provider_id),
@@ -449,31 +425,17 @@ fn patch_account_usage_locked(
     if !calibrated {
         return Err(V3ApiError::not_found(state));
     }
-    if ollama {
-        let (used, reset) = db.ollama_month_usage(id).map_err(V3ApiError::internal)?;
-        return Ok(UsageMutation {
-            usage: usage_window_from_model(
-                state,
-                ModelUsageWindow {
-                    account_id: id.to_string(),
-                    window_5h: 0.0,
-                    window_week: 0.0,
-                    window_month: used,
-                    resets_in_5h: None,
-                    resets_in_week: None,
-                    resets_in_month: reset,
-                },
-                pricing_revision,
-            ),
-            revision: state.settings_revision(),
-            process_generation: state.process_generation(),
-        });
-    }
-    let usage = db
-        .account_usage_with_limits(id, &limits)
+    let mut observed = db
+        .observed_percent_usage(id)
         .map_err(V3ApiError::internal)?;
+    if ollama {
+        observed.window_5h = None;
+        observed.window_week = None;
+        observed.resets_in_5h = None;
+        observed.resets_in_week = None;
+    }
     Ok(UsageMutation {
-        usage: usage_window_from_model(state, usage, pricing_revision),
+        usage: usage_window_from_observed(state, id, &observed),
         revision: state.settings_revision(),
         process_generation: state.process_generation(),
     })
@@ -538,11 +500,17 @@ pub(crate) fn provider_usage_from_db(
         None
     };
     let (quota_windows, pricing_revision) = if descriptor.usage.authoritative_for_quota {
-        let pricing = captured_pricing(state);
         (
-            db.live_opencode_go_quota_windows(&account.id, &pricing.limits)
-                .map_err(V3ApiError::internal)?,
-            Some(pricing.revision),
+            db.live_opencode_go_quota_windows(
+                &account.id,
+                &PricingLimits {
+                    window_5h: 0.0,
+                    window_week: 0.0,
+                    window_month: 0.0,
+                },
+            )
+            .map_err(V3ApiError::internal)?,
+            None,
         )
     } else if descriptor.usage.egress_ip_shared_cooldown_window {
         (
@@ -567,28 +535,14 @@ pub(crate) fn provider_usage_from_db(
         )
     } else if descriptor.kind == ProviderAdapterKind::CommandCodeGoat {
         let limits = crate::command_code_usage::goat_quota_limits();
-        let observed_at = db
-            .account_usage_sync_state(&account.id)
-            .map_err(V3ApiError::internal)?
-            .and_then(|sync| sync.last_success_at);
-        let mut windows = db
-            .live_local_quota_windows(&account.id, &limits, "command-code-goat-local")
+        let windows = db
+            .live_local_quota_windows(&account.id, &limits, "command-code-goat-official")
             .map_err(V3ApiError::internal)?;
-        for window in &mut windows {
-            window.observed_at = observed_at;
-        }
         (windows, None)
     } else if descriptor.kind == ProviderAdapterKind::OllamaCloud {
-        let windows = match db
-            .ollama_cloud_billing_tier(&account.id)
-            .map_err(V3ApiError::internal)?
-            .map(OllamaBillingTier::monthly_credit_limit)
-        {
-            Some(limit) => db
-                .live_ollama_month_quota_window(&account.id, limit)
-                .map_err(V3ApiError::internal)?,
-            None => Vec::new(),
-        };
+        let windows = db
+            .live_ollama_month_quota_window(&account.id, 100.0)
+            .map_err(V3ApiError::internal)?;
         (windows, None)
     } else {
         (
@@ -705,7 +659,7 @@ fn load_account(db: &Database, state: &CoreState, id: &str) -> Result<ModelAccou
 
 fn account_usage_limits(
     state: &CoreState,
-    db: &Database,
+    _db: &Database,
     account: &ModelAccount,
     pricing: &CapturedPricing,
 ) -> Result<(PricingLimits, Option<String>), V3ApiError> {
@@ -717,21 +671,11 @@ fn account_usage_limits(
             return Ok((crate::command_code_usage::goat_quota_limits(), None));
         }
         Some(ProviderAdapterKind::OllamaCloud) => {
-            let limit = db
-                .ollama_cloud_billing_tier(&account.id)
-                .map_err(V3ApiError::internal)?
-                .map(OllamaBillingTier::monthly_credit_limit)
-                .ok_or_else(|| {
-                    V3ApiError::invalid_request_at(
-                        state,
-                        "manual usage calibration is unavailable for this account",
-                    )
-                })?;
             return Ok((
                 PricingLimits {
-                    window_5h: limit,
-                    window_week: limit,
-                    window_month: limit,
+                    window_5h: 100.0,
+                    window_week: 100.0,
+                    window_month: 100.0,
                 },
                 None,
             ));
@@ -765,22 +709,22 @@ fn map_usage_availability(value: &str) -> Result<UsageAvailability, String> {
     }
 }
 
-fn usage_window_from_model(
+pub(super) fn usage_window_from_observed(
     state: &CoreState,
-    usage: ModelUsageWindow,
-    pricing_revision: Option<String>,
+    account_id: &str,
+    observed: &crate::db::ObservedPercentUsage,
 ) -> UsageWindow {
     UsageWindow {
-        account_id: usage.account_id,
-        window_5h: usage.window_5h,
-        window_week: usage.window_week,
-        window_month: usage.window_month,
-        resets_in_5h: rfc3339_opt(usage.resets_in_5h),
-        resets_in_week: rfc3339_opt(usage.resets_in_week),
-        resets_in_month: rfc3339_opt(usage.resets_in_month),
+        account_id: account_id.to_string(),
+        window_5h: observed.window_5h,
+        window_week: observed.window_week,
+        window_month: observed.window_month,
+        resets_in_5h: rfc3339_opt(observed.resets_in_5h),
+        resets_in_week: rfc3339_opt(observed.resets_in_week),
+        resets_in_month: rfc3339_opt(observed.resets_in_month),
         revision: state.settings_revision(),
         process_generation: state.process_generation(),
-        pricing_revision,
+        pricing_revision: None,
     }
 }
 

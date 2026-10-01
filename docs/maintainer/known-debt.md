@@ -57,7 +57,7 @@ proposal or pull request, with corresponding code and documentation changes.
 - `/embeddings`, Gemini `embedContent` (501), or Gemini `countTokens` as a
   real upstream count (501 so Gemini CLI can fall back locally).
 - Gemini as an upstream protocol.
-- Automatic pricing or Zen catalog polling.
+- Price-table fetch, multipliers, and price-based estimates are not features. Zen catalog polling stays manual.
 - Cross-engine reuse of legacy WebView profiles.
 - Database downgrade support, or opening a newer schema with an older binary.
 - Windows/Linux ARM64 desktop packages, 32-bit x86, RPM, Snap, app-store

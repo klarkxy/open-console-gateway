@@ -69,7 +69,6 @@ export interface ProviderScopeView {
   accounts: ProviderAccountChoice[];
   catalog: EffectiveCatalog;
   models: ProviderModelContract[];
-  pricing: CapabilitySummary;
   usage: CapabilitySummary;
   card: CardCapabilitySummary;
   catalog_routable: boolean;
@@ -336,7 +335,6 @@ export function flattenProviderScopes(
     accounts: group.accounts,
     catalog: group.catalog,
     models: group.models,
-    pricing: group.pricing,
     usage: group.usage,
     card: group.card,
     catalog_routable: group.catalog_routable,
@@ -354,7 +352,6 @@ export function flattenProviderScopes(
     accounts: [endpoint.account],
     catalog: endpoint.catalog,
     models: endpoint.models,
-    pricing: endpoint.pricing,
     usage: endpoint.usage,
     card: endpoint.card,
     catalog_routable: endpoint.catalog_routable,

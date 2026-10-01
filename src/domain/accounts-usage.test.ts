@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { dashboardApi } from "../api/dashboard.ts";
+import type { ProviderUsage } from "../api/billing.ts";
+import { usageWindowFromProviderUsage } from "./billing.ts";
 import {
   installFetchMock,
   setupControlPlane,
@@ -22,7 +24,8 @@ import {
   resetsInMinutesForSave,
   resetsSecondFieldMax,
   resetsSecondFieldValue,
-  usagePercentFromCost,
+  manualEditorWindowKeys,
+  manualUsageEditorEnabled,
   usageProgressPercentage,
   usageProgressStatus,
 } from "./accounts-usage.ts";
@@ -173,8 +176,6 @@ test("normalizes manually entered percentages to the supported range and precisi
   assert.equal(normalizeUsagePercent(-1), 0);
   assert.equal(normalizeUsagePercent(42.56), 42.6);
   assert.equal(normalizeUsagePercent(101), 100);
-  assert.equal(usagePercentFromCost(6, 12), 50);
-  assert.equal(usagePercentFromCost(180, 100), 100);
 });
 
 test("manual calibration updates the visible provider window and preserves siblings", () => {
@@ -430,6 +431,114 @@ test("provider quota labels preserve known windows and humanize unknown scopes",
   }, labels), "Future burst window");
 });
 
+function providerUsage(windows: ProviderUsage["quotaWindows"]): ProviderUsage {
+  return {
+    accountId: "acc-1",
+    providerId: "command-code",
+    availability: "available",
+    creditBalances: [],
+    experimental: false,
+    freeCooldownUntil: null,
+    pricingRevision: null,
+    processGeneration: 1,
+    quotaWindows: windows,
+    revision: 3,
+    syncState: null,
+  };
+}
+
+function observedWindow(windowKind: string, used: number) {
+  return {
+    accountId: "acc-1",
+    windowKind,
+    used,
+    limitValue: 100,
+    startedAt: null,
+    resetsAt: null,
+    calibrationOffset: 0,
+    unit: "percent",
+    source: "manual",
+    observedAt: "2026-10-01T00:00:00.000Z",
+    updatedAt: "2026-10-01T00:00:00.000Z",
+  };
+}
+
+test("omitted provider windows stay unknown and an explicit zero stays zero", () => {
+  const omitted = usageWindowFromProviderUsage(providerUsage([]), "acc-1");
+  assert.equal(omitted.window_5h, null);
+  assert.equal(omitted.window_week, null);
+  assert.equal(omitted.window_month, null);
+  assert.notEqual(omitted.window_5h, 0);
+
+  const explicitZero = usageWindowFromProviderUsage(
+    providerUsage([observedWindow("five_hours", 0)]),
+    "acc-1",
+  );
+  assert.equal(explicitZero.window_5h, 0);
+  assert.equal(explicitZero.window_week, null);
+  assert.equal(explicitZero.window_month, null);
+  assert.notEqual(explicitZero.window_week, 0);
+
+  const missing = usageWindowFromProviderUsage(null, "acc-1");
+  assert.equal(missing.window_5h, null);
+  assert.equal(missing.window_month, null);
+
+  const notANumber = usageWindowFromProviderUsage(
+    providerUsage([observedWindow("week", Number.NaN)]),
+    "acc-1",
+  );
+  assert.equal(notANumber.window_week, null);
+  assert.notEqual(notANumber.window_week, 0);
+});
+
+test("manual calibration writes an explicit zero and leaves an unknown window unchanged", () => {
+  const current = {
+    account_id: "acc-1",
+    provider_id: "command-code",
+    availability: "available",
+    quota_windows: [
+      {
+        account_id: "acc-1",
+        window_kind: "five_hours",
+        used: 10,
+        limit_value: 100,
+        started_at: null,
+        resets_at: null,
+        calibration_offset: 0,
+        unit: "percent",
+        source: "manual",
+        observed_at: "2026-10-01T00:00:00.000Z",
+        updated_at: "2026-10-01T00:00:00.000Z",
+      },
+    ],
+    credit_balances: [],
+    sync_state: null,
+  };
+  const usage = {
+    account_id: "acc-1",
+    window_5h: null as number | null,
+    window_week: null as number | null,
+    window_month: null as number | null,
+    resets_in_5h: null,
+    resets_in_week: null,
+    resets_in_month: null,
+  };
+  const untouched = mergeCalibratedProviderUsage(current, "window_5h", usage, "2026-10-01T01:00:00.000Z");
+  assert.equal(untouched?.quota_windows[0]?.used, 10);
+  const zeroed = mergeCalibratedProviderUsage(
+    current,
+    "window_5h",
+    { ...usage, window_5h: 0 },
+    "2026-10-01T01:00:00.000Z",
+  );
+  assert.equal(zeroed?.quota_windows[0]?.used, 0);
+  assert.equal(zeroed?.quota_windows.length, 1);
+
+  const empty = { ...current, quota_windows: [] };
+  const stillEmpty = mergeCalibratedProviderUsage(empty, "window_5h", usage, "2026-10-01T01:00:00.000Z");
+  assert.equal(stillEmpty?.quota_windows.length, 0);
+});
+
 test("MiniMax video quota lanes stay hidden while text windows remain visible", () => {
   const hidden = [
     "minimax_current:m2:video",
@@ -449,4 +558,63 @@ test("MiniMax video quota lanes stay hidden while text windows remain visible", 
   for (const window_kind of visible) {
     assert.equal(isMiniMaxVideoQuotaWindow({ window_kind }), false, window_kind);
   }
+});
+
+const MANUAL_PROVIDERS = ["opencode", "command-code", "ollama", "minimax"] as const;
+
+test("an explicit false calibration plan denies every provider including OpenCode Go", () => {
+  const plan = {
+    manual_calibration: false,
+    windows: [{ kind: "five_hours" }, { kind: "week" }, { kind: "month" }],
+  };
+  for (const providerId of MANUAL_PROVIDERS) {
+    assert.deepEqual(manualEditorWindowKeys(providerId, plan), []);
+    assert.equal(manualUsageEditorEnabled({
+      providerId,
+      plan,
+      reportedManual: true,
+      hasCreditMeter: false,
+    }), false);
+  }
+});
+
+test("no plan and a false manual report keep the percent editor closed", () => {
+  assert.deepEqual(
+    manualEditorWindowKeys("opencode", null),
+    ["window_5h", "window_week", "window_month"],
+  );
+  for (const providerId of MANUAL_PROVIDERS) {
+    assert.equal(manualUsageEditorEnabled({
+      providerId,
+      plan: null,
+      reportedManual: false,
+      hasCreditMeter: false,
+    }), false);
+  }
+});
+
+test("a true plan authorizes only listed sealed windows", () => {
+  const plan = { manual_calibration: true, windows: [{ kind: "week" }, { kind: "free" }] };
+  assert.deepEqual(manualEditorWindowKeys("opencode", plan), ["window_week"]);
+  assert.equal(manualUsageEditorEnabled({
+    providerId: "opencode",
+    plan,
+    reportedManual: false,
+    hasCreditMeter: false,
+  }), true);
+  assert.deepEqual(manualEditorWindowKeys("command-code", plan), ["window_week"]);
+  assert.deepEqual(manualEditorWindowKeys("ollama", plan), []);
+  assert.equal(manualUsageEditorEnabled({
+    providerId: "ollama",
+    plan,
+    reportedManual: true,
+    hasCreditMeter: false,
+  }), false);
+  assert.deepEqual(manualEditorWindowKeys("minimax", plan), []);
+  assert.equal(manualUsageEditorEnabled({
+    providerId: "minimax",
+    plan,
+    reportedManual: true,
+    hasCreditMeter: false,
+  }), false);
 });

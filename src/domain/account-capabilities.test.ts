@@ -35,7 +35,6 @@ function catalogEntry(
     verification_runtime_availability: "available",
     routable: true,
     managed_registration: false,
-    pricing_availability: "unavailable",
     usage_availability: "unavailable",
     manual_usage_calibration: false,
     quota_unit: "credits",
@@ -54,7 +53,6 @@ function builtinCatalog(): ProviderCatalogEntry[] {
       display_name: "OpenCode Go",
       managed_registration: true,
       usage_availability: "available",
-      pricing_availability: "available",
       quota_unit: "tokens",
     }),
     catalogEntry(ZEN_FREE_PROVIDER_ID, {
@@ -262,7 +260,7 @@ const DEFAULT_CONTROLS: Destination["account_controls"] = {
   toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false,
 };
 const monthly: NonNullable<Destination["plan"]> = {
-  expiry_cadence: "monthly", manual_calibration: false, pricing_source: "official",
+  expiry_cadence: "monthly", manual_calibration: false,
   usage_source: "official_api", windows: [{ kind: "month" }],
 };
 function destinationFixture(overrides: Partial<Destination> = {}): Destination {

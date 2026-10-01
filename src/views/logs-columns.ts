@@ -110,11 +110,12 @@ export function renderForwardDetail(row: ForwardLog, ctx: LogsColumnContext) {
   ]);
 }
 
-// Provider attribution and the three cost figures are nullable server-side;
-// null means "unknown" and must never render as a $0 amount.
+// Stored cost fields from an earlier record. Missing and non-positive amounts stay blank.
 function renderProviderCost(row: ForwardLog, ctx: LogsColumnContext) {
   const costValue = (value: number | null | undefined) => (
-    value === null || value === undefined ? t("未知") : formatCost(value, 5)
+    value === null || value === undefined || !Number.isFinite(value) || value <= 0
+      ? "—"
+      : formatCost(value, 5)
   );
   const accountLabel = (id: string | null | undefined) => {
     if (!id) return t("未知");
@@ -132,14 +133,11 @@ function renderProviderCost(row: ForwardLog, ctx: LogsColumnContext) {
     [t("额度扣减"), costValue(row.quota_debit)],
     [t("有效付费成本"), costValue(row.effective_paid_cost_usd)],
   ];
-  // Platform-native estimate: original currency, frozen pricing provenance,
-  // and the actual wallet debit stays unknown — never implied by the estimate.
-  const estimate = forwardLogNativeEstimate(row);
-  if (estimate) {
+  const storedNative = forwardLogNativeEstimate(row);
+  if (storedNative) {
     items.push(
-      [t("平台估算（原始货币）"), formatNativeCostEstimate(estimate, locale.value)],
+      [t("旧口径"), formatNativeCostEstimate(storedNative, locale.value)],
       [t("计价来源（冻结）"), row.pricing_revision_id ?? t("未知")],
-      [t("实际平台扣减"), t("未知")],
     );
   }
   return h("section", [

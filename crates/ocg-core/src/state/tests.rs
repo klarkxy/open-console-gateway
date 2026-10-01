@@ -1284,10 +1284,6 @@ fn a_rebuilding_writer_publishes_one_self_consistent_aggregate() {
         Arc::ptr_eq(&published.routes(), &state.forward_route_set()),
         "the published route set must be the one the writer installed"
     );
-    assert!(
-        Arc::ptr_eq(&published.pricing(), &state.pricing_snapshot()),
-        "the published pricing must be the active pointer"
-    );
     assert_eq!(
         routing_identity(published.routing()),
         routing_identity(&live),

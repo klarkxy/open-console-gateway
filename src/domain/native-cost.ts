@@ -1,19 +1,16 @@
 /**
- * Native (original-currency) platform cost estimates on forward logs.
+ * Stored native-currency amount already recorded on a forward log.
  *
- * Platform-linked Keys get a token estimate in the platform's own currency
- * from the frozen platform price; official providers may also populate
- * `native_cost_*` from their USD cost fields, so presence alone does not mark
- * a platform estimate (see `forwardLogNativeEstimate` for the gate). The
- * figure is an estimate — never a quota debit and never an observed wallet
- * charge — so it renders separately from the USD/quota columns and is never
- * summed across currencies. Pure helpers only; no i18n runtime import.
+ * The figure is historical storage. A missing, zero, or negative amount stays
+ * hidden, and the value is never summed across currencies. Official rows can
+ * carry the same columns, so `forwardLogNativeEstimate` is the display gate.
+ * Pure helpers only; no i18n runtime import.
  */
 
 import { numberFormatter } from "../utils/intl-cache.ts";
 
 export interface NativeCostEstimate {
-  /** Finite amount in the platform's original currency; 0 is a real estimate, distinct from null upstream. */
+  /** Positive finite stored amount in the original currency. */
   value: number;
   currency: string | null;
   unit: string | null;
@@ -28,17 +25,14 @@ export interface NativeCostLogRow {
 }
 
 /**
- * Display gate: official Go/GOAT/Ollama rows also carry `native_cost_*` (from
- * `usd_fields_from_cost`) and official priced rows have a nonempty
- * `pricing_revision_id`, so a revision string is NOT platform-lineage proof.
- * The estimate renders only for Custom-provider Keys with a finite,
- * nonnegative native amount — exactly the rows the platform attribution
- * writes. Anything else hides the estimate entirely.
+ * Display gate for a stored native amount. A pricing revision string does not
+ * decide visibility. Only a Custom-provider row with a positive finite stored
+ * amount is shown; missing, zero, and negative amounts stay hidden.
  */
 export function forwardLogNativeEstimate(row: NativeCostLogRow): NativeCostEstimate | null {
   const value = row.native_cost_value;
   if (row.provider_id !== "custom") return null;
-  if (value === null || !Number.isFinite(value) || value < 0) return null;
+  if (value === null || !Number.isFinite(value) || value <= 0) return null;
   return {
     value,
     currency: row.native_cost_currency || null,
@@ -47,11 +41,9 @@ export function forwardLogNativeEstimate(row: NativeCostLogRow): NativeCostEstim
 }
 
 /**
- * Original-currency amount with significant-digit precision so tiny per-token
- * totals stay inspectable. Non-ISO currency labels fall back to a plain
+ * Formats a stored native amount. Non-ISO currency labels fall back to a plain
  * suffix; a missing currency renders the bare number. The unit is appended
- * only when it differs from the currency label (the backend currently mirrors
- * currency into unit).
+ * only when it differs from the currency label.
  */
 export function formatNativeCostEstimate(estimate: NativeCostEstimate, locale: string): string {
   const { value, currency, unit } = estimate;

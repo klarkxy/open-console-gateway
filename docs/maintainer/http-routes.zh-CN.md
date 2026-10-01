@@ -31,7 +31,7 @@
 - **连接、设置与更新器**（`connection`、`settings`、`proxy_test`、`updater` 模块）：读取或修改保存的连接、测试出站代理、检查并安装更新。
 - **Gateway Key**（`keys` 模块）：创建、列出与重新生成管理员 Gateway Key。
 - **账号生命周期**（`accounts`、`usage`、`usage_refresh`、`account_model_test`、`account_verify`、`managed_key_verify`、`account_transfer` 模块）：创建、排序、启停账号；浏览器注册与 Profile；设置与 Key 校验；冷却重置；自定义配置与模型能力；用量与供应商用量的读取和刷新（含 Command Code 用量刷新）；按账号模型测试与连接验证。
-- **供应商**（`providers`、`pricing`、`dynamic_providers` 模块）：密封与静态供应商行及价格倍率；用户定义供应商的增删改查、模型发现与真实连接测试；Zen `-free` 行与模型刷新。
+- **供应商**（`providers`、`dynamic_providers` 模块）：密封与静态供应商行。价格模块路由未注册，按普通 V4 404 返回。用户定义供应商的增删改查、模型发现与真实连接测试；Zen `-free` 行与模型刷新。
 - **供应商契约与模型协议**（内核中的 provider-contracts 家族）：契约列表、按 scope 的模型协议覆盖（provider 与 custom-endpoint 两种 scope）、目录刷新与静态协议表 reset-static。
 - **协议探测**（`providers` 模块）：`POST /providers/{provider_id}/protocol-probes` 探测 Go/Zen 协议支持。Custom 在此被拒绝（`protocol probes for Custom API are account-owned`），V2 `POST /accounts/{id}/protocol-probes` 为 410。Custom 连接验证与模型发现属于账号生命周期家族与 `custom_discovery`（`POST /accounts/{id}/verify`、`POST /custom/models/discover`）。
 - **平台账号**（`platforms` 模块）：列出、查看、刷新平台账号与平台关联。
@@ -41,11 +41,11 @@
 
 V4 原生（`crates/ocg-core/src/dashboard_v4/`）：
 
-- **控制面**：`GET /contract` 是 V4 原生 ControlRevision（`revision`、`processGeneration`、`pricingRevision`）；`/templates`、`/connections`、`/accounts` 分别列出创建模板、连接与账号身份。
+- **控制面**：`GET /contract` 是 V4 原生 ControlRevision（`revision`、`processGeneration`）。生成的 `ControlRevision` 仍包含 `pricingRevision`，作为遗留读取字符串。它不是 CAS 令牌，也没有被删除。活客户端不发布它，也不发送 `expectedPricingRevision`。`/templates`、`/connections`、`/accounts` 分别列出创建模板、连接与账号身份。
 - **目的地与目录**（`destinations`、`destination_catalog` 模块）：列出目的地与凭据；变更目的地或其目录。目的地变更带 CAS，只允许可配置 HTTP 行；密封与平台管理行不可改。
 - **凭据**（`credentials` 模块）：轮换凭据、重试其配额状态。
-- **账务**（`billing` 模块）：按账号的积分配置、校准与发放，均为本地估算。
-- **官网 API 参考**（`official_api` 模块）：匹配预设的官网 API 状态与余额刷新、按供应商的官网价格表。
+- **账务**（`billing` 模块）：按账号的手工积分分桶、校准与授予。读取报告的活动 `pendingRequests` 为 0。已保存的历史回执保持原样。显式校准不被该回执阻挡，也不结算或删除它。读取不结算、不重算已保存余额。新请求不扣减个人积分。
+- **官网 API 参考**（`official_api` 模块）：匹配预设的官网 API 状态与余额刷新。价格表路由未注册。
 - **平台 Key**（`platform_keys` 模块）：向账号导入平台 Key。
 - **入驻与绑定**（`onboarding`、`bindings`、`identities` 模块）：预设原子提交、Key 到模型的绑定、为身份新增凭据。
 - **路由**（`routing`、`routing_cards` 模块）：`GET /routing/explain` 只读，不发出站请求也不解密 Key；`/routing/cards` 列出与替换路由卡。

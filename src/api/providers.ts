@@ -16,20 +16,18 @@ import type {
   ModelProtocolOverridesUpdate,
   ProviderCatalogEntry as V3ProviderCatalogEntry,
   ProviderContracts as V3ProviderContracts,
-  ProviderPricing as V3ProviderPricing,
-  ProviderPricingSnapshot as V3ProviderPricingSnapshot,
   ProviderUsage as V3ProviderUsage,
   ProtocolOverrideState as V3ProtocolOverrideState,
   ProtocolProbeResponse as V3ProtocolProbeResponse,
   MutationExpectation,
 } from "./generated/dashboard-v3.ts";
-import { presentAccount, presentPricing, type Account, type AccountProtocol, type PricingSnapshot } from "./dashboard-presenters.ts";
+import { presentAccount, type Account, type AccountProtocol } from "./dashboard-presenters.ts";
 
 export { isRevisionConflict };
 
 /**
  * Typed wrappers for the provider-scoped dashboard endpoints. These live
- * outside the page layer so provider catalog/pricing/usage/settings calls share
+ * outside the page layer so provider catalog/usage/settings calls share
  * the `http.ts` transport without growing the legacy account surface; Zen
  * provider settings must go through `updateProviderSettings`, never the
  * generic account PATCH.
@@ -63,7 +61,6 @@ export interface ProviderCatalogEntry {
   verification_runtime_availability: "optional" | "unavailable" | "not_applicable" | "available";
   routable: boolean;
   managed_registration: boolean;
-  pricing_availability: "available" | "unavailable" | "not_applicable" | "unpriced";
   usage_availability: "available" | "unavailable" | "local_state";
   manual_usage_calibration: boolean;
   quota_unit: string;
@@ -114,50 +111,6 @@ export interface ProviderDefinitionView {
 }
 
 export type ProviderProtocol = AccountProtocol;
-
-export interface StoredProviderPricingValue {
-  model_id: string;
-  display_name: string;
-  input_per_million: number | null;
-  output_per_million: number | null;
-  cache_read_per_million: number | null;
-  cache_write_per_million: number | null;
-  plan_limit: number | null;
-  model_allowance: number | null;
-  quota_multiplier: number | null;
-  paid_plan_price: number | null;
-  currency: string | null;
-}
-
-export interface ProviderNeutralPricingSnapshot {
-  revision: string;
-  activated_at: string;
-  document_updated_at: string | null;
-  source_url: string;
-  content_hash: string;
-  evidence: string;
-  values: StoredProviderPricingValue[];
-}
-
-export type StoredProviderPricingSnapshot = PricingSnapshot | ProviderNeutralPricingSnapshot | {
-  provider_id: string;
-  revision: string;
-  activated_at: string;
-  document_updated_at: string | null;
-  source_url: string;
-  content_hash: string;
-  snapshot_json: string;
-};
-
-export interface ProviderPricingResponse {
-  provider_id: string;
-  availability: "available" | "unavailable" | "not_applicable" | "unpriced";
-  snapshot?: StoredProviderPricingSnapshot;
-  revision: number;
-  process_generation: number;
-  pricing_revision: string;
-  provider_pricing_revision: string;
-}
 
 export interface ProviderQuotaWindow {
   account_id: string;
@@ -271,7 +224,6 @@ export interface ProviderContractGroup {
   accounts: ProviderAccountChoice[];
   catalog: EffectiveCatalog;
   models: EffectiveModelContract[];
-  pricing: CapabilitySummary;
   usage: CapabilitySummary;
   card: CardCapabilitySummary;
   catalog_routable: boolean;
@@ -287,7 +239,6 @@ export interface CustomEndpointContract {
   account: ProviderAccountChoice;
   catalog: EffectiveCatalog;
   models: EffectiveModelContract[];
-  pricing: CapabilitySummary;
   usage: CapabilitySummary;
   card: CardCapabilitySummary;
   catalog_routable: boolean;
@@ -321,6 +272,18 @@ export interface ModelProtocolOverrideUpdate {
   preferred?: boolean;
 }
 
+/**
+ * V4 catalog-removal receipt. The write is durable once this arrives; the
+ * store projects it onto the cached contracts in place and any later
+ * revalidation is an independent read whose failure is not a delete failure.
+ */
+export interface ContractCatalogModelsRemoval {
+  removed_ids: string[];
+  catalog_models: string[];
+  revision: number;
+  process_generation: number;
+}
+
 export interface ProtocolProbeResult {
   protocol: ProviderProtocol;
   success: boolean;
@@ -345,11 +308,6 @@ function verificationPolicy(value: string): ProviderCatalogEntry["verification_p
 
 function verificationRuntime(value: string): ProviderCatalogEntry["verification_runtime_availability"] {
   if (value === "available" || value === "unavailable" || value === "optional") return value;
-  return "not_applicable";
-}
-
-function pricingAvailability(value: string): ProviderCatalogEntry["pricing_availability"] {
-  if (value === "available" || value === "unavailable" || value === "unpriced") return value;
   return "not_applicable";
 }
 
@@ -427,7 +385,6 @@ function presentCatalogEntry(value: V3ProviderCatalogEntry): ProviderCatalogEntr
     verification_runtime_availability: verificationRuntime(value.verificationRuntimeAvailability),
     routable: value.routable,
     managed_registration: value.managedRegistration,
-    pricing_availability: pricingAvailability(value.pricingAvailability),
     usage_availability: usageAvailability(value.usageAvailability),
     manual_usage_calibration: value.manualUsageCalibration,
     quota_unit: value.quotaUnit,
@@ -519,7 +476,6 @@ function presentContracts(value: V3ProviderContracts): ProviderContractsResponse
       accounts: scope.accounts.map(presentAccountChoice),
       catalog: presentCatalog(scope.catalog),
       models: scope.models.map(presentModel),
-      pricing: { availability: scope.pricing.availability },
       usage: { availability: scope.usage.availability },
       card: presentCard(scope.card),
       catalog_routable: scope.catalogRoutable,
@@ -534,7 +490,6 @@ function presentContracts(value: V3ProviderContracts): ProviderContractsResponse
       account: presentAccountChoice(scope.account),
       catalog: presentCatalog(scope.catalog),
       models: scope.models.map(presentModel),
-      pricing: { availability: scope.pricing.availability },
       usage: { availability: scope.usage.availability },
       card: {
         ...presentCard(scope.card),
@@ -545,44 +500,6 @@ function presentContracts(value: V3ProviderContracts): ProviderContractsResponse
       production_inference: scope.productionInference,
       disabled_reasons: [...scope.disabledReasons],
       revision: scope.revision,
-    })),
-  };
-}
-
-function presentProviderPricing(value: V3ProviderPricing): ProviderPricingResponse {
-  return {
-    provider_id: value.providerId,
-    availability: value.availability,
-    snapshot: value.providerSnapshot === null
-      ? (value.snapshot === null ? undefined : presentPricing(value.snapshot))
-      : presentProviderPricingSnapshot(value.providerSnapshot),
-    revision: value.revision,
-    process_generation: value.processGeneration,
-    pricing_revision: value.pricingRevision,
-    provider_pricing_revision: value.providerPricingRevision,
-  };
-}
-
-function presentProviderPricingSnapshot(value: V3ProviderPricingSnapshot): ProviderNeutralPricingSnapshot {
-  return {
-    revision: value.revision,
-    activated_at: value.activatedAt,
-    document_updated_at: value.documentUpdatedAt,
-    source_url: value.sourceUrl,
-    content_hash: value.contentHash,
-    evidence: value.evidence,
-    values: value.values.map((row) => ({
-      model_id: row.modelId,
-      display_name: row.displayName,
-      input_per_million: row.inputPerMillion,
-      output_per_million: row.outputPerMillion,
-      cache_read_per_million: row.cacheReadPerMillion,
-      cache_write_per_million: row.cacheWritePerMillion,
-      plan_limit: row.planLimit,
-      model_allowance: row.modelAllowance,
-      quota_multiplier: row.quotaMultiplier,
-      paid_plan_price: row.paidPlanPrice,
-      currency: row.currency,
     })),
   };
 }
@@ -639,25 +556,6 @@ function presentProbe(value: V3ProtocolProbeResponse): ProtocolProbeResponse {
 
 export const providerApi = {
   getProviderCatalog: async () => (await dashboardV3.getProviders()).entries.map(presentCatalogEntry),
-  getProviderPricing: async (providerId: string) =>
-    presentProviderPricing(await dashboardV3.getProviderPricing(providerId)),
-  updateProviderPricingMultipliers: async (
-    providerId: string,
-    expectedPricingRevision: string,
-    multipliers: Array<{ model_id: string; multiplier: number }>,
-  ) => {
-    const control = useControlPlaneStore();
-    if (!control.hasTokens()) await control.refresh();
-    return presentProviderPricing(await control.runMutation((expectation) => (
-      dashboardV3.putProviderPricingMultipliers(providerId, {
-        expectedPricingRevision,
-        multipliers: multipliers.map((multiplier) => ({
-          modelId: multiplier.model_id,
-          multiplier: multiplier.multiplier,
-        })),
-      }, expectation)
-    )));
-  },
   getProviderUsage: async (accountId: string) =>
     presentProviderUsage(await dashboardV3.getProviderUsage(accountId)),
   refreshProviderUsage: async (accountId: string) => {
@@ -711,17 +609,34 @@ export const providerApi = {
     scopeKind: ContractScopeKind,
     scopeId: string,
     modelIds: string[],
-  ) => {
+  ): Promise<ContractCatalogModelsRemoval> => {
     const control = useControlPlaneStore();
     if (!control.hasTokens()) await control.refresh();
     try {
-      await control.runMutation((expectation) =>
+      // The V4 receipt is the completion point: the removal is durable and
+      // CAS already advanced. Never re-derive it from a separate contracts
+      // GET, whose failure would misreport a committed delete as failed.
+      const result = await control.runMutation((expectation) =>
         dashboardV4.removeCatalogModels(scopeKind, scopeId, { modelIds }, expectation));
+      return {
+        removed_ids: result.removedIds,
+        catalog_models: result.catalogModels,
+        revision: result.revision.revision,
+        process_generation: result.revision.processGeneration,
+      };
     } catch (cause) {
-      if (isRevisionConflict(cause)) await dashboardV3.getProviderContracts();
+      if (isRevisionConflict(cause)) {
+        // Read recovery is best-effort: its failure must never replace the
+        // original conflict the caller reports and reconciles from.
+        try {
+          await dashboardV3.getProviderContracts();
+        } catch {
+          // The conflict below is the outcome; the failed reload is retried
+          // by the caller's own revalidation, never by replaying the write.
+        }
+      }
       throw cause;
     }
-    return presentContracts(await dashboardV3.getProviderContracts());
   },
   getProviderContracts: async () => presentContracts(await dashboardV3.getProviderContracts()),
   updateModelProtocolOverrides: async (

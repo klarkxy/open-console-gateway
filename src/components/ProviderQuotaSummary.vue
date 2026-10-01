@@ -6,28 +6,23 @@
       role="status"
     >
       <span class="provider-quota-row__label">{{ t("尚未刷新") }}</span>
-      <n-progress
-        type="line"
-        :percentage="0"
-        status="default"
-        :show-indicator="false"
-        :height="8"
-        :border-radius="4"
-      />
-      <strong class="provider-quota-row__used">—</strong>
+      <span class="provider-quota-row__meter" />
+      <strong class="provider-quota-row__used">{{ t("未知") }}</strong>
       <span class="provider-quota-row__reset" aria-hidden="true" />
     </div>
     <template v-else>
       <div v-for="window in displayedWindows" :key="window.window_kind" class="provider-quota-row">
         <span class="provider-quota-row__label">{{ windowLabel(window) }}</span>
         <n-progress
+          v-if="quotaPercent(window) !== null"
           type="line"
-          :percentage="usedPercent(window)"
-          :status="usedPercent(window) >= 100 ? 'error' : 'default'"
+          :percentage="quotaPercent(window) ?? 0"
+          :status="(quotaPercent(window) ?? 0) >= 100 ? 'error' : 'default'"
           :show-indicator="false"
           :height="8"
           :border-radius="4"
         />
+        <span v-else class="provider-quota-row__meter" />
         <strong class="provider-quota-row__used">{{ usedLabel(window) }}</strong>
         <time v-if="window.resets_at" class="provider-quota-row__reset">
           {{ t("{time}后重置", { time: formatCooldownRemainingText(cooldownRemainingUntil(window.resets_at, now)) }) }}
@@ -41,13 +36,17 @@
 <script setup lang="ts">
 import { NProgress } from "naive-ui";
 import { computed } from "vue";
-import type { ProviderQuotaWindow, ProviderUsageResponse } from "../api/providers.ts";
+import type { ProviderQuotaWindow } from "../api/providers.ts";
 import { cooldownRemainingUntil } from "../domain/account-display.ts";
 import { formatCooldownRemainingText } from "../views/account-status-text.ts";
 import { isMiniMaxVideoQuotaWindow, providerQuotaWindowLabel } from "../domain/accounts-usage.ts";
 import { t } from "../i18n/index.ts";
 
-const props = defineProps<{ usage: ProviderUsageResponse | null; now: number }>();
+const props = defineProps<{
+  /** Quota windows only. Cash, credit, and sync fields are not read. */
+  usage: { quota_windows: readonly ProviderQuotaWindow[] } | null;
+  now: number;
+}>();
 
 const displayedWindows = computed(() => (
   props.usage?.quota_windows.filter((window) => !isMiniMaxVideoQuotaWindow(window)) ?? []
@@ -62,15 +61,18 @@ function windowLabel(window: ProviderQuotaWindow): string {
   });
 }
 
-function usedPercent(window: ProviderQuotaWindow): number {
-  if (window.limit_value === null || window.limit_value <= 0) return 0;
-  return Math.max(0, Math.min(100, (window.used / window.limit_value) * 100));
+function quotaPercent(window: ProviderQuotaWindow): number | null {
+  const limit = window.limit_value;
+  if (typeof window.used !== "number" || !Number.isFinite(window.used)) return null;
+  if (typeof limit !== "number" || !Number.isFinite(limit) || limit <= 0) return null;
+  return Math.max(0, Math.min(100, (window.used / limit) * 100));
 }
 
 function usedLabel(window: ProviderQuotaWindow): string {
-  if (window.limit_value === null) return "∞";
+  const percent = quotaPercent(window);
+  if (percent === null || window.limit_value === null) return t("未知");
   if (window.unit === "percent") {
-    return `${usedPercent(window).toLocaleString(undefined, { maximumFractionDigits: 1 })}%`;
+    return `${percent.toLocaleString(undefined, { maximumFractionDigits: 1 })}%`;
   }
   const used = window.used.toLocaleString();
   const limit = window.limit_value.toLocaleString();
@@ -94,6 +96,12 @@ function usedLabel(window: ProviderQuotaWindow): string {
   align-items: center;
   gap: var(--ocg-space-sm) var(--ocg-space-md);
   min-width: 0;
+}
+
+.provider-quota-row__meter {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--ocg-divider);
 }
 
 .provider-quota-row__label {

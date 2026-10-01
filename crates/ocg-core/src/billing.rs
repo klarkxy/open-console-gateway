@@ -1,12 +1,12 @@
 //! Pure per-credential credit meter. Persistence, HTTP, and settlement live elsewhere.
 
 use crate::billing_types::{
-    CreditBalanceCorrection, CreditBucket, CreditBucketKind, CreditConfiguration, CreditMeterView,
-    CreditPreset, CreditRate, MonthlyCredits,
+    CreditBalanceCorrection, CreditBucket, CreditBucketKind, CreditConfiguration,
+    CreditConfigurationWrite, CreditMeterView, CreditPreset, CreditRate, MonthlyCredits,
 };
 use anyhow::{Result, anyhow, bail, ensure};
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, TimeZone, Utc};
-use ocg_domain::billing::{BillingModel, BillingTokens, TokenRates, convert_charge, token_charge};
+use ocg_domain::billing::{BillingModel, BillingTokens};
 use ocg_domain::destination::AdapterKind;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -104,8 +104,8 @@ pub(crate) fn stepfun_credit_presets(at: DateTime<Utc>) -> Vec<CreditPreset> {
             configuration: CreditConfiguration {
                 name: tier.name.clone(),
                 currency: preset.currency.clone(),
-                credits_per_currency: preset.credits_per_currency,
-                rates: preset.rates.clone(),
+                credits_per_currency: 1.0,
+                rates: Vec::new(),
                 monthly: Some(MonthlyCredits {
                     amount: tier.amount,
                     next_reset_at: next_reset,
@@ -362,9 +362,23 @@ impl CreditMeterState {
     /// Next grant is the following real boundary of the new calendar.
     pub(crate) fn configure(
         &mut self,
-        configuration: CreditConfiguration,
+        configuration: CreditConfigurationWrite,
         now: DateTime<Utc>,
     ) -> Result<()> {
+        let configuration = CreditConfiguration {
+            name: configuration.name,
+            currency: configuration.currency,
+            credits_per_currency: if self.configuration.credits_per_currency.is_finite()
+                && self.configuration.credits_per_currency > 0.0
+            {
+                self.configuration.credits_per_currency
+            } else {
+                1.0
+            },
+            rates: self.configuration.rates.clone(),
+            monthly: configuration.monthly,
+            source_url: configuration.source_url,
+        };
         validate_configuration(&configuration)?;
         if configuration.monthly.is_some() {
             ensure!(
@@ -515,17 +529,8 @@ impl CreditMeterState {
 impl CreditAttempt {
     /// Token total includes cache groups. Missing cache-write prices stay unknown.
     pub(crate) fn charge(&self, tokens: BillingTokens) -> Option<f64> {
-        let rate = self.rate.as_ref()?;
-        let currency = token_charge(
-            tokens,
-            TokenRates::per_million(
-                rate.input_per_million,
-                rate.output_per_million,
-                rate.cache_read_per_million,
-                rate.cache_write_per_million,
-            ),
-        )?;
-        convert_charge(currency, self.credits_per_currency)
+        let _ = (self, tokens);
+        None
     }
 }
 
@@ -556,10 +561,8 @@ fn monthly_policy_changed(
 #[serde(rename_all = "camelCase")]
 struct CreditPresetResource {
     currency: String,
-    credits_per_currency: f64,
     source_url: String,
     tiers: Vec<CreditPresetTier>,
-    rates: Vec<CreditRate>,
 }
 #[derive(Deserialize)]
 struct CreditPresetTier {

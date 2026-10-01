@@ -168,7 +168,6 @@ const props = withDefaults(
     usageRefreshLoading: MaybeRef<boolean>;
     refreshState?: AccountRefreshState;
     purchaseDateSaving: boolean;
-    quotaLimitsFailed?: boolean;
     menuOptions: AccountMenuOption[];
     accountNames?: Readonly<Record<string, string>>;
     connections?: readonly Connection[] | null;
@@ -187,7 +186,6 @@ const props = withDefaults(
   {
     account: null,
     identity: null,
-    quotaLimitsFailed: false,
     accountNames: undefined,
     connections: null,
     extraTags: () => [],

@@ -30,8 +30,8 @@ Windows · macOS · Linux · Docker
   tools, then manage their access with your own Key.
 - **Choose which account goes first.** Drag to set priorities. When an account
   hits a rate limit, the gateway can try another compatible account.
-- **See where your usage goes.** Check usage estimates, available cost estimates,
-  and request logs to understand what's working and what needs attention.
+- **See where your usage goes.** Check observed usage, balances, and request
+  logs to understand what's working and what needs attention.
 
 Start with OpenCode Go, Zen Free, Kimi Code CN, MiniMax CN Token Plan, or
 Command Code GOAT. You can also add a compatible API service.

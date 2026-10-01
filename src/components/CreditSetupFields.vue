@@ -1,7 +1,7 @@
 <template>
   <div class="credit-setup">
     <n-checkbox v-if="presets.length === 0" v-model:checked="draft.enabled" :disabled="disabled">
-      {{ t("本地积分估算") }}
+      {{ t("配置额度") }}
     </n-checkbox>
     <template v-if="draft.enabled">
       <n-form-item :show-feedback="false" v-if="presets.length" :label="t('档位')" required>
@@ -10,8 +10,6 @@
       <template v-else>
         <n-form-item :show-feedback="false" :label="t('名称')"><n-input v-model:value="draft.name" :disabled="disabled" :aria-label="t('名称')" /></n-form-item>
         <n-form-item :show-feedback="false" :label="t('币种')"><n-input v-model:value="draft.currency" :disabled="disabled" :aria-label="t('币种')" /></n-form-item>
-        <n-form-item :show-feedback="false" :label="t('点数每货币')" required><n-input-number v-model:value="draft.factor" :min="0" :disabled="disabled" :aria-label="t('点数每货币')" :input-props="{ 'aria-label': t('点数每货币') }" /></n-form-item>
-        <CreditRateFields v-model="draft.rates" :disabled="disabled" />
         <n-checkbox v-model:checked="draft.monthly" :disabled="disabled">{{ t("月度额度") }}</n-checkbox>
         <n-form-item :show-feedback="false" v-if="draft.monthly" :label="t('月度额度')" required><n-input-number v-model:value="draft.monthlyAmount" :min="0" :disabled="disabled" :aria-label="t('月度额度')" :input-props="{ 'aria-label': t('月度额度') }" /></n-form-item>
       </template>
@@ -22,7 +20,7 @@
         </div>
       </n-form-item>
       <n-form-item :show-feedback="false" v-if="presets.length || draft.monthly" :label="t('重置日期')" required>
-        <input v-model="draft.reset" type="datetime-local" class="credit-setup__date mono" :disabled="disabled" :aria-label="t('重置日期')">
+        <input :value="draft.reset" type="datetime-local" class="credit-setup__date mono" :disabled="disabled" :aria-label="t('重置日期')" @input="setReset">
       </n-form-item>
     </template>
   </div>
@@ -34,7 +32,6 @@ import type { CreditPreset } from "../api/billing.ts";
 import { buildCreditSetup, creditSetupDraft } from "../domain/credit-setup.ts";
 import { creditDisplayFactor, creditsToScaled } from "../domain/billing.ts";
 import { t } from "../i18n/index.ts";
-import CreditRateFields from "./CreditRateFields.vue";
 const props = defineProps<{ presets: readonly CreditPreset[]; disabled?: boolean }>();
 const emit = defineEmits<{ change: [result: ReturnType<typeof buildCreditSetup>] }>();
 const startedAt = Date.now();
@@ -47,6 +44,9 @@ const maximum = computed(() => {
 function selectPreset(id: string): void {
   draft.value.presetId = id;
   draft.value.remaining = maximum.value ?? null;
+}
+function setReset(event: Event): void {
+  draft.value.reset = event.target instanceof HTMLInputElement ? event.target.value : "";
 }
 watch(() => buildCreditSetup(draft.value, props.presets, startedAt), result => emit("change", result), { deep: true, immediate: true });
 </script>

@@ -46,8 +46,8 @@ get billed for a bad guess.
   running process wrote first. The SPA refreshes the affected data from the
   server's `revisionConflict` code but does not replay the change. Review the
   current value, then submit again.
-- **Local bar at 100% but requests still succeed.** That is a *false* circuit
-  breaker — local accounting only. Continue using the account; the gateway
+- **Local bar at 100% but requests still succeed.** A full official or manual
+  percentage is only a warning. Continue using the account; the gateway
   will keep forwarding.
 - **Local bar at 100% and the gateway returns `429`.** That is a *true*
   circuit breaker. Wait for `cooldown_until`, or reset the cooldown manually

@@ -4,6 +4,10 @@
 
 Operator contract for upgrades, backups, and rollback. Schema details are in [Persistence](state-and-lifecycle.md#persistence).
 
+## Pricing data after retirement
+
+Retiring price tables, reference-price feeds, multipliers, and price-based estimates does not change `CURRENT_SCHEMA_VERSION` and does not delete price-snapshot rows, forward cost columns, `credit_meter_json`, or `credit_receipt_json`. Those columns stay readable for history and export. Opening the database does not settle a pending credit receipt, reprice a stored cost, or write a missing cost as zero. A billing read reports active pending requests as 0. The stored receipt bytes stay exact. Explicit calibration is not blocked by that receipt and does not delete it. The historical v22 migration still rolls fixed windows when it inserts those quota rows. This retirement does not change that migration and does not add a destructive migration. An ordinary provider or destination delete does not delete historical price snapshots.
+
 ## Schema v64 — preset public model names
 
 v64 renames only saved Configurable HTTP mappings whose public name exactly matches `<preset-id>/<upstream-id>` to the last upstream-ID segment. Exact upstream IDs, manually named mappings, and historical logs are unchanged. Same-destination leaf collisions remain unchanged for operator review. The migration updates matching credential model scopes and downstream publication choices with the renamed model. It skips a hidden name if the new name is already used by another destination, avoiding a global publication change. Clients using a renamed public name must update their requested model. The change is transactional; back up the full data directory before upgrading and restore it to roll back, since older binaries cannot open schema v64.
@@ -23,13 +27,15 @@ v62 adds nullable `credentials.credit_meter_json` and `forward_logs.credit_recei
 The earlier v61 console-session column is retained as historical schema but cleared when upgrading to v62; no runtime code reads or renews those tokens. Configuration rewrites preserve a credit meter only for the same credential, destination, and endpoint. Key rotation on that account does not reset its balance. Inference grants, cooldowns, and quota recovery are unchanged. These additive changes are transactional and create no separate pre-v62 backup. Rollback requires restoring the whole pre-upgrade data directory; older binaries refuse schema v62.
 
 An exclusive `.database-open-gate.lock` serializes initialization. Each open
-database holds a shared lock on `.database-open.lock`. Pending credit
-receipts are recovered only by an opener that can first acquire the exclusive
-lock, after all previous database handles have closed. A concurrent CLI status
-read therefore leaves active receipts untouched. If another handle survives a
-gateway crash, recovery waits for a later cold open. Do not remove or replace
-either lock file while the directory is in use; upgrades must stop older binaries
-that do not participate in this lock.
+database holds a shared lock on `.database-open.lock`. The following recovery
+describes the schema as it shipped: pending credit receipts were recovered only
+by an opener that could first acquire the exclusive lock, after all previous
+database handles had closed. A concurrent CLI status read therefore left active
+receipts untouched. If another handle survived a gateway crash, recovery waited
+for a later cold open. After pricing retirement that settlement must not run.
+Open, read, and export leave historical receipts and balances unchanged. Do not
+remove or replace either lock file while the directory is in use; upgrades must
+stop older binaries that do not participate in this lock.
 
 ## Schema v60 — per-Key quota recovery
 

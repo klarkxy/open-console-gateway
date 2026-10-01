@@ -44,7 +44,6 @@ const catalogEntry = (
   verification_runtime_availability: "optional",
   routable: true,
   managed_registration: false,
-  pricing_availability: "available",
   usage_availability: "available",
   manual_usage_calibration: false,
   quota_unit: "usd",
@@ -123,7 +122,6 @@ function providerGroup(overrides: Partial<ProviderContractGroup> = {}): Provider
       refresh_supported: true,
     },
     models: [modelContract("gpt-5.6-luna", { chat_completions: true, responses: true })],
-    pricing: { availability: "available" },
     usage: { availability: "available" },
     card: {
       fetch_zen_models: false,
@@ -153,7 +151,6 @@ function customEndpoint(overrides: Partial<CustomEndpointContract> = {}): Custom
       refresh_supported: false,
     },
     models: [modelContract("local-model", { chat_completions: true })],
-    pricing: { availability: "unpriced" },
     usage: { availability: "unavailable" },
     card: {
       fetch_zen_models: false,
@@ -360,7 +357,6 @@ function cnScope(
       refresh_supported: false,
     },
     models,
-    pricing: { availability: "unpriced" },
     usage: { availability: "unavailable" },
     card: {
       fetch_zen_models: false,

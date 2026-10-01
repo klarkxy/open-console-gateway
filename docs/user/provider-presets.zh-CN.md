@@ -36,7 +36,7 @@ MiniMax 国内/API 与国际预设会保存独立的 Chat Completions、Response
 
 于 **2026-09-08** 对照 CC-Switch 的 Claude、Codex、Gemini、OpenCode、OpenClaw 与 Hermes [预设源码 `f3b18df`](https://github.com/farion1231/cc-switch/tree/f3b18df12007d0fd79fd8ad8d310880664015197/src/config)。CC-Switch 的分类只用于发现候选，不能直接作为可信判断，例如 Azure、xAI 也可能被标为 third_party。预设的端点与鉴权选择均已按运营方文档核对。
 
-每一条预设是可用的配置模板，不代表已使用真实 Key 完成在线推理，也不代表账号已经获得模型权限。除下文说明的匹配 DeepSeek/智谱官网 API 预设外，新增供应商不自动同步官方额度、余额和价格，可按账号配置本地积分估算。Coding/Token Plan Key、不同地区 API Key 必须与所选端点匹配，并遵循上游套餐允许的使用范围。
+每一条预设是可用的配置模板，不代表已使用真实 Key 完成在线推理，也不代表账号已经获得模型权限。除下文说明的匹配 DeepSeek/智谱官网 API 预设外，新增供应商不自动同步官方额度或余额。产品不会估算请求价格。Coding/Token Plan Key、不同地区 API Key 必须与所选端点匹配，并遵循上游套餐允许的使用范围。
 
 协议路由已于 **2026-09-24** 按各运营方文档核对，表示服务提供的格式，不保证每个模型或每把 Key 都可使用。腾讯 TokenHub、阿里云 Responses、AtlasCloud、PPIO 与 Novita 存在逐模型差异。运营方只公布 Base URL 时，预设的完整 Messages 地址采用标准 `/v1/messages` 后缀。StreamLake 的 Messages 代理地址对应默认模型 `kat-coder-pro-v2.5`，更换模型时需复核地址。Anthropic 的 Chat 兼容接口用于评估，完整 Claude 能力应使用原生 Messages。预填路由就是 JSON 里的 `protocolRoutes`，在你填写资源专属地址后套用。
 
@@ -48,9 +48,9 @@ MiniMax 国内/API 与国际预设会保存独立的 Chat Completions、Response
 
 **自填资源地址。**Azure OpenAI v1 与 AWS Bedrock 在填写资源或地区 URL 之前只提供模板；其预设描述该地址对应的文档路由组。
 
-**余额与价格面板。**只有 DeepSeek API 与智谱 GLM API 预设带有下文所述的官网余额与价格参考面板；其他预设不接入官方额度、余额或价格同步。
+**余额面板。**只有 DeepSeek API 与智谱 GLM API 预设带有下文所述的官网余额行为；其他预设不接入官方额度或余额同步。这些预设都不显示价格表。
 
-**StepFun 点数。**Step Plan（国内）的 Mini / Plus / Pro / Max 档位阶梯与费率来自服务端 `resources/stepfun-credit-presets.json`，见下文 StepFun 章节。
+**StepFun 点数。**Step Plan（国内）保留手工积分余额，见下文 StepFun 章节。
 
 KAT-Coder 的完整 Chat 地址与 Bearer 鉴权，根据官方 OpenAI 兼容客户端配置推导：Base URL 加标准 `/chat/completions` 后缀；Messages 地址按官方 Claude 代理 Base URL 加 `/v1/messages`。Coding Plan 的用途须符合 [StreamLake 订阅条款](https://www.streamlake.ai/document/DOC/mjzrrkirccgntfkz46)。百灵采用当前官方 `api.ant-ling.com` 域名。
 
@@ -70,26 +70,20 @@ KAT-Coder 的完整 Chat 地址与 Bearer 鉴权，根据官方 OpenAI 兼容客
 
 [新增供应商](add-provider.zh-CN.md) · [供应商](providers.zh-CN.md) · [English](provider-presets.md)
 
-## 官网 API 余额与价格参考
+## 官网 API 余额
 
-DeepSeek API 与智谱 GLM API 预设现在提供独立账务参考面板，但保存的预设、API 类型、鉴权和官网目的地必须仍然匹配。推理继续使用 Configurable HTTP；任意 Custom API、改成中转地址的预设以及 Coding Plan 不会继承这项能力。
+DeepSeek API 与智谱 GLM API 预设可以显示官网余额，但保存的预设、API 类型、鉴权和官网目的地必须仍然匹配。推理继续使用 Configurable HTTP。任意 Custom API、改成中转地址的预设以及 Coding Plan 不会继承这项余额读取。没有参考价格面板，也没有价格刷新。
 
-在 **账号** 页，这些预设共用按量 API 计量：**余额**、**本月**、**历史**。余额是官网钱包；本月和历史是 OCG 已定价日志的本地估算（本月按 UTC 自然月）。DeepSeek 的 **刷新余额** 仅在点击时用所选 Key 读取官网 `/user/balance`。剩余数字是官网总额；仅当赠送余额大于 0 时才另标赠送（已包含在总额内）。查询时间作为三列共用说明。刷新失败保留上次成功结果，不改变启停、认证状态、冷却或路由。换 Key 或修改地址后不会沿用旧余额。智谱明确显示未接入公开余额 API，不生成假余额，也不调用未经证实的控制台接口。
+在 **账号** 页，卡片展示已观测的剩余余额。它不是额度条，也不是按本地价格估算的本月或历史花费。没有读到的余额保持不可用，不会显示成 0。DeepSeek 的 **刷新余额** 仅在点击时用所选 Key 读取官网 `/user/balance`。剩余数字是官网总额；仅当赠送余额大于 0 时才另标赠送（已包含在总额内）。刷新失败保留上次成功结果，不改变启停、认证状态、冷却或路由。换 Key 或修改地址后不会沿用旧余额。智谱明确显示未接入公开余额 API，不生成假余额，也不调用未经证实的控制台接口。
 
-在 **供应商 → 价格** 页，这两种预设展示每百万 Token 的官网参考单价，并提供手工 **刷新价格表**。初始使用附日期的内置参考；参考有效期为 30 天，过期后的新请求保持未定价，直到刷新成功。官网结构不支持时保留旧参考但不延长有效期。打开页面和执行推理都不会自动请求官网价格或余额。
+Gateway 不会拉取价格表，也不会用已保存的参考单价估算新请求。没有记录到的费用保持未知，不会显示成零或免费。以前保存的价格留在本机，不会重算。CNY 余额不会换算成美元费用，读到余额也不会扣减钱包。把模型路由改到其他地址后，不会继承这份官网余额。
 
-DeepSeek 使用官网 USD 价格，区分缓存命中、未命中以及工作日峰谷时段；CNY 余额不会换算或扣除 USD 估算。智谱使用官网 CNY 价格，写入原币费用，不会冒充美元。账号面板按原币分别汇总 OCG 本地成功请求的 UTC 自然月和全时段合计，并显示本月费用未知的请求数。这是参考估算，不是实际账单；不包含 OCG 外的调用，也不回算历史请求。每次尝试固定价格版本与时段，流式完成时沿用同一份价格。
-
-仅对有完整单价的准确上游模型计价。未知模型、不支持的分档或存储计费、缺少用量、无效 Token 数、缓存写入、收费托管工具及其他额外计费请求保持未知。把模型路由改到非官网地址后不会继承官网价格。已有匹配预设无需数据迁移；普通用户定义供应商需显式配置积分计量后才提供本地估算。
-
-来源：[DeepSeek 余额](https://api-docs.deepseek.com/api/get-user-balance/)、[DeepSeek 价格](https://api-docs.deepseek.com/quick_start/pricing/)、[智谱价格](https://docs.bigmodel.cn/cn/guide/start/pricing.md)。初始参考核验于 2026-09-17。来源检查和自动测试均未使用真实账号 Key，也未发送收费推理请求。
+来源：[DeepSeek 余额](https://api-docs.deepseek.com/api/get-user-balance/)。
 
 ## StepFun API (CN) 余额与 Step Plan (CN) 点数
 
-StepFun API (CN) 在 `api.stepfun.com` 的普通路径（不含 `/step_plan`）可以用所选 Key 刷新当前余额，入口与 DeepSeek、Moonshot 相同，都是账号页的现金计量。官网钱包余额不变。
+StepFun API (CN) 在 `api.stepfun.com` 的普通路径（不含 `/step_plan`）可以用所选 Key 刷新当前余额，入口与 DeepSeek、Moonshot 相同。官网钱包余额不变。没有读到的余额保持不可用，不会显示成 0。
 
-Step Plan (CN) 在 Open Console Gateway 里没有官网用量 API。账号卡使用 **本地估算**，并手工校准。在 **添加 Key** 或该 Key 的 **编辑** 表单中，选择 Mini / Plus / Pro / Max（400M / 1600M / 8000M / 40000M 点数，1M 点数 = 1 元人民币），填写当前剩余和重置时间（默认下个自然月 00:00 中国时间，UTC+8）。费率来自服务端预设。后续余额修正使用 Key 操作区的 **校准用量**。不需要控制台 Cookie 或登录。
+Step Plan (CN) 在 Open Console Gateway 里没有官网用量 API。账号卡保留手工积分余额。Step 预设是一笔数量和月度续期，不是 token 费率。分桶、授予、月度续期和过期仍然分开，需要改正已保存余额时使用 **校准用量**。完成的请求不会扣减这份余额。产品不要求填写按 token 费率或货币换算。没有记下的数量保持未知，不会记成零或免费。余额为空或未知不会停止路由。剩余不含已过期的授予，卡片也不会编造一个共用重置时间。不需要控制台 Cookie 或登录。
 
-费用按实际归一化 Token × 这些费率 × 1M/元换算，不是订阅标价。只有 OCG 流量进入估算；OCG 之外的用量用校准纠正。待结算完成后再校准。月度发放、400M / 1600M 充值（可选 30 天过期）和其他过期是分开的桶。剩余不含已过期充值。每条过期单独列出，卡片不会编造一个共用重置时间。未知定价保持未知，不是免费。该估算不阻断路由。
-
-可配置 HTTP 目的地可以用同一套点数模型，自行填写名称、货币、换算、费率和桶。来源 URL 只作只读外链，Open Console Gateway 不会去拉取。
+可配置 HTTP 目的地可以保留同一份手工积分余额。Open Console Gateway 不会为它拉取费率文档。

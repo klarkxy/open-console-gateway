@@ -1,4 +1,4 @@
-import type { OfficialApiStatus, OfficialBalance, OfficialSpend } from "../api/generated/dashboard-v4.ts";
+import type { OfficialApiStatus, OfficialBalance } from "../api/generated/dashboard-v4.ts";
 import type { MessageKey } from "../i18n/index.ts";
 
 /** Why the remaining-balance figure has no amount. */
@@ -19,9 +19,6 @@ export interface OfficialApiMeterRemaining {
 export interface OfficialApiAccountMeter {
   remainingEmpty: OfficialApiMeterEmpty | null;
   remaining: OfficialApiMeterRemaining[];
-  monthSpend: OfficialSpend[];
-  lifetimeSpend: OfficialSpend[];
-  unpriced: number;
 }
 
 function finiteAmount(value: number): boolean {
@@ -29,30 +26,15 @@ function finiteAmount(value: number): boolean {
 }
 
 export function officialApiAccountMeter(
-  status: Pick<
-    OfficialApiStatus,
-    "balanceAvailable" | "balances" | "monthSpend" | "lifetimeSpend" | "unpricedRequests"
-  >,
+  status: Pick<OfficialApiStatus, "balanceAvailable" | "balances">,
 ): OfficialApiAccountMeter {
-  const monthSpend = status.monthSpend.filter((row) => finiteAmount(row.amount));
-  const lifetimeSpend = (status.lifetimeSpend ?? []).filter((row) => finiteAmount(row.amount));
-  const unpriced = Math.max(0, status.unpricedRequests);
   if (!status.balanceAvailable) {
-    return {
-      remainingEmpty: "unavailable",
-      remaining: [],
-      monthSpend,
-      lifetimeSpend,
-      unpriced,
-    };
+    return { remainingEmpty: "unavailable", remaining: [] };
   }
   const remaining = status.balances.flatMap((row) => remainingFromBalance(row) ?? []);
   return {
     remainingEmpty: remaining.length === 0 ? "not_queried" : null,
     remaining,
-    monthSpend,
-    lifetimeSpend,
-    unpriced,
   };
 }
 
@@ -65,14 +47,4 @@ function remainingFromBalance(row: OfficialBalance): OfficialApiMeterRemaining |
     gift,
     observedAt: row.observedAt,
   };
-}
-
-export function joinOfficialApiSpend(
-  rows: readonly OfficialSpend[],
-  formatAmount: (value: number, currency: string) => string,
-): string | null {
-  const parts = rows
-    .filter((row) => finiteAmount(row.amount))
-    .map((row) => formatAmount(row.amount, row.currency));
-  return parts.length > 0 ? parts.join(" · ") : null;
 }

@@ -5,24 +5,16 @@ use crate::gateway::attempt_pricing::{
 use crate::kernel::pricing::PricingSnapshot;
 
 fn install_test_credits(state: &CoreState, account: &Account) {
-    use crate::billing_types::{CreditBucket, CreditBucketKind, CreditConfiguration, CreditRate};
+    use crate::billing_types::{CreditBucket, CreditBucketKind, CreditConfigurationWrite};
     let now = Utc::now();
     let db = state.db.lock();
     let tx = db.conn.unchecked_transaction().unwrap();
     crate::db::billing::configure_on(
         &tx,
         &account.id,
-        CreditConfiguration {
+        CreditConfigurationWrite {
             name: "test credits".into(),
             currency: "CNY".into(),
-            credits_per_currency: 1_000_000.0,
-            rates: vec![CreditRate {
-                model: "local-custom".into(),
-                input_per_million: 10.0,
-                output_per_million: 20.0,
-                cache_read_per_million: Some(2.0),
-                cache_write_per_million: Some(10.0),
-            }],
             monthly: None,
             source_url: None,
         },
@@ -113,28 +105,27 @@ async fn credits_json_and_sse_settle_one_native_receipt_and_survive_reopen() {
         let view = test_credit_view(&state);
         assert_eq!(view.pending_requests, 0, "{stream}");
         assert_eq!(view.unpriced_requests, 0, "{stream}");
-        // Check the normalized groups actually persisted, including cache-write support.
+        assert!((view.remaining - 100_000_000.0).abs() < 1e-6, "{stream}");
         let db = state.db.lock();
         let logs = db.list_forward_logs(10).unwrap();
         assert_eq!(logs.len(), 1, "{stream}: {logs:?}");
         let log = &logs[0];
-        let expected = ocg_domain::billing::token_charge(
-            ocg_domain::billing::BillingTokens::new(
-                log.prompt_tokens,
-                log.completion_tokens,
-                log.cached_tokens,
-                log.cache_creation_tokens,
-            ),
-            ocg_domain::billing::TokenRates::per_million(10.0, 20.0, Some(2.0), Some(10.0)),
-        )
-        .unwrap()
-            * 1_000_000.0;
-        assert!(expected > 10_000_000.0 && expected < 13_000_000.0);
-        assert!((view.remaining - (100_000_000.0 - expected)).abs() < 1e-6);
+        assert_eq!(log.prompt_tokens, 1_000_000, "{stream}");
+        assert_eq!(log.completion_tokens, 100_000, "{stream}");
+        assert_eq!(log.cached_tokens, 200_000, "{stream}");
+        assert_eq!(log.cache_creation_tokens, 0, "{stream}");
+        assert_eq!(log.status, "success", "{stream}");
+        assert_eq!(log.cost_state, "unknown", "{stream}");
+        assert!(log.cost.is_none(), "{stream}");
+        assert!(log.pricing_revision_id.is_none(), "{stream}");
+        assert!(
+            log.raw_cost_usd.is_none() && log.quota_debit.is_none(),
+            "{stream}"
+        );
         let native = db.forward_log_native_attribution(log.id).unwrap().unwrap();
-        assert_eq!(native.native_cost_unit.as_deref(), Some("credits"));
-        assert_eq!(native.native_cost_value, Some(expected));
-        assert!(log.raw_cost_usd.is_none() && log.quota_debit.is_none());
+        assert_eq!(native.native_cost_unit, None, "{stream}");
+        assert_eq!(native.native_cost_value, None, "{stream}");
+        assert_eq!(native.native_cost_currency, None, "{stream}");
         drop(db);
         let remaining = view.remaining;
         drop(state);
@@ -181,16 +172,15 @@ async fn credits_cancelled_before_headers_keeps_uncertainty_and_releases_calibra
         result = &mut future => panic!("request completed before fixture signal: {:?}", result.error_message),
         result = tokio::time::timeout(StdDuration::from_secs(10), received.notified()) => result.unwrap(),
     }
-    assert_eq!(test_credit_view(&state).pending_requests, 1);
-    assert!(
-        crate::db::billing::calibrate_on(&state.db.lock().conn, ACCOUNT, &[], Utc::now()).is_err()
-    );
+    assert_eq!(test_credit_view(&state).pending_requests, 0);
+    assert_eq!(test_credit_view(&state).unpriced_requests, 0);
+    crate::db::billing::calibrate_on(&state.db.lock().conn, ACCOUNT, &[], Utc::now())
+        .expect("an in-flight request no longer holds a credit receipt");
     drop(future);
     let view = test_credit_view(&state);
     assert_eq!(view.pending_requests, 0);
-    assert_eq!(view.unpriced_requests, 1);
+    assert_eq!(view.unpriced_requests, 0);
     assert_eq!(view.remaining, 100_000_000.0);
-    assert_eq!(state.db.lock().list_forward_logs(10).unwrap().len(), 1);
     server.abort();
     drop(state);
     let _ = fs::remove_dir_all(dir);
@@ -210,13 +200,15 @@ fn credits_startup_recovers_an_abandoned_pre_send_receipt_once() {
         Utc::now(),
     )
     .unwrap();
+    let attempt = context.credit_attempt.clone().unwrap();
     let pricing = RequestPricingSnapshot::Credits {
-        attempt: context.credit_attempt.clone().unwrap(),
+        attempt: attempt.clone(),
         provider_id: CUSTOM_PROVIDER_ID.into(),
         revision: "credit-estimate:fixture".into(),
         token_pricing_supported: true,
     };
-    DbAttemptSink::new(&state.db.lock())
+    let db = state.db.lock();
+    let log_id = DbAttemptSink::new(&db)
         .insert(
             &(&account).into(),
             "local-custom",
@@ -228,7 +220,9 @@ fn credits_startup_recovers_an_abandoned_pre_send_receipt_once() {
             None,
         )
         .unwrap();
-    assert_eq!(test_credit_view(&state).pending_requests, 1);
+    crate::db::billing::attach_attempt_on(&db.conn, log_id, &attempt).unwrap();
+    drop(db);
+    assert_eq!(test_credit_view(&state).pending_requests, 0);
     drop(state);
     for _ in 0..2 {
         let db = Database::open(dir.clone()).unwrap();
@@ -236,7 +230,7 @@ fn credits_startup_recovers_an_abandoned_pre_send_receipt_once() {
             .unwrap()
             .unwrap();
         assert_eq!(view.pending_requests, 0);
-        assert_eq!(view.unpriced_requests, 1);
+        assert_eq!(view.unpriced_requests, 0);
         assert_eq!(view.remaining, 100_000_000.0);
         drop(db);
     }
@@ -609,12 +603,7 @@ fn frozen_exact_model_and_group_writes_native_cost_without_usd() {
     metrics.scope_to_provider(Some(CUSTOM_PROVIDER_ID), true);
     assert_eq!(metrics.cost_state, "unknown");
     assert_usd_and_quota_null(&metrics);
-    assert!(
-        metrics
-            .pricing_revision_id
-            .as_deref()
-            .is_some_and(|id| id.contains(PARENT) && id.contains(UPSTREAM) && id.contains(GROUP))
-    );
+    assert_eq!(metrics.pricing_revision_id, None);
 
     let id = persist_priced_row(&state, &account, &pricing, &context, 10, 5, 0, 0);
     let log = state.db.lock().list_forward_logs(1).unwrap().remove(0);
@@ -629,9 +618,9 @@ fn frozen_exact_model_and_group_writes_native_cost_without_usd() {
         .forward_log_native_attribution(id)
         .unwrap()
         .unwrap();
-    assert!((native.native_cost_value.unwrap() - (10.0 * 0.002 + 5.0 * 0.008)).abs() < 1e-12);
-    assert_eq!(native.native_cost_unit.as_deref(), Some("CNY"));
-    assert_eq!(native.native_cost_currency.as_deref(), Some("CNY"));
+    assert_eq!(native.native_cost_value, None);
+    assert_eq!(native.native_cost_unit, None);
+    assert_eq!(native.native_cost_currency, None);
     drop(state);
     let _ = fs::remove_dir_all(dir);
 }
@@ -654,8 +643,7 @@ fn cache_arithmetic_applies_only_when_rates_are_known() {
         .forward_log_native_attribution(id)
         .unwrap()
         .unwrap();
-    let expected = 5.0 * 0.002 + 2.0 * 0.008 + 4.0 * 0.001 + 1.0 * 0.003;
-    assert!((native.native_cost_value.unwrap() - expected).abs() < 1e-12);
+    assert_eq!(native.native_cost_value, None);
     drop(state);
     let _ = fs::remove_dir_all(dir);
 }
@@ -784,7 +772,7 @@ fn linked_unknown_does_not_inherit_go_provider_prices() {
     official.official_reference = true;
     link_with_snapshot(&state, pinned_group(), snapshot(vec![official], false));
     let (pricing, _) = bind_for(&state, &account, UPSTREAM);
-    assert!(matches!(pricing, RequestPricingSnapshot::Platform(_)));
+    assert!(matches!(pricing, RequestPricingSnapshot::Unpriced));
     let mut metrics = pricing_metrics(&pricing, "gpt-5", 1_000_000, 1_000_000, 0, 0, None);
     metrics.scope_to_provider(Some(CUSTOM_PROVIDER_ID), true);
     assert_eq!(metrics.cost_state, "unknown");
@@ -861,7 +849,7 @@ fn streaming_finalize_retains_the_attempt_frozen_price() {
         .forward_log_native_attribution(id)
         .unwrap()
         .unwrap();
-    assert!((native.native_cost_value.unwrap() - (10.0 * 0.002 + 5.0 * 0.008)).abs() < 1e-12);
+    assert_eq!(native.native_cost_value, None);
     let log = state.db.lock().list_forward_logs(1).unwrap().remove(0);
     assert_eq!(log.raw_cost_usd, None);
     assert_eq!(log.quota_debit, None);
@@ -912,8 +900,8 @@ fn fallback_attempt_rebinds_from_the_live_link_snapshot() {
         .forward_log_native_attribution(second_id)
         .unwrap()
         .unwrap();
-    assert!((first_native.native_cost_value.unwrap() - 0.02).abs() < 1e-12);
-    assert!((second_native.native_cost_value.unwrap() - 0.50).abs() < 1e-12);
+    assert_eq!(first_native.native_cost_value, None);
+    assert_eq!(second_native.native_cost_value, None);
     drop(state);
     let _ = fs::remove_dir_all(dir);
 }
@@ -1009,13 +997,12 @@ fn o05_fallback_from_a_to_b_keeps_each_attempts_native_rate() {
         .forward_log_native_attribution(id_b)
         .unwrap()
         .unwrap();
-    assert!((native_a.native_cost_value.unwrap() - (10.0 * 0.002 + 5.0 * 0.008)).abs() < 1e-12);
-    assert_eq!(native_a.native_cost_currency.as_deref(), Some("CNY"));
-    assert_eq!(native_a.native_cost_unit.as_deref(), Some("CNY"));
-    assert!((native_b.native_cost_value.unwrap() - (10.0 * 0.01 + 5.0 * 0.03)).abs() < 1e-12);
-    assert_eq!(native_b.native_cost_currency.as_deref(), Some("USD"));
-    assert_eq!(native_b.native_cost_unit.as_deref(), Some("USD"));
-    assert_ne!(native_a.native_cost_currency, native_b.native_cost_currency);
+    assert_eq!(native_a.native_cost_value, None);
+    assert_eq!(native_a.native_cost_currency, None);
+    assert_eq!(native_a.native_cost_unit, None);
+    assert_eq!(native_b.native_cost_value, None);
+    assert_eq!(native_b.native_cost_currency, None);
+    assert_eq!(native_b.native_cost_unit, None);
     drop(state);
     let _ = fs::remove_dir_all(dir);
 }
@@ -2462,11 +2449,9 @@ fn official_api_attempt_pricing_is_native_frozen_and_never_attaches_to_foreign_r
         let metrics = pricing_metrics(&price, model, 1000, 1000, 0, 0, None);
         assert_eq!(metrics.quota_debit, None);
         assert_eq!(metrics.effective_paid_cost_usd, None);
-        if currency == "CNY" {
-            assert_eq!(metrics.raw_cost_usd, None);
-        } else {
-            assert_eq!(metrics.raw_cost_usd, Some(amount));
-        }
+        assert_eq!(metrics.raw_cost_usd, None);
+        assert_eq!(metrics.cost_state, "unknown");
+        let _ = (currency, amount);
         let mut context = attempt_context(model);
         context.provider_id = Some(runtime.id.clone());
         context.official_price = Some(frozen.clone());
@@ -2488,8 +2473,8 @@ fn official_api_attempt_pricing_is_native_frozen_and_never_attaches_to_foreign_r
             .forward_log_native_attribution(id)
             .unwrap()
             .unwrap();
-        assert!((native.native_cost_value.unwrap() - amount).abs() < 1e-12);
-        assert_eq!(native.native_cost_currency.as_deref(), Some(currency));
+        assert_eq!(native.native_cost_value, None);
+        assert_eq!(native.native_cost_currency, None);
         // Finalizing a stream keeps the captured prices, not a later sheet.
         DbAttemptSink::new(&state.db.lock())
             .finalize(id, "success", Some(200), metrics, None, None, &context)
@@ -2502,7 +2487,7 @@ fn official_api_attempt_pricing_is_native_frozen_and_never_attaches_to_foreign_r
                 .unwrap()
                 .unwrap()
                 .native_cost_value,
-            Some(amount)
+            None
         );
         let mut positive = attempt_context(model);
         let bound = bind_official_attempt_price(
@@ -2512,9 +2497,9 @@ fn official_api_attempt_pricing_is_native_frozen_and_never_attaches_to_foreign_r
             std::slice::from_ref(&runtime),
             RequestPricingSnapshot::Unpriced,
         );
-        assert!(matches!(bound, RequestPricingSnapshot::OfficialApi(_)));
+        assert!(matches!(bound, RequestPricingSnapshot::Unpriced));
         positive.attach_pricing(&bound);
-        assert!(positive.official_price.is_some());
+        assert!(positive.official_price.is_none());
         for endpoint in [
             "https://attacker.test/chat/completions",
             "http://127.0.0.1:9/chat/completions",
@@ -2614,7 +2599,7 @@ async fn forward_request(
         plan,
     )
     .unwrap();
-    let pricing = capture_execution_pricing(state, &execution, adapter, plan, pricing);
+    let pricing = capture_execution_pricing(state, &execution, adapter, plan);
     super::forward_request(
         client,
         route,
@@ -3810,7 +3795,7 @@ async fn metered_malformed_accepted_json_stays_uncertain_without_replay() {
     assert_eq!(hits.load(Ordering::SeqCst), 1);
     let view = test_credit_view(&state);
     assert_eq!(view.pending_requests, 0);
-    assert_eq!(view.unpriced_requests, 1);
+    assert_eq!(view.unpriced_requests, 0);
     assert_eq!(view.remaining, 100_000_000.0);
     let logs = state.db.lock().list_forward_logs(10).unwrap();
     assert_eq!(logs.len(), 1);

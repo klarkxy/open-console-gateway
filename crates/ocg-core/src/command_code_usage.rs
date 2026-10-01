@@ -230,10 +230,8 @@ fn parse_command_code_usage_body(
         WEEK_MAX_MINUTES,
         now,
     )?;
-    let monthly_percent = ((COMMAND_CODE_GOAT_QUOTA_MONTH - monthly_remaining)
-        / COMMAND_CODE_GOAT_QUOTA_MONTH
-        * 100.0)
-        .clamp(0.0, 100.0);
+    let monthly_percent =
+        (COMMAND_CODE_GOAT_QUOTA_MONTH - monthly_remaining) / COMMAND_CODE_GOAT_QUOTA_MONTH * 100.0;
 
     Ok(CommandCodeUsageSnapshot {
         observed_at: now,
@@ -281,7 +279,7 @@ fn parse_window(
     let resets_in_minutes = bounded_resets_in_minutes(reset_at, now, max_minutes)
         .map_err(CommandCodeUsageError::from)?;
     Ok(ParsedWindow {
-        percent: (used / cap * 100.0).clamp(0.0, 100.0),
+        percent: used / cap * 100.0,
         resets_in_minutes,
     })
 }

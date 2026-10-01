@@ -35,7 +35,7 @@
   </div>
 
   <div
-    v-if="(hasCreditMeter || (manualUsageCalibration && edits)) && accountIsReady(account)"
+    v-if="(hasCreditMeter || (manualUsageCalibration && limits.length > 0)) && accountIsReady(account)"
     :class="actionClass('secondary')"
   >
     <n-popover
@@ -77,8 +77,7 @@
         :account="account"
         :usage="usage"
         :limits="limits"
-        :edits="edits!"
-        :loading="usageLoading"
+        :edits="edits ?? {}"
         :now="now"
         @update-draft="(key, value) => emit('usage-update-draft', key, value)"
         @update-resets-first="(key, value) => emit('usage-update-resets-first', key, value)"
@@ -151,7 +150,7 @@ import {
 import type { Account, UsageWindow } from "../api/dashboard";
 import type { Identity } from "../api/identities.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
-import { isUsageLimitReached } from "../domain/accounts-usage.ts";
+import { isUsageLimitReached, manualUsageEditorEnabled } from "../domain/accounts-usage.ts";
 import type { UsageKey } from "../domain/accounts-usage.ts";
 import {
   accountIsReady,
@@ -161,7 +160,7 @@ import { accountMenuLabelKey } from "../views/account-status-text.ts";
 import { accountCapabilities } from "../domain/account-capabilities.ts";
 import { findPlanDefinition } from "../domain/plans.ts";
 import type { AccountUsageEdits, UsageLimitView } from "../domain/useAccountUsage.ts";
-import { billingManualCalibration, creditCalibrationBlock, partitionCreditBuckets } from "../domain/billing.ts";
+import { creditCalibrationBlock, partitionCreditBuckets } from "../domain/billing.ts";
 import { t } from "../i18n/index.ts";
 import { useBillingStore } from "../stores/billing.ts";
 import { accountInferenceEndpointUrl, officialBalanceSupported } from "../domain/upstream-balance.ts";
@@ -224,10 +223,15 @@ function setCalibrationOpen(show: boolean): void {
   if (show && !hasCreditMeter.value) emit("usage-editor-open");
 }
 watch(() => [props.account.id, props.account.updated_at, billing.sessionEpoch], () => { calibrationOpen.value = false; });
-const manualUsageCalibration = computed(() => {
-  if (billingStatus.value) return billingManualCalibration(billingStatus.value);
-  return plan.value?.manual_usage_calibration ?? false;
-});
+const manualUsageCalibration = computed(() => manualUsageEditorEnabled({
+  providerId: props.account.provider_id,
+  plan: destination.value?.plan ?? null,
+  reportedManual: billingStatus.value
+    ? billingStatus.value.manualCalibration
+    : plan.value?.manual_usage_calibration === true
+      || destination.value?.plan?.manual_calibration === true,
+  hasCreditMeter: Boolean(billingStatus.value?.credits),
+}));
 const usageRefreshAvailable = computed(() => (
   billingStatus.value ? billingStatus.value.officialRefresh : plan.value?.usage_availability === "available"
 ));
@@ -258,10 +262,9 @@ const renderedMenuOptions = computed(() => props.menuOptions.filter(option => !p
     label: option.label ?? (labelKey ? t(labelKey) : String(option.key)),
   };
 }));
-const usageEditorAvailable = computed(() => {
-  if (props.usageLoading || props.usageLoadError) return false;
-  return props.limits.some(({ key }) => !isUsageLimitReached(props.account, key, props.now));
-});
+const usageEditorAvailable = computed(() => (
+  props.limits.some(({ key }) => !isUsageLimitReached(props.account, key, props.now))
+));
 
 function actionClass(slot: "enabled" | "secondary" | "tertiary" | "menu"): string {
   return props.compact ? "credential-action" : `account-action account-action--${slot}`;

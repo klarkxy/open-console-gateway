@@ -97,14 +97,6 @@ fn configuration() -> serde_json::Value {
     serde_json::json!({
         "name": "Personal",
         "currency": "CNY",
-        "creditsPerCurrency": 1.0,
-        "rates": [{
-            "model": "model",
-            "inputPerMillion": 10.0,
-            "outputPerMillion": 20.0,
-            "cacheReadPerMillion": 2.0,
-            "cacheWritePerMillion": 10.0
-        }],
         "monthly": null,
         "sourceUrl": null
     })
@@ -391,36 +383,42 @@ async fn active_credits_ignore_a_failed_official_cash_projection() {
 }
 
 #[tokio::test]
-async fn disabling_credits_rolls_back_when_official_cash_projection_fails() {
+async fn disabling_credits_ignores_a_historical_price_snapshot() {
     let (dir, state, provider_id) = official_deepseek();
     let configured = configure_credits(&state).await;
     assert_eq!(configured.model, BillingModel::Credits);
     insert_mismatched_official_price_snapshot(&state, &provider_id);
     let revision = state.settings_revision();
 
-    let failed = disable(
+    let disabled = disable(
         State(state.clone()),
         Path("credits".into()),
         body(&state, serde_json::json!({})),
     )
     .await
-    .unwrap_err();
-    assert_eq!(
-        failed.into_response().status(),
-        StatusCode::INTERNAL_SERVER_ERROR
-    );
-    assert_eq!(state.settings_revision(), revision);
-    assert_eq!(
+    .unwrap()
+    .0;
+    assert_eq!(disabled.model, BillingModel::Cash);
+    assert!(disabled.credits.is_none());
+    assert!(disabled.cash.is_some());
+    assert_eq!(disabled.revision, revision + 1);
+    assert_eq!(disabled.revision, state.settings_revision());
+    assert!(
         crate::db::billing::read_view_on(&state.db.lock().conn, "credits", Utc::now())
             .unwrap()
-            .unwrap()
-            .remaining,
-        75.0
+            .is_none()
     );
-    let read = status(&state, "credits").unwrap();
-    assert_eq!(read.model, BillingModel::Credits);
-    assert!(read.cash.is_none());
-    assert_eq!(remaining(&read), 75.0);
+    let retained: i64 = state
+        .db
+        .lock()
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM provider_pricing_snapshots WHERE provider_id = ?1",
+            [&provider_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retained, 1);
 
     drop(state);
     std::fs::remove_dir_all(dir).ok();

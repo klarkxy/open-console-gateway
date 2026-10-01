@@ -137,7 +137,7 @@ test("presentDestinationCredential maps grants, cooldowns, and has_secret", () =
 });
 
 test("destinationsApi.list presents the V4 projection", async () => {
-  setupControlPlane(4, 11, "p1");
+  setupControlPlane(4, 11);
   installFetchMock(({ url, method }) => {
     if (url.endsWith("/destinations") && method === "GET") {
       assert.match(url, /\/dashboard\/api\/v4\/destinations$/);
@@ -156,11 +156,10 @@ test("destinationsApi.list presents the V4 projection", async () => {
   const control = useControlPlaneStore();
   assert.equal(control.revision, 8);
   assert.equal(control.processGeneration, 11);
-  assert.equal(control.pricingRevision, "p2");
 });
 
 test("credentialsApi.list presents the V4 projection", async () => {
-  setupControlPlane(4, 11, "p1");
+  setupControlPlane(4, 11);
   installFetchMock(({ url, method }) => {
     if (url.endsWith("/credentials") && method === "GET") {
       return {
@@ -225,7 +224,7 @@ test("presentQuotaRecovery rejects malformed recovery objects", () => {
 });
 
 test("credentialsApi.retryQuota posts flattened CAS and presents the returned Key", async () => {
-  setupControlPlane(4, 11, "p1");
+  setupControlPlane(4, 11);
   const requests = installFetchMock(({ url, method }) => {
     if (url.endsWith("/credentials/cred-1/quota-retry") && method === "POST") {
       return {

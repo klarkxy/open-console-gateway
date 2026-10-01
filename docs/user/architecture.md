@@ -45,7 +45,7 @@ fail before selection.
 | --- | --- | --- |
 | **Access Keys** | Client-facing primary and sub Keys | Account credentials live on **Accounts** |
 | **Accounts** | Account Key, enablement, order, notes, cooldown, usage state | Catalogs and protocol contracts live on **Providers** |
-| **Providers** | Built-in catalogs, model/protocol contracts, pricing scopes, typed user-defined Provider Endpoint/auth/mappings | Custom API mappings stay on the account card |
+| **Providers** | Built-in catalogs, model/protocol contracts, typed user-defined Provider Endpoint/auth/mappings | Custom API mappings stay on the account card |
 | **Custom API account** | One API URL, one account-wide upstream protocol, public-model → upstream-ID mappings | Shared Provider definitions live on **Providers** |
 | **Extensions / CPA** | A static local external-integration boundary | Built-in routing families stay under **Accounts** / **Providers** |
 | **Applications / DSH** | The OCG-owned plugin installed into DSH's `web` profile | Clients use the ordinary Gateway API |
@@ -61,7 +61,7 @@ These reads use saved local state. Catalog refreshes are explicit actions on
 | Endpoint | Published models |
 | --- | --- |
 | Authenticated `GET /v1/models` | Currently routeable code-owned Aliases, saved Zen/Command/CN mappings, saved user-defined Provider public models, and eligible Custom declared IDs |
-| `GET /dashboard/api/v4/application-models` | Go-routeable Aliases intersected with the current Go pricing snapshot; excludes Custom API, user-defined Providers, and CN Plans |
+| `GET /dashboard/api/v4/application-models` | Go names that resolve in the saved catalog and have an enabled protocol; it does not consult a price snapshot. Excludes Custom API, user-defined Providers, and CN Plans |
 
 Command ids that contain `/` publish a unique last-segment lowercase kebab Alias;
 other unmatched catalog rows keep exact raw pins until code assigns an Alias. A Custom ID

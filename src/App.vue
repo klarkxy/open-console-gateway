@@ -202,22 +202,37 @@ function onDashboardGone(event: Event) {
   const detail = (event as CustomEvent<{ guidance?: string }>).detail;
   upgradeGuidance.value = detail?.guidance || t("页面版本与服务不匹配，刷新页面后重试；仍失败请升级到最新版本");
 }
+function adoptSessionPhase(): void {
+  const phase = session.phase;
+  authState.value = phase === "checking" ? authState.value : phase;
+  localMode.value = session.status?.local ?? localMode.value;
+}
 async function loadAuthStatus() {
+  const epoch = session.sessionEpoch;
   authState.value = "checking";
   try {
-    const status = await session.loadStatus();
-    localMode.value = status.local;
+    await session.loadStatus();
+    if (session.sessionEpoch !== epoch) {
+      adoptSessionPhase();
+      return;
+    }
+    localMode.value = session.status?.local ?? false;
     authError.value = "";
     logoutError.value = "";
-    authState.value = status.authenticated ? "ready" : status.initialized ? "login" : "register";
+    authState.value = session.phase;
     suppressAuthRequired = false;
   } catch (e) {
-    authState.value = "login";
+    if (session.sessionEpoch !== epoch) {
+      adoptSessionPhase();
+      return;
+    }
+    authState.value = session.phase === "ready" ? "ready" : "login";
     authError.value = t("连接失败：{error}", { error: userFacingError(e, t("无法连接到本地服务，请确认程序正在运行后重试")) });
   }
 }
 async function submitAuth() {
   const mode = authState.value;
+  const epoch = session.sessionEpoch;
   const username = authUsername.value.trim();
   if (!username || !authPassword.value) return;
   if (mode === "register" && [...username].length > 64) { authError.value = t("用户名需为 1 至 64 个字符"); return; }
@@ -228,6 +243,10 @@ async function submitAuth() {
   try {
     if (mode === "register") await session.register(username, authPassword.value);
     else await session.login(username, authPassword.value);
+    if (session.sessionEpoch !== epoch || session.phase !== "ready") {
+      adoptSessionPhase();
+      return;
+    }
     authPassword.value = "";
     authPasswordConfirm.value = "";
     authError.value = "";
@@ -235,6 +254,10 @@ async function submitAuth() {
     authState.value = "ready";
     suppressAuthRequired = false;
   } catch (e) {
+    if (session.sessionEpoch !== epoch) {
+      adoptSessionPhase();
+      return;
+    }
     authPassword.value = "";
     authPasswordConfirm.value = "";
     let error = userFacingError(e, t("无法连接到本地服务，请确认程序正在运行后重试"));
@@ -244,32 +267,63 @@ async function submitAuth() {
     }
     if (mode === "login" && e instanceof DashboardRequestError && e.status === 401) {
       const status = await session.loadStatus().catch(() => null);
-      if (status) {
-        localMode.value = status.local;
-        if (status.authenticated) { authError.value = ""; logoutError.value = ""; authState.value = "ready"; suppressAuthRequired = false; return; }
-        if (!status.initialized) { authError.value = ""; authState.value = "register"; return; }
+      if (session.sessionEpoch !== epoch) {
+        adoptSessionPhase();
+        return;
+      }
+      if (status && session.phase === "ready") {
+        localMode.value = session.status?.local ?? false;
+        authError.value = "";
+        logoutError.value = "";
+        authState.value = "ready";
+        suppressAuthRequired = false;
+        return;
+      }
+      if (status && session.phase === "register") {
+        localMode.value = session.status?.local ?? false;
+        authError.value = "";
+        authState.value = "register";
+        return;
       }
     }
     if (mode === "register") {
       const status = await session.loadStatus().catch(() => null);
-      if (status?.initialized) { localMode.value = status.local; authError.value = error; authState.value = status.authenticated ? "ready" : "login"; return; }
+      if (session.sessionEpoch !== epoch) {
+        adoptSessionPhase();
+        return;
+      }
+      if (status && session.phase !== "register") {
+        localMode.value = session.status?.local ?? false;
+        authError.value = error;
+        authState.value = session.phase === "checking" ? "login" : session.phase;
+        return;
+      }
     }
     authError.value = error;
-    authState.value = mode;
+    authState.value = mode === "checking" ? "login" : mode;
   }
 }
 async function logout() {
   if (loggingOut.value) return;
   loggingOut.value = true;
   logoutError.value = "";
+  const epoch = session.sessionEpoch;
   suppressAuthRequired = true;
   try {
     await session.logout();
+    if (session.phase === "ready") {
+      authState.value = "ready";
+      return;
+    }
     authPassword.value = "";
     authPasswordConfirm.value = "";
     authError.value = "";
     authState.value = "login";
   } catch (e) {
+    if (session.sessionEpoch !== epoch) {
+      adoptSessionPhase();
+      return;
+    }
     suppressAuthRequired = false;
     const error = userFacingError(e, t("无法连接到本地服务，请确认程序正在运行后重试"));
     logoutError.value = t("退出登录失败：{error}", { error });

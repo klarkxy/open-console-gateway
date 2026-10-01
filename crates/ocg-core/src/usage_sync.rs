@@ -505,16 +505,11 @@ pub fn manual_next_allowed_at(
 }
 
 pub fn max_go_usage_percent(usage: &UsageWindow, limits: &PricingLimits) -> f64 {
-    let pct = |cost: f64, limit: f64| {
-        if limit <= 0.0 {
-            0.0
-        } else {
-            ((cost / limit) * 100.0).clamp(0.0, 100.0)
-        }
-    };
-    pct(usage.window_5h, limits.window_5h)
-        .max(pct(usage.window_week, limits.window_week))
-        .max(pct(usage.window_month, limits.window_month))
+    let _ = limits;
+    [usage.window_5h, usage.window_week, usage.window_month]
+        .into_iter()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .fold(0.0, f64::max)
 }
 
 pub fn account_is_auto_sync_candidate(enabled: bool, setup_ready: bool, key_present: bool) -> bool {

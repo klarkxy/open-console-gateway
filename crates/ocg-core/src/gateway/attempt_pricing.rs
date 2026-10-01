@@ -72,28 +72,8 @@ impl RequestPricingSnapshot {
         adapter: ProviderAdapterKind,
         go: Arc<PricingSnapshot>,
     ) -> Self {
-        match adapter {
-            ProviderAdapterKind::OpenCodeGo => return Self::OpenCode(go),
-            ProviderAdapterKind::CommandCodeGoat | ProviderAdapterKind::OllamaCloud => {}
-            _ => return Self::Unpriced,
-        }
-        let loaded = latest_provider_pricing_snapshot(&state.db.lock(), &account.provider_id);
-        match loaded {
-            Ok(Some(snapshot)) if snapshot.evidence() == ProviderPricingEvidence::Verified => {
-                Self::Provider {
-                    snapshot: Arc::new(snapshot),
-                    at: state.sample_gateway_clock().0,
-                }
-            }
-            Ok(_) => Self::Unpriced,
-            Err(error) => {
-                eprintln!(
-                    "warning: failed to load provider pricing for {}/{}: {error}",
-                    account.provider_id, account.provider_id
-                );
-                Self::Unpriced
-            }
-        }
+        let _ = (state, account, adapter, go);
+        Self::Unpriced
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -106,74 +86,16 @@ impl RequestPricingSnapshot {
         cache_creation_tokens: i64,
         service_tier: Option<&str>,
     ) -> crate::kernel::pricing::PricingEstimate {
-        match self {
-            Self::OpenCode(snapshot) => snapshot.estimate(
-                model,
-                prompt_tokens,
-                completion_tokens,
-                cached_tokens,
-                cache_creation_tokens,
-                service_tier,
-            ),
-            Self::Provider { snapshot, at } => snapshot.estimate(
-                model,
-                prompt_tokens,
-                completion_tokens,
-                cached_tokens,
-                cache_creation_tokens,
-                *at,
-            ),
-            Self::Platform(price) => price.estimate(),
-            Self::OfficialApi(price) => {
-                let amount = (model == price.model)
-                    .then(|| {
-                        price.amount(
-                            prompt_tokens,
-                            completion_tokens,
-                            cached_tokens,
-                            cache_creation_tokens,
-                        )
-                    })
-                    .flatten();
-                let usd = amount.filter(|_| price.sheet.kind.currency() == "USD");
-                crate::kernel::pricing::PricingEstimate {
-                    raw_cost_usd: usd,
-                    quota_debit: None,
-                    effective_paid_cost_usd: None,
-                    cost: usd,
-                    pricing_revision_id: Some(price.sheet.revision.clone()),
-                    quota_multiplier: None,
-                    local_adjustment_multiplier: None,
-                    cost_state: if usd.is_some() {
-                        "priced"
-                    } else if amount.is_some() {
-                        "unknown"
-                    } else {
-                        "unpriced"
-                    },
-                }
-            }
-            Self::Credits { revision, .. } => crate::kernel::pricing::PricingEstimate {
-                raw_cost_usd: None,
-                quota_debit: None,
-                effective_paid_cost_usd: None,
-                cost: None,
-                pricing_revision_id: Some(revision.clone()),
-                quota_multiplier: None,
-                local_adjustment_multiplier: None,
-                cost_state: "unknown",
-            },
-            Self::Unpriced => crate::kernel::pricing::PricingEstimate {
-                raw_cost_usd: None,
-                quota_debit: None,
-                effective_paid_cost_usd: None,
-                cost: None,
-                pricing_revision_id: None,
-                quota_multiplier: None,
-                local_adjustment_multiplier: None,
-                cost_state: "unpriced",
-            },
-        }
+        let _ = (
+            self,
+            model,
+            prompt_tokens,
+            completion_tokens,
+            cached_tokens,
+            cache_creation_tokens,
+            service_tier,
+        );
+        crate::kernel::pricing::PricingEstimate::unknown()
     }
 
     fn revision(&self) -> Option<&str> {
@@ -228,21 +150,14 @@ fn estimate_platform_native(
     cached_tokens: i64,
     cache_creation_tokens: i64,
 ) -> Option<f64> {
-    ocg_domain::billing::token_charge(
-        ocg_domain::billing::BillingTokens::clamped(
-            prompt_tokens,
-            completion_tokens,
-            cached_tokens,
-            cache_creation_tokens,
-        ),
-        ocg_domain::billing::TokenRates {
-            input: price.input,
-            output: price.output,
-            cache_read: price.cache_read,
-            cache_write: price.cache_write,
-            per_tokens: 1.0,
-        },
-    )
+    let _ = (
+        price,
+        prompt_tokens,
+        completion_tokens,
+        cached_tokens,
+        cache_creation_tokens,
+    );
+    None
 }
 
 pub(crate) fn platform_price_for_attempt(
@@ -251,151 +166,8 @@ pub(crate) fn platform_price_for_attempt(
     upstream_model: &str,
     endpoint: Option<&str>,
 ) -> Option<PlatformAttemptPrice> {
-    let db = state.db.lock();
-    let links = db.list_platform_links().ok()?;
-    let link = links
-        .into_iter()
-        .find(|link| link.account_id == account.id)?;
-    if db
-        .credential_key_cipher_for_legacy_account(&account.id)
-        .ok()
-        .flatten()
-        .is_none_or(|current| current != account.key_cipher)
-        || endpoint.is_some_and(|url| {
-            crate::destination_projection::load_runtime(&db)
-                .ok()
-                .and_then(|projection| {
-                    let id = &projection
-                        .credentials
-                        .iter()
-                        .find(|c| c.legacy_account_id == account.id)?
-                        .destination_id;
-                    projection
-                        .destinations
-                        .iter()
-                        .find(|d| &d.id == id)
-                        .cloned()
-                })
-                .is_none_or(|destination| {
-                    !ocg_domain::destination::http_configured_routes(&destination)
-                        .iter()
-                        .any(|route| route.url.as_deref() == Some(url))
-                })
-        })
-    {
-        return Some(PlatformAttemptPrice::Unknown {
-            provenance: Some("platform:attempt_identity_changed".into()),
-        });
-    }
-    let parent = match db.platform_account(&link.platform_account_id) {
-        Ok(Some(parent)) => parent,
-        _ => {
-            return Some(PlatformAttemptPrice::Unknown {
-                provenance: Some(format!("{}:missing", link.platform_account_id)),
-            });
-        }
-    };
-    Some(select_link_platform_price(
-        &link,
-        &parent,
-        upstream_model,
-        Utc::now().timestamp(),
-    ))
-}
-
-fn select_link_platform_price(
-    link: &PlatformLink,
-    parent: &PlatformAccount,
-    upstream_model: &str,
-    now: i64,
-) -> PlatformAttemptPrice {
-    let unknown = |reason: &str| PlatformAttemptPrice::Unknown {
-        provenance: Some(format!(
-            "{}:{}:{}:{}:{reason}",
-            parent.id,
-            parent.version,
-            link.group.id.as_deref().unwrap_or(""),
-            upstream_model
-        )),
-    };
-    let Some(group_id) = link
-        .group
-        .id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-    else {
-        return unknown("auto");
-    };
-    if group_id == "auto" || !link.group.auto_groups.is_empty() {
-        return unknown("auto");
-    }
-    let Some(snapshot) = link.snapshot.as_ref() else {
-        return unknown("nosnap");
-    };
-    if snapshot.stale {
-        return unknown("stale");
-    }
-    let matches = snapshot
-        .prices
-        .iter()
-        .filter(|price| {
-            price.model == upstream_model
-                && price.group_id.as_deref() == Some(group_id)
-                && !price.official_reference
-        })
-        .collect::<Vec<_>>();
-    if matches.len() != 1 {
-        return unknown("nomatch");
-    }
-    let price = matches[0];
-    if price.unavailable_reason.is_some() {
-        return unknown("unavailable");
-    }
-    if now >= price.valid_until {
-        return unknown("expired");
-    }
-    let Some(input) = finite_nonneg_rate(price.input) else {
-        return unknown("incomplete");
-    };
-    let Some(output) = finite_nonneg_rate(price.output) else {
-        return unknown("incomplete");
-    };
-    let currency = price.currency.trim();
-    if currency.is_empty() {
-        return unknown("incomplete");
-    }
-    let cache_read = match optional_finite_nonneg_rate(price.cache_read) {
-        Ok(rate) => rate,
-        Err(()) => return unknown("incomplete"),
-    };
-    let cache_write = match optional_finite_nonneg_rate(price.cache_write) {
-        Ok(rate) => rate,
-        Err(()) => return unknown("incomplete"),
-    };
-    PlatformAttemptPrice::Frozen(FrozenPlatformPrice {
-        provenance: format!(
-            "{}:{}:{group_id}:{upstream_model}:{}:{}:{}",
-            parent.id, parent.version, price.valid_until, price.source, snapshot.observed_at
-        ),
-        currency: currency.to_string(),
-        input,
-        output,
-        cache_read,
-        cache_write,
-    })
-}
-
-fn finite_nonneg_rate(value: Option<f64>) -> Option<f64> {
-    value.filter(|rate| rate.is_finite() && *rate >= 0.0)
-}
-
-fn optional_finite_nonneg_rate(value: Option<f64>) -> Result<Option<f64>, ()> {
-    match value {
-        None => Ok(None),
-        Some(rate) if rate.is_finite() && rate >= 0.0 => Ok(Some(rate)),
-        Some(_) => Err(()),
-    }
+    let _ = (state, account, upstream_model, endpoint);
+    None
 }
 
 pub(crate) fn bind_platform_attempt_price(
@@ -405,34 +177,18 @@ pub(crate) fn bind_platform_attempt_price(
     pricing: RequestPricingSnapshot,
     endpoint: Option<&str>,
 ) -> RequestPricingSnapshot {
-    let Some(platform) = platform_price_for_attempt(state, account, upstream_model, endpoint)
-    else {
-        return pricing;
-    };
-    RequestPricingSnapshot::Platform(platform)
+    let _ = (state, account, upstream_model, endpoint, pricing);
+    RequestPricingSnapshot::Unpriced
 }
 
 fn restrict_platform_to_token_coverage(
     plan: &RequestPlan,
     pricing: RequestPricingSnapshot,
 ) -> RequestPricingSnapshot {
-    if !matches!(&pricing, RequestPricingSnapshot::Platform(_)) {
-        return pricing;
-    }
-    let hosted_tools = serde_json::from_slice::<Value>(&plan.body)
-        .ok()
-        .is_some_and(|body| request_has_hosted_tool_charges(&body));
-    if hosted_tools || !token_pricing_covers_request(&plan.body, plan.service_tier.as_deref()) {
-        let reason = if hosted_tools {
-            "platform:hosted_tool_unpriced"
-        } else {
-            "platform:unsupported_request_pricing"
-        };
-        RequestPricingSnapshot::Platform(PlatformAttemptPrice::Unknown {
-            provenance: Some(reason.into()),
-        })
-    } else {
-        pricing
+    let _ = plan;
+    match pricing {
+        RequestPricingSnapshot::Platform(_) => RequestPricingSnapshot::Unpriced,
+        other => other,
     }
 }
 
@@ -442,51 +198,8 @@ pub(crate) fn bind_official_execution_price(
     plan: &RequestPlan,
     original: RequestPricingSnapshot,
 ) -> RequestPricingSnapshot {
-    if !matches!(original, RequestPricingSnapshot::Unpriced)
-        || !token_pricing_covers_request(&plan.body, plan.service_tier.as_deref())
-    {
-        return original;
-    }
-    let Ok(body) = serde_json::from_slice::<Value>(&plan.body) else {
-        return original;
-    };
-    // Hosted tools have charges outside token pricing; ordinary function tools do not.
-    if request_has_hosted_tool_charges(&body) {
-        return original;
-    }
-    let Some(kind) = account.official_pricing_kind else {
-        return original;
-    };
-    let Some(endpoint) = plan
-        .custom_route
-        .as_ref()
-        .map(|route| route.endpoint_url.as_str())
-    else {
-        return original;
-    };
-    let protocol = match plan.upstream {
-        ApiFormat::ChatCompletions => crate::provider::UpstreamProtocolKind::ChatCompletions,
-        ApiFormat::Responses => crate::provider::UpstreamProtocolKind::Responses,
-        ApiFormat::Messages => crate::provider::UpstreamProtocolKind::Messages,
-        ApiFormat::Gemini => return original,
-    };
-    if !crate::official_api::route_is_official(kind, endpoint, protocol) {
-        return original;
-    }
-    let Ok(sheet) = state
-        .db
-        .lock()
-        .official_api_prices(&account.provider_id, kind)
-    else {
-        return original;
-    };
-    let price = crate::official_api::OfficialAttemptPrice {
-        provider_id: account.provider_id.clone(),
-        sheet,
-        model: plan.model.clone(),
-        at: state.sample_gateway_clock().0,
-    };
-    RequestPricingSnapshot::OfficialApi(price)
+    let _ = (state, account, plan, original);
+    RequestPricingSnapshot::Unpriced
 }
 
 fn bind_credit_attempt_price(
@@ -496,50 +209,8 @@ fn bind_credit_attempt_price(
     upstream_model: &str,
     pricing: RequestPricingSnapshot,
 ) -> RequestPricingSnapshot {
-    let Some(endpoint) = plan
-        .custom_route
-        .as_ref()
-        .map(|route| route.endpoint_url.as_str())
-    else {
-        return pricing;
-    };
-    let captured = crate::db::billing::capture_on(
-        &state.db.lock().conn,
-        &account.id,
-        endpoint,
-        upstream_model,
-        state.sample_gateway_clock().0,
-    );
-    match captured {
-        Ok(Some(credit)) => {
-            use sha2::{Digest, Sha256};
-            let revision = format!(
-                "credit-estimate:{}",
-                hex::encode(Sha256::digest(
-                    serde_json::to_vec(&credit).unwrap_or_default()
-                )),
-            );
-            // One parse of this route's client body feeds both gates; the
-            // request may be large, and the fallback rules differ (an
-            // unparseable body is a hosted-tool charge here and simply
-            // uncovered there).
-            let body = serde_json::from_slice::<Value>(&plan.body).ok();
-            let hosted_tools = body.as_ref().is_none_or(request_has_hosted_tool_charges);
-            RequestPricingSnapshot::Credits {
-                attempt: credit,
-                provider_id: account.provider_id.clone(),
-                revision,
-                token_pricing_supported: !hosted_tools
-                    && token_pricing_covers_service_tier(plan.service_tier.as_deref())
-                    && body.is_some_and(|body| !request_has_unpriced_media(&body)),
-            }
-        }
-        Ok(None) => pricing,
-        Err(error) => {
-            eprintln!("warning: credit estimate could not be captured: {error}");
-            pricing
-        }
-    }
+    let _ = (state, account, plan, upstream_model, pricing);
+    RequestPricingSnapshot::Unpriced
 }
 
 fn request_has_hosted_tool_charges(body: &Value) -> bool {
@@ -663,35 +334,7 @@ pub(crate) fn apply_native_cost_attribution(
     official_price: Option<&crate::official_api::OfficialAttemptPrice>,
     metrics: &ForwardMetrics,
 ) {
-    if let Some(PlatformAttemptPrice::Frozen(price)) = platform_price
-        && metrics.cost_state == "unknown"
-        && let Some(value) = estimate_platform_native(
-            price,
-            metrics.prompt_tokens,
-            metrics.completion_tokens,
-            metrics.cached_tokens,
-            metrics.cache_creation_tokens,
-        )
-    {
-        attribution.native_cost_value = Some(value);
-        attribution.native_cost_unit = Some(price.currency.clone());
-        attribution.native_cost_currency = Some(price.currency.clone());
-    }
-    if let Some(price) = official_price
-        && matches!(metrics.cost_state, "priced" | "unknown")
-        && metrics.pricing_provider_id.as_deref() == Some(price.provider_id.as_str())
-        && metrics.pricing_revision_id.as_deref() == Some(price.sheet.revision.as_str())
-        && let Some(amount) = price.amount(
-            metrics.prompt_tokens,
-            metrics.completion_tokens,
-            metrics.cached_tokens,
-            metrics.cache_creation_tokens,
-        )
-    {
-        attribution.native_cost_value = Some(amount);
-        attribution.native_cost_unit = Some(price.sheet.kind.currency().into());
-        attribution.native_cost_currency = Some(price.sheet.kind.currency().into());
-    }
+    let _ = (attribution, platform_price, official_price, metrics);
 }
 
 pub(crate) fn capture_execution_pricing(
@@ -699,26 +342,9 @@ pub(crate) fn capture_execution_pricing(
     account: &ExecutionCredential,
     adapter: ProviderAdapterKind,
     plan: &RequestPlan,
-    pricing_snapshot: Arc<PricingSnapshot>,
 ) -> RequestPricingSnapshot {
-    let upstream_model = native_log_identity(plan).upstream_model;
-    let endpoint = plan
-        .custom_route
-        .as_ref()
-        .map(|route| route.endpoint_url.as_str());
-    let pricing = bind_platform_attempt_price(
-        state,
-        account,
-        &upstream_model,
-        RequestPricingSnapshot::for_account(state, account, adapter, pricing_snapshot),
-        endpoint,
-    );
-    let pricing = restrict_platform_to_token_coverage(plan, pricing);
-    let pricing = bind_official_execution_price(state, account, plan, pricing);
-    if matches!(pricing, RequestPricingSnapshot::Platform(_)) {
-        return pricing;
-    }
-    bind_credit_attempt_price(state, account, plan, &upstream_model, pricing)
+    let _ = (state, account, adapter, plan);
+    RequestPricingSnapshot::Unpriced
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -731,31 +357,22 @@ pub(crate) fn pricing_metrics(
     cache_creation_tokens: i64,
     service_tier: Option<&str>,
 ) -> ForwardMetrics {
-    let estimate = snapshot.estimate(
-        model,
-        prompt_tokens,
-        completion_tokens,
-        cached_tokens,
-        cache_creation_tokens,
-        service_tier,
-    );
-    let provider_identity = snapshot.provider_identity();
+    let _ = (snapshot, model);
     ForwardMetrics {
         prompt_tokens,
         completion_tokens,
         cached_tokens,
         cache_creation_tokens,
-        cost: estimate.cost.unwrap_or(0.0),
-        raw_cost_usd: estimate.raw_cost_usd,
-        quota_debit: estimate.quota_debit,
-        effective_paid_cost_usd: estimate.effective_paid_cost_usd,
-        pricing_revision_id: estimate.pricing_revision_id,
-        quota_multiplier: estimate.quota_multiplier,
-        local_adjustment_multiplier: estimate.local_adjustment_multiplier,
-        pricing_provider_id: provider_identity.map(str::to_string),
-
+        cost: 0.0,
+        raw_cost_usd: None,
+        quota_debit: None,
+        effective_paid_cost_usd: None,
+        pricing_revision_id: None,
+        quota_multiplier: None,
+        local_adjustment_multiplier: None,
+        pricing_provider_id: None,
         service_tier: service_tier.map(str::to_string),
-        cost_state: estimate.cost_state,
+        cost_state: "unknown",
     }
 }
 
@@ -764,11 +381,15 @@ pub(crate) fn metadata_metrics(
     service_tier: Option<&str>,
     cost_state: &'static str,
 ) -> ForwardMetrics {
-    let provider_identity = snapshot.provider_identity();
+    let _ = snapshot;
+    let cost_state = match cost_state {
+        "outcome_unknown" => "outcome_unknown",
+        "usage_missing" => "usage_missing",
+        _ => "unknown",
+    };
     ForwardMetrics {
-        pricing_revision_id: snapshot.revision().map(str::to_string),
-        pricing_provider_id: provider_identity.map(str::to_string),
-
+        pricing_revision_id: None,
+        pricing_provider_id: None,
         service_tier: service_tier.map(str::to_string),
         cost_state,
         ..ForwardMetrics::default()

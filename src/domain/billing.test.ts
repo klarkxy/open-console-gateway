@@ -261,14 +261,6 @@ function officialCash(): OfficialApiStatus {
     lifetimeSpend: [],
     monthSpend: [],
     monthStartedAt: "2026-09-01T00:00:00Z",
-    prices: {
-      kind: "deepseek",
-      observedAt: "2026-09-21T00:00:00Z",
-      revision: "r1",
-      rows: [],
-      sourceUrl: "https://example.test",
-      validUntil: "2026-10-21T00:00:00Z",
-    },
     processGeneration: 99,
     providerId: "deepseek",
     revision: 3,
@@ -327,8 +319,6 @@ test("generic setup can omit monthly grant and keep remaining on a manual bucket
   const built = buildInitialCreditConfigure({
     name: "lab",
     currency: "USD",
-    creditsPerCurrency: 1,
-    rates: [],
     remaining: 15,
     monthlyEnabled: false,
     monthlyAmount: 100,
@@ -350,8 +340,6 @@ test("generic monthly setup keeps grant independent from current remaining", () 
   const built = buildInitialCreditConfigure({
     name: "lab",
     currency: "USD",
-    creditsPerCurrency: 1,
-    rates: [],
     remaining: 15,
     monthlyEnabled: true,
     monthlyAmount: 100,
@@ -374,8 +362,6 @@ test("editing monthly on or off does not refill remaining", () => {
   const off = buildCreditSettingsConfiguration(current, {
     name: current.name,
     currency: current.currency,
-    creditsPerCurrency: current.creditsPerCurrency,
-    rates: current.rates,
     monthlyEnabled: false,
     monthlyAmount: current.monthly?.amount ?? null,
     nextResetAt: current.monthly?.nextResetAt ?? null,
@@ -384,11 +370,10 @@ test("editing monthly on or off does not refill remaining", () => {
   assert.ok(!("issue" in off));
   if ("issue" in off) return;
   assert.equal(off.monthly, null);
+  assert.equal("rates" in off, false);
   const on = buildCreditSettingsConfiguration(off, {
     name: off.name,
     currency: off.currency,
-    creditsPerCurrency: off.creditsPerCurrency,
-    rates: off.rates,
     monthlyEnabled: true,
     monthlyAmount: 50,
     nextResetAt: "2026-11-01T00:00:00.000Z",
@@ -398,6 +383,8 @@ test("editing monthly on or off does not refill remaining", () => {
   if ("issue" in on) return;
   assert.equal(on.monthly?.amount, 50);
   assert.equal(on.monthly?.nextResetAt, "2026-11-01T00:00:00.000Z");
+  assert.equal("rates" in on, false);
+  assert.equal(JSON.stringify(on).includes("PerMillion"), false);
 });
 
 test("live nextResetAt is the caption boundary and can be absent", () => {
@@ -409,20 +396,35 @@ test("live nextResetAt is the caption boundary and can be absent", () => {
   assert.notEqual(meter().configuration.monthly?.nextResetAt, meterNextResetAt(meter()));
 });
 
-test("preset setup copies backend rates and keeps remaining as a reviewable grant", () => {
+test("preset setup keeps the reviewable grant, monthly renewal, and expiry", () => {
   const preset: CreditPreset = {
     id: "mini",
     initialGrant: 400_000_000,
     configuration: meter().configuration,
   };
   const configuration = configurationFromPreset(preset, "2026-09-30T16:00:00.000Z");
-  assert.equal(configuration.rates[0]?.inputPerMillion, 1);
+  assert.equal(configuration.monthly?.amount, 400_000_000);
   assert.equal(configuration.monthly?.timezoneOffsetMinutes, CHINA_OFFSET_MINUTES);
+  assert.equal(configuration.monthly?.renewalEndsAt, null);
   const initial = initialMonthlyBucket(configuration, 100_000_000, "2026-09-21T00:00:00.000Z");
   assert.equal(initial.remaining, 100_000_000);
   assert.equal(initial.granted, 400_000_000);
   assert.equal(initial.expiresAt, "2026-09-30T16:00:00.000Z");
   assert.equal(initial.kind, "monthly");
+});
+
+test("preset activation does not copy token rates into the ledger", () => {
+  const preset: CreditPreset = {
+    id: "mini",
+    initialGrant: 400_000_000,
+    configuration: meter().configuration,
+  };
+  const configuration = configurationFromPreset(preset, "2026-09-30T16:00:00.000Z");
+  assert.equal(configuration.monthly?.amount, 400_000_000);
+  assert.equal(configuration.name, "Mini");
+  assert.equal("rates" in configuration, false);
+  assert.equal("creditsPerCurrency" in configuration, false);
+  assert.equal(JSON.stringify(configuration).includes("PerMillion"), false);
 });
 
 test("usage windows project from camelCase BillingStatus.usage through one presenter", () => {
@@ -468,6 +470,57 @@ test("usage windows project from camelCase BillingStatus.usage through one prese
   assert.equal(calibrated.quotaWindows[0]?.used, 9);
   assert.equal(calibrated.quotaWindows[0]?.resetsAt, "2026-09-21T06:00:00.000Z");
   assert.equal(calibrated.quotaWindows[1]?.used, 20);
+});
+
+test("an official percent window stays percent over 100 and an empty observation list stays empty", () => {
+  const raw = usage({
+    quotaWindows: [{
+      accountId: "acc-1",
+      calibrationOffset: 0,
+      limitValue: 100,
+      observedAt: "2026-09-21T00:00:00.000Z",
+      resetsAt: "2026-09-22T00:00:00.000Z",
+      source: "official",
+      startedAt: "2026-09-21T00:00:00.000Z",
+      unit: "percent",
+      updatedAt: "2026-09-21T00:00:00.000Z",
+      used: 37,
+      windowKind: "five_hours",
+    }],
+  });
+  const presented = presentProviderUsage(raw);
+  assert.equal(presented.quota_windows.length, 1);
+  assert.equal(presented.quota_windows[0]?.unit, "percent");
+  assert.equal(presented.quota_windows[0]?.used, 37);
+  assert.equal(presented.quota_windows[0]?.limit_value, 100);
+  assert.equal(presentProviderUsage(usage()).quota_windows.length, 0);
+});
+
+test("a missing usage window is unavailable instead of a zero observation", () => {
+  const raw = usage({
+    quotaWindows: [{
+      accountId: "acc-1",
+      calibrationOffset: 0,
+      limitValue: 100,
+      observedAt: null,
+      resetsAt: "2026-09-28T00:00:00.000Z",
+      source: "manual",
+      startedAt: null,
+      unit: "percent",
+      updatedAt: "2026-09-21T01:00:00.000Z",
+      used: 20,
+      windowKind: "week",
+    }],
+  });
+  const window = usageWindowFromProviderUsage(raw, "acc-1");
+  assert.equal(window.window_week, 20);
+  assert.equal(window.window_5h, null);
+  assert.equal(window.window_month, null);
+  const blank = usageWindowFromProviderUsage(undefined, "acc-missing");
+  assert.equal(blank.account_id, "acc-missing");
+  assert.equal(blank.window_5h, null);
+  assert.equal(blank.window_week, null);
+  assert.equal(blank.window_month, null);
 });
 
 test("revalidation errors overlay a last snapshot; first failure replaces content", () => {
