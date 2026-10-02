@@ -783,7 +783,7 @@ fn try_file_reparse(link: &std::path::Path, target: &std::path::Path) -> bool {
 fn make_directory_reparse(link: &std::path::Path, target: &std::path::Path) -> bool {
     #[cfg(unix)]
     {
-        return std::os::unix::fs::symlink(target, link).is_ok();
+        std::os::unix::fs::symlink(target, link).is_ok()
     }
     #[cfg(windows)]
     {
