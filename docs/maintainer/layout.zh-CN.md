@@ -18,8 +18,8 @@ scripts/                   发版、契约、冒烟
 
 Workspace 成员和 `rust-version` 在根目录 `Cargo.toml`。面板 HTTP 客户端：
 `src/api/dashboard-v3.ts`（共享传输层）与 `src/api/dashboard-v4.ts`，以及
-`src/api/dashboard.ts` / `src/api/providers.ts` / `src/api/connections.ts` 的
-presenter。镜像相关：`Dockerfile`、
+`src/api/dashboard.ts`、`src/api/providers.ts`、`src/api/connections.ts`
+中的 presenter。镜像相关：`Dockerfile`、
 `Dockerfile.browser`、`compose.yaml`、`compose.example.yaml`、
 `docker-bake.hcl`。
 

@@ -2,8 +2,8 @@
 
 # Release Artifacts
 
-Open Console Gateway ships desktop installers for three platforms, a CLI archive for each,
-and a multi-arch container image.
+Open Console Gateway ships desktop installers for three platforms, a CLI archive
+for each, and a multi-arch container image.
 
 | Runner | GUI | CLI |
 | --- | --- | --- |
@@ -35,6 +35,7 @@ SHA256SUMS
 Each CLI archive ships with its executable, a `dist/` directory, and `LICENSE`.
 `serve` needs the sibling dashboard assets, so distribute the whole archive.
 Windows has no portable GUI artifact.
+
 The `ocg-manager` Codex skill is embedded in the desktop and CLI binaries,
 not a separate archive member. Native release startup synchronizes that exact
 build's skill into the current user's `~/.agents/skills`; the packaged CLI
@@ -60,6 +61,7 @@ are smoke-only.
 macOS updater archives require the `app` bundle target. deb is signed with
 `tauri signer sign` because it is not a native Tauri updater artifact.
 `pnpm run release:check` is the same validation without a native build.
+
 ---
 
 [Maintainer guide index](../MAINTAINER.md) · [简体中文](release-artifacts.zh-CN.md) · [Docs index](../README.md)

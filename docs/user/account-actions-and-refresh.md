@@ -1,14 +1,15 @@
 [简体中文](account-actions-and-refresh.zh-CN.md)
 
-# Account actions and refresh
+# Account Actions And Refresh
 
-## Saving and continuing work
+## Saving And Continuing Work
 
-A confirmed account or Key save closes its editor without waiting for account lists, model catalogs, or usage to reload. These follow-up reads run in the background. If a read fails, the saved change remains saved; use the affected section's retry action instead of submitting the change again. Creating or rotating a Key is complete when the gateway confirms it. If the following read fails, the Key stays saved and a replaced secret is left blank. Read it again; do not create or rotate it again.
+A confirmed account or Key save closes its editor without waiting for account lists, model catalogs, or usage to reload. These follow-up reads run in the background. If a read fails, the saved change stands; use the affected section's retry
+action instead of submitting the change again. Creating or rotating a Key is complete when the gateway confirms it. If the following read fails, the Key stays saved and a replaced secret is left blank. Read it again; do not create or rotate it again.
 
 Background platform observation refreshes do not invalidate an unrelated open configuration editor. A real configuration conflict still keeps the draft for review and never silently retries the write.
 
-## Removing one local Key
+## Removing One Local Key
 
 Open a Key row's menu on **Accounts** and choose **Delete account**. This action is available for ordinary accounts and for Keys linked to New API or Sub2API. Confirmation removes the selected local account using the existing account deletion endpoint. It does not revoke an upstream Key, close an upstream account, remove sibling Keys, or delete the Provider definition.
 
@@ -20,7 +21,7 @@ The confirmation shows progress while the DELETE is pending and closes as soon a
 
 After removing every Key from a configurable HTTP account group, open the group menu and choose **Delete account group**. This explicitly removes its connection configuration, model mappings, and all remaining cards, including the last empty card. The confirmation names the group. A Key on another card of the same group still blocks deletion. System-managed destinations retain their existing restrictions, and New API / Sub2API parent groups keep their existing deletion action. Deleting an individual account does not automatically delete its group.
 
-## Refresh scopes
+## Refresh Scopes
 
 Use the refresh button beside a Key's enable switch; it is directly accessible without opening the menu. Manual account and platform refreshes share a serial background queue with automatic account refreshes. Waiting buttons show a clock (Queued); the active button shows a spinner (Refreshing). You can queue other accounts and keep using the page. Repeated clicks on the same pending account do not add another request. An error does not stop the next queued account. The queue belongs to the current dashboard session: logout or closing the page discards waiting work, and accounts removed or changed before their turn are skipped. It is not a durable server queue.
 
@@ -33,3 +34,7 @@ For other accounts, manual refresh retains the existing companion model-discover
 Repeated identical platform refreshes share the pending request. Platform parent and child refreshes do not overlap within that platform. Logout and confirmed removal invalidate pending observations; a late completion cannot populate the new session or release a newer operation's busy flag.
 
 These changes retain the V4 API, its CAS checks, and the existing persisted data format. No migration or upstream account mutation is required.
+
+---
+
+[User guide index](../USER.md) · [简体中文](account-actions-and-refresh.zh-CN.md) · [Docs index](../README.md)

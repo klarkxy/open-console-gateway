@@ -11,9 +11,9 @@ Tombstoned `/dashboard/api/...` REST returns empty-body **401** when anonymous
 when authenticated, including loopback local mode. The `/dashboard/api/v3`
 prefix is a separate 410 family:
 `{ "code": "dashboardV3Removed", "message": "Dashboard API V3 has been removed; refresh the page and retry." }`.
-Unknown `/dashboard/api/...`
-paths that are not the V3 tombstone prefix, not V4, and not a preserved family are also 410 once
-authenticated. Unknown V4 paths are V4 `404`s, not tombstones. Preserved
+Unknown `/dashboard/api/...` paths that are not the V3 tombstone prefix, not
+V4, and not a preserved family are also 410 once authenticated. Unknown V4
+paths are V4 `404`s, not tombstones. Preserved
 `/dashboard/api` families (exact path, no trailing slash, no extra
 segments): `auth/status`, `auth/register`, `auth/login`, `auth/logout`,
 and `browser/sessions/{token}/ws` (non-empty token). Protected
@@ -48,7 +48,7 @@ Semantics the router does not state at a glance:
 - `GET /v1/models` is a local inventory (code-owned aliases plus eligible
   saved names); it requires auth and performs no upstream I/O.
 
-## Dashboard V3 tombstone (`/dashboard/api/v3`)
+## Dashboard V3 Tombstone (`/dashboard/api/v3`)
 
 `/dashboard/api/v3` and `/dashboard/api/v3/*` are retired. Anonymous
 requests get empty-body **401**. Authenticated requests get **410**
@@ -155,9 +155,10 @@ Compatibility shims and data-shape notes that the routers do not show:
   independently of discovery and test; a real test may consume upstream
   quota.
 
-## Static dashboard
+## Static Dashboard
 
 `GET /dashboard`, `GET /dashboard/`, `GET /dashboard/assets/{*path}`.
+
 ---
 
 [Maintainer guide index](../MAINTAINER.md) · [简体中文](http-routes.zh-CN.md) · [Docs index](../README.md)

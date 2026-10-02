@@ -24,5 +24,4 @@ workflows that appear abusive.
 
 ---
 
-[中文版](OPENCODE_GO_ANTI_ABUSE.zh-CN.md) · [Docs index](README.md) ·
-[Back to README](../README.md)
+[简体中文](OPENCODE_GO_ANTI_ABUSE.zh-CN.md) · [Docs index](README.md) · [Back to README](../README.md)

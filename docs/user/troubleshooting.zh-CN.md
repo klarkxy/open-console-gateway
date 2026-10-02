@@ -2,7 +2,7 @@
 
 # 常见问题
 
-Open Console Gateway 出问题，通常先怀疑有别的进程占了 `127.0.0.1:9042`——本地 Gateway 的端口，向来不太空闲。下文还覆盖陈旧 SPA、冲突写入、账号冷却，以及看起来能跑但实际仍是 `pending` 草稿的 Plan；Gateway 宁可报错，也不会替你猜一个可能多收钱的请求。
+Open Console Gateway 出问题，通常先怀疑有别的进程占了 `127.0.0.1:9042`——本地 Gateway 的端口向来不太空闲。下文还覆盖陈旧 SPA、冲突写入、账号冷却，以及看起来能跑、实际仍是 `pending` 草稿的 Plan；Gateway 宁可报错，也不会替你猜一个可能多收钱的请求。
 
 - **Windows 上打开应用没反应、找不到托盘图标。**重新打开桌面版会尝试恢复已有实例的托盘并打开管理界面。新实例会先创建托盘，再启动 Gateway；启动失败会显示错误弹窗。如果端口被 `ocg-manager-cli.exe` 占用，弹窗会显示进程号和程序路径，可确认停止旧服务并重试。当前请求会中断，账号、配置和数据不会删除；取消则保留旧服务。其他程序占用端口时只显示诊断信息，需要先退出该程序。CLI 本身仍支持无托盘运行。Windows 可能把托盘图标收进折叠菜单，程序无法强制它固定显示在任务栏。若旧桌面实例已卡死，需在任务管理器结束它后重新打开。仅源码开发时可用 `scripts/free-dev-port.mjs` 清理 `30001` 上的残留 Vite 进程；它不会释放 `9042`，也不会释放桌面端单实例锁。
 - **弹窗提示本机数据由更新版本写入。**数据目录已被更新版本的 Open Console Gateway 升级，当前版本无法读取。点「是」打开发布页下载最新版本，点「否」直接退出；账号、配置和数据不会被修改。安装最新版后即可正常启动，不要删除数据目录。
@@ -21,17 +21,11 @@ Open Console Gateway 出问题，通常先怀疑有别的进程占了 `127.0.0.1
 
 ## 查看更详细的日志
 
-在“日志 → 运行日志”中，可以按级别、精确分类或网关返回的 `x-ocg-request-id` 筛选。
-请求接收、上游尝试准备、响应头及等待时间、失败和结束记录通过同一 ID 关联。
-`response_ready` 表示响应头已就绪；流式请求的最终结果请查看后续 `attempt_outcome`。
+转发请求看 **日志 → 逻辑请求**，展开一行可看到全部上游尝试。**用户操作**是操作回执。**历史混合日志**是保留的混合旧记录，不是程序诊断的实时输出。用网关响应头 `x-ocg-request-id` 搜索对应请求。`streaming` 和 `outcome_unknown` 保持未结束。
 
-启动前设置 `OCG_LOG_LEVEL`，可选 `trace`、`debug`、`info`（默认）、`warn`、`error`。
-它控制运行日志保存级别，不影响请求统计。
-`pnpm run dev` 默认使用 `debug`，并把凭证脱敏后的完整请求内容保存到
-`.artifacts/debug-requests`，保留最近 1,000 个文件。
-设置 `OCG_DEBUG_REQUESTS=0` 可关闭。文件包含会话内容；覆盖范围、存储规则和环境变量见
-[开发指南](../maintainer/development.zh-CN.md#请求调试与日志分级)。
+程序诊断由 `RUST_LOG` 控制。桌面版和普通 CLI 写入滚动文件 `<数据目录>/logs/program.log`（10 MiB，另有 4 个归档）。`OCG_PROGRAM_LOG_FILE=off` 关闭该文件。Docker 只写 stderr。设置页没有这个开关。保留策略、30 天的 `diagnostic_json` 过期，以及已生效的调试附件上限（每个 2 MiB、合计 100 MiB、7 天、1,000 个文件）见[日志与设置](logs-settings.zh-CN.md)。
 
+`pnpm run dev` 仍可能把凭证脱敏后的请求内容写到 `.artifacts/debug-requests`。设置 `OCG_DEBUG_REQUESTS=0` 可关闭。这些文件包含会话内容；覆盖范围见[开发指南](../maintainer/development.zh-CN.md#请求调试与日志分级)。
 
 ---
 

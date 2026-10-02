@@ -6,7 +6,7 @@ This page defines stable dependency and ownership boundaries. Runtime edge
 cases, schema history, route inventories, and release procedures live in
 their own chapters.
 
-## Dependency graph
+## Dependency Graph
 
 ```text
 ocg-gateway -> ocg-domain
@@ -29,12 +29,13 @@ are typed data bound to Configurable HTTP.
 | `ocg-core` | SQLite, `CoreState`, Dashboard control plane, adapters, gateway execution, usage sync, Host composition | Runtime plugin loading; adapter-owned DB or HTTP clients |
 | `ocg-cli` / `src-tauri` | Process composition for CLI and Desktop | A second control plane or direct WebView mutation path |
 
-`ocg-domain::credential` holds the identity/credential/binding vocabulary and the single legacy mapper.
+`ocg-domain::credential` holds the identity/credential/binding vocabulary and
+the single legacy mapper.
 
 Compatibility facades live in `ocg-core`; new no-I/O catalog, selector,
 alias, and conversion behavior belongs in the lower crates.
 
-## HTTP composition
+## HTTP Composition
 
 `crates/ocg-core/src/host_router.rs` is the composition root for one listener:
 
@@ -53,7 +54,7 @@ alias, and conversion behavior belongs in the lower crates.
 The SPA remains an HTTP client. Desktop capabilities are registered into
 `CoreState`.
 
-## Gateway request path
+## Gateway Request Path
 
 Inference is implemented under `crates/ocg-core/src/gateway/`:
 
@@ -80,7 +81,7 @@ stream interruptions, and other outcomes that may have reached the upstream
 are not automatically replayed. Full status-specific behavior lives in
 [Runtime invariants](runtime-invariants.md).
 
-## Adapter and Provider boundary
+## Adapter And Provider Boundary
 
 `ocg-domain::ProviderRegistry` contains the code-owned built-in Provider rows
 and exhaustive adapter kinds. Unknown `provider_id` values fail closed unless
@@ -89,13 +90,14 @@ existing Configurable HTTP adapter.
 
 Legacy Custom API rows are distinct configurable `http` destinations using
 the same sealed adapter kind. A connection may hold multiple credentials while
-preserving public-name-only resolution. CPA is a separate static external integration.
+preserving public-name-only resolution. CPA is a separate static external
+integration.
 
 Provider-owned catalogs and contracts are resolved before account credentials
 are used. Saved discovery rows may activate code-owned Alias mappings or remain
 exact raw pins.
 
-## Control plane
+## Control Plane
 
 The Vue SPA calls remounted operational handlers through
 `src/api/dashboard-v3.ts` (HTTP base `/dashboard/api/v4`) and native V4 routes
@@ -113,7 +115,7 @@ The settings-specific persist/rebind/compensation sequence is shown in
 states are shown in
 [State and lifecycle](state-and-lifecycle.md#managed-account-setup-lifecycle).
 
-## Detail ownership
+## Detail Ownership
 
 | Detail | Authoritative chapter |
 | --- | --- |

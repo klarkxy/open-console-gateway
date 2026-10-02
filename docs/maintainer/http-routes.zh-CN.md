@@ -64,4 +64,4 @@ V4 原生（`crates/ocg-core/src/dashboard_v4/`）：
 
 ---
 
-[维护者指南索引](../MAINTAINER.zh-CN.md) · [English](http-routes.md) · [文档索引](../README.md)
+[维护者指南索引](../MAINTAINER.zh-CN.md) · [English](http-routes.md) · [文档索引](../README.zh-CN.md)

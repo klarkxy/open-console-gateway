@@ -66,10 +66,6 @@ KAT-Coder 的完整 Chat 地址与 Bearer 鉴权，根据官方 OpenAI 兼容客
 
 初始模型 ID 依据运营方文档复核，不直接复制 CC-Switch 快照。你可按当前目录或控制台更换、补充模型，并保留上游 ID 原始拼写。即使没有模型列表接口，也可以填写明确的模型映射后保存。
 
----
-
-[新增供应商](add-provider.zh-CN.md) · [供应商](providers.zh-CN.md) · [English](provider-presets.md)
-
 ## 官网 API 余额
 
 DeepSeek API 与智谱 GLM API 预设可以显示官网余额，但保存的预设、API 类型、鉴权和官网目的地必须仍然匹配。推理继续使用 Configurable HTTP。任意 Custom API、改成中转地址的预设以及 Coding Plan 不会继承这项余额读取。没有参考价格面板，也没有价格刷新。
@@ -87,3 +83,7 @@ StepFun API (CN) 在 `api.stepfun.com` 的普通路径（不含 `/step_plan`）�
 Step Plan (CN) 在 Open Console Gateway 里没有官网用量 API。账号卡保留手工积分余额。Step 预设是一笔数量和月度续期，不是 token 费率。分桶、授予、月度续期和过期仍然分开，需要改正已保存余额时使用 **校准用量**。完成的请求不会扣减这份余额。产品不要求填写按 token 费率或货币换算。没有记下的数量保持未知，不会记成零或免费。余额为空或未知不会停止路由。剩余不含已过期的授予，卡片也不会编造一个共用重置时间。不需要控制台 Cookie 或登录。
 
 可配置 HTTP 目的地可以保留同一份手工积分余额。Open Console Gateway 不会为它拉取费率文档。
+
+---
+
+[用户指南索引](../USER.zh-CN.md) · [English](provider-presets.md) · [文档索引](../README.zh-CN.md)

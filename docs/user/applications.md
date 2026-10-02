@@ -7,7 +7,7 @@
 These tabs add an **Open Console Gateway** model provider to an existing local client configuration. Codex means local Codex workflows in the CLI or desktop app; it does not redirect ordinary ChatGPT Chat or cloud Work.
 
 1. Run the OCG desktop app or native CLI on the same computer and under the same user as the client. Select the client tab and inspect the exact configuration path. The path belongs to the OCG host, which may differ from the computer displaying the dashboard.
-2. For Codex and Kimi, close the client CLI and desktop app before confirming. These clients do not cooperate with an OCG file lock; do not edit the same file during the operation.
+2. For Codex and Kimi, close the client CLI and desktop app before you confirm. These clients do not cooperate with an OCG file lock; do not edit the same file during the operation.
 3. Review the target paths and confirm **Configure**. OCG creates or reuses an enabled ordinary **Key** named `codex`, `kimi-code`, `minimax-code`, or `zcode`, and exports every model returned by authenticated `/v1/models`. There is no separate model selection or capability filter. The Key is written to the client's local configuration with restricted file permissions; the result does not show its value.
 4. Start the client or open a new session, select an OCG model, and send a request. Confirm it in OCG **Logs**. A saved configuration does not prove that the client loaded it or that tools, attachments, and multi-turn conversations work.
 
@@ -15,13 +15,13 @@ These tabs add an **Open Console Gateway** model provider to an existing local c
 
 Configuration keeps the current OCG model when it is still published; otherwise it activates the first exported model. Choose another model in the client itself. Codex activates the OCG catalog as its global catalog; it does not merge it into the native ChatGPT catalog. Unknown model limits are left unspecified. Model availability does not guarantee that every model supports a coding client's tools.
 
-Disabled Keys stay disabled. Configuring again creates an enabled Key if none with the matching name exists. A Key created before a later client-file error remains available in Connection Center, and retrying reuses it. An empty model catalog is rejected before creating a Key or writing client files.
+Disabled Keys stay disabled. Configuring again creates an enabled Key when none with the matching name exists. A Key created before a later client-file error remains available in Connection Center, and retrying reuses it. An empty model catalog is rejected before creating a Key or writing client files.
 
 The generated Codex catalog includes the official generic coding instructions from Codex 0.153.4, which requires an instruction source for each custom model. Source attribution and the Apache 2.0 license are included with OCG.
 
 OCG keeps private recovery data before replacing configuration. If an operation is interrupted, the tab offers recovery when the saved journal can safely restore the affected files. It refuses to restore over intervening user changes. Recovery files may contain credentials; keep them private. Do not copy their contents into bug reports.
 
-MiniMax YAML configuration is reformatted when saved. Unrelated values remain, and original comments remain available in the first backup.
+MiniMax YAML configuration is reformatted when saved. Unrelated values remain, and the original comments stay available in the first backup.
 
 The tabs resolve client-specific home/data-directory overrides. You can select another configuration path for a custom profile. Codex and Kimi use `config.toml`; MiniMax uses `config.yaml`; current ZCode uses the versioned `provider_config.json` Personal Provider format. Legacy or malformed files are not overwritten. CLI and desktop share a configuration only when they use the same location and compatible format. Docker and builds without the native capability cannot configure clients on the browser computer; use [manual client configuration](add-application.md).
 
@@ -29,20 +29,21 @@ The **DSH** tab below connects DSH itself to the gateway through the OCG plugin.
 
 ## DSH
 
-The **DSH** tab installs or removes the OCG-owned plugin through the **running
-address** shown on the page.
+The **DSH** tab installs or removes the OCG-owned plugin through the
+**running address** shown on the page.
 
 In DSH's plugin list, the integration appears as **Open Console Gateway** with
 the OCG icon and an English or Chinese description matching DSH's language.
-Reinstall through OCG to update an older plugin package, then restart DSH if prompted.
+Reinstall through OCG to update an older plugin package, then restart DSH if
+prompted.
 
 The page also detects profiles one level below the current user's
 `~/.dsh/profiles` and `~/.dsh-*/profiles`. It lists directories with a valid
-DSH profile manifest and skips linked directories. When `DSH_HOME` is explicitly
-set for the OCG Host, detection follows that existing Home instead. The default
-`web` target remains available even before its profile manifest is created.
-Selecting a profile chooses its local DSH Home and session context. Check the
-running address before confirming installation or uninstallation.
+DSH profile manifest and skips linked directories. When `DSH_HOME` is
+explicitly set for the OCG Host, detection follows that existing Home instead.
+The default `web` target remains available even before its profile manifest is
+created. Selecting a profile chooses its local DSH Home and session context.
+Check the running address before confirming installation or uninstallation.
 
 A discovered profile points at that Home's DSH session files and suggests a
 loopback address (`web` → `http://127.0.0.1:3080`, official Desktop →
@@ -104,8 +105,7 @@ restart it.
 
 The plugin registers **Open Console Gateway** as `ocg` and refreshes the
 authenticated `GET /v1/models` list when DSH asks for models or prepares a
-call. That is the full set of public
-names currently offered to clients,
+call. That is the full set of public names currently offered to clients,
 including eligible Custom IDs; it is not the narrower dashboard
 `application-models` list. Model visibility changes therefore do not require
 reinstalling the plugin. Whether a model accepts image attachments in DSH is
@@ -141,8 +141,11 @@ host. The official Docker image reports local installation as unsupported: a
 container cannot install into the browser user's or Docker host's DSH. It may
 still serve DSH through ordinary Gateway configuration.
 
-[User guide index](../USER.md) · [Manual client setup](add-application.md) · [Docs index](../README.md)
+## Model Details In DSH
 
-## Model details in DSH
+See [model metadata and reasoning tiers](model-metadata.md) for discovery,
+route-specific declarations, and upgrading the installed OCG plugin.
 
-See [model metadata and reasoning tiers](model-metadata.md) for discovery, route-specific declarations, and upgrading the installed OCG plugin.
+---
+
+[User guide index](../USER.md) · [简体中文](applications.zh-CN.md) · [Docs index](../README.md)

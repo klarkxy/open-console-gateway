@@ -2,8 +2,8 @@
 
 # Troubleshooting
 
-Troubleshooting Open Console Gateway usually starts with discovering that something else
-is already squatting on `127.0.0.1:9042`. The entries below cover stale SPAs,
+Troubleshooting Open Console Gateway usually starts by finding that something
+else already occupies `127.0.0.1:9042`. The entries below cover stale SPAs,
 conflicting writes, accounts that are cooling down, and Plans that look ready
 but are still `pending` drafts — the gateway stays pessimistic so you do not
 get billed for a bad guess.
@@ -20,9 +20,8 @@ get billed for a bad guess.
   Windows may put the icon in its overflow menu; the application cannot
   force it to stay pinned on the taskbar. If an existing desktop instance
   is hung, end it in Task Manager and launch again. For source development
-  only, `scripts/free-dev-port.mjs` clears stale Vite
-  processes on port `30001`; it does not release `9042` or the desktop
-  single-instance lock.
+  only, `scripts/free-dev-port.mjs` clears stale Vite processes on port
+  `30001`; it does not release `9042` or the desktop single-instance lock.
 - **A startup dialog says the data was written by a newer version.** The local
   data directory was upgraded by a newer Open Console Gateway build, and this
   version cannot read it. Choose **Yes** to open the release page and download
@@ -34,8 +33,9 @@ get billed for a bad guess.
   OpenCode Go rotates and records `auth_error` only for a structured
   `CreditsError`; re-save the same Key after renewal to clear it. `ModelError`,
   unknown, and malformed OpenCode 401 responses remain unchanged. Custom API
-  `401` rotates to the next eligible card and records `auth_error`. To check an OpenCode Go
-  key directly, use CLI `key ping <id>` or send a real client request.
+  `401` rotates to the next eligible card and records `auth_error`. To check an
+  OpenCode Go key directly, use CLI `key ping <id>` or send a real client
+  request.
   Managed-account Key verification and Custom **Test connection**
   record `auth_error` on 401 in those flows.
 - **The dashboard says the page version does not match the service.** A cached
@@ -53,7 +53,7 @@ get billed for a bad guess.
   circuit breaker. Wait for `cooldown_until`, or reset the cooldown manually
   in the **Accounts** view.
 - **Gateway returns `429` with "all accounts cooling down".** Every enabled
-  account is in cooldown. Either wait for the soonest reset, or add / enable
+  account is in cooldown. Either wait for the soonest reset, or add or enable
   another account.
 - **Gateway returns `400` for a model name.** Send a published alias or an
   eligible Custom ID from authenticated `GET /v1/models`. Names with `/`,
@@ -64,9 +64,10 @@ get billed for a bad guess.
   protocol is enabled in the **Providers** matrix. Public `/models` refresh does
   not validate the Key; an invalid Key surfaces as inference 401/403.
 - **A saved Custom API still does not route.** Confirm the card is enabled and
-  ready, its Key is non-empty, and the requested model is declared. Verification does
-  not flip the switch. Verify sends one minimal request in the selected
-  protocol to the resolved inference Endpoint and expects a `2xx` JSON response.
+  ready, its Key is non-empty, and the requested model is declared. Verification
+  does not flip the switch. Verify sends one minimal request in the selected
+  protocol to the resolved inference Endpoint and expects a `2xx` JSON
+  response.
   Changing the API URL, Key, declared models, or protocol re-pends verification
   while preserving the card's current enabled state.
 - **Gemini requests fail with `400` over `safetySettings`.** The gateway
@@ -74,7 +75,7 @@ get billed for a bad guess.
   rejects non-empty arrays. Remove the field and retry; the Chat/Messages
   upstream applies its own policy.
 - **Docker first-run registration does not pick up my
-  `OCG_ADMIN_PASSWORD`.** These variables are only honored when the database
+  `OCG_ADMIN_PASSWORD`.** These variables are honored only when the database
   has no administrator yet; use the stored administrator account. Recreate
   `ocg-data` and `ocg-browser-profiles` only for an intentional full reset
   after a verified backup — doing so erases every account, credential,
@@ -84,22 +85,26 @@ get billed for a bad guess.
   **Open Anyway** for the first launch; the warning is not a sign of
   tampering.
 
-## More detailed logs
+## More Detailed Logs
 
-In **Logs → Runtime logs**, filter by severity, exact category, or the
-`x-ocg-request-id` returned by the Gateway. Request reception, upstream attempt
-preparation, response headers/timing, failures, and completion can be correlated
-by that ID. `response_ready` means the response headers are ready; for streaming
-requests, inspect the later `attempt_outcome` for the final result.
+Use **Logs → Logical requests** for one row per forwarded request, and expand
+it for every upstream attempt. **User operations** are action receipts.
+**Historical mixed logs** are retained mixed rows, not a live diagnostic feed.
+Correlate a gateway response with the `x-ocg-request-id` header by searching
+that id. `streaming` and `outcome_unknown` stay unresolved.
 
-Set `OCG_LOG_LEVEL` before startup to `trace`, `debug`, `info` (default), `warn`,
-or `error`. This controls persisted runtime events, not request accounting.
-`pnpm run dev` defaults to `debug` and saves full, credential-redacted request
-content in `.artifacts/debug-requests`; recent 1,000 files are retained.
-Use `OCG_DEBUG_REQUESTS=0` to disable it. These files contain conversation content;
-see the [development guide](../maintainer/development.md#request-debugging-and-log-levels)
-for coverage, storage, and overrides.
+Program diagnostics follow `RUST_LOG` and, for desktop and normal CLI, the
+rolling file `<data-dir>/logs/program.log` (10 MiB, plus four archives).
+`OCG_PROGRAM_LOG_FILE=off` disables the file. Docker writes stderr only.
+Settings has no control for this. See
+[Logs and settings](logs-settings.md) for retention, the 30-day
+`diagnostic_json` expiry, and the enforced 2 MiB / 100 MiB / 7 day / 1,000 file
+debug-attachment bounds.
 
+`pnpm run dev` can still save credential-redacted request content under
+`.artifacts/debug-requests`. Set `OCG_DEBUG_REQUESTS=0` to disable it. Those
+files contain conversation content; see the
+[development guide](../maintainer/development.md#request-debugging-and-log-levels).
 
 ---
 

@@ -25,3 +25,7 @@ OpenCode Go 读取公开、无 Key 的 [`GET /zen/go/v1/models`](https://opencod
 MiMo Token Plan 可刷新其已文档化的 `/models` 目录，种子 `mimo-v2.6-flash` 使用 Chat Completions、Responses 和 Messages。Kimi 仍是 Chat Completions 与 Messages 供应商。MiniMax CN/API 与 Global 预设提供 Chat Completions、Responses 和 Messages；实际请求使用保存的区域路由和鉴权。不能因为另一个模型或供应商支持某协议，就推断未文档化的能力。
 
 刷新目录不会拉取价格表，也不会估算请求费用。没有记录到的费用保持未知，不会显示成零或免费。
+
+---
+
+[用户指南索引](../USER.zh-CN.md) · [English](model-catalog-refresh.md) · [文档索引](../README.zh-CN.md)

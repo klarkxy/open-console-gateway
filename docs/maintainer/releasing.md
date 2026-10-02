@@ -26,9 +26,10 @@
    Read back GitHub Release metadata and the expected image tags. Report the
    release/tag/SHA, both workflow results, and any affected manual checks.
 
-Published assets and tags are immutable. Fix a bad release with a new patch version.
+Published assets and tags are immutable. Fix a bad release with a new patch
+version.
 
-## Check ownership and completion
+## Check Ownership And Completion
 
 Keep the candidate fixed during final validation. A different commit needs its
 own successful main Quality run. Local focused results remain useful for
@@ -44,7 +45,7 @@ package trial; use isolated data and record cleanup. Local connectivity trouble
 does not invalidate successful CI evidence, unless local operation is itself
 part of the requested acceptance.
 
-## Extra checks selected by the change
+## Extra Checks Selected By The Change
 
 - Gateway routing/protocol, billing, or storage changes: run the affected
   isolated Gateway Lab scenarios against the candidate binary. Require no

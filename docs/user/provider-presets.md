@@ -1,6 +1,6 @@
 [简体中文](provider-presets.zh-CN.md)
 
-# Plan and API presets
+# Plan And API Presets
 
 Browse Plan/API presets from **Accounts → Add account** or **Providers → Add Provider**. Both buttons open the same Accounts chooser. Existing connections list only built-in families that still have an account plus saved user-defined Providers; unused built-in templates stay with these creation templates. Presets group by vendor, with a compact selector for regional or plan variants. Search includes vendor and variant names, preset IDs and endpoint hosts. The chooser shows a read-only connection summary before the Key field. Fixed presets supply the address, protocol, authentication and an editable default model; Azure and Bedrock still require resource/regional addresses and deployment/model information. Completing a preset requires a Key and creates the Provider and its first account together; **Save draft** may omit the Key. Custom API and manual configuration retain their full settings.
 
@@ -16,7 +16,7 @@ Switching presets clears the previous channel's Key and model mappings, then fil
 
 Default models come from operator model documentation or request examples. They are editable starting points and do not certify account entitlement. Saving makes no upstream calls, imports no full model catalog and performs no paid test. Template updates do not rewrite saved connections; the v64 name migration above is a one-time exception.
 
-## Discover, test and edit
+## Discover, Test And Edit
 
 Presets save the documented route set when you create or explicitly reapply one. Fixed presets never derive replacement paths from a runtime hostname, and updating OCG never rewrites an already saved connection. Azure and Bedrock require your resource or regional Responses URL. If that URL matches the documented Azure OpenAI or Bedrock Runtime host and path, OCG fills their other documented routes for the same resource. Review the routes before saving; a custom hostname or path stays as one manually editable route. Azure static API Keys use the `api-key` header; Microsoft Entra tokens use Bearer. Bedrock has no compatible `GET /models`, so enter its model ID yourself. Gemini's native Google API is outside these three upstream formats, so its preset uses the documented OpenAI-compatible surface.
 
@@ -32,7 +32,7 @@ Testing never changes routing or preference. **Save Provider** commits the confi
 
 The selected preset is retained when saving and reopening, including resource-specific addresses such as Azure. It preserves template hints and discovery restrictions; it does not certify an edited endpoint as official. Entries without preset provenance use only unambiguous existing configuration evidence, and manually named models are not rewritten. Changing the endpoint, Key, model or protocol clears stale test results.
 
-## Coverage and sources
+## Coverage And Sources
 
 Compared on **2026-09-08** against CC-Switch's Claude, Codex, Gemini, OpenCode, OpenClaw and Hermes [preset sources at `f3b18df`](https://github.com/farion1231/cc-switch/tree/f3b18df12007d0fd79fd8ad8d310880664015197/src/config). CC-Switch categories are discovery hints, not a trust decision: for example, Azure and xAI appear under third-party categories. The endpoint and authentication choices were checked against operator documentation.
 
@@ -56,7 +56,7 @@ KAT-Coder's full Chat URL and Bearer auth are derived from its official OpenAI-c
 
 **Unverified gap:** CC-Switch's Baidu personal Token Plan `/v2/tokenplan/personal` route could not be corroborated in the fetched official docs. It is not offered as a preset. The documented Qianfan general API, legacy Coding Plan and team Token Plan are included separately; do not use a personal Key on the team endpoint.
 
-## Existing integrations and exclusions
+## Existing Integrations And Exclusions
 
 - **OpenCode Go**, **Kimi Code CN** and **MiniMax CN Token Plan** retain their existing built-in routing and usage behavior. Select those existing Providers for the subscription workflow; the Moonshot and MiniMax API presets cover the distinct API/region use cases.
 - Azure uses the current v1 API with a resource URL and deployment name. It does not provision resources or refresh Entra ID tokens. Bedrock uses its official OpenAI-compatible API with an API Key; AWS AK/SK signing is not implemented.
@@ -66,11 +66,7 @@ KAT-Coder's full Chat URL and Bearer auth are derived from its official OpenAI-c
 
 Initial model IDs are reviewed against operator documentation rather than copied from CC-Switch. You can replace or extend them using the current catalog or console, retaining exact upstream spelling. A missing model-list interface does not prevent saving an explicit mapping.
 
----
-
-[Add a Provider](add-provider.md) · [Providers](providers.md) · [简体中文](provider-presets.zh-CN.md)
-
-## Official API balances
+## Official API Balances
 
 DeepSeek API and Zhipu GLM API presets can show an official balance when their saved preset, API offering, authentication, and official destination still match. Inference remains on Configurable HTTP. This balance reader is not available for arbitrary Custom API endpoints, edited proxy destinations, or Coding Plan presets. There is no reference-price panel and no price refresh.
 
@@ -80,10 +76,14 @@ The gateway does not fetch a price list or estimate a new request from stored re
 
 Source: [DeepSeek balance](https://api-docs.deepseek.com/api/get-user-balance/).
 
-## StepFun API (CN) balance and Step Plan (CN) credits
+## StepFun API (CN) Balance And Step Plan (CN) Credits
 
 StepFun API (CN) ordinary endpoints on `api.stepfun.com` (not the `/step_plan` path) can refresh a Key-authenticated current balance with the same Accounts balance reading used for DeepSeek and Moonshot. That official wallet is unchanged. A missing balance stays unavailable and is not shown as 0.
 
 Step Plan (CN) has no official usage API in Open Console Gateway. The account card keeps a manual credit balance. A Step preset is an amount and a monthly renewal, not a token rate. Buckets, grants, monthly renewal, and expiry stay separate, and **Calibrate usage** corrects the saved balance by hand. A completed request does not reduce that balance. The product does not ask for per-token rates or a currency conversion. A missing amount stays unknown and is not recorded as zero or free. An empty or unknown balance does not stop routing. Remaining does not include an expired grant, and the card does not invent one shared reset. No console cookie or login is required.
 
 Configurable HTTP destinations can keep the same manual credit balance. Open Console Gateway does not fetch a rate document for it.
+
+---
+
+[User guide index](../USER.md) · [简体中文](provider-presets.zh-CN.md) · [Docs index](../README.md)

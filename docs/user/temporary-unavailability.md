@@ -6,7 +6,7 @@ On **Settings**, the temporary-unavailability section skips a Key or model local
 
 Choose **Global** or one connection. A connection rule with the same id replaces the entire global rule; fields are not merged. A disabled local row hides the inherited global rule. Delete the local row to restore inheritance.
 
-## Built-in GOAT credits rejection
+## Built-In GOAT Credits Rejection
 
 The built-in GOAT credits-rejection matcher is sealed. You can disable it for Global or for one connection, or restore inheritance. You cannot turn it into a script, a regular expression, or a raw-body scan.
 
@@ -16,7 +16,7 @@ Other and unknown 400s (context, model, reasoning validation, and similar) stay 
 
 The credits matcher does not create persistent quota or a saved plan deadline. That wait stays the existing in-memory Key-and-model rule, 30 to 300 seconds by default. The only GOAT body that records a plan deadline is the exact HTTP 429 sentence in [Routing](routing.md); it is not a rule on this page and it is not quota recovery. Other GOAT error text stays opaque and does not create persistent quota or a reset clock. Ordinary unrecognized `429` handling, Zen Free, and OpenRouter Free stay on their existing paths.
 
-## Custom rules
+## Custom Rules
 
 Each custom rule has a scope:
 
@@ -32,7 +32,7 @@ Match fields are optional; any field you fill must be nonempty:
 
 Filled fields combine with AND. Values inside one field combine with OR. Matching reads only those top-level structured error fields from a bounded JSON error body. It does not walk request echoes, choices, messages, or successful bodies, and it does not scan the raw body or run regular expressions. A status-only rule can match without a parsed body. A body that cannot be read does not become synthetic error text.
 
-## Local waits
+## Local Waits
 
 Active restrictions show `waiting`, `ready`, or `probing`:
 
@@ -50,7 +50,7 @@ If every compatible Key is waiting only on local policy, the gateway returns `50
 
 Backoff defaults are 30 and 300 seconds. Each value is an integer from 1 through 86400, and the maximum must be at least the initial.
 
-## Persistence and copies
+## Persistence And Copies
 
 Saved rules survive restart. Process-local waiting, ready, and probing do not; after a restart the next matching request can send again. Existing official quota recovery is a separate mechanism and is not created from these error bodies.
 

@@ -46,10 +46,10 @@ supported protocol matrix lives in
   register Google accounts, solve verification challenges, pay, scrape
   pages, or extract keys automatically.
 - The installed Windows x64, macOS, and Linux x64 desktop dashboards can start
-  Open Console Gateway in the tray when the user logs in. Development builds, CLI, and
-  Docker do not expose that dashboard `auto_start` switch. Docker Compose
-  separately uses `restart: unless-stopped`, so its service can restart with
-  the Docker daemon.
+  Open Console Gateway in the tray when the user logs in. Development builds,
+  CLI, and Docker do not expose that dashboard `auto_start` switch. Docker
+  Compose separately uses `restart: unless-stopped`, so its service can restart
+  with the Docker daemon.
 - The macOS desktop dashboard can hide the Dock icon while retaining the
   menu-bar icon. Windows, Linux, CLI, and Docker do not expose the
   `show_dock_icon` switch.
@@ -65,19 +65,22 @@ supported protocol matrix lives in
   runs on **Accounts**; GOAT preset and newly discovered rows default on when
   a supported protocol is known, except that GOAT's first snapshot starts only
   plan-included models on and keeps the rest of that snapshot off until enabled
-  manually. GOAT catalog refresh updates the model
-  directory; Key auth is observed from inference 401/403. The account card can
-  explicitly **Refresh quota** to read official percentage windows from the
-  first-party `/alpha/billing/credits` endpoint used by Command Code's official
-  CLI. When that reading includes a percentage, the window uses it against a
-  full window of 100 and keeps its reset. A dollar amount is not relabeled as
-  a percentage. Later requests do not add a price onto the percentage. The endpoint is not
-  documented in the public Provider API. GOAT is never auto-synced. You can
-  save a manual percentage afterwards. With no official reading and no manual
-  percentage, the window stays unavailable and is not shown as 0. Custom
-  API is live under the trusted-administrator
-  boundary in [Accounts](accounts.md). A missing cost stays unknown and is not
-  shown as zero or free. A manual credit balance is not reduced by a completed
+  manually.
+
+  GOAT catalog refresh updates the model directory; Key auth is observed from
+  inference 401/403. The account card can explicitly **Refresh quota** to read
+  official percentage windows from the first-party `/alpha/billing/credits`
+  endpoint used by Command Code's official CLI. When that reading includes a
+  percentage, the window uses it against a full window of 100 and keeps its
+  reset. A dollar amount is not relabeled as a percentage. Later requests do
+  not add a price onto the percentage. The endpoint is not documented in the
+  public Provider API. GOAT is never auto-synced. You can save a manual
+  percentage afterwards. With no official reading and no manual percentage,
+  the window stays unavailable and is not shown as 0.
+
+  Custom API is live under the trusted-administrator boundary in
+  [Accounts](accounts.md). A missing cost stays unknown and is not shown as
+  zero or free. A manual credit balance is not reduced by a completed
   request. There is no generic official usage path. Its catalog and protocol
   controls live on **Providers**.
 - Account cards show three kinds of evidence when the Provider has it: timed
@@ -89,7 +92,8 @@ supported protocol matrix lives in
   do not show that editor. A plan whose metadata explicitly turns manual
   calibration off does not show it either. The first saved percentage is only
   that quota window. Opening the page again, or reading it again while it
-  stays open, shows that percentage and does not fill in a full billing status.
+  stays open, shows that percentage and does not fill in a full billing
+  status.
   A manual credit balance, a cash balance, and a platform site's
   observed consumption history stay separate. A manual credit balance
   keeps separate buckets, grants, monthly renewal, and expiry; **Calibrate
@@ -101,13 +105,15 @@ supported protocol matrix lives in
   monthly or lifetime spend.
 - Ollama Cloud has no official usage API in this product and does not estimate
   a monthly credit meter from request prices. The account form still presents
-  Pro, Max, or Team and a purchase date. A manual percentage does not require a price.
-  A month percentage can be saved before a tier is chosen. A week percentage is not accepted.
-  Without an official or manual usage observation, usage stays unavailable and is not shown as 0. Existing
-  accounts stay routeable. Previously stored billing rows stay on disk and are
-  not recalculated. A full window, where one exists, never writes cooldown,
-  disables the account, or changes routing. An actual upstream `429` uses the
-  generic cooldown/fallback path.
+  Pro, Max, or Team and a purchase date. A manual percentage does not require a
+  price.
+  A month percentage can be saved before a tier is chosen. A week percentage is
+  not accepted.
+  Without an official or manual usage observation, usage stays unavailable and
+  is not shown as 0. Existing accounts stay routeable. Previously stored
+  billing rows stay on disk and are not recalculated. A full window, where one
+  exists, never writes cooldown, disables the account, or changes routing. An
+  actual upstream `429` uses the generic cooldown/fallback path.
 - Zen Free routing uses the card's enable switch and list position.
 - Unknown model names return `400` on every supported client format. Clients
   should send published aliases or eligible Custom IDs from authenticated

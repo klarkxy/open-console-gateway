@@ -12,7 +12,8 @@ clients expect the trailing `/v1`.
    dashboard does not collect or manage an OpenCode login password.
 2. In the dashboard's **Connection Center**, copy the **Key** and the
    **API Base URL** (`http://127.0.0.1:9042/v1`).
-3. Point your client at the base URL with the Key. See [Manual client setup](add-application.md) for URL and protocol selection.
+3. Point your client at the base URL with the Key. See
+   [Manual client setup](add-application.md) for URL and protocol selection.
 4. Verify the setup with a real request.
 
 The **Key** is the only secret you hand to the client. It accepts three

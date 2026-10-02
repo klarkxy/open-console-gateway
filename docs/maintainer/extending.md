@@ -4,7 +4,7 @@
 
 Provider adapters and external integrations are the current extension paths.
 
-## 1. Provider or Plan: sealed and static
+## 1. Provider Or Plan: Sealed And Static
 
 Use this only for an OCG-owned upstream family with a complete routing,
 catalog, protocol, key, and failure contract.
@@ -44,10 +44,10 @@ OCG-owned package; it is not a generic registry or a promised extension point.
 Add a second application only from its concrete install, credential, lifecycle,
 and acceptance contract. See [Applications](../user/applications.md).
 
-## 3. External integration: static local-service adapter
+## 3. External Integration: Static Local-Service Adapter
 
-Use this for a local service integrated through a code-reviewed adapter. It appears in
-the general **Extensions** navigation group below Settings, not in
+Use this for a local service integrated through a code-reviewed adapter. It
+appears in the general **Extensions** navigation group below Settings, not in
 Providers, Plans, or the Add Account selector.
 
 - Define a narrow typed Dashboard V4 contract and CAS-protected mutations; do
@@ -55,8 +55,9 @@ Providers, Plans, or the Add Account selector.
 - Make the ownership boundary explicit. OCG may retain only what it needs to
   connect and route; the external service retains its own OAuth tokens, auth
   files, browser callbacks, and internal scheduler. For an externally operated
-  service, lifecycle also remains external. The managed CPA mode separately
-  owns its installed files and child process; see [Runtime Invariants](runtime-invariants.md#external-integrations).
+  service, lifecycle also remains external. The managed CPA mode separately owns
+  its installed files and child process; see
+  [Runtime Invariants](runtime-invariants.md#external-integrations).
 - Keep the service local: loopback for Desktop/CLI, or an explicit private
   Compose sibling. Remote service addresses and arbitrary process control are
   outside this boundary. Managed CPA lifecycle operations are limited to the
@@ -69,7 +70,7 @@ CPA is the current instance of this path. Reuse its existing helpers where they
 fit; justify a shared framework with concrete requirements from the integrations
 that will use it.
 
-## Dashboard V4 endpoint changes
+## Dashboard V4 Endpoint Changes
 
 New provider, destination, or credential semantics go to `dashboard_v4`
 (`types.rs` and its `CATALOG_TYPE_NAMES`; routes in `dashboard_v4/mod.rs`).

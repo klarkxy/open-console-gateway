@@ -4,15 +4,50 @@
 
 ## Billing (V4)
 
-`GET /dashboard/api/v4/accounts/{id}/billing` presents observed quota windows, official balances, and stored manual credit balances together with available actions. Here `id` identifies one account (one Key); several accounts in a supplier container remain independent. The read makes no upstream request and does not settle, reprice, or advance stored balances. Existing official balance and quota refresh endpoints retain their provider-specific observation adapters.
+`GET /dashboard/api/v4/accounts/{id}/billing` presents observed quota windows,
+official balances, and stored manual credit balances together with available
+actions. Here `id` identifies one account (one Key); several accounts in a
+supplier container remain independent. The read makes no upstream request and
+does not settle, reprice, or advance stored balances. Existing official balance
+and quota refresh endpoints retain their provider-specific observation adapters.
 
-`PUT .../billing/credits` records manual buckets. It does not accept token rates or a currency conversion. `POST .../billing/credits/calibrate` corrects current bucket balances, `POST .../billing/credits/grants` adds a grant, and `DELETE .../billing/credits` disables the manual balance. Mutations require `expectedRevision` and `processGeneration` and return `BillingStatus`. Only an explicit manual edit changes the stored balance. Reading, opening, exporting, or a new inference request does not. A read may show a stored grant past its saved expiry without writing that expiry back. A new request does not debit personal credit. An empty or unknown balance does not change routing eligibility. Historical `credit_meter_json` and `credit_receipt_json` remain readable. A stored pending receipt stays byte-exact. A billing read reports active `pendingRequests` as 0. Explicit calibration writes that meter's balance. The historical receipt does not block that write, and the write does not settle or delete the receipt. Opening does not settle it, and export does not collapse it. The configuration written here is the name, currency, monthly amount, and source URL. A portable import keeps legacy rates stored for historical compatibility. It rebuilds a validated meter and does not call `CreditMeterState::new` or `advance`. Binding and meter ids are new. The monthly expiry, expired buckets, configuration, counters, monthly cursor, `created_at`, and `last_calibration_at` stay exact. The remaining charge attempt returns no debit.
+`PUT .../billing/credits` records manual buckets. It does not accept token
+rates or a currency conversion. `POST .../billing/credits/calibrate` corrects
+current bucket balances, `POST .../billing/credits/grants` adds a grant, and
+`DELETE .../billing/credits` disables the manual balance. Mutations require
+`expectedRevision` and `processGeneration` and return `BillingStatus`.
 
-Step Plan keeps manual buckets, monthly renewal, expiry, and calibration. A Step preset is an amount and a monthly renewal, not a token rate. The former private console-token endpoints and `StepFunUsageStatus` contract are retired. StepFun ordinary API balance remains separate from the `/step_plan` channel.
+Only an explicit manual edit changes the stored balance. Reading, opening,
+exporting, or a new inference request does not. A read may show a stored grant
+past its saved expiry without writing that expiry back. A new request does not
+debit personal credit. An empty or unknown balance does not change routing
+eligibility.
 
-Manual credit is limited to `http` destinations of legacy kind `custom_account` or `dynamic`. Platform-linked Keys, observer credentials, and sealed built-in Plans keep their observed billing views.
+Historical `credit_meter_json` and `credit_receipt_json` remain readable. A
+stored pending receipt stays byte-exact. A billing read reports active
+`pendingRequests` as 0. Explicit calibration writes that meter's balance. The
+historical receipt does not block that write, and the write does not settle or
+delete the receipt. Opening does not settle it, and export does not collapse it.
 
-These pricing routes are not registered and answer with the ordinary V4 404. There is no new tombstone registry for them:
+The configuration written here is the name, currency, monthly amount, and
+source URL. A portable import keeps legacy rates stored for historical
+compatibility. It rebuilds a validated meter and does not call
+`CreditMeterState::new` or `advance`. Binding and meter ids are new. The
+monthly expiry, expired buckets, configuration, counters, monthly cursor,
+`created_at`, and `last_calibration_at` stay exact. The remaining charge
+attempt returns no debit.
+
+Step Plan keeps manual buckets, monthly renewal, expiry, and calibration. A Step
+preset is an amount and a monthly renewal, not a token rate. The former private
+console-token endpoints and `StepFunUsageStatus` contract are retired.
+StepFun ordinary API balance remains separate from the `/step_plan` channel.
+
+Manual credit is limited to `http` destinations of legacy kind
+`custom_account` or `dynamic`. Platform-linked Keys, observer credentials, and
+sealed built-in Plans keep their observed billing views.
+
+These pricing routes are not registered and answer with the ordinary V4 404.
+There is no new tombstone registry for them:
 
 - `GET /dashboard/api/v4/providers/{id}/pricing`
 - `POST /dashboard/api/v4/providers/{id}/pricing/refresh`
@@ -35,7 +70,11 @@ relative paths, except the account-list shim is `GET /account-records` so it
 does not collide with V4 `GET /accounts` (identities). `GET /contract` is the
 existing V4 ControlRevision. **The remounted handlers are a compatibility
 shim** over the destination and credential tables. New clients should use V4
-`GET /destinations` and `GET /credentials`. Remounted listings reconstruct from destinations and credentials. Key ciphertext stays on credential SQL rows and never appears on V4 GET destination/credential DTOs. DTOs are camelCase, mutation bodies deny unknown fields, and nullable response fields serialize as `T | null`.
+`GET /destinations` and `GET /credentials`. Remounted listings reconstruct from
+destinations and credentials. Key ciphertext stays on credential SQL rows and
+never appears on V4 GET destination/credential DTOs. DTOs are camelCase,
+mutation bodies deny unknown fields, and nullable response fields serialize as
+`T | null`.
 
 Control-plane identity:
 
@@ -43,7 +82,11 @@ Control-plane identity:
   a successful persist. Not stored in SQLite as the CAS token.
 - `process_generation` — assigned once per `CoreState`, never persisted.
   A CAS token from a previous process cannot be reused after restart.
-- `pricingRevision` — generated `ControlRevision` still includes this legacy read string, and Rust `ControlRevision::from_state` still copies the in-memory pricing snapshot revision. It is not a CAS token, and it is not removed. The live dashboard client publishes only `revision` and `processGeneration`. There is no pricing mutation. Do not send `expectedPricingRevision`.
+- `pricingRevision` — generated `ControlRevision` still includes this legacy
+  read string, and Rust `ControlRevision::from_state` still copies the in-memory
+  pricing snapshot revision. It is not a CAS token, and it is not removed. The
+  live dashboard client publishes only `revision` and `processGeneration`. There
+  is no pricing mutation. Do not send `expectedPricingRevision`.
 
 `GET /contract` returns the current process's live revision / generation token
 (`ControlRevision`: `revision`, `processGeneration`).
@@ -53,10 +96,11 @@ Mutations require top-level `expectedRevision` and `processGeneration`
 `POST /accounts/{id}/usage/refresh`). A missing `expectedRevision` returns
 `400` `missingExpectedRevision`; a mismatch returns `409` `revisionConflict`
 with `currentRevision` and `processGeneration` in the error envelope. The Vue
-`controlPlane` store records both tokens from every remounted V3 payload. On 409 the
-client refreshes the control tokens and affected resource without replaying
-the mutation; the user can review current state and submit again. Tokens are process-local
-and do not coordinate separate processes sharing a data directory.
+`controlPlane` store records both tokens from every remounted V3 payload. On 409
+the client refreshes the control tokens and affected resource without replaying
+the mutation; the user can review current state and submit again. Tokens are
+process-local and do not coordinate separate processes sharing a data
+directory.
 
 Operations that are not mutations skip CAS and never bump revision:
 operational diagnostics such as `POST /settings/test-proxy` and
@@ -71,7 +115,11 @@ it returns the primary key and every non-deleted sub-key value, including
 disabled sub-keys, under dashboard session protection. Only enabled keys enter
 the authentication snapshot. `CustomModelDiscoveryRequest.apiKey` is write-only.
 Account list/get payloads stay secret-free. Logs and error envelopes redact
-known secrets. A confirmed Key create or rotate acknowledgement is committed even when the following `GET /connection` fails. The acknowledgement does not include plaintext. After rotation or revocation the previous plaintext is blank. Recovery is another GET. The client must not create or rotate the Key again.
+known secrets. A confirmed Key create or rotate acknowledgement is committed
+even when the following `GET /connection` fails. The acknowledgement does not
+include plaintext. After rotation or revocation the previous plaintext is
+blank. Recovery is another GET. The client must not create or rotate the Key
+again.
 
 The frozen contract is `schema/dashboard-api-v3.schema.json`, generated from
 `dashboard_v3::contract_schema_pretty()` by
@@ -94,18 +142,21 @@ JSON prefix: additive V4 routes plus remounted V3 operational handlers.
 V3 `$defs` do not gain new fields.
 
 V4 reuses V3 session middleware. Its listings return the same `ControlRevision`
-(`expectedRevision` / `processGeneration`) that V3 uses for CAS. V4 mutations are `POST /onboarding/commit`,
+(`expectedRevision` / `processGeneration`) that V3 uses for CAS. V4 mutations
+are `POST /onboarding/commit`,
 `POST /credentials/{id}/rotate`, `POST /credentials/{id}/quota-retry`,
 `PATCH /bindings/{id}`,
 `POST /identities/{id}/credentials`, `POST|DELETE /applications/dsh` (which also
-binds the GET inspection fingerprint; DELETE has no `keyId`), `PUT /destinations/{id}/catalog`,
+binds the GET inspection fingerprint; DELETE has no `keyId`),
+`PUT /destinations/{id}/catalog`,
 `POST /destinations/{id}/catalog/refresh`, `POST /destinations/{id}/model-tests`,
 `POST /platform-accounts/{id}/import-keys`, `PUT /cpa/models`,
 `POST /provider-contracts/{scope_kind}/{scope_id}/catalog/remove`, and
 `PATCH /alias-publication`; they check those tokens. Read routes
 do not.
 
-The checked-in additive V4 contract is `schema/dashboard-api-v4.schema.json`, generated from
+The checked-in additive V4 contract is
+`schema/dashboard-api-v4.schema.json`, generated from
 `dashboard_v4::contract_schema_pretty()` by
 `crates/ocg-core/examples/export_dashboard_v4_schema.rs`. Generated TypeScript
 (`src/api/generated/dashboard-v4.ts`) is types only, with no HTTP wrappers.
@@ -133,7 +184,8 @@ template catalog. Templates have no user instances or secrets.
 
 `GET /connections` is a projection of saved instances: built-ins that already
 have an account and every configurable HTTP connection, including each
-persisted Custom API destination grouped with all of its Keys; CPA is never a connection. Each connection carries lifecycle, authorization state, local
+persisted Custom API destination grouped with all of its Keys; CPA is never a
+connection. Each connection carries lifecycle, authorization state, local
 eligibility with a reason, endpoints, model targets, and a legacy identity
 reference. Connection ids are deterministic UUIDv5 values derived from that
 legacy identity, never from names or URLs.
@@ -158,14 +210,20 @@ cannot be redacted safely), and `legacy`. The platform parent's
 `credential_state` row). `authState` is local: `unknown` is never
 `valid`; `valid` requires the existing verification record. The Vue
 Accounts page overlays this projection for display; Key rotation, quota retry,
-binding
-edits, and additional identity credentials use V4, while the remaining
+binding edits, and additional identity credentials use V4, while the remaining
 account mutations stay on V3.
 
-`GET /destinations` and `GET /credentials` are secret-free, revision-tagged, local-only projections. `DestinationCredentialDto` may include optional nullable `quotaRecovery` (camelCase). Absence means no confirmed exhaustion, not verified upstream health. `status` on that object is presentation only (`waiting` | `ready` | `probing`). `IdentitySummary` credentials do not carry this field.
-CAS-protected `PATCH /destinations/{id}` fully replaces editable HTTP name, endpoint, auth,
-protocol, mappings, and route overrides. It never accepts Key material and unions safe grants
-only for explicit `authorizeCredentialIds`. `DELETE /destinations/{id}` requires zero referencing
+`GET /destinations` and `GET /credentials` are secret-free, revision-tagged,
+local-only projections. `DestinationCredentialDto` may include optional
+nullable `quotaRecovery` (camelCase). Absence means no confirmed exhaustion,
+not verified upstream health. `status` on that object is presentation only
+(`waiting` | `ready` | `probing`). `IdentitySummary` credentials do not carry
+this field.
+CAS-protected `PATCH /destinations/{id}` fully replaces editable HTTP name,
+endpoint, auth, protocol, mappings, and route overrides. It never accepts Key
+material and unions safe grants
+only for explicit `authorizeCredentialIds`. `DELETE /destinations/{id}` requires
+zero referencing
 credentials. Sealed and platform-managed destinations reject both mutations. A
 populated destinations/credentials store is served even when live
 `project()` would refuse. An empty store or leftover-table upgrade window
@@ -174,7 +232,8 @@ falls back to `project()`; only that empty-store fallback can return
 refused row.
 
 Node transfer (`POST /accounts/transfer/export|preview|import`) is remounted
-on V4. The latest export uses the current transfer payload: `destinations` and `credentials`
+on V4. The latest export uses the current transfer payload: `destinations` and
+`credentials`
 (plaintext secrets, platform and CPA observer management credentials, and
 identity / grant / cooldown extras stay inside the encrypted envelope), plus
 `quotaPools` and `node`, and explicit HTTP protocol routes.
@@ -182,11 +241,30 @@ Merging a package that has no CPA observer key preserves the destination's
 existing management key. It does not emit
 `accounts`, `platformAccounts`, `platformLinks`, `dynamicProviders`, or
 `identities`. Those portable types are transfer-only and are not V4 listing
-DTOs. The supported import range, per-version defaults, and the explicit-routes rejection are the node-transfer payload policy in [runtime invariants](runtime-invariants.md). Local quota recovery is not a portable field: it is omitted from export, retained on an unchanged target Key, and cleared when the Key is replaced.
+DTOs. The supported import range, per-version defaults, and the
+explicit-routes rejection are the node-transfer payload policy in
+[runtime invariants](runtime-invariants.md). Local quota recovery is not a
+portable field: it is omitted from export, retained on an unchanged target Key,
+and cleared when the Key is replaced.
 
-`GET /routing/cards` returns one revision-tagged snapshot of `cards`, `destinations` and `credentials`. `PUT /routing/cards` accepts CAS tokens and the complete ordered card list. A card has `id`, `destinationId` and ordered `credentialIds`; every inference credential, including disabled rows, must appear exactly once under its existing destination. Observer credentials are excluded. Layout and flattened routing ranks commit together, and the response returns the complete committed snapshot. Multiple cards share one destination; creating or removing an empty extra card does not create or delete a supplier.
+`GET /routing/cards` returns one revision-tagged snapshot of `cards`,
+`destinations` and `credentials`. `PUT /routing/cards` accepts CAS tokens and
+the complete ordered card list. A card has `id`, `destinationId` and ordered
+`credentialIds`; every inference credential, including disabled rows, must
+appear exactly once under its existing destination. Observer credentials are
+excluded.
 
-`GET /routing/explain?model=...&clientProtocol=...` is read-only and authenticated. It reuses live alias resolution, route materialization, availability gates, and a clone-based base-policy preview. It never sends, decrypts a Key, probes DNS, writes logs/cooldowns/quota recovery, or advances sticky, round-robin or quota-trial state. The response includes eligible Keys, typed exclusions, effective upstream protocol/global rank, and explicit runtime-only uncertainties.
+Layout and flattened routing ranks commit together, and the response returns the
+complete committed snapshot. Multiple cards share one destination; creating or
+removing an empty extra card does not create or delete a supplier.
+
+`GET /routing/explain?model=...&clientProtocol=...` is read-only and
+authenticated. It reuses live alias resolution, route materialization,
+availability gates, and a clone-based base-policy preview. It never sends,
+decrypts a Key, probes DNS, writes logs/cooldowns/quota recovery, or advances
+sticky, round-robin or quota-trial state. The response includes eligible Keys,
+typed exclusions, effective upstream protocol/global rank, and explicit
+runtime-only uncertainties.
 
 V4 does not treat authorization `unknown` as `valid`. Eligibility is a local
 projection, never upstream health.
@@ -204,7 +282,8 @@ per-target upstream override. `new` requires a non-empty `targets` list;
 `existing` requires it empty (connection edits use V4 `PATCH /destinations/{id}`).
 
 Evaluation order: (1) parse; (2) `operationId` must be a UUID; (3) take the
-`settings_update` lock, then idempotency lookup before CAS — if that `operationId` was already committed with the same
+`settings_update` lock, then idempotency lookup before CAS — if that
+`operationId` was already committed with the same
 payload digest, the stored secret-free result is returned with `replayed:
 true` and the current revision tokens, without checking CAS (the first write
 already moved the revision); the same `operationId` with a different payload
@@ -222,7 +301,8 @@ singleton account. The Provider row, optional first account row, and the
 operation record commit in one SQLite transaction; the dynamic-provider
 snapshot is installed after commit exactly as V3 does.
 
-`existing` accepts a new `api_key` on keyed dynamic Providers and legacy Custom HTTP connections. Built-in, platform-managed, and no-auth
+`existing` accepts a new `api_key` on keyed dynamic Providers and legacy
+Custom HTTP connections. Built-in, platform-managed, and no-auth
 connection ids return `400`. Account row and
 operation record commit in one transaction, then the revision bump only
 (`reload_contracts=false`), the same as V3 plain account create.
@@ -291,13 +371,14 @@ returns `409` and writes nothing. The result is secret-free.
 
 The dashboard consumes `GET /connections` for the Providers rail,
 `POST /onboarding/commit` for user-defined Provider creation, and
-`GET /accounts` as a display overlay on the Accounts page. The client generates a new `operationId` when
+`GET /accounts` as a display overlay on the Accounts page. The client generates
+a new `operationId` when
 the draft changes, keeps that id across retries of an unchanged draft, and
 regenerates it after success. Editing and deleting accounts and the
 remaining Accounts-page operations stay on V3; Key rotation, quota retry,
 binding edits, and adding a Key to an existing identity use V4.
 
-## Settings mutation workflow
+## Settings Mutation Workflow
 
 [![Dashboard V3 settings mutation workflow](../diagrams/dashboard-v3-mutation.visual-check.1440x900.light.png)](https://klarkxy.github.io/open-console-gateway/diagrams/dashboard-v3-mutation/)
 
@@ -316,9 +397,19 @@ listener is running. If rebind fails, the request returns `500` with code
 still contains the failed committed port, so a later successful write is not
 overwritten.
 
-A confirmed settings acknowledgement means the write is saved. If the following canonical read fails, that is a separate read warning. The client must not treat it as a write failure and must not submit the same write again. A gateway-port change does not navigate by itself. On a direct connection, the page may offer a link the operator opens. That link keeps the current scheme, host name, path, query, and hash, and changes only the port. The page does not follow the link automatically, including when the new port is the loopback port the dashboard was already using. A reverse-proxy origin stays unchanged. A failed bind returns the `500` `internal` above, is not success, and does not offer that link.
+A confirmed settings acknowledgement means the write is saved. If the following
+canonical read fails, that is a separate read warning. The client must not treat
+it as a write failure and must not submit the same write again.
 
-## V2 REST tombstone
+A gateway-port change does not navigate by itself. On a direct connection, the
+page may offer a link the operator opens. That link keeps the current scheme,
+host name, path, query, and hash, and changes only the port. The page does not
+follow the link automatically, including when the new port is the loopback port
+the dashboard was already using. A reverse-proxy origin stays unchanged. A
+failed bind returns the `500` `internal` above, is not success, and does not
+offer that link.
+
+## V2 REST Tombstone
 
 Protected Dashboard V2 REST answers with a fixed tombstone.
 

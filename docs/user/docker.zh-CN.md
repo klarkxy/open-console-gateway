@@ -8,7 +8,7 @@ Docker 版在同一个端口 `9042` 上无头提供 Dashboard 和 Gateway。镜�
 的仓库：
 
 ```bash
-VERSION=2.6.2
+VERSION=2.7.0
 git clone --branch "v$VERSION" --depth 1 https://github.com/klarkxy/open-console-gateway.git
 cd open-console-gateway
 cp .env.example .env
@@ -136,6 +136,9 @@ Google 可能把数据中心出口 IP 视为高风险，要求额外验证，甚
 `https://ocg.example.com`，不需要填写 `/dashboard/` 或具体 API 端点；
 末尾 `/v1` 可省略或保留。
 
+以上说的是部署加密密钥，不是客户端用来鉴权的 Gateway **Key**。Key 泄露时
+请重新生成。
+
 ## 运行时行为
 
 在 `.env` 中设置 `OCG_PORT` 可修改宿主机端口，容器内仍固定使用 `9042`。
@@ -156,8 +159,7 @@ Google 可能把数据中心出口 IP 视为高风险，要求额外验证，甚
   `seccomp=unconfined`，以便普通 Chromium 建立自身的 namespace 和 renderer
   seccomp 沙箱。Sidecar 不使用 `--no-sandbox`，另有 1 GiB 共享内存；命名卷
   `ocg-data` 与 `ocg-browser-profiles` 是两类持久化应用状态。
-- 支持 `status --show-key` 的 CLI 构建会在启动日志中隐藏 Gateway Key；旧版镜像可能打印过它，因此既有日志和 Docker daemon 权限仍属于敏感信息。
-  如果 Docker 主机默认没有限制日志大小，请由部署方配置日志轮转。
+- 支持 `status --show-key` 的 CLI 构建会在启动日志中隐藏 Gateway Key；旧版镜像可能打印过它，因此既有日志和 Docker daemon 权限仍属于敏感信息。如果 Docker 主机默认没有限制日志大小，请由部署方配置日志轮转。
 
 常用检查命令：
 
@@ -178,7 +180,7 @@ curl --fail http://127.0.0.1:9042/dashboard/
 的 provenance attestation。可这样检查发布版本：
 
 ```bash
-VERSION=2.6.2
+VERSION=2.7.0
 docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:$VERSION
 docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:$VERSION
 gh attestation verify \

@@ -41,4 +41,6 @@ Host 通过 `runtime_log` 共享的控制台 sink 向上进程的 stderr 逐事�
 
 格式解析、配置保存、客户端加载和真实推理是不同的证据。升级适配器时，使用目标源码 schema 检查生成文件。真实桌面激活、工具、附件和多轮推理仍需单独验证，不能用保存成功代替这些行为的验证。
 
-[维护者指南](../MAINTAINER.zh-CN.md) · [用户流程](../user/applications.zh-CN.md)
+---
+
+[维护者指南索引](../MAINTAINER.zh-CN.md) · [English](byok-applications.md) · [文档索引](../README.zh-CN.md)

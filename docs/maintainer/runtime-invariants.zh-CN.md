@@ -169,10 +169,6 @@
 - `.github/workflows/quality.yml` 在 PR / `main` 上分为三个并行 job：Web（含 `pnpm run contract:v3:check`、`pnpm run contract:v4:check`、前端测试/类型/lint）、Linux workspace Rust 测试/Clippy（排除 Tauri 桌面 crate，无需安装系统包）与 Windows Tauri 目标测试（stub `dist/`，不运行 Vite）。`release.yml` 仅在生产 `v*` tag push 时调用该质量门。`release.yml` 手动候选（即使选择 tag ref）始终未签名，且可能只构建所选平台；只有 `v*` tag push 事件才会构建全部三个平台并读取仓库签名密钥。生产 tag push 会触发发布流水线：工作流逐个校验附件集合与组装产物名称匹配（数量由产物推导，非硬编码）、升级器签名、公钥连续性，以及 GitHub 服务端摘要，然后自动发布同一未改动草稿。
 - 容器以固定 UID/GID `10001` 运行，包含 `LICENSE`；Compose 透传可选 `OCG_MANAGER_ENCRYPTION_KEY` 以支持显式 Key 恢复，但正常部署倾向于在卷中保留 `.encryption-key`。
 
----
-
-[维护者指南索引](../MAINTAINER.zh-CN.md) · [English](runtime-invariants.md) · [文档索引](../README.zh-CN.md)
-
 ## 计费模型与用量来源
 
 - 账务能力按精确 HTTPS authority（包括 443 端口）与完整保存请求路径分类，绝不以主机前缀判断。StepFun 国内推理仍使用 Configurable HTTP：普通 `https://api.stepfun.com/v1/accounts` API 路径可读取所选凭据的可用余额；即使主机相同，`/step_plan` 路径仍排除。读取使用该精确凭据已保存的 endpoint grant，不推算消费，也不累加现金与赠送金额字段。捆绑的 Step 预设资源提供各档数量。套用预设时把该数量存成月度续期，费率列表为空，不存 token 费率。
@@ -194,3 +190,6 @@
 - Rust 持有容量有界、最长 15 秒的本地账单投影缓存，官方事实仍以持久化快照为准。SQLite 本连接写计数、其他连接的 `data_version`、配置与定价版本均使缓存失效；额度重置、积分到期或续期、日期边界会缩短有效期。扣费与校准无需增加配置版本即可使缓存失效。缓存不得用于推理授权。
 - 账号页首屏按每批 32 个读取本地快照，服务端上限为 64 个，错误按账号隔离。单账号与批量读取均不访问上游；较慢的本地投影在阻塞工作线程执行，不阻塞 Tokio 网络工作线程。
 - 相同操作、凭据版本与控制版本的余额刷新共享进行中的任务，每个调用者均重新检查身份与 CAS；最后一个等待者取消时释放任务。手动刷新不复用已完成任务。原有全局四路并发、来源授权与最后成功快照保护保持不变。
+---
+
+[维护者指南索引](../MAINTAINER.zh-CN.md) · [English](runtime-invariants.md) · [文档索引](../README.zh-CN.md)

@@ -2,8 +2,7 @@
 
 # 架构
 
-本页定义稳定的依赖与所有权边界。运行时边缘情况、schema 历史、完整路由和发布流程
-留在各自章节。
+本页定义稳定的依赖与所有权边界。运行时边缘情况、schema 历史、完整路由和发布流程留在各自章节。
 
 ## 依赖图
 
@@ -17,8 +16,7 @@ ocg-browser-worker   独立进程；不依赖内部 ocg-* crate
 Vue SPA              静态资源；只走 HTTP Dashboard V4
 ```
 
-**Adapter Registry** 静态密封。运行时 Provider 定义是绑定 Configurable HTTP 的
-类型化数据。
+**Adapter Registry** 静态密封。运行时 Provider 定义是绑定 Configurable HTTP 的类型化数据。
 
 | Crate | 负责 | 禁止持有 |
 | --- | --- | --- |
@@ -30,8 +28,7 @@ Vue SPA              静态资源；只走 HTTP Dashboard V4
 
 `ocg-domain::credential` 持有身份/凭据/绑定词汇以及唯一的遗留映射器。
 
-兼容 facade 位于 `ocg-core`；新的无 I/O 目录、selector、Alias 与转换行为应进入
-下层 crate。
+兼容 facade 位于 `ocg-core`；新的无 I/O 目录、selector、Alias 与转换行为应进入下层 crate。
 
 ## HTTP 组合
 
@@ -56,19 +53,13 @@ SPA 始终是 HTTP 客户端。Desktop capability 注册进 `CoreState`。
 推理实现位于 `crates/ocg-core/src/gateway/`：
 
 1. `handler.rs` 分配 request id、验证客户端 Key、解析客户端协议并解析模型身份。
-2. `GatewayExecutor` 在请求入口捕获一次代理路由、合约与 Alias 解析快照，不为新请求捕获价格快照。fallback
-   每轮重读实时账号状态、合格 Custom runtime 与 Zen Free 冷却。协议选择使用该次保存的
-   合约。
+2. `GatewayExecutor` 在请求入口捕获一次代理路由、合约与 Alias 解析快照，不为新请求捕获价格快照。fallback 每轮重读实时账号状态、合格 Custom runtime 与 Zen Free 冷却。协议选择使用该次保存的合约。
 3. 候选物化先应用适配器上限和 effective 模型/协议状态，再由无 I/O selector 选择账号卡。
-4. `provider_adapter.rs` 对密封 `ProviderAdapterKind` 做穷尽映射并返回纯数据
-   `AttemptSpec`；不解密 Key、不打开 SQLite，也不构造 HTTP client。
-5. Host 解析所选账号凭据；`forward_once` 每次只调用一次上游 `.send()`，重试与 fallback
-   策略留在外层循环。
-6. 分类阶段决定同账号重试、账号 fallback、冷却或终止返回；随后 Host 转换响应并写日志
-   （`requested_model`、`resolved_alias`、`upstream_model`）。
+4. `provider_adapter.rs` 对密封 `ProviderAdapterKind` 做穷尽映射并返回纯数据 `AttemptSpec`；不解密 Key、不打开 SQLite，也不构造 HTTP client。
+5. Host 解析所选账号凭据；`forward_once` 每次只调用一次上游 `.send()`，重试与 fallback 策略留在外层循环。
+6. 分类阶段决定同账号重试、账号 fallback、冷却或终止返回；随后 Host 转换响应并写日志（`requested_model`、`resolved_alias`、`upstream_model`）。
 
-未知或有歧义的模型身份在出站 HTTP 前失败。超时、流中断及其他可能已经到达上游的
-结果不会自动重放。完整状态码语义见[运行时不变式](runtime-invariants.zh-CN.md)。
+未知或有歧义的模型身份在出站 HTTP 前失败。超时、流中断及其他可能已经到达上游的结果不会自动重放。完整状态码语义见[运行时不变式](runtime-invariants.zh-CN.md)。
 
 ## Adapter 与 Provider 边界
 
@@ -76,8 +67,8 @@ SPA 始终是 HTTP 客户端。Desktop capability 注册进 `CoreState`。
 未知 `provider_id` 默认失败；只有匹配已持久化类型化 Provider 定义时才例外，而这些
 定义始终选择既有 Configurable HTTP 适配器。
 
-Custom API 是同一密封适配器种类上的单凭据 `http` 目的地。CPA 是另一条静态外部
-集成。
+遗留的 Custom API 行是同一密封适配器种类上的独立可配置 `http` 目的地。一个连接
+可以持有多个凭据，同时保持只按公开名称解析。CPA 是另一条静态外部集成。
 
 Provider 目录与合约先于账号凭据解析。保存的发现行只能激活代码持有 Alias 映射，或
 继续作为精确 raw pin。
@@ -88,12 +79,9 @@ Vue SPA 通过 `src/api/dashboard-v3.ts`（HTTP 基址 `/dashboard/api/v4`）调
 `/dashboard/api/v3` 是 410 墓碑。活的面板 JSON 只走 V4。
 受 CAS 保护的变更携带 `expectedRevision` 与 `processGeneration`。没有价格写入，也不发送 `expectedPricingRevision`。不变更状态的操作读取与诊断跳过 CAS。
 
-CLI 调用相同的 HTTP-neutral service，不带 argv CAS token。共享 service 负责持久化与
-revision bump，同时服务 CLI 与前端。
+CLI 调用相同的 HTTP-neutral service，不带 argv CAS token。共享 service 负责持久化与 revision bump，同时服务 CLI 与前端。
 
-Settings 的持久化、重绑与补偿顺序见
-[Dashboard API](dashboard-api.zh-CN.md#settings-变更流程)。账号 setup 状态见
-[状态与生命周期](state-and-lifecycle.zh-CN.md#托管账号-setup-生命周期)。
+Settings 的持久化、重绑与补偿顺序见 [Dashboard API](dashboard-api.zh-CN.md#settings-变更流程)。账号 setup 状态见 [状态与生命周期](state-and-lifecycle.zh-CN.md#托管账号-setup-生命周期)。
 
 ## 细节归属
 

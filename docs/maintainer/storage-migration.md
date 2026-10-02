@@ -22,6 +22,10 @@ Older binaries refuse a v66 database. Rollback is a complete restore of the pre-
 
 Retiring price tables, reference-price feeds, multipliers, and price-based estimates does not change `CURRENT_SCHEMA_VERSION` and does not delete price-snapshot rows, forward cost columns, `credit_meter_json`, or `credit_receipt_json`. Those columns stay readable for history and export. Opening the database does not settle a pending credit receipt, reprice a stored cost, or write a missing cost as zero. A billing read reports active pending requests as 0. The stored receipt bytes stay exact. Explicit calibration is not blocked by that receipt and does not delete it. The historical v22 migration still rolls fixed windows when it inserts those quota rows. This retirement does not change that migration and does not add a destructive migration. An ordinary provider or destination delete does not delete historical price snapshots.
 
+## Schema v65 — operation receipts and request groups
+
+v65 adds `operation_logs` and a virtual `forward_logs.request_group_key` with `idx_forward_logs_request_group`. It does not rewrite `forward_logs` rows or `credit_receipt_json`. The migration requires schema 64. An already-v65 open runs the same storage ensure and does not write another snapshot. A non-fresh v64 database gets a verified `data.sqlite.pre-v65.<timestamp>.bak` and `.sha256` sidecar before mutation. The DDL and version bump are one transaction; a failure leaves schema 64 and the stored rows unchanged. Older binaries refuse schema 65. Roll back by restoring that backup or the whole pre-upgrade data directory. A brand-new empty database does not get a pre-v65 backup.
+
 ## Schema v64 — preset public model names
 
 v64 renames only saved Configurable HTTP mappings whose public name exactly matches `<preset-id>/<upstream-id>` to the last upstream-ID segment. Exact upstream IDs, manually named mappings, and historical logs are unchanged. Same-destination leaf collisions remain unchanged for operator review. The migration updates matching credential model scopes and downstream publication choices with the renamed model. It skips a hidden name if the new name is already used by another destination, avoiding a global publication change. Clients using a renamed public name must update their requested model. The change is transactional; back up the full data directory before upgrading and restore it to roll back, since older binaries cannot open schema v64.
@@ -65,11 +69,11 @@ Schema v59 persists `credentials.authorization_connection_id`, preserving the ex
 
 Existing Custom protocol judgments are converted into the destination catalog in one transaction. Conflicting judgments for a shared model reject the upgrade instead of combining permissions. CPA's selected catalog is also materialized into `destination_models`. A nonempty v58 database receives a verified `data.sqlite.pre-v59.<timestamp>.bak` and `.sha256` sidecar before mutation. Restore the matching pre-upgrade directory to roll back; no down-migration is provided.
 
-## Routing cards (schema v59, no new tables)
+## Routing Cards (Schema v59, No New Tables)
 
 `settings.routing_cards_v1` stores versioned card IDs, destination references and credential membership. Card identity is separate from the shared destination configuration. `credentials.routing_rank` remains the runtime order: one CAS layout write validates the complete inference-credential set and commits its flattened ranks and card metadata in one transaction. Reads never reorder credentials; legacy rank-only writes reconcile card boundaries against the saved ranks. Adjacent and empty cards remain distinct. Payload V9 adds validated `routingCards`; V4–V8 imports derive cards from their credential order.
 
-## Data directories and cipher identity
+## Data Directories And Cipher Identity
 
 Every database open uses the Host-resolved cipher (`Database::open_with_cipher` on CLI, desktop, and Docker). Stored account ciphertext is probed before migration and decryption errors fail closed. New writes use authenticated AES-256-GCM (`v2:`). Unprefixed legacy XOR still decrypts so backups restore; a successful Host-cipher open rewrites those rows to v2. A successful UTF-8 decode of XOR is not treated as v2 success. Retain the original cipher; rewriting ciphertext does not repair a mismatch.
 
@@ -86,7 +90,7 @@ Keep each surface on its own cipher identity:
 - Copying a GUI directory onto the CLI default path (or the reverse) uses a different directory and, on Windows, a different cipher.
 - If the process was started with `--encryption-key` or `OCG_MANAGER_ENCRYPTION_KEY`, restoring only `.encryption-key` is not enough; supply the same explicit secret again.
 
-## Upgrades and backups
+## Upgrades And Backups
 
 SQLite migrations run in place when the GUI or CLI starts. Before opening a newer binary:
 
@@ -415,7 +419,7 @@ shasum -a 256 -c data.sqlite.pre-v3.<timestamp>.bak.sha256  # macOS
 
 On Windows, compare `Get-FileHash -Algorithm SHA256` with the first field of the sidecar. A hash mismatch means do not restore that file.
 
-## Rollback and failed opens
+## Rollback And Failed Opens
 
 **There is no down-migration.** Rollback is an offline, exact-file restore:
 

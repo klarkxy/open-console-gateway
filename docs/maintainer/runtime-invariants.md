@@ -167,10 +167,6 @@ Linked platform Keys reuse their existing snapshot reader, which can also read t
 - `.github/workflows/quality.yml` splits into three parallel jobs on PR / `main`: Web (includes `pnpm run contract:v3:check`, `pnpm run contract:v4:check`, frontend tests/types/lint), Linux workspace Rust tests/Clippy (excluding the Tauri desktop crate; no system packages needed), and Windows Tauri-targeted tests (stubs `dist/`, does not run Vite). `release.yml` invokes the gate only for a production `v*` tag push. A `release.yml` manual candidate (even when a tag ref is selected) is always unsigned and may build only the selected platform; only a `v*` tag push event builds all three platforms and reads repository signing secrets. A production tag push triggers the release pipeline: the workflow validates that the attachment set matches assembled artifacts name-by-name (quantity derived from artifacts, not hard-coded), updater signature, public-key continuity, and GitHub server-side digest, then automatically publishes the same unchanged draft.
 - Container runs fixed as UID/GID `10001` and includes `LICENSE`; Compose passes through optional `OCG_MANAGER_ENCRYPTION_KEY` to support explicit key recovery, but normal deployments prefer keeping `.encryption-key` in the volume.
 
----
-
-[Maintainer guide index](../MAINTAINER.md) · [简体中文](runtime-invariants.zh-CN.md) · [Docs index](../README.md)
-
 ## Billing models and observations
 
 - Financial capability is classified by the exact HTTPS authority (including port 443) and complete saved request path, never a host prefix. StepFun CN inference remains Configurable HTTP: the ordinary `https://api.stepfun.com/v1/accounts` API path may read the selected credential's available balance, while a `/step_plan` path is excluded despite sharing the host. The financial panel selects the current account's own credential and granted endpoint; the balance reader does not derive spend or sum cash/voucher fields. The bundled Step preset resource supplies each tier amount. Applying a preset stores that amount as a monthly renewal and an empty rate list; it does not store a token rate.
@@ -192,3 +188,6 @@ Linked platform Keys reuse their existing snapshot reader, which can also read t
 - Rust owns a bounded, 15-second local billing projection cache, backed by persisted official evidence. SQLite local write counts, external `data_version`, settings and pricing revisions invalidate it; quota reset, credit expiry/renewal and calendar boundaries shorten its lifetime. Settlement and calibration do not need a settings revision bump to invalidate a balance. No cached value is used for inference authorization.
 - Account-page startup reads local snapshots in batches of 32 (server maximum 64), with per-account errors. Neither individual nor batch reads perform upstream I/O. Slow local projections run on blocking workers rather than Tokio I/O workers.
 - Balance refresh callers for the same operation, credential version and control revision share unfinished work. All callers recheck identity/CAS; cancellation releases work when the last waiter leaves. Manual refresh never reuses a completed flight. The existing global four-request limit, origin grants and last-good evidence remain authoritative.
+---
+
+[Maintainer guide index](../MAINTAINER.md) · [简体中文](runtime-invariants.zh-CN.md) · [Docs index](../README.md)

@@ -4,34 +4,48 @@
 
 This guide is for people changing code, cutting releases, debugging the gateway, and validating desktop bundles. It documents the architecture and operating contracts as implemented at HEAD.
 
-## Chapters
+## Foundations
 
 - [Layout](maintainer/layout.md) — Crate and directory layout.
 - [Development](maintainer/development.md) — Dev loop and checks.
 - [Architecture](maintainer/architecture.md) — Dependency boundaries, adapter identity, request flow, and text diagrams.
+- [Coding Conventions](maintainer/conventions.md) — Crate DAG, security boundaries, and documentation ownership.
+
+## Runtime
+
 - [Dashboard API](maintainer/dashboard-api.md) — V4 surface, remounted compatibility handlers, CAS tokens, and mutation rules.
 - [State, Credentials, And Lifecycle](maintainer/state-and-lifecycle.md) — `CoreState`, locks, credentials, and persistence.
 - [HTTP Routes](maintainer/http-routes.md) — Inference routes, V3/V4 paths, the V2 tombstone, and auth/session routes.
 - [Runtime Invariants](maintainer/runtime-invariants.md) — Detailed gateway, alias, Zen Free, plan catalog, access key, proxy, and usage-sync semantics.
+
+## Data And Extension
+
 - [Storage And Migrations](maintainer/storage-migration.md) — SQLite schema and migrations, backup, and the operator runbook.
 - [Extending Open Console Gateway](maintainer/extending.md) — Sealed provider extension procedure.
 - [Local BYOK Applications](maintainer/byok-applications.md) — Client format baselines, ownership, recovery, and isolated validation.
+
+## Release
+
 - [Release Artifacts](maintainer/release-artifacts.md) — Supported platform matrix and package names.
 - [CI Workflows](maintainer/ci.md) — Quality, release, and container workflows.
 - [Release Procedure](maintainer/releasing.md) — Version bump, tag, build, and publish checklist.
+
+## Reference
+
+- [Console UI Design](maintainer/ui-design.md) — Visual reference, implementation map, and the Reka UI / Tailwind direction.
 - [Known Debt And Non-Goals](maintainer/known-debt.md) — Documented gaps and deliberate non-goals.
 - [RFC: Account And Provider Model Redesign](maintainer/account-model-unification.md) — Landed Destination / Credential model, leftover table drops, V3 tombstone, and the migration that produced HEAD.
-- [Coding Conventions](maintainer/conventions.md) — crate DAG, security boundaries, and documentation ownership.
+- [Release notes](releases/) — Per-version upgrade, change, and verification notes.
 
 ## Proposals
 
 - [Codex integration](maintainer/codex-integration-proposal.md) — OpenCodex research and a proposed login-preserving integration; not implemented.
 
-## Reading paths
+## Reading Paths
 
 - **Contributor** — `layout` → `development` → `architecture` → `state-and-lifecycle` → `http-routes` → `conventions`.
 - **Release owner** — `release-artifacts` → `ci` → `releasing` → `known-debt`.
-- **UI / theme work** — Read `DESIGN.md` first, then `src/theme.ts` and the Vue surface you are changing.
+- **UI / theme work** — Read `DESIGN.md` first, then `ui-design`, `src/theme.ts`, and the Vue surface you are changing.
 
 ---
 

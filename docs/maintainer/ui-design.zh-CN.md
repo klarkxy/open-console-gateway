@@ -1,6 +1,6 @@
-# 控制台 UI 设计
-
 [English](ui-design.md)
+
+# 控制台 UI 设计
 
 ## 参考来源与范围
 
@@ -36,3 +36,7 @@ Tauri 另行检查原生窗口缩放、125%/150% 系统缩放、中文输入法�
 - **绝不引入 Tailwind 的 preflight**——它对所有元素的 margin/padding 全局重置会摧毁 Naive UI 与现有样式。由于没有 preflight，`<button>` 等表单元素需要显式补上 `border-0 bg-transparent [font:inherit]` 之类的 utilities。
 - 浮层类组件（tooltip、popover，以及后续的菜单/对话框）统一在 `src/components/ocg/` 封装一次（`OcgTooltip.vue`、`OcgPopover.vue`），业务侧只使用封装件；浮层固定 `z-[2000]`，与 Naive UI 动态分配的浮层层级共存。浮层进出动画共用 `.ocg-overlay-*` 过渡类（opacity + 2px `translate`，`var(--ocg-motion-fast) var(--ocg-ease)`）；使用 `translate` 而非 `transform`，避免与 floating-ui 定位冲突。
 - 示范迁移：`src/views/Dashboard.vue` 的接入中心（tooltip 与 Key 切换 popover）。
+
+---
+
+[维护者指南索引](../MAINTAINER.zh-CN.md) · [English](ui-design.md) · [文档索引](../README.zh-CN.md)

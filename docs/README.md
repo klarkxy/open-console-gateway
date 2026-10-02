@@ -1,12 +1,10 @@
 [简体中文](README.zh-CN.md)
 
-# Documentation index
+# Documentation Index
 
-Open Console Gateway documentation is split by audience. Start
-with the guide for your role, then follow its chapter links. When a guide
-conflicts with the current implementation, code is authoritative.
+Open Console Gateway documentation is split by audience. Start with the guide for your role, then follow its chapter links. When a guide conflicts with the current implementation, code is authoritative.
 
-## Start here
+## Start Here
 
 | Audience | English | 简体中文 | Use |
 | --- | --- | --- | --- |
@@ -14,10 +12,11 @@ conflicts with the current implementation, code is authoritative.
 | Architecture gallery | [GitHub Pages](https://klarkxy.github.io/open-console-gateway/) | [GitHub Pages](https://klarkxy.github.io/open-console-gateway/) | Interactive architecture and workflow diagrams |
 | End users | [USER.md](USER.md) | [USER.zh-CN.md](USER.zh-CN.md) | Setup, accounts, Providers, clients, and operations |
 | Maintainers | [MAINTAINER.md](MAINTAINER.md) | [MAINTAINER.zh-CN.md](MAINTAINER.zh-CN.md) | Architecture, development, runtime, storage, CI, and releases |
+| Release notes | [releases/README.md](releases/README.md) | [releases/README.zh-CN.md](releases/README.zh-CN.md) | Per-version upgrade, change, and verification notes |
 | Usage boundary | [OPENCODE_GO_ANTI_ABUSE.md](OPENCODE_GO_ANTI_ABUSE.md) | [OPENCODE_GO_ANTI_ABUSE.zh-CN.md](OPENCODE_GO_ANTI_ABUSE.zh-CN.md) | OpenCode-Go anti-abuse policy |
 | Contributors | [CONTRIBUTORS.md](CONTRIBUTORS.md) | bilingual / 中英同页 | Community credits |
 | Design and coding agents | [../DESIGN.md](../DESIGN.md) · [../AGENTS.md](../AGENTS.md) | English sources | Visual system and project constraints |
 
-## Editing documentation
+## Editing Documentation
 
-Paired-guide rules are in [maintainer/conventions.md](maintainer/conventions.md).
+Paired-guide rules are in [maintainer/conventions.md](maintainer/conventions.md). Every guide has an English and a `.zh-CN.md` counterpart with the same heading structure, so an edit to one needs the same edit to the other.

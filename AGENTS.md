@@ -22,6 +22,7 @@ Open Console Gateway is a local multi-Plan console: Rust workspace, Vue 3 dashbo
 - Release: [releasing](docs/maintainer/releasing.md).
 - Extension paths: [extending](docs/maintainer/extending.md).
 - Known limits: [known debt](docs/maintainer/known-debt.md).
+- Per-version upgrade and change notes: [release notes](docs/releases/README.md).
 - User docs: [docs/USER.md](docs/USER.md). Maintainer index: [docs/MAINTAINER.md](docs/MAINTAINER.md).
 
 Use checks that can expose a failure in the changed behavior. Documentation-only work needs paired English and `.zh-CN.md` content review, not a Rust or frontend build. Contract changes require `pnpm run contract:v4:check`; Vue changes require `pnpm run build:web`.

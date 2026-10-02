@@ -2,15 +2,33 @@
 
 # RFC: Redesigning The Account And Provider Model
 
-Status: **schema v59 makes destinations, credentials and model mappings the normal routing authority.** V4 provides transactional HTTP destination edits and read-only routing explanation. The export payload preserves HTTP destination/model controls, model-resolution policy and route overrides; its import version policy is the node-transfer payload policy in [runtime invariants](runtime-invariants.md). See also [dashboard API](dashboard-api.md).
+Status: **schema v59 makes destinations, credentials and model mappings the
+normal routing authority.** V4 provides transactional HTTP destination edits
+and read-only routing explanation. The export payload preserves HTTP
+destination/model controls, model-resolution policy and route overrides; its
+import version policy is the node-transfer payload policy in
+[runtime invariants](runtime-invariants.md). See also
+[dashboard API](dashboard-api.md).
 
-## Runtime cutover (v59)
+## Runtime Cutover (v59)
 
-Normal requests use persisted destinations, model mappings and a private execution credential view. The planner no longer reconstructs Account, branches on legacy creation origin, or falls back after a failed authoritative read. Frozen attempts and live authorization share the same model gate with route explanation. HTTP destination edits and deletes share one transaction with runtime preflight; imported formats and operational Account DTOs remain boundary adapters. Global credential ordering is exposed separately from supplier grouping.
+Normal requests use persisted destinations, model mappings and a private
+execution credential view. The planner no longer reconstructs Account, branches
+on legacy creation origin, or falls back after a failed authoritative read.
+Frozen attempts and live authorization share the same model gate with route
+explanation. HTTP destination edits and deletes share one transaction with
+runtime preflight; imported formats and operational Account DTOs remain
+boundary adapters. Global credential ordering is exposed separately from
+supplier grouping.
 
-The remaining RFC sections describe the historical migration rationale; their counts and staged proposals are not current runtime status. Live price tables, reference-price feeds, multipliers, and price-based estimates are retired. Historical fields described below, including `pricing_source` and price-table snapshots, remain explanations of stored history and are not a current pricing feature.
+The remaining RFC sections describe the historical migration rationale; their
+counts and staged proposals are not current runtime status. Live price tables,
+reference-price feeds, multipliers, and price-based estimates are retired.
+Historical fields described below, including `pricing_source` and price-table
+snapshots, remain explanations of stored history and are not a current pricing
+feature.
 
-## 1. What is wrong
+## 1. What Is Wrong
 
 The gateway has one job: route a client request to an upstream through some
 credential. The current design expresses "upstream" and "credential" through
@@ -52,7 +70,7 @@ The root causes, in order of damage:
 Patching any one of these while keeping the others is what produced the
 current shape. The fix is a new model with a migration, not another overlay.
 
-## 2. Hard constraints versus current choices
+## 2. Hard Constraints Versus Current Choices
 
 **Kept — these are safety and scope, not design taste:**
 
@@ -78,7 +96,7 @@ current shape. The fix is a new model with a migration, not another overlay.
 - Wording in `runtime-invariants.md`, `AGENTS.md`, and `DESIGN.md` that
   encodes the above.
 
-## 3. Target model
+## 3. Target Model
 
 Four entities. Everything else is a capability flag or an observation.
 
@@ -101,8 +119,10 @@ Custom API config, and platform parent.
 | `enabled`, `revision` | lifecycle and CAS |
 
 A Custom API account migrates to a distinct destination with `adapter = http`,
-`max_credentials = null`, stable IDs, and `public_only` resolution; multiple credentials may reference it. A user-defined Provider likewise has `max_credentials = null` but uses `public_and_upstream`. A platform
-site is the same plus `observer_credential_id` and the `observer` capability.
+`max_credentials = null`, stable IDs, and `public_only` resolution; multiple
+credentials may reference it. A user-defined Provider likewise has
+`max_credentials = null` but uses `public_and_upstream`. A platform site is the
+same plus `observer_credential_id` and the `observer` capability.
 Zen Free is `adapter = zen`, `auth_scheme = none`, `max_credentials = 1`. CPA
 is `adapter = cpa` with `capabilities.external_integration`; it holds no local
 inference credential.
@@ -185,7 +205,8 @@ explicit cooldown writes on the credential.
   one row; there is no separate "account card" versus "platform card".
 - **Providers** lists **destinations**. Detail = catalog, plan / pricing,
   transport settings, observer credential. Custom API destinations appear
-  and edit here like any other configurable `http` destination; Accounts edits credentials only.
+  and edit here like any other configurable `http` destination; Accounts
+  edits credentials only.
 - **Add** is one flow: choose a destination (existing, or new from sealed
   kinds / presets / manual `http`), then add a credential. Managed signup is a
   credential onboarding task started from the same flow when the destination
@@ -196,7 +217,7 @@ explicit cooldown writes on the credential.
   destination with one credential. It is the fallback for any upstream and
   is never hidden.
 
-## 5. Target API and storage
+## 5. Target API And Storage
 
 - **Dashboard API V4 becomes complete**: `destinations`, `credentials`,
   `quota-pools`, `observations`, `onboarding`, plus the existing `contract`,
@@ -214,7 +235,8 @@ explicit cooldown writes on the credential.
   tables into them; the old tables are dropped after the shim release. The
   migration is total: every current row maps to exactly one destination and
   one credential, or the migration refuses to run.
-- **Transfer bundle** payload V10 carries the new entities, resolution policy, and route overrides directly.
+- **Transfer bundle** payload V10 carries the new entities, resolution policy,
+  and route overrides directly.
 
 ## 6. Migration
 
@@ -288,7 +310,7 @@ plan covering every current shape (each sealed adapter, Custom with root and
 complete-path endpoints, user-defined with and without Key, platform with
 linked / unlinked / pending Keys, managed drafts at every step, Zen, CPA).
 
-## 7. Documents this RFC supersedes when implemented
+## 7. Documents This RFC Supersedes When Implemented
 
 - `runtime-invariants.md`: "Provider and Plan share `provider_id`", "V3 is
   frozen", the Custom API account-ownership section, the platform parent
@@ -299,7 +321,7 @@ linked / unlinked / pending Keys, managed drafts at every step, Zen, CPA).
   card kinds.
 - `storage-migration.md`: new schema version and the migration runbook.
 
-## 8. Open decisions
+## 8. Open Decisions
 
 - Whether V3 removal happens in the same major version as the shim or one
   later. Settled: `/dashboard/api/v3` is a 410 tombstone in this line;
@@ -505,7 +527,8 @@ import that omits a CPA observer key keeps the destination's existing
 management key. Latest export does not emit `accounts`, platform rows, dynamic
 provider definitions, or a separate identities array. V4–V12 remain
 importable, with V4–V6 going through an old-graph decoder that maps into the
-same new-model import object. A V7 package that still carries leftover old fields must
+same new-model import object. A V7 package that still carries leftover old
+fields must
 match dest/cred or is rejected. Payloads newer than V12 are an unsupported-version
 error. V12 stores each GOAT Key's plan-window map separately from ordinary
 cooldowns; the map is Key-local and is not an ordinary shared cooldown.
@@ -514,7 +537,9 @@ destinations/credentials are the read model.
 
 ### UI rules started in stage 6
 
-Accounts lists each persisted routing card through one `DestinationCard` shell. Multiple cards may reference one destination; their identities and membership are separate from supplier configuration.
+Accounts lists each persisted routing card through one `DestinationCard`
+shell. Multiple cards may reference one destination; their identities and
+membership are separate from supplier configuration.
 Each credential is a `CredentialRow`. Header brand and type come from
 destination `brand_family` / capabilities when the group is not a platform
 parent. `AccountCard` is no longer mounted on this page. Providers lists

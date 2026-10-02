@@ -2,28 +2,30 @@
 
 # Protocol Conversion
 
-Open Console Gateway speaks four client protocols on one port, then translates each
-request into whatever the upstream Plan actually understands. The conversion
-layer is deterministic: it resolves the Alias, checks account
+Open Console Gateway speaks four client protocols on one port, then translates
+each request into whatever the upstream Plan actually understands. The
+conversion layer is deterministic: it resolves the Alias, checks account
 eligibility, applies the adapter ceiling and saved provider contract, checks
 the per-model/per-protocol effective state, and only then passthroughs or
 converts. Explicit upstream protocol disablement takes precedence over
 baseline support.
 
-Protocol selection uses the saved provider contract. Explicit catalog refresh
-imports the official model list and protocol baseline: Go and Zen use the Go
-documentation, Command Code uses its provider documentation, and MiniMax CN / Kimi
-Code CN use their documented Chat and Messages family. Go, Zen, and Command Code
-fall back to Chat when the document omits a model or cannot be fetched. Saved
-overrides and probe evidence remain constrained by the sealed adapter. See
-[Providers](providers.md) for refresh and enablement controls; inference never
-refreshes a catalog or tries another upstream protocol to discover support.
+Protocol selection uses the saved provider contract. An explicit catalog
+refresh imports the official model list and protocol baseline: Go and Zen use
+the Go documentation, Command Code uses its provider documentation, and
+MiniMax CN / Kimi Code CN use their documented Chat and Messages family. Go,
+Zen, and Command Code fall back to Chat when the document omits a model or
+cannot be fetched. Saved overrides and probe evidence remain constrained by
+the sealed adapter. See [Providers](providers.md) for refresh and enablement
+controls; inference never refreshes a catalog or tries another upstream
+protocol to discover support.
 
 If the client protocol is enabled in the current model contract, request and
 response pass through. Otherwise the gateway converts the **request body** to
-the enabled preferred protocol, or the first remaining enabled protocol in adapter
-fallback order, and the **response body** — or SSE stream — back to the client
-protocol. Gemini always converts to an enabled upstream protocol. This rule
+the enabled preferred protocol, or the first remaining enabled protocol in
+adapter fallback order, and the **response body** — or SSE stream — back to
+the client protocol. Gemini always converts to an enabled upstream protocol.
+This rule
 applies to every Providers-catalog supplier, including user-defined
 Configurable HTTP mappings (one protocol per mapping). Custom API
 does the same to the account's declared upstream protocol, then honors that
@@ -34,7 +36,8 @@ through (Gemini still converts to Chat Completions). CPA is not
 part of this conversion-default control. Conversion covers text, system
 instructions, images, tool calls and results, reasoning content, completion
 status, errors, and usage fields. SSE usage, errors, and terminal state are
-parsed in event order, including responses that mix LF and CRLF event separators.
+parsed in event order, including responses that mix LF and CRLF event
+separators.
 
 The tables below describe code-owned alias profiles, not current provider
 availability. Refresh-written official baselines and saved enablement determine
@@ -49,8 +52,8 @@ the actual default and available protocols shown on **Providers**.
 Alias-profile reference (the checked-in 2026-09-06 preferences and 2026-08-27
 Go `live_supported` paths). ✓ marks support in that code profile; it does not
 promise current direct passthrough. Provider catalogs and effective contracts
-decide whether a model and protocol are routable. The reference profiles live in
-`MODEL_PROTOCOLS` in `crates/ocg-domain/src/protocol.rs`.
+decide whether a model and protocol are routable. The reference profiles live
+in `MODEL_PROTOCOLS` in `crates/ocg-domain/src/protocol.rs`.
 
 `reasoning.effort` aliases apply only on an OpenCode Go route that carries
 this compatibility policy, before forwarding or conversion:
@@ -117,11 +120,11 @@ environment-only and does not change Dashboard request limits.
 
 This is a transport limit, not a context-window limit. Requests above it return
 `413 Payload Too Large`. Larger limits allow more memory to be buffered per
-concurrent request, including before authentication. If a reverse proxy sits in
-front of Open Console Gateway, configure its limit to be at least as large or it
-may reject the request before the gateway sees it.
+concurrent request, including before authentication. If a reverse proxy sits
+in front of Open Console Gateway, configure its limit to be at least as large,
+or it may reject the request before the gateway sees it.
 
-## Responses is stateless
+## Responses Is Stateless
 
 The following fields return `400` instead of being silently ignored:
 
@@ -140,7 +143,7 @@ versioned `legacy_compat` profile, and that downgrade is recorded; stored
 protocol configuration is not rewritten. Native Responses passthrough keeps
 hosted tools.
 
-## Gemini is a client-only format
+## Gemini Is A Client-Only Format
 
 Gemini is a client format: the gateway converts `contents`,
 text-only `systemInstruction`, supported `inlineData` images,

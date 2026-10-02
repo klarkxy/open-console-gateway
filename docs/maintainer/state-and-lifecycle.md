@@ -2,7 +2,7 @@
 
 # State, Credentials, And Lifecycle
 
-## State, credentials, and settings
+## State, Credentials, And Settings
 
 `CoreStateInner` (`state.rs`) is shared by gateway, dashboard, and CLI.
 
@@ -15,12 +15,15 @@ rebind → compensation) is acquired before `gateway_lifecycle` when a
 settings write also rebinds. Never hold a `parking_lot` lock across those
 awaits. Startup does not seed, repair, or activate price snapshots and does not
 start a price-fetch task. Opening the database does not settle historical
-credit receipts. A billing read reports active `pendingRequests` as 0. The stored receipt stays exact. Explicit calibration is not blocked by that receipt and does not delete it. The published `GatewayPreparationSnapshot` has no price
-field. Lock ordinal (6) `pricing` remains the in-memory pricing snapshot
-lock on `CoreStateInner`.
+credit receipts. A billing read reports active `pendingRequests` as 0. The
+stored receipt stays exact. Explicit calibration is not blocked by that receipt
+and does not delete it. The published `GatewayPreparationSnapshot` has no price
+field. Lock ordinal (6) `pricing` remains the in-memory pricing snapshot lock
+on `CoreStateInner`.
 
 The authoritative table for access keys is `access_keys`. Two credential
-tiers share that table (current schema; see [storage migration](storage-migration.md)) and one auth snapshot:
+tiers share that table (current schema; see
+[storage migration](storage-migration.md)) and one auth snapshot:
 
 - Primary key: fixed id `00000000-0000-0000-0000-000000000001`, display
   name `"Primary"`. Always enabled, never deleted. Public `AppConfig` and
@@ -49,16 +52,18 @@ bootstrap the first administrator with **both** `OCG_ADMIN_USERNAME` and
 `OCG_ADMIN_PASSWORD`; setting only one fails startup; otherwise the first
 registration wins.
 
-Settings fetches GitHub Release metadata via `GET /dashboard/api/v4/settings/check-update`.
-Installed desktop runtimes with updater support can download, verify, and install
-signed updates; development builds, CLI, and Docker only receive metadata and
-release links. The outbound request is triggered by the user.
+Settings fetches GitHub Release metadata via
+`GET /dashboard/api/v4/settings/check-update`.
+Installed desktop runtimes with updater support can download, verify, and
+install signed updates; development builds, CLI, and Docker only receive
+metadata and release links. The outbound request is triggered by the user.
 
-## Account lifecycle and browser runtime
+## Account Lifecycle And Browser Runtime
 
 `credentials` carry `account_type` (`key | managed`) and `setup_step`
 (`google_account → opencode_registration → payment → key_verification → ready`).
-non-managed rows are `key + ready`. The leftover `accounts` table is gone after v52. A managed draft is persisted
+non-managed rows are `key + ready`. The leftover `accounts` table is gone after
+v52. A managed draft is persisted
 immediately with an empty key and `enabled=false`; selector, enable, and
 the request path all require both `ready` and a non-empty key.
 `google_account` is labeled **sign-in identity** in the UI and is
@@ -68,7 +73,8 @@ skippable.
 `DEFAULT_OPENCODE_INVITE_URL` (demo). Normalized values must be a
 credential-free HTTPS URL up to 2,048 characters whose host is exactly
 `opencode.ai` or `console.opencode.ai`. The dashboard edits that value on
-the OpenCode Go provider **Settings** tab. Creating a managed draft can edit the invite
+the OpenCode Go provider **Settings** tab. Creating a managed draft can edit
+the invite
 URL and write it back to `opencode_invite_url` when it differs. Signup,
 registration, and payment remain manual in the isolated browser; the user
 copies the key back. Never add CDP autofill or automated payment clicks.
@@ -255,7 +261,7 @@ Forward-log inserts go through `ocg-infra::sqlite_logs` (one explicit
 statement per helper). Callers own timestamps, diagnostics, cost policy,
 redaction, and transactions.
 
-## Per-node boundaries
+## Per-Node Boundaries
 
 Each node owns its account data and is managed through its own dashboard.
 
@@ -280,6 +286,7 @@ Updater is configured as a `CoreState` starter.
 `src-tauri/capabilities/default.json` has no updater permission.
 Updater outbound follows the process-wide **default-leg** proxy policy
 (List mode included).
+
 ---
 
 [Maintainer guide index](../MAINTAINER.md) · [简体中文](state-and-lifecycle.zh-CN.md) · [Docs index](../README.md)

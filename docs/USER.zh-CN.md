@@ -2,7 +2,7 @@
 
 # 用户指南
 
-本指南面向把 Open Console Gateway 当作桌面应用、无头 Gateway 或 Docker 服务运行的人。章节按你实际会撞上它们的顺序排列：先装起来，排障在后。
+本指南面向把 Open Console Gateway 当作桌面应用、无头 Gateway 或 Docker 服务运行的人。章节按你会遇到它们的时机分组：先装起来接入，再日常运维与恢复。
 
 ## 新增集成
 
@@ -10,29 +10,43 @@
 - [手动客户端配置](user/add-application.zh-CN.md) — 通过 Gateway API 直接连接客户端。
 - [New API 与 Sub2API 账号](user/platform-accounts.zh-CN.md) — 一个可排序的站点账号下多把 Key；按 Key 拉取模型，并按你的顺序路由。
 
-## 章节
+## 从这里开始
 
 - [产品定位](user/overview.zh-CN.md) — 产品定位与 Gateway 承担的四个职责。
 - [架构图](user/architecture.zh-CN.md) — 节点、客户端请求、Plan 与面板的文字图。
 - [安装与首次启动](user/install.zh-CN.md) — Windows、macOS、Linux 安装包；附赠 SmartScreen 仪式。
 - [接入第一个客户端](user/first-client.zh-CN.md) — 复制 Key 与 API Base URL，用一个请求验证连通。
-- [升级、备份、恢复与卸载](user/upgrade-backup.zh-CN.md) — 应用内与手动升级、备份、恢复与卸载。
 - [管理面板](user/dashboard.zh-CN.md) — 八个核心页面、扩展分组、国际化与接入中心。
 - [应用](user/applications.zh-CN.md) — DSH 插件安装流程、恢复与移除。
+
+## 账号与模型
+
 - [账号](user/accounts.zh-CN.md) — Plan、凭据、排序、额度行为与托管注册。
+- [账号操作与刷新](user/account-actions-and-refresh.zh-CN.md) — 保存时不等重载、删除单把本地 Key 或整个分组，以及各刷新入口的作用范围。
 - [供应商](user/providers.zh-CN.md) — 目录、供应商合约、按模型协议覆盖、探测与用户定义供应商。
+- [Plan 与 API 预设](user/provider-presets.zh-CN.md) — 从账号或供应商入口浏览 Plan/API 预设；固定预设提供地址、协议、鉴权与默认模型。
 - [单模型管理](user/provider-models.zh-CN.md) — 新增和编辑 HTTP 模型映射、对外别名与允许的上游协议，删除本地目录行。
 - [模型目录刷新](user/model-catalog-refresh.zh-CN.md) — 刷新模型目录的作用：目录更新、协议证据、首次快照默认与单模型测试。
-- [Plan 与 API 预设](user/provider-presets.zh-CN.md) — 从账号或供应商入口浏览 Plan/API 预设；固定预设提供地址、协议、鉴权与默认模型。
-- [日志与设置](user/logs-settings.zh-CN.md) — 请求日志、设置与代理模式。
+- [模型元数据与推理档位](user/model-metadata.zh-CN.md) — 上下文窗口、模态与推理档位：每项信息来自哪里，以及如何自行声明。
+
+## 运行 Gateway
+
 - [Gateway 行为](user/gateway.zh-CN.md) — 端点、鉴权与别名。
-- [协议转换](user/protocol-conversion.zh-CN.md) — 推荐/已验证协议、透传与转换边界。
 - [路由与故障转移](user/routing.zh-CN.md) — 选择顺序、粘性/轮询、用量窗口、熔断与故障转移。
+- [协议转换](user/protocol-conversion.zh-CN.md) — 推荐/已验证协议、透传与转换边界。
 - [临时停调](user/temporary-unavailability.zh-CN.md) — 在设置里按全局或连接匹配上游错误后本地跳过 Key 或模型，再用真实流量重试。
+- [日志与设置](user/logs-settings.zh-CN.md) — 请求日志、设置与代理模式。
+
+## 部署
+
 - [CLI](user/cli.zh-CN.md) — 无头 CLI 压缩包、数据目录、`serve` / `key` / `status` 与内置 skill 同步。
 - [Docker](user/docker.zh-CN.md) — GHCR 镜像、Compose 部署、浏览器 Sidecar 与源码构建。
 - [外部接入](user/external-integrations.zh-CN.md) — 本机 CPA 配置、数据归属、路由订阅池与断开行为。
+
+## 维护与恢复
+
 - [数据与安全](user/data-security.zh-CN.md) — 数据目录、凭据存储与加密边界。
+- [升级、备份、恢复与卸载](user/upgrade-backup.zh-CN.md) — 应用内与手动升级、备份、恢复与卸载。
 - [限制](user/limits.zh-CN.md) — 明确报错、未实现的表面与平台边界。
 - [常见问题](user/troubleshooting.zh-CN.md) — 首次启动、鉴权、路由与日志的常见问题。
 

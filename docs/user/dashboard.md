@@ -2,11 +2,13 @@
 
 # The Dashboard
 
-The dashboard is the gateway's own single-page Vue 3 interface. **Dashboard**, **Access Keys**, **Accounts**, **Providers**, **Aliases**, **Applications**, **Logs**, and **Settings** are its eight fixed core views in the left rail (or horizontal menu below 1024px). Applications hosts the DSH plugin flow. A divider below Settings starts the optional **Extensions** group; CPA is its local-only entry. On a Windows x64, macOS, or Linux x64 desktop app or CLI, that page can also install and manually start an OCG-owned CPA runtime; other platforms keep connect-only CPA. Theme and language switches and a sign-out button live in the header. It speaks ten languages — 简体中文, 繁體中文, English, 日本語, 한국어, Español, Français, Deutsch, Português (Brasil), and Русский — with 简体中文 as the default. Your choice persists in `localStorage` under `ocg-manager.locale`; when persistence is unavailable, the in-memory locale still works for the session.
+The dashboard is the gateway's own single-page Vue 3 interface. **Dashboard**, **Access Keys**, **Accounts**, **Providers**, **Aliases**, **Applications**, **Logs**, and **Settings** are its eight fixed core views in the left rail (or horizontal menu below 1024px). Applications hosts the DSH plugin flow. A divider below Settings starts the optional **Extensions** group; CPA is its local-only entry. On the Windows x64, macOS, or Linux x64 desktop app or CLI, that page can also install and manually start an OCG-owned CPA runtime; other platforms keep connect-only CPA. Theme and language switches and a sign-out button live in the header.
+
+It speaks ten languages — 简体中文, 繁體中文, English, 日本語, 한국어, Español, Français, Deutsch, Português (Brasil), and Русский — with 简体中文 as the default. Your choice persists in `localStorage` under `ocg-manager.locale`; when persistence is unavailable, the in-memory locale still works for the session.
 
 The mascot face identifies the app in the dashboard, browser tab, and desktop icons. In the dark dashboard theme, a fine light outline keeps the logo visible; browser and desktop icons retain the original artwork.
 
-## Finding and editing configuration
+## Finding And Editing Configuration
 
 The Add account search filters plans, presets, saved Providers, and platform
 types together. Changing the search does not discard the selected form.
@@ -23,7 +25,9 @@ Plaintext Keys travel only inside the Connection Center payload (`GET /dashboard
 
 Views are cached while you switch tabs (`KeepAlive`) and revalidate their server data when you return, throttled to a short freshness window (15–60 seconds by view, matching the Accounts projection refresh cadence) so quick round-trips do not restate identical reads. The Dashboard view also refreshes when the browser tab comes back to the foreground. Catalogs and provider directories are not polled automatically; official usage sync runs on the server. The Settings page may poll signed desktop install progress until the process restarts.
 
-Accounts automatically refreshes enabled, ready accounts with an official usage or balance reader, including linked platform Keys. It checks on entry, on return to the foreground, and every 15 seconds while the page is visible; an upstream observation stays fresh for five minutes. The entry refresh starts as soon as account and billing data are ready, without waiting for registration or browser capabilities. Due accounts refresh one at a time, including rows outside the current filter. Leaving Accounts, hiding the window, or logging out pauses new work. Existing data remains visible, automatic refresh does not show success notifications, and failures retain the last good data and wait at least five minutes before another automatic attempt (or longer if the server requires it). Manual refresh remains available. Accounts without an official usage or balance reader do not trigger those upstream requests. Automatic refresh does not fetch model catalogs or price tables.
+Accounts automatically refreshes enabled, ready accounts with an official usage or balance reader, including linked platform Keys. It checks on entry, on return to the foreground, and every 15 seconds while the page is visible; an upstream observation stays fresh for five minutes. The entry refresh starts as soon as account and billing data are ready, without waiting for registration or browser capabilities. Due accounts refresh one at a time, including rows outside the current filter.
+
+Leaving Accounts, hiding the window, or logging out pauses new work. Existing data remains visible, automatic refresh does not show success notifications, and failures retain the last good data and wait at least five minutes before another automatic attempt (or longer if the server requires it). Manual refresh remains available. Accounts without an official usage or balance reader do not trigger those upstream requests. Automatic refresh does not fetch model catalogs or price tables.
 
 Linked platform Keys reuse their existing snapshot reader. That snapshot reads the platform’s models, usage, balance, and groups, and it does not fetch a price table. No separate model-discovery action is triggered. Automatic work pauses while account editing or card arrangement is open.
 

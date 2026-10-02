@@ -4,11 +4,11 @@
 
 Open Console Gateway is a local gateway that stores provider API keys in a SQLite
 database — including built-in Provider keys, trusted Custom API destinations,
-and user-defined Provider definitions — and exposes a loopback gateway at
+and user-defined Provider definitions — and exposes a loopback endpoint at
 `http://127.0.0.1:9042/v1`. A Provider and a Plan are one product identity,
 keyed only by `provider_id`; each account card belongs to one such Provider.
-Clients send **aliases** from the local registry or eligible Custom model IDs;
-live routing includes OpenCode Go, Zen Free, Command Code GOAT, MiniMax CN
+Clients send **aliases** from the local registry or eligible Custom model IDs.
+Live routing includes OpenCode Go, Zen Free, Command Code GOAT, MiniMax CN
 Token Plan, Kimi Code CN, Ollama Cloud, Custom API, the CPA subscription pool,
 and saved user-defined Providers. The Vue 3 dashboard is at
 `/dashboard/` and the current SPA talks JSON at `/dashboard/api/v4` only
@@ -22,14 +22,14 @@ The gateway does four jobs, in roughly the order you would expect:
    Custom declared IDs), then pick a usable account card after capability
    filtering, the adapter ceiling, the saved provider contract, and the
    per-model protocol effective state.
-3. Convert the request to the selected Plan's effective upstream protocol,
+3. Convert the request to the selected Plan's effective upstream protocol
    and the response back to the client protocol. Protocol selection uses the
    saved contract.
 4. Log the request (`requested_model`, `resolved_alias`, `upstream_model`),
    write usage and any cooldown to SQLite, and surface everything in the
    dashboard.
 
-## Shape of a node
+## Shape Of A Node
 
 Desktop, CLI, and Docker all run one `ocg-core` process on `127.0.0.1:9042`.
 The dashboard opens in your system browser; clients hit `/v1` in OpenAI,

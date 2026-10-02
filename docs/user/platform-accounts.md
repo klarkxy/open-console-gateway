@@ -1,8 +1,8 @@
 [简体中文](platform-accounts.zh-CN.md)
 
-# New API and Sub2API accounts
+# New API And Sub2API Accounts
 
-For a site installed under a path such as `/chat`, enter that site's root as `/chat` or `/chat/v1`. Adding and refreshing a Key requests `/chat/v1/models`; Chat inference uses `/chat/v1/chat/completions`, with matching Responses and Messages paths. When an unlinked Key's original Custom connection is empty and still uses the same route and model mappings, the Key returns to that connection; shared or edited connections are preserved.
+For a site installed under a path such as `/chat`, enter the site root as either `/chat` or `/chat/v1`. Adding and refreshing a Key requests `/chat/v1/models`; Chat inference uses `/chat/v1/chat/completions`, with matching Responses and Messages paths. When an unlinked Key's original Custom connection is empty and still uses the same route and model mappings, the Key returns to that connection; shared or edited connections are preserved.
 
 Each site is **one account** with multiple Keys. **Add Key** asks for a name and the Key only. Saving fetches that Key's models from the site and then associates the Key. On New API, **Import Keys from site** uses the saved management credential to list remote tokens, read each full Key, create local Custom Keys, and associate them. Tokens that already exist locally, are disabled, or cannot return a full Key or models are skipped. New API and Sub2API already convert Chat Completions, Messages, and Responses, so OCG does not ask for a protocol or open the Providers model matrix for that Key. If association fails after creation, the form shows that the Key already exists and retries only association. Reloading keeps the standalone Key available under Link existing Key. An uncertain creation result must be reconciled against the account list before creating again.
 
@@ -16,7 +16,7 @@ An optional user credential enables user-scoped observations. For New API, fill 
 
 Model counts in the import confirmation, Key row, and model list use distinct public model names. A model available through Chat, Messages, and Responses counts once.
 
-## Refresh and read the results
+## Refresh And Read The Results
 
 Refresh is manual. The parent card shows the site's **Balance**, **This month**, and **Lifetime**. These are site wallet and consume-log observations, not a local price and not a request cost. Official API cards show the remaining balance only. Balance and lifetime come from the site wallet; this month is the site's consume-log total for the current UTC month when that optional endpoint responds, otherwise a dash. Parent **Refresh** reads that site wallet. Each linked Key row can show its own remaining next to its enable switch; that row's **Refresh** reads only that Key's remaining quota, not the site wallet. Wallet, subscription, and Key limits are separate scopes and are not added together.
 
@@ -26,7 +26,7 @@ New API supports wallet and subscription billing, fixed and automatic groups, an
 
 A missing cost stays unknown and is not shown as zero or free. If a new snapshot has no prices, previously stored prices stay with the older snapshot and are not used to price a new request. A later refresh does not recalculate older rows. A site balance observation does not prove what one request debited from the wallet.
 
-## Change or transfer an account
+## Change Or Transfer An Account
 
 A linked Key's endpoint belongs to its parent. Unlinking keeps the Key, its materialized endpoint, and model configuration. Delete or unlink all children before deleting a parent; parent deletion never deletes Keys.
 
@@ -36,7 +36,7 @@ Back up the complete data directory before upgrading. Rollback restores that ful
 
 The reader baseline is New API `71c1fd7caad738db4d13aabbf28eeadb293d0cfe` and Sub2API `772a0382f079676983c06f24b0d41e09139a8462`. Older releases and forks may omit or change these interfaces; an unavailable observation is not an inference failure.
 
-## Refresh isolation and bounded imports
+## Refresh Isolation And Bounded Imports
 
 The parent **Refresh** and each Key's **Refresh** update observations only. They do not run model discovery a second time or change saved model routing. Use **Fetch models** explicitly for that configuration change. A truncated discovery result leaves the existing model configuration unchanged; empty and failed results likewise do not replace it.
 
@@ -45,3 +45,7 @@ A Key refresh reports that Key's errors, not an old parent error. Sub2API Key re
 When an endpoint fails, successful components are saved and only rows from failed sources retain their last-known values. Retained rows do not gain a new expiry from the failed attempt. The snapshot time describes the latest attempt, not proof every retained row was observed then. A parent observation no longer invalidates an in-flight child refresh; origin, management credential, link, and inference Key changes still invalidate it.
 
 New API import copies at most 50 remote rows per action and returns an explicit `nextPage`. Even a page of entirely disabled or already imported Keys can have a continuation. Invoke **Import Keys from site** again to continue in the current session. Completing all pages resets the next import to page one. Reloading or signing out also resets the cursor. This is bounded copying, not remote synchronization; rescan after concurrent remote inventory changes. Duplicate secrets are checked within the selected platform instance, and already imported Keys skip model discovery.
+
+---
+
+[User guide index](../USER.md) · [简体中文](platform-accounts.zh-CN.md) · [Docs index](../README.md)

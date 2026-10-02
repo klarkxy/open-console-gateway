@@ -5,9 +5,10 @@
 Use this guide to connect a client directly through the ordinary Gateway API.
 The [Applications page](applications.md) also offers local BYOK configuration
 for Codex, Kimi Code, MiniMax Code and ZCode, alongside the DSH plugin flow.
-These flows create or reuse a harness-named ordinary Key and use its entire published model list, without a separate model selection.
+These flows create or reuse a harness-named ordinary Key and use its entire
+published model list, with no separate model selection.
 
-## Connect an unlisted client
+## Connect An Unlisted Client
 
 Copy the **Key** and URLs from **Connection Center**. Choose the interface the client already supports:
 
@@ -31,4 +32,6 @@ This list is a local read of currently routeable code-owned Aliases and eligible
 
 After configuration, send one real request and check **Logs**.
 
-[User guide index](../USER.md) · [Docs index](../README.md)
+---
+
+[User guide index](../USER.md) · [简体中文](add-application.zh-CN.md) · [Docs index](../README.md)

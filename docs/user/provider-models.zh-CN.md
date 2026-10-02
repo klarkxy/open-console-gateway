@@ -36,3 +36,7 @@ MiniMax CN Token Plan、Kimi Code CN、OpenCode Go、Zen Free、Command Code GOA
 内置供应商可编辑模型映射及协议，但封闭适配器、连接地址和鉴权方式保持原样。CPA 仍由外部集成管理目录，不提供手动新增。少数仍保留多个隐式协议的旧 HTTP 连接，需要先在**编辑连接**中配置明确的协议路由；单模型编辑器不会静默把这些连接压缩成单协议。
 
 相关说明：[添加供应商](add-provider.zh-CN.md) · [模型目录刷新](model-catalog-refresh.zh-CN.md)。
+
+---
+
+[用户指南索引](../USER.zh-CN.md) · [English](provider-models.md) · [文档索引](../README.zh-CN.md)

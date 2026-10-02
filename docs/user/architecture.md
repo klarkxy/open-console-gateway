@@ -6,7 +6,7 @@ Open Console Gateway is one local node. Desktop, CLI, and Docker are alternative
 for the same `ocg-core` process. The default listener is `127.0.0.1:9042`.
 Each node stores its own data locally.
 
-## One local node
+## One Local Node
 
 [![Open Console Gateway local-node architecture](../diagrams/local-node.visual-check.1440x900.light.png)](https://klarkxy.github.io/open-console-gateway/diagrams/local-node/)
 
@@ -16,11 +16,10 @@ trace relationships, or export another format.
 The Dashboard and inference endpoints share port `9042`, but they use different
 credentials. A client **Key** authenticates an AI tool to Open Console Gateway. After
 selection, the account credential is sent only to that account's configured
-upstream; Zen Free has no credential. The Vue SPA talks HTTP Dashboard V4
-only; the only V2 compatibility families kept are auth and the browser
-WebSocket.
+upstream; Zen Free has no credential. The Vue SPA talks HTTP Dashboard V4 only. The only V2 compatibility
+families kept are auth and the browser WebSocket.
 
-## Request lifecycle
+## Request Lifecycle
 
 One inference request follows a fixed order:
 
@@ -39,7 +38,7 @@ Unknown model names return `400`. Ambiguous exact raw IDs return
 eligible pre-send or provider-specific failures; ambiguous or unsafe requests
 fail before selection.
 
-## Product ownership
+## Product Ownership
 
 | Surface | Owns | Related surface |
 | --- | --- | --- |
@@ -53,7 +52,7 @@ fail before selection.
 The Adapter Registry is static and sealed. User-defined Providers persist as
 typed data and always bind Configurable HTTP.
 
-## Local model lists
+## Local Model Lists
 
 These reads use saved local state. Catalog refreshes are explicit actions on
 **Providers**.
@@ -67,7 +66,7 @@ Command ids that contain `/` publish a unique last-segment lowercase kebab Alias
 other unmatched catalog rows keep exact raw pins until code assigns an Alias. A Custom ID
 that collides with a published built-in Alias is excluded from publication.
 
-## Protocol conversion
+## Protocol Conversion
 
 Clients may use OpenAI Chat Completions, OpenAI Responses, Anthropic Messages,
 or Gemini `generateContent` / `streamGenerateContent` entry points. A supported
@@ -79,7 +78,7 @@ selected Plan's Chat Completions or Messages upstream.
 The complete preferred/supported matrix and conversion limits live in
 [Protocol conversion](protocol-conversion.md).
 
-## Where to read next
+## Where To Read Next
 
 | Task | Guide |
 | --- | --- |

@@ -2,7 +2,11 @@
 
 # Accounts
 
-Edit Custom API endpoints, protocols and model mappings on the account, even when it has multiple Keys. For a user-defined HTTP Provider, edit these in **Providers**, even if it has only one Key. Only Plans with a modeled subscription period display expiry; CPA and user-defined API/Plan presets do not.
+Edit Custom API endpoints, protocols, and model mappings on the account, even
+when it has multiple Keys. For a user-defined HTTP Provider, edit these in
+**Providers**, even if it has only one Key. Only Plans with a modeled
+subscription period display expiry; CPA and user-defined API/Plan presets do
+not.
 
 Choose **Account routing** from the dropdown above the account list and use the adjacent **Conversation sticky** switch. Each change saves immediately; a successful change resets runtime routing state. Hover or focus the question-mark buttons for explanations.
 
@@ -16,9 +20,38 @@ Choose **Account routing** from the dropdown above the account list and use the 
   message). If no conversation key can be built, the base routing mode is
   used. Similar prompts may share a binding.
 
-**Add account** first distinguishes an existing connection from a new service. Existing connections use the same projection as **Providers**: built-in Providers that still have at least one account, and every saved user-defined Provider (with or without a Key). Deleting the last account of a built-in family removes it from existing connections and returns it to the new-service templates. Choose an existing connection to add another Key using its saved address, protocol and models. Choose a new service to browse unused built-in templates, Plan/API presets, Custom API, or a platform site; saving a preset creates a Provider and its first account together. **Providers → Add Provider** opens this same chooser. Saving a preset from **Add account** uses the same onboarding commit as **Providers**. Connection summaries remain visible before entering a Key. Regional variants use a compact picker. Keys are stored by the account service; you can add one here or from a Provider's detail with **Add Key**.
+**Add account** first distinguishes an existing connection from a new service.
+Existing connections use the same projection as **Providers**: built-in
+Providers that still have at least one account, and every saved user-defined
+Provider (with or without a Key). Deleting the last account of a built-in
+family removes it from existing connections and returns it to the new-service
+templates.
 
-Provider choices come from the V4 destination and catalog projection; the chooser lists them by name, with Custom API first when adding a new service. `provider_id` is the chooser, filter, dialog, and cache key. A successful empty catalog stays empty. If the catalog cannot be loaded, only the OpenCode Go creation form remains available; an existing Zen Free singleton can still be displayed, while every other built-in, Custom, and user-defined entry fails closed. Names, offering types, creation status, and form fields come from each catalog row. The chooser has no Plan/API sections. After the first ready account for a sealed Provider is saved, the dashboard consults that Provider's existing contract capability before refreshing its model catalog; another Key does not refresh again. A capability or refresh failure never rolls back the saved account and can be retried from **Providers → Refresh model catalog**.
+Choose an existing connection to add another Key using its saved address,
+protocol, and models. Choose a new service to browse unused built-in
+templates, Plan/API presets, Custom API, or a platform site; saving a preset
+creates a Provider and its first account together.
+
+**Providers → Add Provider** opens this same chooser. Saving a preset from
+**Add account** uses the same onboarding commit as **Providers**. Connection
+summaries remain visible before entering a Key. Regional variants use a
+compact picker. Keys are stored by the account service; you can add one here
+or from a Provider's detail with **Add Key**.
+
+Provider choices come from the V4 destination and catalog projection; the
+chooser lists them by name, with Custom API first when adding a new service.
+`provider_id` is the chooser, filter, dialog, and cache key. A successful
+empty catalog stays empty. If the catalog cannot be loaded, only the OpenCode
+Go creation form remains available; an existing Zen Free singleton can still
+be displayed, while every other built-in, Custom, and user-defined entry
+fails closed. Names, offering types, creation status, and form fields come
+from each catalog row. The chooser has no Plan/API sections.
+
+After the first ready account for a sealed Provider is saved, the dashboard
+consults that Provider's existing contract capability before refreshing its
+model catalog; another Key does not refresh again. A capability or refresh
+failure never rolls back the saved account and can be retried from
+**Providers → Refresh model catalog**.
 
 **Enabled** means the account may enter routing. New ready Key accounts, including Custom API and user-defined Providers, start enabled. Test connection does not change the switch. Already-enabled or disabled accounts stay as stored. Test results stay in the test dialog. User-defined Providers have no modeled subscription period, including those created from Plan presets: their accounts do not show an inferred purchase date, expiry countdown, or expiry alert. Existing stored purchase anchors are preserved for compatibility, but are not presented as confirmed billing facts.
 
@@ -33,16 +66,32 @@ Edit binding changes that credential's enabled state, model scope (all models, o
 Accounts are arranged in supplier cards. A card can contain several accounts / Keys, and one supplier can have several cards sharing its address, protocols and models. Moving an account preserves its credential, grants, usage, quota pool, cooldown, saved GOAT plan deadlines, and local state. Provider and Plan remain one product identity (`provider_id` only). OpenCode Go counts usage by account **Key**, Zen Free shares free cooldown by egress IP, and Custom API keeps no provider-side quota. Card order, then row order inside each card, defines the persisted routing priority used by strict priority, global sticky and round-robin after eligibility filtering. There is no per-model quota pool. Ordinary cooldown can fan out through a **declared quota pool**; a `429` cooldown remains on its receiving Key.
 
 **Accounts** owns identity, the account **Key**, verification, enabled state,
-card order, managed registration, and available usage / cooldown / quota-recovery state.
-Catalogs, protocol probes, per-model protocol overrides, configurable HTTP
-Endpoint/auth/protocol/mappings live on **Providers**.
+card order, managed registration, and available usage / cooldown /
+quota-recovery state. Catalogs, protocol probes, per-model protocol
+overrides, and configurable HTTP Endpoint/auth/protocol/mappings live on
+**Providers**.
+
 An account stores one Key (when auth requires it), notes, enablement, model
 scope, grants, quota relation, and runtime state. No-auth connections expose
 one singleton credential and reject a second.
 
-Quota cards follow catalog capabilities instead of Provider IDs. `usageAvailability=available` loads Provider quota windows and enables the refresh action. `manualUsageCalibration=true` additionally loads the local calibration object for editing, while the card itself still renders the Provider windows. OpenCode Go, GOAT, and Ollama set that flag. Go edits the 5-hour, weekly, and monthly windows. Ollama edits the month window, including before a tier is chosen, and does not accept a week percentage. Zen, MiniMax, Kimi, Custom, and CPA do not show the editor. Metadata that explicitly turns manual calibration off also hides it. A missing, blank, or null percentage is not saved as 0. Other rows show no quota strip; Zen Free keeps its separate egress cooldown. Known MiniMax/Kimi window names remain friendly, and unknown window names are humanized without changing stored wire values. Custom API and user-defined Provider cards whose stored Endpoint host is exactly `api.deepseek.com`, `api.moonshot.cn`, or `api.moonshot.ai` can also **Refresh quota** to read that official current balance. DeepSeek and Zhipu official API cards show the observed remaining balance. It is not a quota bar, and it is not a price-based monthly or lifetime spend. A New API / Sub2API parent card shows the site's Balance, This month, and Lifetime from the site wallet and consume log. Those three figures are not a local price and not a request cost. A missing balance stays unavailable and is not shown as 0. Known-host official balances keep a remaining figure. **Refresh quota** on ordinary quota/balance accounts completes independently of model discovery. Use the row menu’s **Refresh model catalog** for the official Provider catalog or Custom / known-host `/v1/models` discovery. Model-only accounts keep their manual model-refresh fallback; platform Keys keep their existing platform synchronization. Built-in catalog rows follow each Provider's documented default policy; GOAT's first snapshot starts only its plan-included models on. Usage snapshots stay display-only: a bar at 100%, unknown, or failed never marks a Key exhausted and never changes routing. Other Custom destinations have no balance endpoint in this product.
+Quota cards follow catalog capabilities instead of Provider IDs.
+`usageAvailability=available` loads Provider quota windows and enables the
+refresh action. `manualUsageCalibration=true` additionally loads the local
+calibration object for editing, while the card itself still renders the
+Provider windows. OpenCode Go, GOAT, and Ollama set that flag. Go edits the
+5-hour, weekly, and monthly windows. Ollama edits the month window, including
+before a tier is chosen, and does not accept a week percentage. Zen, MiniMax,
+Kimi, Custom, and CPA do not show the editor. Metadata that explicitly turns
+manual calibration off also hides it. A missing, blank, or null percentage is
+not saved as 0. Other rows show no quota strip; Zen Free keeps its separate
+egress cooldown. Known MiniMax/Kimi window names remain friendly, and unknown
+window names are humanized without changing stored wire values.
 
-Account rows and saved quota snapshots load independently of catalog/pricing metadata. Same-session, same-binding snapshots remain visible while revalidating, including after a failed upstream refresh. Ordinary quota observations share a pool of at most four requests and publish per account; a slow account does not block completed peers. Duplicate requests for one account share completion, and queued manual requests take priority over background requests. Platform synchronization and model catalog writes remain exclusive to preserve CAS. Automatic refresh still runs only while the Accounts page is active and visible, respects freshness and server retry deadlines, and reconciles the destination projection once per pass. It is not a new server-wide background poller.
+Custom API and user-defined Provider cards whose stored Endpoint host is exactly `api.deepseek.com`, `api.moonshot.cn`, or `api.moonshot.ai` can also **Refresh quota** to read that official current balance. DeepSeek and Zhipu official API cards show the observed remaining balance. It is not a quota bar, and it is not a price-based monthly or lifetime spend. A New API / Sub2API parent card shows the site's Balance, This month, and Lifetime from the site wallet and consume log. Those three figures are not a local price and not a request cost. A missing balance stays unavailable and is not shown as 0. Known-host official balances keep a remaining figure. **Refresh quota** on ordinary quota/balance accounts completes independently of model discovery. Use the row menu’s **Refresh model catalog** for the official Provider catalog or Custom / known-host `/v1/models` discovery. Model-only accounts keep their manual model-refresh fallback; platform Keys keep their existing platform synchronization.
+
+Built-in catalog rows follow each Provider's documented default policy; GOAT's first snapshot starts only its plan-included models on. Usage snapshots stay display-only: a bar at 100%, unknown, or failed never marks a Key exhausted and never changes routing. Other Custom destinations have no balance endpoint in this product.
+Account rows and saved quota snapshots load independently of catalog metadata. Same-session, same-binding snapshots remain visible while revalidating, including after a failed upstream refresh. Ordinary quota observations share a pool of at most four requests and publish per account; a slow account does not block completed peers. Duplicate requests for one account share completion, and queued manual requests take priority over background requests. Platform synchronization and model catalog writes remain exclusive to preserve CAS. Automatic refresh still runs only while the Accounts page is active and visible, respects freshness and server retry deadlines, and reconciles the destination projection once per pass. It is not a new server-wide background poller.
 
 GOAT cards offer **Refresh quota** to read the official 5-hour, weekly, and monthly windows. When that reading includes a percentage, the window uses it against a full window of 100 and keeps its reset. The endpoint is used by the official CLI but is not documented in the public Provider API. Later requests do not add a price onto the percentage, and a dollar amount is not relabeled as a percentage. You can save a manual percentage. With no official reading and no manual percentage, the window stays unavailable and is not shown as 0. The monthly reset still uses the configured purchase date when the upstream does not provide one. Ollama Cloud exposes no official usage API in this product and does not estimate a monthly credit meter from request prices. The account form still presents Pro, Max, or Team and a purchase date. A manual percentage does not require a price. A month percentage can be saved before a tier is chosen. A week percentage is not accepted. Without an official or manual usage observation, usage stays unavailable. Existing accounts remain routeable. Previously stored billing rows stay on disk and are not recalculated.
 
@@ -60,7 +109,7 @@ The Adapter Registry is sealed. Built-in Provider families are:
 
 Configurable HTTP connections and individual models have separate **Enabled** switches in **Providers → Edit connection**. Renaming a connection or editing mappings preserves existing disabled models. Deleting the final Key preserves the connection and its model settings.
 
-## Manual credit balance
+## Manual Credit Balance
 
 Custom API and saved configurable HTTP accounts can keep a manual credit balance. Buckets, grants, monthly renewal, and expiry stay separate, and you can correct the saved balance by hand. The fields you set are the name, currency, monthly amount, and source URL. The product does not ask for per-token rates or a currency conversion, and a completed request does not reduce the balance.
 
@@ -68,53 +117,61 @@ A missing figure stays unknown. It is not shown as zero or free. Opening the das
 
 New API / Sub2API site Keys and sealed built-in Plans keep their observed billing views. Editing a Key keeps an existing manual balance. If the Key save is confirmed and a later read fails, the Key stays saved; read it again instead of creating another. See [Upgrade and backup](upgrade-backup.md).
 
-## Move a node configuration
+## Move A Node Configuration
 
 Supplier and model enablement, enabled protocols and preferred protocols are restored from matching source records. Target-only models remain; conflicting upstream mappings or route overrides reject the entire import. No-auth HTTP destinations can also be exported and restored.
 
 Use **Export** on the Accounts toolbar to create a password-encrypted
 `.ocgbackup` file, then use **Import** on the destination node to preview and
 confirm the merge. Choose a migration password of at least 12 characters and
-transfer it separately from the file; Open Console Gateway cannot recover it. The
-operation remains available only from the node's loopback dashboard; forwarded
-scheme headers do not grant access to a remote dashboard.
+transfer it separately from the file; Open Console Gateway cannot recover it.
+The operation remains available only from the node's loopback dashboard;
+forwarded scheme headers do not grant access to a remote dashboard.
 
 The current payload moves destinations and credentials as the authority
 (ready Keys, platform and CPA observer management credentials, and identity /
-grant / cooldown extras stay inside the encrypted envelope), Custom Endpoint/public-model → upstream-ID mappings and verification
-state encoded on those entities, user-defined Providers as destination extras,
-the primary and active sub Access Keys, portable routing/proxy settings, Zen
-Free enablement/catalog, Provider catalogs, evidence, protocol overrides, and
+grant / cooldown extras stay inside the encrypted envelope), Custom
+Endpoint/public-model → upstream-ID mappings and verification state encoded on
+those entities, user-defined Providers as destination extras, the primary and
+active sub Access Keys, portable routing/proxy settings, Zen Free
+enablement/catalog, Provider catalogs, evidence, protocol overrides, and
 explicit HTTP protocol routes, plus quota-pool membership.
+
 Shared identities, a second credential on the same identity, binding model
 restrictions and enabled flags, and quota-pool membership and declared/unknown
 evidence are restored as stored. V7 Custom destinations are normalized to the
 connection-owned multi-Key representation without changing their stable IDs or
-public-name-only lookup behavior. Matching stable IDs are merged with package-owned portable fields;
-same-Plan or same-name rows with different IDs coexist and independent same-URL
-accounts are not merged. Existing destination
+public-name-only lookup behavior. Matching stable IDs are merged with
+package-owned portable fields; same-Plan or same-name rows with different IDs
+coexist and independent same-URL accounts are not merged. Existing destination
 accounts keep their current order and position; source-only accounts append in
 package order. Destination-only Access Keys and Provider scopes are retained.
 A merge that omits a CPA observer key keeps the destination's existing
 management key.
 
 Browser profiles/cookies, third-party login passwords, referral codes, logs,
-and usage history do not move. Local quota-recovery state is not exported.
-An import that leaves the target Key unchanged keeps that local recovery;
+and usage history do not move. Local quota-recovery state is not exported. An
+import that leaves the target Key unchanged keeps that local recovery;
 replacing the Key clears it. V9 carries source cooldown deadlines without
 shortening a later destination deadline; V4/V5 keep cooldown behavior
-host-local. Existing destination usage history and browser data stay in
-place; stale authentication and last-error flags are cleared when package
-account fields replace the stored credential.
+host-local. Existing destination usage history and browser data stay in place;
+stale authentication and last-error flags are cleared when package account
+fields replace the stored credential.
+
 Machine-local listener/root URL, auto-start, and Dock settings also stay with
-the destination. Ready managed accounts keep their Key, but their browser login
-does not move; unfinished managed drafts are skipped. Import accepts payload
-V4 through the current export version. Pre-V11 packages remain compatible when they omit protocol routes; a pre-V11 package carrying nonempty explicit routes is rejected rather than losing those routes. The current export stores each GOAT Key's plan-window map separately from ordinary cooldowns. A V4–V11 import is ordinary-only: the same Key keeps deadlines already on this node, and a changed Key drops them. A current export of the same Key merges the later deadline in each window; a changed Key drops the old deadlines, then applies a valid incoming map. Same-Key preservation keeps or merges that map only while the incoming credential is still GOAT; moving the same id and the same plaintext to a non-GOAT provider, including Custom HTTP, remains a supported remap and discards only the GOAT map while ordinary cooldowns stay. A pre-V12 file that carries the field is rejected. V4/V5 packages rebuild one identity, credential, All-scope
-binding, and identity quota pool per account. Payloads older than V4 or newer than the current export version are rejected with an
-explicit unsupported-version error. A V4/V5 file
-that already contains V6 identity fields, or a V6 file that already contains
-V7 destination fields, is rejected rather than silently dropping them. The outer encrypted envelope remains version 1 and
-is distinct from the portable payload version. The current payload version is listed in [Upgrade and backup](upgrade-backup.md).
+the destination. Ready managed accounts keep their Key, but their browser
+login does not move; unfinished managed drafts are skipped. Import accepts
+payload V4 through the current export version. Pre-V11 packages remain
+compatible when they omit protocol routes; a pre-V11 package carrying
+nonempty explicit routes is rejected rather than losing those routes. The current export stores each GOAT Key's plan-window map separately from ordinary cooldowns. A V4–V11 import is ordinary-only: the same Key keeps deadlines already on this node, and a changed Key drops them. A current export of the same Key merges the later deadline in each window; a changed Key drops the old deadlines, then applies a valid incoming map. Same-Key preservation keeps or merges that map only while the incoming credential is still GOAT; moving the same id and the same plaintext to a non-GOAT provider, including Custom HTTP, remains a supported remap and discards only the GOAT map while ordinary cooldowns stay. A pre-V12 file that carries the field is rejected. V4/V5
+packages rebuild one identity, credential, All-scope binding, and identity
+quota pool per account. Payloads older than V4 or newer than the current
+export version are rejected with an explicit unsupported-version error. A
+V4/V5 file that already contains V6 identity fields, or a V6 file that already
+contains V7 destination fields, is rejected rather than silently dropping
+them. The outer encrypted envelope remains version 1 and is distinct from the
+portable payload version. The current payload version is listed in
+[Upgrade and backup](upgrade-backup.md).
 
 Every persistent mutation path rejects `enabled=true` for a catalogued
 `routable=false` Provider before it mutates the row, revision, or timestamps.

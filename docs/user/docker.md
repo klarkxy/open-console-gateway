@@ -2,17 +2,17 @@
 
 # Docker
 
-Open Console Gateway runs headlessly in Docker, serving the same dashboard and gateway
-on port `9042`. Pull the image from GHCR anonymously — it ships `linux/amd64`
-and `linux/arm64`, and Docker picks the right variant. Save the release's
-`compose.example.yaml` as `compose.yaml`, add `.env` if needed, and run the
-commands below; they pin one release through a `VERSION` shell variable, and
-the pinned value matches the `compose.example.yaml` shipped with that release
-— substitute the latest release when you run them. You can also use a
-checkout of the matching tag.
+Open Console Gateway runs headlessly in Docker, serving the same dashboard and
+gateway on port `9042`. Pull the image from GHCR anonymously — it ships
+`linux/amd64` and `linux/arm64`, and Docker picks the right variant. Save the
+release's `compose.example.yaml` as `compose.yaml`, add `.env` if needed, and
+run the commands below; they pin one release through a `VERSION` shell
+variable, and the pinned value matches the `compose.example.yaml` shipped with
+that release — substitute the latest release when you run them. You can also
+use a checkout of the matching tag.
 
 ```bash
-VERSION=2.6.2
+VERSION=2.7.0
 git clone --branch "v$VERSION" --depth 1 https://github.com/klarkxy/open-console-gateway.git
 cd open-console-gateway
 cp .env.example .env
@@ -87,9 +87,9 @@ does not read or copy those files. Back up `cpa-auth` separately from
 configuration and keys. `docker compose down` preserves all three named
 volumes, while `docker compose down -v` permanently deletes them.
 
-Open **Extensions → CPA** after the container is running. Save the same CPA
-inference key from `cpa-config.yaml` and the Management password, run
-the application-level test, and perform OAuth inside CPA. The OCG container
+Open **Extensions → CPA** after the container is running. Save the CPA
+inference key from `cpa-config.yaml` together with the Management password,
+run the application-level test, and perform OAuth inside CPA. The OCG container
 does not start, stop, upgrade, or health-check CPA on your behalf.
 
 ## Optional Remote Browser
@@ -130,15 +130,15 @@ runtime volume, but always stop and back up the two sensitive persistent
 volumes, `ocg-data` and `ocg-browser-profiles`, together.
 
 Google may treat a data-center egress IP as high risk, require additional
-verification, or reject registration/login. Open Console Gateway does not bypass that
-risk control. Complete Google's checks yourself, or use the desktop build on
-a residential connection. Real payment is always an explicit user action on
-the official site.
+verification, or reject registration/login. Open Console Gateway does not
+bypass that risk control. Complete Google's checks yourself, or use the desktop
+build on a residential connection. Real payment is always an explicit user
+action on the official site.
 
 ## Administrator Bootstrap
 
-`OCG_ADMIN_USERNAME` and `OCG_ADMIN_PASSWORD` create the administrator **only
-when the database has no administrator yet**.
+The administrator is created by `OCG_ADMIN_USERNAME` and `OCG_ADMIN_PASSWORD`
+**only when the database has no administrator yet**.
 
 - Both must be set together; setting only one stops startup with an error.
 - Once an administrator exists, later environment changes do not reset it.
@@ -167,6 +167,9 @@ the saved SQLite value, and an invalid value stops startup. It does not
 configure the listener, DNS, or reverse proxy. Normally use
 `https://ocg.example.com`, not `/dashboard/` or a concrete API endpoint; a
 trailing `/v1` is accepted.
+
+This covers the deployment encryption key, not the Gateway **Key** clients
+authenticate with. Regenerate the Gateway Key if it leaks.
 
 ## Runtime Behavior
 
@@ -219,7 +222,7 @@ provenance, and a GitHub signed provenance attestation. Inspect and verify a
 release with:
 
 ```bash
-VERSION=2.6.2
+VERSION=2.7.0
 docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:$VERSION
 docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:$VERSION
 gh attestation verify \
@@ -230,10 +233,10 @@ gh attestation verify \
   --repo klarkxy/open-console-gateway
 ```
 
-Both `gh attestation verify` commands require an authenticated GitHub CLI. Public pulls are
-anonymous; if the OCI client still requests registry credentials,
-authenticate to `ghcr.io` with a token that can read packages. Provenance
-proves how the artifact was produced.
+Both `gh attestation verify` commands require an authenticated GitHub CLI.
+Public pulls are anonymous; if the OCI client still requests registry
+credentials, authenticate to `ghcr.io` with a token that can read packages.
+Provenance proves how the artifact was produced.
 
 Regenerate the Key if it leaks.
 

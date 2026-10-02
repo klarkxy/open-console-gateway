@@ -32,15 +32,18 @@ proposal or pull request, with corresponding code and documentation changes.
   stability is not guaranteed by the public Provider API, so manual refresh
   validates exact GOAT caps and fails closed on schema or plan drift. Its
   public model directory still cannot validate a stored Key, so authentication
-  failure is only known from real inference 401/403. Custom API uses the shared HTTP adapter under the trusted-administrator URL boundary.
+  failure is only known from real inference 401/403. Custom API uses the shared
+  HTTP adapter under the trusted-administrator URL boundary.
 - Per-model/per-protocol overrides still use remounted Account-path handlers
   under `/dashboard/api/v4`. Custom account-level per-protocol probing has no
   dedicated endpoint; that probe path returns 410. Custom verify and model
   discovery are the live Custom operational paths.
 - The V4 operation digest key (`dashboard_operation_digest_key`) lives in the
   same SQLite file as the credential Keys (AES-256-GCM `v2:` ciphertext).
-- V4 destination PATCH/DELETE use a shared transactional HTTP configuration service. Operational Account DTOs and legacy IDs remain compatibility boundaries for management and old imports; normal request planning reads destinations and execution credentials directly.
-
+- V4 destination PATCH/DELETE use a shared transactional HTTP configuration
+  service. Operational Account DTOs and legacy IDs remain compatibility
+  boundaries for management and old imports; normal request planning reads
+  destinations and execution credentials directly.
 
 ## Deliberate Non-Goals
 
@@ -57,13 +60,15 @@ proposal or pull request, with corresponding code and documentation changes.
 - `/embeddings`, Gemini `embedContent` (501), or Gemini `countTokens` as a
   real upstream count (501 so Gemini CLI can fall back locally).
 - Gemini as an upstream protocol.
-- Price-table fetch, multipliers, and price-based estimates are not features. Zen catalog polling stays manual.
+- Price-table fetch, multipliers, and price-based estimates are not features.
+  Zen catalog polling stays manual.
 - Cross-engine reuse of legacy WebView profiles.
 - Database downgrade support, or opening a newer schema with an older binary.
 - Windows/Linux ARM64 desktop packages, 32-bit x86, RPM, Snap, app-store
   packages, Windows Authenticode, or Apple notarization. This does not exclude
   the supported Linux ARM64 container image.
 - A second Cosign image signature on top of GitHub provenance.
+
 ---
 
 [Maintainer guide index](../MAINTAINER.md) · [简体中文](known-debt.zh-CN.md) · [Docs index](../README.md)

@@ -312,4 +312,4 @@ capabilities。`AccountCard` 不再挂在这个页面上。Providers 左侧列�
 
 ---
 
-[维护者指南索引](../MAINTAINER.zh-CN.md) · [English](account-model-unification.md) · [文档索引](../README.md)
+[维护者指南索引](../MAINTAINER.zh-CN.md) · [English](account-model-unification.md) · [文档索引](../README.zh-CN.md)

@@ -22,6 +22,7 @@ HTTP clients: `src/api/dashboard-v3.ts` (shared transport) and
 `src/api/providers.ts`, and `src/api/connections.ts`. Images:
 `Dockerfile`, `Dockerfile.browser`, `compose.yaml`, `compose.example.yaml`,
 `docker-bake.hcl`.
+
 ---
 
 [Maintainer guide index](../MAINTAINER.md) · [简体中文](layout.zh-CN.md) · [Docs index](../README.md)

@@ -48,7 +48,7 @@ reinstall into the remembered directory). macOS checks universal
 tests (`cpa_runtime::host`) that Linux already covered in quality.yml.
 Linux launches the AppImage under Xvfb.
 
-## Updater signing
+## Updater Signing
 
 Generate the key once outside the checkout:
 
@@ -88,7 +88,7 @@ gate on the first run.
 Publishes `docs/` to GitHub Pages (`docs/index.html`). Set the repository
 Pages source to **GitHub Actions** before the first deployment.
 
-## What CI does not cover
+## What CI Does Not Cover
 
 Quality covers frontend + Linux Rust excluding the desktop crate + Windows
 desktop unit tests. Native installer smokes run on candidates and tags.
@@ -101,6 +101,7 @@ Choose applicable manual checks using [Release Procedure](releasing.md) and
 record omissions. Real payment is not a routine release requirement. Database
 downgrade is unsupported; rollback uses a pre-upgrade backup as described in
 [Storage And Migrations](storage-migration.md).
+
 ---
 
 [Maintainer guide index](../MAINTAINER.md) · [简体中文](ci.zh-CN.md) · [Docs index](../README.md)

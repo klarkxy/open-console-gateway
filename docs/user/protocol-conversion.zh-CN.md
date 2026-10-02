@@ -90,7 +90,7 @@ Gemini 是客户端格式：Gateway 把 `contents`、纯文本 `systemInstructio
 
 - 非空 `safetySettings` 无法跨协议执行同一套内容安全阈值，直接返回 `400 INVALID_ARGUMENT`；省略、`null` 或空数组可以使用。`safetySettings` 只影响 Gateway 是否接受请求，不会作为上游执行的提示生效。
 - `generationConfig.topK` 与 `generationConfig.thinkingConfig` 只作为跨协议兼容提示接受；采样、推理预算和 thoughts 展示不保证与 Google Gemini 等价，实际能力由所选 OpenCode-Go 模型决定。
-- 其他无法跨协议保留的非空生成选项（包括 `seed`、presence/frequency penalty、 logprobs 与 media resolution）会返回 `400`，不会静默丢弃。
+- 其他无法跨协议保留的非空生成选项（包括 `seed`、presence/frequency penalty、logprobs 与 media resolution）会返回 `400`，不会静默丢弃。
 - `cachedContent`、`fileData`、Google Search、URL Context、Code Execution、多模态 function response、function response 的 schema/behavior、`VALIDATED` 函数调用模式、`candidateCount` 大于 1、非 TEXT 输出模态会返回 `400`。图片请改用 base64 `inlineData`，支持 PNG、JPEG、GIF、WebP。
 - `countTokens` 与 `embedContent` 返回 `501 UNIMPLEMENTED`；Gemini CLI 对前者失败可使用本地估算，Gateway 当前没有 embeddings 路由。
 
