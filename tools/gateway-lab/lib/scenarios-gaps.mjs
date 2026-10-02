@@ -574,12 +574,16 @@ export async function runImportExport(runtime, collector) {
 export async function runUnpricedAttribution(runtime, collector) {
   try {
     const chat = protocolSlotsOf(runtime.started).find((slot) => slot.slot === "chat");
-    await request(runtime.gatewayBase, "/v1/chat/completions", "POST", input("chat", chat.publicModel, false), inferenceHeaders("chat", runtime.gatewayKey));
+    const response = await request(runtime.gatewayBase, "/v1/chat/completions", "POST", input("chat", chat.publicModel, false), inferenceHeaders("chat", runtime.gatewayKey));
+    assert.equal(response.status, 200, await response.text());
     const logs = await latestForwardLogs(runtime.api);
     const last = logs[0] || logs[logs.length - 1];
     const costState = last?.costState || last?.cost_state || last?.status;
     assert.ok(last, "missing forward log");
-    assert.ok(/unpriced|success_unpriced|not_applicable/i.test(String(costState)), `expected unpriced attribution, got ${costState}`);
+    assert.ok(/^(?:unknown|unpriced|success_unpriced|not_applicable)$/i.test(String(costState)), `expected unknown cost attribution, got ${costState}`);
+    assert.equal(last.accountId || last.account_id, chat.accountId);
+    assert.ok(last.cost == null, "missing cost must not become zero");
+    assert.ok((last.rawCostUsd ?? last.raw_cost_usd) == null, "missing raw cost must remain unknown");
     gw(collector, "unpriced attribution", { scenarioId: "gw.unpriced", costState });
   } catch (error) {
     collector.fail("unpriced attribution", error, { scenarioId: "gw.unpriced" });
