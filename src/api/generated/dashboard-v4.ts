@@ -112,6 +112,8 @@ export type DashboardApiV4 =
   | BillingModel
   | BillingSource
   | BillingStatus
+  | BillingSnapshotRequest
+  | BillingSnapshots
   | CreditRate
   | MonthlyCredits
   | CreditConfiguration
@@ -1774,6 +1776,20 @@ export interface UsageSyncState {
   lastExpeditedAt: string | null;
   lastSuccessAt: string | null;
   nextEligibleAt: string | null;
+}
+/**
+ * Bounded, local-only batch read; it is not a control-plane mutation.
+ */
+export interface BillingSnapshotRequest {
+  accountIds: string[];
+}
+export interface BillingSnapshots {
+  errors: {
+    [k: string]: V3Error;
+  };
+  processGeneration: number;
+  revision: number;
+  statuses: BillingStatus[];
 }
 /**
  * Required process-scoped mutation precondition.

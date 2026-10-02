@@ -882,7 +882,7 @@ const {
   automaticRefreshTarget,
   loadQuotaLimits,
   loadAccountUsage,
-  ensureAccountUsage,
+  loadAccountUsageSnapshots,
   revalidateAccountUsage,
   retryQuotaLimits,
   forgetAccount,
@@ -2658,15 +2658,12 @@ async function loadAccounts(): Promise<boolean> {
 
 let usageReadGeneration = 0;
 async function loadUsageSnapshots(list = accounts.value, refresh = false): Promise<void> {
-  const generation = ++usageReadGeneration;
-  const session = billingStore.sessionEpoch;
-  await mapWithConcurrency(list.filter(account => accountIsReady(account)
-    && (accountHasUsageDisplay(account) || (!providerCatalog.value && !platformStore.linkForAccount(account.id)))), 4, async account => {
-    // Route identity changes before KeepAlive's leave transition finishes.
-    if (generation !== usageReadGeneration || session !== billingStore.sessionEpoch
-      || !accountsViewActive || route.name !== "accounts" || !sessionStore.authenticated) return;
-    await (refresh ? loadAccountUsage(account.id) : ensureAccountUsage(account.id));
-  });
+  usageReadGeneration += 1;
+  if (!accountsViewActive || route.name !== "accounts" || !sessionStore.authenticated) return;
+  const ids = list.filter(account => accountIsReady(account)
+    && (accountHasUsageDisplay(account) || (!providerCatalog.value && !platformStore.linkForAccount(account.id))))
+    .map(account => account.id);
+  await loadAccountUsageSnapshots(ids, refresh);
 }
 
 async function loadRegistrationOptions(): Promise<void> {

@@ -152,3 +152,19 @@ pub struct CreditGrantRequest {
     #[serde(flatten)]
     pub expectation: crate::dashboard_v3::MutationExpectation,
 }
+
+/// Bounded, local-only batch read; it is not a control-plane mutation.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BillingSnapshotRequest {
+    pub account_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BillingSnapshots {
+    pub statuses: Vec<BillingStatus>,
+    pub errors: std::collections::BTreeMap<String, crate::dashboard_v3::V3Error>,
+    pub revision: u64,
+    pub process_generation: u64,
+}

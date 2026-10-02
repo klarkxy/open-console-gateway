@@ -473,13 +473,17 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct V3ApiError {
     status: StatusCode,
     body: V3Error,
 }
 
 impl V3ApiError {
+    pub(crate) fn envelope(&self) -> &V3Error {
+        &self.body
+    }
+
     pub(crate) fn unauthorized() -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
@@ -741,7 +745,7 @@ pub(crate) fn parse_mutation_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T
 /// Operational-body parser. Unknown fields and malformed JSON are
 /// `invalidJson`. Unlike [`parse_mutation_json`], this does not require
 /// `expectedRevision`.
-fn parse_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, V3ApiError> {
+pub(crate) fn parse_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, V3ApiError> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| V3ApiError::invalid_json())?;
     if !value.is_object() {
         return Err(V3ApiError::invalid_json());

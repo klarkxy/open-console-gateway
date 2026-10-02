@@ -646,6 +646,28 @@ export function useAccountUsage(
     usageRefreshLoadingSelectors.clear();
   }, { flush: "sync" });
 
+  async function loadAccountUsageSnapshots(ids: string[], refresh = false): Promise<void> {
+    if (disposed) return;
+    const targets = ids.flatMap(id => {
+      const account = accounts.value.find(account => account.id === id);
+      if (!account || !accountIsReady(account)) return [];
+      const binding = bindingFor(account);
+      const slot = billing.slotFor(id).value;
+      if (!refresh && slot?.loaded && !slot.error && slot.boundVersion === binding) return [];
+      return [{ accountId: id, binding }];
+    });
+    const current = new Map(targets.map(target => {
+      const account = accounts.value.find(account => account.id === target.accountId)!;
+      return [target.accountId, requestStillCurrent(account)];
+    }));
+    await billing.loadMany(targets);
+    for (const { accountId } of targets) {
+      if (!current.get(accountId)?.()) continue;
+      const account = accounts.value.find(account => account.id === accountId);
+      if (account && usageCapabilities(account).manual) syncUsageEdits(accountId, getUsage(accountId));
+    }
+  }
+
   function ensureAccountUsage(accountId: string): Promise<void> {
     const account = accounts.value.find(item => item.id === accountId);
     if (!account) return Promise.resolve();
@@ -683,6 +705,7 @@ export function useAccountUsage(
     loadQuotaLimits,
     loadAccountUsage,
     ensureAccountUsage,
+    loadAccountUsageSnapshots,
     revalidateAccountUsage,
     retryQuotaLimits,
     forgetAccount,

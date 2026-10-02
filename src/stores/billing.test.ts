@@ -702,3 +702,62 @@ test("initialization cannot start its write after logout or rebinding during its
     assert.equal(store.byId["acc-1"]?.status?.credits?.remaining, transition === "logout" ? undefined : 456);
   }
 });
+
+
+test("batch reads retain good data on per-account errors and ignore logged-out replies", async () => {
+  setActivePinia(createPinia());
+  const store = useBillingStore();
+  const original = billingApi.snapshots;
+  try {
+    billingApi.snapshots = async ids => ({
+      statuses: ids.map(accountId => billingStatus({ accountId })), errors: {}, revision: 3, processGeneration: 99,
+    });
+    await store.loadMany([{ accountId: "a", binding: "v1" }, { accountId: "b", binding: "v1" }]);
+    const previous = store.slotFor("b").value?.status;
+    billingApi.snapshots = async () => ({
+      statuses: [billingStatus({ accountId: "a", revision: 4 })],
+      errors: { b: { code: "internal_error", message: "failed", currentRevision: null, processGeneration: null } },
+      revision: 4, processGeneration: 99,
+    });
+    await store.loadMany([{ accountId: "a", binding: "v1" }, { accountId: "b", binding: "v1" }]);
+    assert.equal(store.slotFor("a").value?.status?.revision, 4);
+    assert.equal(store.slotFor("b").value?.status, previous);
+    assert.equal(store.slotFor("b").value?.error, "load_failed");
+    let resolve!: (value: Awaited<ReturnType<typeof billingApi.snapshots>>) => void;
+    billingApi.snapshots = () => new Promise(done => { resolve = done; });
+    const pending = store.loadMany([{ accountId: "a", binding: "v2" }]);
+    store.clear();
+    resolve({ statuses: [billingStatus({ accountId: "a" })], errors: {}, revision: 3, processGeneration: 99 });
+    await pending;
+    assert.equal(store.slotFor("a").value, undefined);
+  } finally { billingApi.snapshots = original; }
+});
+
+
+test("batch loading bounds requests and never overwrites a newer binding", async () => {
+  setActivePinia(createPinia());
+  const store = useBillingStore();
+  const oldSnapshots = billingApi.snapshots;
+  const oldStatus = billingApi.status;
+  try {
+    const requests: string[][] = [];
+    billingApi.snapshots = async ids => {
+      requests.push(ids);
+      return { statuses: ids.map(accountId => billingStatus({ accountId })), errors: {}, revision: 3, processGeneration: 99 };
+    };
+    await store.loadMany(Array.from({ length: 65 }, (_, i) => ({ accountId: `a${i}`, binding: "v1" })));
+    assert.deepEqual(requests.map(ids => ids.length), [32, 32, 1]);
+    let resolve!: (value: Awaited<ReturnType<typeof billingApi.snapshots>>) => void;
+    billingApi.snapshots = () => new Promise(done => { resolve = done; });
+    const oldRead = store.loadMany([{ accountId: "a0", binding: "v1" }]);
+    billingApi.status = async accountId => billingStatus({ accountId, revision: 7 });
+    await store.load("a0", "v2");
+    resolve({ statuses: [billingStatus({ accountId: "a0", revision: 3 })], errors: {}, revision: 3, processGeneration: 99 });
+    await oldRead;
+    assert.equal(store.slotFor("a0").value?.boundVersion, "v2");
+    assert.equal(store.slotFor("a0").value?.status?.revision, 7);
+  } finally {
+    billingApi.snapshots = oldSnapshots;
+    billingApi.status = oldStatus;
+  }
+});
