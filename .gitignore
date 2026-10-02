@@ -74,6 +74,8 @@ diff.txt
 
 # Agent session artifacts (audit reports, screenshots, scratch logs)
 .artifacts/
+/.acl-out/
+/.worktrees/
 /.playwright-cli/
 /.playwright-mcp/
 /target-agent/

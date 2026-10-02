@@ -58,7 +58,7 @@ if (isMain) {
 
   console.log(`Gateway development port: ${gatewayPort}`);
   console.log(`Gateway data directory: ${dataDir}`);
-  console.log(`Runtime log level: ${env.OCG_LOG_LEVEL}`);
+  console.log(`Process log filter: ${env.RUST_LOG}`);
   console.log(`Request capture: ${env.OCG_DEBUG_REQUESTS === "1" ? env.OCG_DEBUG_DIR : "disabled"}`);
 
   try {

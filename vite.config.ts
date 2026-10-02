@@ -34,7 +34,43 @@ export default defineConfig({
       },
     },
     watch: {
-      ignored: ["**/target/**", "**/target-agent/**", "**/src-tauri/target/**"],
+      // The watcher is async, but its initial scan still costs seconds and
+      // competes with startup: the repo root also holds ~18k non-app files
+      // (pnpm store, Rust workspace, agent scratch, test output). Ignoring them
+      // keeps HMR cheap without touching the module graph -- `src`, `assets`
+      // and `resources` stay watched because index.html and
+      // provider-presets.test.ts resolve into them.
+      ignored: [
+        "**/node_modules/**",
+        "**/target/**",
+        "**/target-agent/**",
+        "**/src-tauri/**",
+        "**/crates/**",
+        // pnpm store + npm cache: largest non-app tree in the repo root.
+        "**/.pnpm-store/**",
+        "**/.playwright-cli/**",
+        "**/.playwright-mcp/**",
+        "**/playwright-out/**",
+        "**/dist/**",
+        "**/release/**",
+        "**/tmp/**",
+        "**/tools/**",
+        "**/docs/**",
+        "**/skills/**",
+        "**/integrations/**",
+        "**/browser/**",
+        "**/schema/**",
+        // Local worktrees/artifacts live outside the app graph; never watch them.
+        "**/.worktrees/**",
+        "**/.artifacts/**",
+        "**/.acl-out/**",
+        "**/.agent/**",
+        "**/.codegraph/**",
+        "**/.githooks/**",
+        "**/.zcode/**",
+        // Stale bundles from interrupted `vite` config loads.
+        "**/*.timestamp-*.mjs",
+      ],
     },
   },
   envPrefix: ["VITE_", "TAURI_"],
