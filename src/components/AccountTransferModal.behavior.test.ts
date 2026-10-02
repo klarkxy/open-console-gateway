@@ -342,7 +342,7 @@ before(async () => {
     build: {
       emptyOutDir: true,
       lib: {
-        entry: path.resolve(".artifacts/frontend-logic-repair/account-tests/transfer-entry.ts"),
+        entry: path.resolve("src/test-helpers/transfer-entry.ts"),
         fileName: () => "bundle.mjs",
         formats: ["es"],
       },

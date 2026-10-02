@@ -723,7 +723,7 @@ before(async () => {
       emptyOutDir: true,
       target: "esnext",
       lib: {
-        entry: path.resolve(".artifacts/frontend-logic-repair/account-tests/accounts-entry.ts"),
+        entry: path.resolve("src/test-helpers/accounts-entry.ts"),
         fileName: () => "bundle.mjs",
         formats: ["es"],
       },

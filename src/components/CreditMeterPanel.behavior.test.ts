@@ -11,7 +11,7 @@ import {
   loadRetirementBundle,
   type RecordedCall,
   type RetirementBundle,
-} from "../../.artifacts/frontend-logic-repair/frontend-retirement-tests/panel-host.ts";
+} from "../test-helpers/panel-host.ts";
 import {
   createVueHostRenderer,
   installTestWindow,

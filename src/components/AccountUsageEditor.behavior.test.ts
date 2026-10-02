@@ -9,7 +9,7 @@ import {
   installHostElementMethods,
   loadQuotaBundle,
   type QuotaBundle,
-} from "../../.artifacts/frontend-logic-repair/manual-quota-tests/panel-host.ts";
+} from "../test-helpers/panel-host.ts";
 import {
   createVueHostRenderer,
   installTestWindow,

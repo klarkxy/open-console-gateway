@@ -709,7 +709,7 @@ describe("settings page canonical confirmation", { concurrency: false }, () => {
         emptyOutDir: true,
         target: "esnext",
         lib: {
-          entry: path.resolve(".artifacts/frontend-logic-repair/settings-ui-tests/entry.ts"),
+          entry: path.resolve("src/test-helpers/settings-entry.ts"),
           fileName: () => "bundle.mjs",
           formats: ["es"],
         },
