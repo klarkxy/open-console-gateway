@@ -151,6 +151,7 @@ struct FakeState {
     delay: Duration,
     journal: Option<SharedJournal>,
     listener: String,
+    first_response_gate: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
 }
 
 #[derive(Clone)]
@@ -176,7 +177,14 @@ pub(crate) async fn start_fake_upstream_with_delay(
     replies: HashMap<String, VecDeque<FakeReply>>,
     delay: Duration,
 ) -> (String, FakeCalls, tokio::sync::oneshot::Sender<()>) {
-    start_fake_upstream_inner(replies, delay, None, String::new()).await
+    start_fake_upstream_inner(replies, delay, None, String::new(), None).await
+}
+
+pub(crate) async fn start_fake_upstream_with_gate(
+    replies: HashMap<String, VecDeque<FakeReply>>,
+    gate: tokio::sync::oneshot::Receiver<()>,
+) -> (String, FakeCalls, tokio::sync::oneshot::Sender<()>) {
+    start_fake_upstream_inner(replies, Duration::ZERO, None, String::new(), Some(gate)).await
 }
 
 /// Start a loopback upstream that appends every hit to `journal` under `label`.
@@ -188,7 +196,7 @@ pub(crate) async fn start_fake_upstream_on_journal(
     replies: HashMap<String, VecDeque<FakeReply>>,
     journal: SharedJournal,
 ) -> (String, FakeCalls, tokio::sync::oneshot::Sender<()>) {
-    start_fake_upstream_inner(replies, Duration::ZERO, Some(journal), label.into()).await
+    start_fake_upstream_inner(replies, Duration::ZERO, Some(journal), label.into(), None).await
 }
 
 async fn start_fake_upstream_inner(
@@ -196,6 +204,7 @@ async fn start_fake_upstream_inner(
     delay: Duration,
     journal: Option<SharedJournal>,
     listener: String,
+    first_response_gate: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> (String, FakeCalls, tokio::sync::oneshot::Sender<()>) {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let app = Router::new()
@@ -207,6 +216,7 @@ async fn start_fake_upstream_inner(
             delay,
             journal,
             listener,
+            first_response_gate: Arc::new(Mutex::new(first_response_gate)),
         });
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -373,6 +383,10 @@ async fn fake_reply(
             cookie: header(&headers, "cookie"),
         });
 
+    let first_gate = state.first_response_gate.lock().unwrap().take();
+    if let Some(gate) = first_gate {
+        let _ = gate.await;
+    }
     if !state.delay.is_zero() {
         tokio::time::sleep(state.delay).await;
     }

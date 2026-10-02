@@ -11,6 +11,7 @@ use axum::extract::{Path, State};
 use chrono::Utc;
 
 use crate::custom::{self, CustomVerificationContract, CustomVerifyFailure};
+use crate::log_types::OperationOutcome;
 use crate::models::{
     Account as ModelAccount, AccountCustomConfig as ModelCustomConfig,
     AccountModelCapability as ModelCapability, AppConfig,
@@ -137,14 +138,102 @@ pub(super) async fn verify_account(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<AccountMutation>, V3ApiError> {
-    let input = parse_mutation_json::<AccountVerify>(&body)?;
+    let mut op =
+        super::settings::open_dashboard(&state, "account.verify", "account", Some(id.clone()));
+    let input = match parse_mutation_json::<AccountVerify>(&body) {
+        Ok(input) => input,
+        Err(error) => {
+            return super::settings::record_after(
+                op,
+                &state,
+                &[],
+                (None, None, None),
+                None,
+                Err(error),
+            )
+            .map(Json);
+        }
+    };
     let prepared = {
         let _settings_update = state.settings_update.lock();
-        prepare_verify(&state, &id, &input.expectation)?
+        prepare_verify(&state, &id, &input.expectation)
+    };
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return super::settings::record_after(
+                op,
+                &state,
+                &[],
+                (None, None, None),
+                None,
+                Err(error),
+            )
+            .map(Json);
+        }
     };
     match prepared {
-        PreparedVerify::Ready(mutation) => Ok(Json(*mutation)),
-        PreparedVerify::Custom(job) => complete_custom_verification(&state, *job).await,
+        PreparedVerify::Ready(mutation) => super::settings::record_after(
+            op,
+            &state,
+            &[],
+            (Some(1), Some(1), None),
+            None,
+            Ok(Json(*mutation)),
+        ),
+        PreparedVerify::Custom(job) => {
+            op.subject(job.account.id.clone());
+            op.accepted(super::settings::metadata_for(
+                &state,
+                &[],
+                Some(1),
+                Some(0),
+                None,
+                None,
+            ));
+            let mut effect = super::settings::CommittedEffect::Atomic;
+            let result = complete_custom_verification(&state, *job, &mut effect).await;
+            match &result {
+                Ok(Json(mutation)) => {
+                    let verified = mutation.account.as_ref().is_some_and(|account| {
+                        account.verification_status
+                            == super::types::AccountVerificationStatus::Verified
+                    });
+                    let (outcome, reason, completed, failed) = if verified {
+                        (OperationOutcome::Success, None, Some(1), None)
+                    } else {
+                        (
+                            OperationOutcome::Failed,
+                            Some("verificationFailed"),
+                            None,
+                            Some(1),
+                        )
+                    };
+                    op.complete(
+                        outcome,
+                        reason,
+                        super::settings::metadata_for(
+                            &state,
+                            &[],
+                            Some(1),
+                            completed,
+                            failed,
+                            None,
+                        ),
+                    );
+                    result
+                }
+                Err(_) => super::settings::record_effect(
+                    op,
+                    &state,
+                    &[],
+                    (Some(1), None, Some(1)),
+                    None,
+                    effect,
+                    result,
+                ),
+            }
+        }
     }
 }
 
@@ -272,6 +361,7 @@ fn capture_custom_verification_job(
 async fn complete_custom_verification(
     state: &CoreState,
     job: CustomVerificationJob,
+    effect: &mut super::settings::CommittedEffect,
 ) -> Result<Json<AccountMutation>, V3ApiError> {
     let result = run_custom_probe(&job).await;
     let _settings_update = state.settings_update.lock();
@@ -298,8 +388,8 @@ async fn complete_custom_verification(
         ));
     }
     let revision = state.bump_settings_revision();
-    let account = load_model_account(state, &job.account.id)?;
-    mutation_at(state, account, revision).map(Json)
+    let account = effect.note_follow_up(load_model_account(state, &job.account.id))?;
+    effect.note_follow_up(mutation_at(state, account, revision).map(Json))
 }
 
 async fn run_custom_probe(job: &CustomVerificationJob) -> Result<(), CustomVerifyFailure> {

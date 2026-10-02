@@ -559,3 +559,28 @@ async fn configuration_writes_still_advance_settings_revision() {
     drop(state);
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[tokio::test]
+async fn create_records_one_success_for_the_generated_platform_id() {
+    let (dir, state) = open_state("operation-create");
+    let id = create_parent(&state, "ops", "https://example.test", None).await;
+    let (outcome, subject, actor, metadata): (String, String, Option<String>, String) = state
+        .db
+        .lock()
+        .conn
+        .query_row(
+            "SELECT outcome, subject_id, actor_id, metadata_json
+             FROM operation_logs WHERE action = 'platform.create'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(outcome, "success");
+    assert_eq!(subject, id);
+    assert!(actor.is_none());
+    assert!(metadata.contains("kind"));
+    assert!(!metadata.contains("example.test"));
+    assert!(!metadata.contains("ops"));
+    drop(state);
+    std::fs::remove_dir_all(dir).ok();
+}

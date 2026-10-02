@@ -213,6 +213,18 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "TemporaryPolicyRestrictions",
     "TemporaryPolicyUpdate",
     "TemporaryPolicyClearRequest",
+    "OperationSource",
+    "OperationOutcome",
+    "OperationMetadata",
+    "OperationLog",
+    "OperationLogPage",
+    "OperationLogQuery",
+    "RequestLog",
+    "RequestLogSummary",
+    "RequestLogPage",
+    "RequestLogQuery",
+    "RequestAttempts",
+    "ForwardLog",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -594,6 +606,10 @@ pub(crate) struct StoredOnboardingCommitResult {
     pub target_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+    /// Audit identity for this committed ledger result. Absent on rows written
+    /// before the field existed. Not part of the public commit DTO.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1960,6 +1976,16 @@ pub fn contract_schema() -> Value {
     include_type::<TemporaryPolicyConfiguration>(&mut serialize);
     include_type::<TemporaryPolicyRestriction>(&mut serialize);
     include_type::<TemporaryPolicyRestrictions>(&mut serialize);
+    include_type::<crate::log_types::OperationSource>(&mut serialize);
+    include_type::<crate::log_types::OperationOutcome>(&mut serialize);
+    include_type::<crate::log_types::OperationMetadata>(&mut serialize);
+    include_type::<crate::log_types::OperationLog>(&mut serialize);
+    include_type::<crate::log_types::OperationLogPage>(&mut serialize);
+    include_type::<crate::log_types::RequestLog>(&mut serialize);
+    include_type::<crate::log_types::RequestLogSummary>(&mut serialize);
+    include_type::<crate::log_types::RequestLogPage>(&mut serialize);
+    include_type::<super::logs::RequestAttempts>(&mut serialize);
+    include_type::<crate::dashboard_v3::ForwardLog>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -1999,6 +2025,8 @@ pub fn contract_schema() -> Value {
     include_type::<TemporaryPolicyRule>(&mut deserialize);
     include_type::<TemporaryPolicyMatch>(&mut deserialize);
     include_type::<TemporaryPolicyBackoff>(&mut deserialize);
+    include_type::<crate::log_types::OperationLogQuery>(&mut deserialize);
+    include_type::<crate::log_types::RequestLogQuery>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }
@@ -2012,7 +2040,7 @@ pub fn contract_schema() -> Value {
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "DashboardApiV4",
-        "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection, template, destination, and credential listings are secret-free. OnboardingCommitRequest.secretInput, CredentialRotateRequest.secretInput, and IdentityCredentialCreateRequest.secretInput are write-only.",
+        "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection, template, destination, and credential listings are secret-free. OnboardingCommitRequest.secretInput, CredentialRotateRequest.secretInput, and IdentityCredentialCreateRequest.secretInput are write-only. Operation and request log reads redact known stored secrets.",
         "anyOf": catalog_refs(&defs),
         "$defs": defs })
 }

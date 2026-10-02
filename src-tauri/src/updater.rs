@@ -17,7 +17,7 @@ pub fn configure(app: &AppHandle, state: CoreState) -> crate::Result<()> {
     }
 
     let Some(public_key) = embedded_public_key() else {
-        let _ = state.db.lock().log_gateway(
+        ocg_core::process_log::diagnostic(
             "warn",
             "update",
             "signed desktop updates are disabled because this build has no updater public key",
@@ -30,7 +30,7 @@ pub fn configure(app: &AppHandle, state: CoreState) -> crate::Result<()> {
         .ok()
         .is_some_and(|path| path.starts_with("/Volumes"))
     {
-        let _ = state.db.lock().log_gateway(
+        ocg_core::process_log::diagnostic(
             "warn",
             "update",
             "signed desktop updates are disabled while the app is running from a mounted DMG",
@@ -52,8 +52,12 @@ pub fn configure(app: &AppHandle, state: CoreState) -> crate::Result<()> {
         tauri::async_runtime::spawn(async move {
             if let Err(error) = install_update(app, state.clone(), expected_version).await {
                 let message = format!("signed desktop update failed: {error:#}");
-                state.set_desktop_update_failed(message.clone());
-                let _ = state.db.lock().log_gateway("error", "update", &message);
+                state.set_desktop_update_failed(message);
+                ocg_core::process_log::diagnostic(
+                    "error",
+                    "update",
+                    "signed desktop update failed",
+                );
             }
         });
         Ok(())
@@ -100,12 +104,9 @@ async fn install_update(
         .await?;
 
     state.set_desktop_update_installing();
-    let _ = state.db.lock().log_gateway(
-        "info",
-        "update",
-        &format!("installing signed desktop update {expected_version}"),
-    );
+    ocg_core::process_log::diagnostic("info", "update", "installing signed desktop update");
     update.install(&bytes)?;
+    state.set_desktop_update_completed();
 
     #[cfg(not(windows))]
     app.request_restart();

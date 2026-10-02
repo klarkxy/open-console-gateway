@@ -1,5 +1,5 @@
 {
-  "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection, template, destination, and credential listings are secret-free. OnboardingCommitRequest.secretInput, CredentialRotateRequest.secretInput, and IdentityCredentialCreateRequest.secretInput are write-only.",
+  "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection, template, destination, and credential listings are secret-free. OnboardingCommitRequest.secretInput, CredentialRotateRequest.secretInput, and IdentityCredentialCreateRequest.secretInput are write-only. Operation and request log reads redact known stored secrets.",
   "$defs": {
     "AccountAuthScheme": {
       "description": "Custom auth scheme. Wire values match V2 kebab-case.",
@@ -3478,6 +3478,262 @@
       ],
       "type": "string"
     },
+    "ForwardLog": {
+      "additionalProperties": false,
+      "description": "One redacted forward-log row plus native model identity. There is no\n`requestedAlias` field.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "accountName": {
+          "type": "string"
+        },
+        "attempt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cacheCreationTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "cachedTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "clientKeyId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "clientKeyName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "completionTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "cost": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "costState": {
+          "type": "string"
+        },
+        "credentialAccountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "diagnostic": true,
+        "durationMs": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "effectivePaidCostUsd": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "errorMessage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errorSource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errorStage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "httpStatus": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "localAdjustmentMultiplier": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "nativeCostCurrency": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativeCostUnit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativeCostValue": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "pricingRevisionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "promptTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "providerId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quotaDebit": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "quotaMultiplier": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "rawCostUsd": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestedModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resolvedAlias": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "route": {
+          "type": "string"
+        },
+        "routeAccountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "serviceTier": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string"
+        },
+        "upstreamModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "timestamp",
+        "model",
+        "accountId",
+        "accountName",
+        "routeAccountId",
+        "providerId",
+        "credentialAccountId",
+        "clientKeyId",
+        "clientKeyName",
+        "status",
+        "httpStatus",
+        "route",
+        "promptTokens",
+        "completionTokens",
+        "cachedTokens",
+        "cacheCreationTokens",
+        "cost",
+        "rawCostUsd",
+        "quotaDebit",
+        "effectivePaidCostUsd",
+        "pricingRevisionId",
+        "quotaMultiplier",
+        "localAdjustmentMultiplier",
+        "serviceTier",
+        "costState",
+        "errorMessage",
+        "requestId",
+        "attempt",
+        "errorSource",
+        "errorStage",
+        "durationMs",
+        "diagnostic",
+        "requestedModel",
+        "resolvedAlias",
+        "upstreamModel",
+        "nativeCostValue",
+        "nativeCostUnit",
+        "nativeCostCurrency"
+      ],
+      "type": "object"
+    },
     "HttpProtocolRouteDto": {
       "additionalProperties": false,
       "properties": {
@@ -4411,6 +4667,268 @@
       ],
       "type": "object"
     },
+    "OperationLog": {
+      "additionalProperties": false,
+      "description": "One user-operation receipt. `completed_at` is null only while `pending`.",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "actorId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "completedAt": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": {
+          "$ref": "#/$defs/OperationMetadata"
+        },
+        "operationId": {
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/OperationOutcome"
+        },
+        "reasonCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/OperationSource"
+        },
+        "startedAt": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "subjectId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subjectType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "operationId",
+        "startedAt",
+        "completedAt",
+        "action",
+        "source",
+        "actorId",
+        "subjectType",
+        "subjectId",
+        "outcome",
+        "reasonCode",
+        "metadata"
+      ],
+      "type": "object"
+    },
+    "OperationLogPage": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/OperationLog"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "offset": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "total": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "total",
+        "limit",
+        "offset"
+      ],
+      "type": "object"
+    },
+    "OperationLogQuery": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "endTime": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "startTime": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subjectId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subjectType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "OperationMetadata": {
+      "additionalProperties": false,
+      "description": "Allowlisted, non-secret facts about one user operation.",
+      "properties": {
+        "changedFields": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "compensated": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "completedCount": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "failedCount": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "relatedIds": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "requestedCount": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "revision": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "changedFields",
+        "requestedCount",
+        "completedCount",
+        "failedCount",
+        "revision",
+        "compensated",
+        "relatedIds"
+      ],
+      "type": "object"
+    },
+    "OperationOutcome": {
+      "enum": [
+        "pending",
+        "success",
+        "rejected",
+        "failed",
+        "partial",
+        "compensated"
+      ],
+      "type": "string"
+    },
+    "OperationSource": {
+      "enum": [
+        "dashboard",
+        "cli",
+        "desktop"
+      ],
+      "type": "string"
+    },
     "PlanDto": {
       "additionalProperties": false,
       "description": "Commercial offering embedded in a destination. Mirrors the domain `Plan`.",
@@ -5243,6 +5761,317 @@
         "declared"
       ],
       "type": "string"
+    },
+    "RequestAttempts": {
+      "additionalProperties": false,
+      "description": "Attempt detail reuses the V3 forward-log DTO.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ForwardLog"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "RequestLog": {
+      "additionalProperties": false,
+      "description": "One logical request projected from `forward_logs` attempts.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "accountName": {
+          "type": "string"
+        },
+        "attemptCount": {
+          "description": "Upstream attempts. A pre-upstream `attempt = 0` row contributes zero.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "cachedTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "clientKeyId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "clientKeyName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "completionTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "credentialAccountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "durationMs": {
+          "description": "Newest attempt's cumulative elapsed, only when that attempt recorded one.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "httpStatus": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "isLegacy": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "promptTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "providerId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recordedRowCount": {
+          "description": "Stored `forward_logs` rows in this logical request, including attempt 0.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestKey": {
+          "type": "string"
+        },
+        "requestedModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resolvedAlias": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "route": {
+          "type": "string"
+        },
+        "routeAccountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string"
+        },
+        "upstreamModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "requestKey",
+        "requestId",
+        "timestamp",
+        "status",
+        "httpStatus",
+        "model",
+        "requestedModel",
+        "resolvedAlias",
+        "upstreamModel",
+        "attemptCount",
+        "recordedRowCount",
+        "promptTokens",
+        "completionTokens",
+        "cachedTokens",
+        "durationMs",
+        "isLegacy",
+        "clientKeyId",
+        "clientKeyName",
+        "providerId",
+        "accountId",
+        "accountName",
+        "routeAccountId",
+        "credentialAccountId",
+        "route"
+      ],
+      "type": "object"
+    },
+    "RequestLogPage": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/RequestLog"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "offset": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "summary": {
+          "$ref": "#/$defs/RequestLogSummary"
+        },
+        "total": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "total",
+        "limit",
+        "offset",
+        "summary"
+      ],
+      "type": "object"
+    },
+    "RequestLogQuery": {
+      "additionalProperties": false,
+      "properties": {
+        "accountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credentialAccountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "endTime": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "keyId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "offset": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "providerId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "routeAccountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startTime": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RequestLogSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "cachedTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "completionTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "promptTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "totalAttempts": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "totalRequests": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "totalRequests",
+        "totalAttempts",
+        "promptTokens",
+        "completionTokens",
+        "cachedTokens"
+      ],
+      "type": "object"
     },
     "RoutingCard": {
       "additionalProperties": false,
@@ -6614,6 +7443,42 @@
     },
     {
       "$ref": "#/$defs/TemporaryPolicyClearRequest"
+    },
+    {
+      "$ref": "#/$defs/OperationSource"
+    },
+    {
+      "$ref": "#/$defs/OperationOutcome"
+    },
+    {
+      "$ref": "#/$defs/OperationMetadata"
+    },
+    {
+      "$ref": "#/$defs/OperationLog"
+    },
+    {
+      "$ref": "#/$defs/OperationLogPage"
+    },
+    {
+      "$ref": "#/$defs/OperationLogQuery"
+    },
+    {
+      "$ref": "#/$defs/RequestLog"
+    },
+    {
+      "$ref": "#/$defs/RequestLogSummary"
+    },
+    {
+      "$ref": "#/$defs/RequestLogPage"
+    },
+    {
+      "$ref": "#/$defs/RequestLogQuery"
+    },
+    {
+      "$ref": "#/$defs/RequestAttempts"
+    },
+    {
+      "$ref": "#/$defs/ForwardLog"
     }
   ],
   "title": "DashboardApiV4"

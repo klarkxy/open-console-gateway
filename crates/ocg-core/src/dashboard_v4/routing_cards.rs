@@ -23,27 +23,55 @@ pub(super) async fn replace(
     State(state): State<CoreState>,
     body: Bytes,
 ) -> Result<Json<RoutingCardList>, DestinationsError> {
-    let input = parse_mutation_json::<RoutingCardUpdate>(&body)?;
-    let _settings_update = state.settings_update.lock();
-    check_expectation(&state, &input.expectation)?;
-    // Preserve the destination read gate before changing any saved ranks.
-    snapshot(&state)?;
-    {
-        let db = state.db.lock();
-        let tx = db
-            .conn
-            .unchecked_transaction()
-            .map_err(V3ApiError::internal)?;
-        routing_cards::save_on(&tx, &input.cards)
-            .and_then(|()| routing_cards::reconcile_on(&tx))
-            .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
-        tx.commit().map_err(V3ApiError::internal)?;
-        // Membership/rank changes do not replace credentials or transport.
-        // Preserve conversation bindings and selector progress, as the legacy
-        // account-order writer does; each new request loads the saved ranks.
-        state.bump_settings_revision();
+    let receipt =
+        super::applications::DashboardReceipt::open(&state, "routing.replace", "routing", None);
+    let mut durable = None;
+    let mut card_count = 0_u32;
+    let result = (|| {
+        let input = parse_mutation_json::<RoutingCardUpdate>(&body)?;
+        let _settings_update = state.settings_update.lock();
+        check_expectation(&state, &input.expectation)?;
+        // Preserve the destination read gate before changing any saved ranks.
+        snapshot(&state)?;
+        card_count = super::applications::count_u32(input.cards.len());
+        {
+            let db = state.db.lock();
+            let tx = db
+                .conn
+                .unchecked_transaction()
+                .map_err(V3ApiError::internal)?;
+            routing_cards::save_on(&tx, &input.cards)
+                .and_then(|()| routing_cards::reconcile_on(&tx))
+                .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
+            tx.commit().map_err(V3ApiError::internal)?;
+            // Membership/rank changes do not replace credentials or transport.
+            // Preserve conversation bindings and selector progress, as the legacy
+            // account-order writer does; each new request loads the saved ranks.
+            state.bump_settings_revision();
+        }
+        durable = Some(super::applications::DurableEffect {
+            revision: state.settings_revision(),
+            completed: card_count,
+            failed: 1,
+            related_ids: Vec::new(),
+        });
+        snapshot(&state)
+    })();
+    if result.is_ok() {
+        durable = None;
     }
-    snapshot(&state).map(Json)
+    let card_count = card_count;
+    receipt
+        .observe(result, durable, |value| {
+            crate::log_types::OperationMetadata {
+                revision: Some(value.revision.revision),
+                requested_count: Some(card_count),
+                completed_count: Some(card_count),
+                failed_count: Some(0),
+                ..crate::log_types::OperationMetadata::default()
+            }
+        })
+        .map(Json)
 }
 
 /// Caller holds settings_update so revision, layout and rows describe one state.

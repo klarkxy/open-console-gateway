@@ -136,6 +136,20 @@ fn host_is_exact_loopback(parsed: &reqwest::Url) -> bool {
 pub(super) async fn check_update(
     State(state): State<CoreState>,
 ) -> Result<Json<UpdateCheck>, V3ApiError> {
+    let op = crate::user_operation::UserOperation::dashboard(
+        &state,
+        "desktop.update.check",
+        "desktop",
+        None,
+    );
+    let result = check_update_work(State(state.clone())).await;
+    op.result(&result);
+    result
+}
+
+async fn check_update_work(
+    State(state): State<CoreState>,
+) -> Result<Json<UpdateCheck>, V3ApiError> {
     let snapshot = {
         let _settings_update = state.settings_update.lock();
         CapturedUpdateCheck {
@@ -216,25 +230,25 @@ pub(super) async fn install_update(
     State(state): State<CoreState>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<DesktopUpdate>), V3ApiError> {
-    let input = parse_mutation_json::<InstallUpdate>(&body)?;
-    let _settings_update = state.settings_update.lock();
-    check_expectation(&state, &input.expectation)?;
-
-    let status = state.desktop_update_status();
-    let (current_version_parts, _) = parse_semver_version(&status.current_version)
-        .ok_or_else(|| V3ApiError::internal("application version is not valid SemVer"))?;
-    let (expected_version_parts, expected_version) = parse_semver_version(&input.expected_version)
-        .ok_or_else(|| {
-            V3ApiError::invalid_request_at(&state, "expectedVersion must be a valid SemVer version")
-        })?;
-    if !is_update_available(&current_version_parts, &expected_version_parts) {
-        return Err(V3ApiError::invalid_request_at(
-            &state,
-            "expectedVersion must be newer than the current version",
-        ));
-    }
-
-    match state.start_desktop_update(expected_version.to_string()) {
+    let op = super::settings::open_dashboard(&state, "desktop.update.install", "desktop", None);
+    // Keep CAS validation and acceptance in the same critical section.
+    let settings_update = state.settings_update.lock();
+    let expected_version = match prepare_desktop_install(&state, &body) {
+        Ok(version) => version,
+        Err(error) => {
+            drop(settings_update);
+            return super::settings::record_after(
+                op,
+                &state,
+                &[],
+                (None, None, None),
+                None,
+                Err(error),
+            );
+        }
+    };
+    // Accept this same operation before the starter can finish it.
+    match state.start_desktop_update_recorded(expected_version, op) {
         Ok(()) => Ok((
             StatusCode::ACCEPTED,
             Json(desktop_update_from_state(&state)),
@@ -258,6 +272,25 @@ pub(super) async fn install_update(
             )))
         }
     }
+}
+
+fn prepare_desktop_install(state: &CoreState, body: &Bytes) -> Result<String, V3ApiError> {
+    let input = parse_mutation_json::<InstallUpdate>(body)?;
+    check_expectation(state, &input.expectation)?;
+    let status = state.desktop_update_status();
+    let (current_version_parts, _) = parse_semver_version(&status.current_version)
+        .ok_or_else(|| V3ApiError::internal("application version is not valid SemVer"))?;
+    let (expected_version_parts, expected_version) = parse_semver_version(&input.expected_version)
+        .ok_or_else(|| {
+            V3ApiError::invalid_request_at(state, "expectedVersion must be a valid SemVer version")
+        })?;
+    if !is_update_available(&current_version_parts, &expected_version_parts) {
+        return Err(V3ApiError::invalid_request_at(
+            state,
+            "expectedVersion must be newer than the current version",
+        ));
+    }
+    Ok(expected_version.to_string())
 }
 
 struct CapturedUpdateCheck {

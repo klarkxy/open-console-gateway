@@ -239,11 +239,11 @@ pub(crate) fn ensure_fresh(state: &CoreState) {
                 let saved = save(&state.db.lock(), &catalog);
                 *state.modelsdev_catalog.write() = Arc::new(catalog);
                 if let Err(error) = saved {
-                    eprintln!("warning: failed to persist models.dev catalog: {error}");
+                    tracing::warn!("failed to persist models.dev catalog: {error}");
                 }
             }
             Err(error) => {
-                eprintln!("warning: models.dev catalog refresh failed: {error}");
+                tracing::warn!("models.dev catalog refresh failed: {error}");
             }
         }
     });

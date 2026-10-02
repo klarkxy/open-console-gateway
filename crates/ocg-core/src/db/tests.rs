@@ -236,15 +236,14 @@ fn open_does_not_rewrite_pending_credit_receipts() {
     assert_billing_open_state(&opened, 75.0, 0, 0);
     let blocked = {
         let tx = opened.conn.unchecked_transaction().unwrap();
-        let result = billing::settle_on(
+        billing::settle_on(
             &tx,
             log_id,
             &attempt,
             ocg_domain::billing::BillingTokens::new(1_000_000, 0, 0, 0),
             "success",
             Utc::now(),
-        );
-        result
+        )
     };
     assert!(blocked.is_err(), "a blocked receipt write must not commit");
     assert_billing_open_state(&opened, 75.0, 0, 0);
@@ -6816,6 +6815,7 @@ fn v16_migrates_existing_accounts_to_imported_ready_keys() {
              );
              CREATE TABLE forward_logs (
                  id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL,
+                 request_id TEXT, attempt INTEGER,
                  cost_state TEXT NOT NULL DEFAULT 'not_applicable', diagnostic_json TEXT
              );
              CREATE TABLE gateway_logs (
@@ -7338,6 +7338,7 @@ fn v4_migration_preserves_uncalibrated_usage() {
                  password_cipher TEXT
              );
              CREATE TABLE forward_logs (
+                 id INTEGER PRIMARY KEY,
                  timestamp TEXT NOT NULL,
                  model TEXT NOT NULL DEFAULT 'test',
                  account_id TEXT NOT NULL,
@@ -8357,7 +8358,9 @@ fn v14_migrates_v13_logs_and_adds_request_id_indexes() {
     let db = Database::open(dir.clone()).expect("db should open");
     db.conn
         .execute_batch(
-            "DROP INDEX idx_forward_logs_request_id;
+            "DROP INDEX idx_forward_logs_request_group;
+                 ALTER TABLE forward_logs DROP COLUMN request_group_key;
+                 DROP INDEX idx_forward_logs_request_id;
                  DROP INDEX idx_gateway_logs_request_id;
                  ALTER TABLE forward_logs DROP COLUMN request_id;
                  ALTER TABLE forward_logs DROP COLUMN attempt;
@@ -8460,6 +8463,7 @@ fn v15_migration_adds_nullable_auth_error() {
                  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
              );
              CREATE TABLE forward_logs (
+                 id INTEGER PRIMARY KEY, request_id TEXT, attempt INTEGER,
                  timestamp TEXT,
                  cost_state TEXT NOT NULL DEFAULT 'not_applicable',
                  diagnostic_json TEXT
@@ -16589,6 +16593,1093 @@ fn daily_tokens_by_model_includes_midnight_of_the_earliest_utc_day() {
     assert_eq!(early_tokens, 60);
     assert!(db.daily_tokens_by_model(0).is_err());
     drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+const V65_STORED_SECRET: &str = "stored-key-9f3a-not-prefixed";
+const V65_RECEIPT: &str = r#"{"phase":"pending","attempt":{"credentialId":"cred-v65","meterId":"meter-v65"},"marker":"stored-key-9f3a-not-prefixed"}"#;
+
+fn rewind_to_v64(conn: &Connection) {
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_forward_logs_request_group;
+         DROP INDEX IF EXISTS idx_operation_logs_started;
+         DROP INDEX IF EXISTS idx_operation_logs_subject;
+         DROP TABLE IF EXISTS operation_logs;
+         ALTER TABLE forward_logs DROP COLUMN request_group_key;
+         DELETE FROM schema_version;
+         INSERT INTO schema_version(version) VALUES (64);",
+    )
+    .expect("v65 objects should rewind to schema 64");
+}
+
+fn forward_row_snapshot(conn: &Connection) -> Vec<String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, timestamp, model, account_id, account_name, status, http_status, route,
+                    prompt_tokens, completion_tokens, cached_tokens, cache_creation_tokens, cost,
+                    cost_state, error_message, request_id, attempt, diagnostic_json,
+                    credit_receipt_json
+             FROM forward_logs ORDER BY id",
+        )
+        .unwrap();
+    stmt.query_map([], |row| {
+        let mut parts = Vec::new();
+        for index in 0..19 {
+            parts.push(format!("{:?}", row.get_ref(index).unwrap()));
+        }
+        Ok(parts.join("\t"))
+    })
+    .unwrap()
+    .map(|row| row.unwrap())
+    .collect()
+}
+
+fn insert_preserved_forward_row(db: &Database) -> i64 {
+    let mut log = forward_log("preserved-account", "error", 1.25);
+    log.model = V65_STORED_SECRET.into();
+    log.error_message = Some(V65_STORED_SECRET.into());
+    log.request_id = Some("preserve-req".into());
+    log.attempt = Some(1);
+    log.route = "proxy".into();
+    log.prompt_tokens = 7;
+    log.cached_tokens = 3;
+    log.timestamp = DateTime::parse_from_rfc3339("2026-02-02T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let id = db.log_forward(&log).unwrap();
+    let updated = db
+        .conn
+        .execute(
+            "UPDATE forward_logs SET credit_receipt_json = ?1, error_message = ?2 WHERE id = ?3",
+            params![V65_RECEIPT, V65_STORED_SECRET, id],
+        )
+        .unwrap();
+    assert_eq!(updated, 1);
+    id
+}
+
+fn stored_receipt(conn: &Connection, id: i64) -> String {
+    conn.query_row(
+        "SELECT credit_receipt_json FROM forward_logs WHERE id = ?1",
+        [id],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn assert_verified_pre_v65_backup(path: &std::path::Path) {
+    let name = path.file_name().unwrap().to_str().unwrap();
+    assert!(name.starts_with(PRE_V65_BACKUP_FILE_PREFIX), "{name}");
+    assert!(name.ends_with(".bak"), "{name}");
+    let backup =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    assert_eq!(schema_version_on(&backup).unwrap(), 64);
+    let sidecar = path.with_file_name(format!("{name}.sha256"));
+    let text = fs::read_to_string(&sidecar).unwrap();
+    let digest = text.split_whitespace().next().unwrap();
+    assert_eq!(digest.len(), 64, "{text}");
+    assert!(digest.chars().all(|ch| ch.is_ascii_hexdigit()), "{text}");
+    assert!(text.contains(name), "{text}");
+}
+
+fn request_group_column_exists(conn: &Connection) -> bool {
+    let mut stmt = conn.prepare("PRAGMA table_xinfo(forward_logs)").unwrap();
+    stmt.query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .any(|name| name.unwrap() == "request_group_key")
+}
+
+fn sqlite_table_exists(conn: &Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [name],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap()
+        == 1
+}
+
+use crate::log_types::{
+    OperationFinish, OperationLog, OperationLogQuery, OperationMetadata, OperationOutcome,
+    OperationSource, RequestLogQuery,
+};
+
+fn operation_at(
+    id: &str,
+    outcome: OperationOutcome,
+    completed_at: Option<DateTime<Utc>>,
+) -> OperationLog {
+    OperationLog {
+        operation_id: id.into(),
+        started_at: DateTime::parse_from_rfc3339("2026-10-02T00:00:00.000Z")
+            .unwrap()
+            .with_timezone(&Utc),
+        completed_at,
+        action: "rename.account".into(),
+        source: OperationSource::Dashboard,
+        actor_id: Some("actor-1".into()),
+        subject_type: Some("account".into()),
+        subject_id: Some("acct-1".into()),
+        outcome,
+        reason_code: None,
+        metadata: OperationMetadata {
+            changed_fields: vec!["name".into()],
+            ..OperationMetadata::default()
+        },
+    }
+}
+
+struct AttemptSeed {
+    request_id: Option<String>,
+    attempt: Option<i64>,
+    status: String,
+    model: String,
+    timestamp: String,
+    provider_id: Option<String>,
+    account_id: String,
+    account_name: String,
+    route_account_id: Option<String>,
+    credential_account_id: Option<String>,
+    client_key_id: Option<String>,
+    client_key_name: Option<String>,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    cached_tokens: i64,
+    duration_ms: Option<i64>,
+    http_status: Option<i32>,
+    route: String,
+    requested_model: Option<String>,
+    resolved_alias: Option<String>,
+    upstream_model: Option<String>,
+}
+
+impl AttemptSeed {
+    fn new(request_id: Option<&str>, attempt: i64, timestamp: &str) -> Self {
+        Self {
+            request_id: request_id.map(str::to_string),
+            attempt: Some(attempt),
+            status: "error".into(),
+            model: "model".into(),
+            timestamp: timestamp.into(),
+            provider_id: None,
+            account_id: "acct".into(),
+            account_name: "acct".into(),
+            route_account_id: None,
+            credential_account_id: None,
+            client_key_id: None,
+            client_key_name: None,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: 0,
+            duration_ms: None,
+            http_status: Some(200),
+            route: "auto".into(),
+            requested_model: None,
+            resolved_alias: None,
+            upstream_model: None,
+        }
+    }
+}
+
+fn insert_attempt(db: &Database, seed: &AttemptSeed) -> i64 {
+    let mut log = forward_log(&seed.account_id, &seed.status, 0.0);
+    log.model = seed.model.clone();
+    log.account_name = seed.account_name.clone();
+    log.timestamp = DateTime::parse_from_rfc3339(&seed.timestamp)
+        .unwrap()
+        .with_timezone(&Utc);
+    log.provider_id = seed.provider_id.clone();
+    log.route_account_id = seed.route_account_id.clone();
+    log.credential_account_id = seed.credential_account_id.clone();
+    log.client_key_id = seed.client_key_id.clone();
+    log.client_key_name = seed.client_key_name.clone();
+    log.http_status = seed.http_status;
+    log.route = seed.route.clone();
+    log.prompt_tokens = seed.prompt_tokens;
+    log.completion_tokens = seed.completion_tokens;
+    log.cached_tokens = seed.cached_tokens;
+    log.request_id = seed.request_id.clone();
+    log.attempt = seed.attempt;
+    log.duration_ms = seed.duration_ms;
+    let id = db.log_forward(&log).unwrap();
+    db.conn
+        .execute(
+            "UPDATE forward_logs SET status = ?1 WHERE id = ?2",
+            params![seed.status, id],
+        )
+        .unwrap();
+    if seed.requested_model.is_some()
+        || seed.resolved_alias.is_some()
+        || seed.upstream_model.is_some()
+    {
+        db.conn
+            .execute(
+                "UPDATE forward_logs
+                 SET requested_model = ?1, resolved_alias = ?2, upstream_model = ?3
+                 WHERE id = ?4",
+                params![
+                    seed.requested_model,
+                    seed.resolved_alias,
+                    seed.upstream_model,
+                    id
+                ],
+            )
+            .unwrap();
+    }
+    id
+}
+
+#[test]
+fn log_ledger_v65_migration_preserves_rows_receipts_and_backup() {
+    let dir = temp_data_dir("v65-preserve");
+    let db = Database::open(dir.clone()).unwrap();
+    let id = insert_preserved_forward_row(&db);
+    let before = forward_row_snapshot(&db.conn);
+    assert_eq!(stored_receipt(&db.conn, id), V65_RECEIPT);
+    rewind_to_v64(&db.conn);
+    assert!(!request_group_column_exists(&db.conn));
+    assert!(backup_paths_with_prefix(&dir, PRE_V65_BACKUP_FILE_PREFIX).is_empty());
+    migrate_to_v65(&db.conn, &dir.join("data.sqlite"), false).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 65);
+    assert!(request_group_column_exists(&db.conn));
+    assert!(sqlite_table_exists(&db.conn, "operation_logs"));
+    assert_eq!(forward_row_snapshot(&db.conn), before);
+    assert_eq!(stored_receipt(&db.conn, id), V65_RECEIPT);
+    let backups = backup_paths_with_prefix(&dir, PRE_V65_BACKUP_FILE_PREFIX);
+    assert_eq!(backups.len(), 1);
+    assert_verified_pre_v65_backup(&backups[0]);
+    migrate_to_v65(&db.conn, &dir.join("data.sqlite"), false).unwrap();
+    assert_eq!(
+        backup_paths_with_prefix(&dir, PRE_V65_BACKUP_FILE_PREFIX).len(),
+        1
+    );
+    assert_eq!(forward_row_snapshot(&db.conn), before);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn log_ledger_v65_migration_failure_is_atomic_and_v64_is_required() {
+    let dir = temp_data_dir("v65-atomic");
+    let db = Database::open(dir.clone()).unwrap();
+    let id = insert_preserved_forward_row(&db);
+    let before = forward_row_snapshot(&db.conn);
+    rewind_to_v64(&db.conn);
+    db.conn
+        .execute_batch(
+            "DELETE FROM schema_version; INSERT INTO schema_version(version) VALUES (63);",
+        )
+        .unwrap();
+    let path = dir.join("data.sqlite");
+    let err = migrate_to_v65(&db.conn, &path, false).unwrap_err();
+    assert!(err.to_string().contains("v65 requires schema v64"), "{err}");
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 63);
+    assert!(backup_paths_with_prefix(&dir, PRE_V65_BACKUP_FILE_PREFIX).is_empty());
+    assert!(!request_group_column_exists(&db.conn));
+    assert!(!sqlite_table_exists(&db.conn, "operation_logs"));
+    assert_eq!(forward_row_snapshot(&db.conn), before);
+
+    db.conn
+        .execute_batch(
+            "DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (64);
+             CREATE TABLE idx_forward_logs_request_group(id INTEGER PRIMARY KEY);",
+        )
+        .unwrap();
+    assert!(migrate_to_v65(&db.conn, &path, false).is_err());
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 64);
+    assert!(!request_group_column_exists(&db.conn));
+    assert!(!sqlite_table_exists(&db.conn, "operation_logs"));
+    assert_eq!(stored_receipt(&db.conn, id), V65_RECEIPT);
+    assert_eq!(forward_row_snapshot(&db.conn), before);
+    let backups = backup_paths_with_prefix(&dir, PRE_V65_BACKUP_FILE_PREFIX);
+    assert_eq!(backups.len(), 1);
+    assert_verified_pre_v65_backup(&backups[0]);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn log_ledger_v65_reopen_and_fresh_open_follow_backup_rules() {
+    let fresh = temp_data_dir("v65-fresh");
+    let db = Database::open(fresh.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 66);
+    assert!(request_group_column_exists(&db.conn));
+    assert!(sqlite_table_exists(&db.conn, "operation_logs"));
+    assert!(backup_paths_with_prefix(&fresh, PRE_V65_BACKUP_FILE_PREFIX).is_empty());
+    drop(db);
+    fs::remove_dir_all(fresh).unwrap();
+
+    let dir = temp_data_dir("v65-reopen");
+    let db = Database::open(dir.clone()).unwrap();
+    let id = insert_preserved_forward_row(&db);
+    let before = forward_row_snapshot(&db.conn);
+    rewind_to_v64(&db.conn);
+    drop(db);
+    let db = Database::open(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    assert_eq!(
+        backup_paths_with_prefix(&dir, PRE_V65_BACKUP_FILE_PREFIX).len(),
+        1
+    );
+    assert_verified_pre_v65_backup(&backup_paths_with_prefix(&dir, PRE_V65_BACKUP_FILE_PREFIX)[0]);
+    assert_eq!(forward_row_snapshot(&db.conn), before);
+    assert_eq!(stored_receipt(&db.conn, id), V65_RECEIPT);
+    drop(db);
+    let db = Database::open(dir.clone()).unwrap();
+    assert_eq!(
+        backup_paths_with_prefix(&dir, PRE_V65_BACKUP_FILE_PREFIX).len(),
+        1
+    );
+    assert_eq!(forward_row_snapshot(&db.conn), before);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn log_ledger_operation_pending_final_is_unique_and_redacts_secrets() {
+    let dir = temp_data_dir("v65-operations");
+    let db = Database::open(dir.clone()).unwrap();
+    let pending_id = "22222222-2222-4222-8222-222222222222";
+    let pending = operation_at(pending_id, OperationOutcome::Pending, None);
+    let started = db.begin_operation(&pending).unwrap();
+    assert_eq!(started.outcome, OperationOutcome::Pending);
+    assert!(started.completed_at.is_none());
+    let duplicate = db.begin_operation(&pending).unwrap_err();
+    assert!(
+        duplicate.to_string().contains("operation already exists"),
+        "{duplicate}"
+    );
+    let finish = OperationFinish {
+        completed_at: DateTime::parse_from_rfc3339("2026-10-02T00:05:00.000Z")
+            .unwrap()
+            .with_timezone(&Utc),
+        outcome: OperationOutcome::Success,
+        reason_code: Some("saved".into()),
+        metadata: OperationMetadata {
+            changed_fields: vec!["name".into()],
+            ..OperationMetadata::default()
+        },
+    };
+    let done = db.finish_operation(pending_id, &finish).unwrap();
+    assert_eq!(done.outcome, OperationOutcome::Success);
+    assert_eq!(done.reason_code.as_deref(), Some("saved"));
+    let mut later = finish.clone();
+    later.outcome = OperationOutcome::Failed;
+    later.reason_code = Some("later".into());
+    assert_eq!(db.finish_operation(pending_id, &later).unwrap(), done);
+    let mut replacement = done.clone();
+    replacement.action = "other.action".into();
+    replacement.outcome = OperationOutcome::Failed;
+    assert_eq!(db.record_operation(&replacement).unwrap(), done);
+
+    let mut pending_done = operation_at(
+        "44444444-4444-4444-8444-444444444444",
+        OperationOutcome::Pending,
+        Some(
+            DateTime::parse_from_rfc3339("2026-10-02T00:06:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        ),
+    );
+    assert!(db.begin_operation(&pending_done).is_err());
+    pending_done.operation_id = "55555555-5555-4555-8555-555555555555".into();
+    pending_done.outcome = OperationOutcome::Success;
+    pending_done.completed_at = None;
+    assert!(db.record_operation(&pending_done).is_err());
+    let mut secret_related = operation_at(
+        "66666666-6666-4666-8666-666666666666",
+        OperationOutcome::Pending,
+        None,
+    );
+    secret_related.metadata.related_ids = vec!["sk-live".into()];
+    assert!(db.begin_operation(&secret_related).is_err());
+
+    db.conn
+        .execute(
+            "INSERT INTO operation_logs (
+                operation_id, started_at, completed_at, action, source, actor_id,
+                subject_type, subject_id, outcome, reason_code, metadata_json
+             ) VALUES (
+                '11111111-1111-4111-8111-111111111111',
+                '2026-10-02T00:00:00.000Z', '2026-10-02T00:00:01.000Z',
+                'sk-secret', 'dashboard', '0123456789abcdef0123456789abcdef',
+                'account', 'subject-1', 'success', 'bearer-token', ?1
+             )",
+            [r#"{"changedFields":["name","api_key"],"relatedIds":["kept-id","sk-live"]}"#],
+        )
+        .unwrap();
+    let page = db
+        .query_operation_logs(&OperationLogQuery::default())
+        .unwrap();
+    let raw = page
+        .items
+        .iter()
+        .find(|item| item.operation_id == "11111111-1111-4111-8111-111111111111")
+        .unwrap();
+    assert_eq!(raw.action, "redacted");
+    assert_eq!(raw.reason_code, None);
+    assert_eq!(raw.actor_id, None);
+    assert_eq!(raw.subject_id.as_deref(), Some("subject-1"));
+    assert_eq!(raw.metadata.changed_fields, vec!["name".to_string()]);
+    assert_eq!(raw.metadata.related_ids, vec!["kept-id".to_string()]);
+    let stored = page
+        .items
+        .iter()
+        .find(|item| item.operation_id == pending_id)
+        .unwrap();
+    assert_eq!(stored, &done);
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn log_ledger_request_logs_group_retries_filter_any_attempt_and_page() {
+    let dir = temp_data_dir("v65-request-groups");
+    let db = Database::open(dir.clone()).unwrap();
+    let mut attempt0 = AttemptSeed::new(Some("retry-group"), 0, "2026-04-01T00:00:00Z");
+    attempt0.provider_id = Some("prov-0".into());
+    attempt0.account_id = "acct-0".into();
+    attempt0.model = "model-0".into();
+    attempt0.prompt_tokens = 1;
+    attempt0.completion_tokens = 10;
+    attempt0.cached_tokens = 2;
+    attempt0.duration_ms = Some(5);
+    attempt0.http_status = Some(100);
+    insert_attempt(&db, &attempt0);
+
+    let mut attempt1 = AttemptSeed::new(Some("retry-group"), 1, "2026-04-01T00:00:01Z");
+    attempt1.provider_id = Some("prov-a".into());
+    attempt1.account_id = "acct-a".into();
+    attempt1.account_name = "acct-a".into();
+    attempt1.route_account_id = Some("route-a".into());
+    attempt1.credential_account_id = Some("cred-a".into());
+    attempt1.client_key_id = Some("key-a".into());
+    attempt1.client_key_name = Some("key-a-name".into());
+    attempt1.model = "model-a".into();
+    attempt1.prompt_tokens = 3;
+    attempt1.completion_tokens = 11;
+    attempt1.cached_tokens = 4;
+    attempt1.duration_ms = Some(15);
+    attempt1.http_status = Some(400);
+    insert_attempt(&db, &attempt1);
+
+    let mut attempt2 = AttemptSeed::new(Some("retry-group"), 2, "2026-04-01T00:00:02Z");
+    attempt2.status = "streaming".into();
+    attempt2.provider_id = Some("prov-b".into());
+    attempt2.account_id = "acct-b".into();
+    attempt2.account_name = "acct-b".into();
+    attempt2.route_account_id = Some("route-b".into());
+    attempt2.credential_account_id = Some("cred-b".into());
+    attempt2.client_key_id = Some("key-b".into());
+    attempt2.model = "model-b".into();
+    attempt2.prompt_tokens = 5;
+    attempt2.completion_tokens = 12;
+    attempt2.cached_tokens = 6;
+    attempt2.duration_ms = Some(99);
+    attempt2.http_status = Some(200);
+    insert_attempt(&db, &attempt2);
+
+    let mut middle = AttemptSeed::new(Some("page-mid"), 1, "2026-04-02T00:00:00Z");
+    middle.status = "success".into();
+    middle.account_id = "acct-mid".into();
+    middle.client_key_id = Some("key-mid".into());
+    middle.prompt_tokens = 2;
+    middle.completion_tokens = 1;
+    middle.cached_tokens = 10;
+    insert_attempt(&db, &middle);
+
+    let mut newest = AttemptSeed::new(Some("page-new"), 1, "2026-04-03T00:00:00Z");
+    newest.status = "cancelled".into();
+    newest.account_id = "acct-new".into();
+    newest.client_key_id = Some("key-new".into());
+    newest.prompt_tokens = 3;
+    newest.completion_tokens = 1;
+    newest.cached_tokens = 1;
+    insert_attempt(&db, &newest);
+
+    let page = db.query_request_logs(&RequestLogQuery::default()).unwrap();
+    assert_eq!(page.total, 3);
+    assert_eq!(page.summary.total_requests, 3);
+    assert_eq!(page.summary.total_attempts, 4);
+    assert_eq!(page.summary.prompt_tokens, 14);
+    assert_eq!(page.summary.completion_tokens, 35);
+    assert_eq!(page.summary.cached_tokens, 23);
+    let retry = page
+        .items
+        .iter()
+        .find(|item| item.request_id.as_deref() == Some("retry-group"))
+        .unwrap();
+    assert_eq!(retry.request_key, "request:retry-group");
+    assert_eq!(retry.status, "streaming");
+    assert_eq!(retry.http_status, Some(200));
+    assert_eq!(retry.duration_ms, Some(99));
+    assert_eq!(retry.model, "model-b");
+    assert_eq!(retry.account_id, "acct-b");
+    assert_eq!(retry.attempt_count, 2);
+    assert_eq!(retry.recorded_row_count, 3);
+    assert_eq!(retry.prompt_tokens, 9);
+    assert_eq!(retry.completion_tokens, 33);
+    assert_eq!(retry.cached_tokens, 12);
+    assert!(!retry.is_legacy);
+
+    let split = RequestLogQuery {
+        provider_id: Some("prov-a".into()),
+        model: Some("model-b".into()),
+        ..RequestLogQuery::default()
+    };
+    assert_eq!(db.query_request_logs(&split).unwrap().total, 0);
+    let cross_account = RequestLogQuery {
+        provider_id: Some("prov-a".into()),
+        account_id: Some("acct-b".into()),
+        ..RequestLogQuery::default()
+    };
+    assert_eq!(db.query_request_logs(&cross_account).unwrap().total, 0);
+    let same_attempt = RequestLogQuery {
+        provider_id: Some("prov-a".into()),
+        account_id: Some("acct-a".into()),
+        route_account_id: Some("route-a".into()),
+        credential_account_id: Some("cred-a".into()),
+        key_id: Some("key-a".into()),
+        model: Some("model-a".into()),
+        ..RequestLogQuery::default()
+    };
+    let matched = db.query_request_logs(&same_attempt).unwrap();
+    assert_eq!(matched.total, 1);
+    assert_eq!(matched.items[0].recorded_row_count, 3);
+    assert_eq!(matched.items[0].attempt_count, 2);
+    assert_eq!(matched.summary.cached_tokens, 12);
+    let older_account = RequestLogQuery {
+        account_id: Some("acct-a".into()),
+        ..RequestLogQuery::default()
+    };
+    let older = db.query_request_logs(&older_account).unwrap();
+    assert_eq!(older.total, 1);
+    assert_eq!(older.items[0].account_id, "acct-b");
+
+    assert_eq!(
+        db.query_request_logs(&RequestLogQuery {
+            status: Some("streaming".into()),
+            ..RequestLogQuery::default()
+        })
+        .unwrap()
+        .total,
+        1
+    );
+    assert_eq!(
+        db.query_request_logs(&RequestLogQuery {
+            status: Some("error".into()),
+            ..RequestLogQuery::default()
+        })
+        .unwrap()
+        .total,
+        0
+    );
+    assert_eq!(
+        db.query_request_logs(&RequestLogQuery {
+            status: Some("success".into()),
+            ..RequestLogQuery::default()
+        })
+        .unwrap()
+        .items[0]
+            .request_id
+            .as_deref(),
+        Some("page-mid")
+    );
+    assert_eq!(
+        db.query_request_logs(&RequestLogQuery {
+            status: Some("cancelled".into()),
+            ..RequestLogQuery::default()
+        })
+        .unwrap()
+        .items[0]
+            .request_id
+            .as_deref(),
+        Some("page-new")
+    );
+    let unattributed = db
+        .query_request_logs(&RequestLogQuery {
+            key_id: Some("__unattributed__".into()),
+            ..RequestLogQuery::default()
+        })
+        .unwrap();
+    assert_eq!(unattributed.total, 1);
+    assert_eq!(
+        unattributed.items[0].request_id.as_deref(),
+        Some("retry-group")
+    );
+
+    let paged = db
+        .query_request_logs(&RequestLogQuery {
+            limit: Some(1),
+            offset: Some(1),
+            ..RequestLogQuery::default()
+        })
+        .unwrap();
+    assert_eq!(paged.total, 3);
+    assert_eq!(paged.limit, 1);
+    assert_eq!(paged.offset, 1);
+    assert_eq!(paged.items.len(), 1);
+    assert_eq!(paged.items[0].request_id.as_deref(), Some("page-mid"));
+    assert_eq!(paged.summary.total_requests, 3);
+    assert_eq!(page.items[0].request_id.as_deref(), Some("page-new"));
+    assert_eq!(page.items[2].request_id.as_deref(), Some("retry-group"));
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn log_ledger_request_logs_newest_streaming_legacy_keys_preupstream_and_cache() {
+    let dir = temp_data_dir("v65-request-shape");
+    let db = Database::open(dir.clone()).unwrap();
+    let mut stream_old = AttemptSeed::new(Some("stream-group"), 1, "2026-05-01T00:00:00Z");
+    stream_old.status = "success".into();
+    stream_old.model = "old-model".into();
+    stream_old.duration_ms = Some(10);
+    stream_old.http_status = Some(200);
+    stream_old.cached_tokens = 1;
+    insert_attempt(&db, &stream_old);
+    let mut stream_new = AttemptSeed::new(Some("stream-group"), 2, "2026-05-01T00:00:01Z");
+    stream_new.status = "streaming".into();
+    stream_new.model = "stream-model".into();
+    stream_new.duration_ms = Some(40);
+    stream_new.http_status = Some(202);
+    stream_new.cached_tokens = 8;
+    insert_attempt(&db, &stream_new);
+
+    let mut unknown = AttemptSeed::new(Some("unknown-group"), 1, "2026-05-02T00:00:00Z");
+    unknown.status = "outcome_unknown".into();
+    unknown.model = "unknown-model".into();
+    unknown.duration_ms = Some(8);
+    insert_attempt(&db, &unknown);
+
+    let mut cached_success = AttemptSeed::new(Some("cached-success"), 1, "2026-05-03T00:00:00Z");
+    cached_success.status = "success_cached".into();
+    cached_success.model = "cached-model".into();
+    insert_attempt(&db, &cached_success);
+
+    let mut cancelled = AttemptSeed::new(Some("cancelled-group"), 1, "2026-05-04T00:00:00Z");
+    cancelled.status = "cancelled".into();
+    cancelled.model = "cancelled-model".into();
+    insert_attempt(&db, &cancelled);
+
+    let mut only_zero = AttemptSeed::new(Some("only-zero"), 0, "2026-05-05T00:00:00Z");
+    only_zero.model = "zero-model".into();
+    only_zero.prompt_tokens = 4;
+    only_zero.cached_tokens = 7;
+    insert_attempt(&db, &only_zero);
+    let mut zero_then = AttemptSeed::new(Some("zero-then-one"), 0, "2026-05-06T00:00:00Z");
+    zero_then.prompt_tokens = 1;
+    zero_then.cached_tokens = 1;
+    insert_attempt(&db, &zero_then);
+    let mut one_after = AttemptSeed::new(Some("zero-then-one"), 1, "2026-05-06T00:00:01Z");
+    one_after.status = "success".into();
+    one_after.prompt_tokens = 2;
+    one_after.cached_tokens = 3;
+    insert_attempt(&db, &one_after);
+
+    let mut null_id = AttemptSeed::new(None, 1, "2026-05-07T00:00:00Z");
+    null_id.model = "legacy-null".into();
+    let null_row = insert_attempt(&db, &null_id);
+    let mut blank_id = AttemptSeed::new(Some(""), 1, "2026-05-07T00:00:01Z");
+    blank_id.model = "legacy-blank".into();
+    let blank_row = insert_attempt(&db, &blank_id);
+    let mut space_id = AttemptSeed::new(Some("   "), 1, "2026-05-07T00:00:02Z");
+    space_id.model = "legacy-space".into();
+    let space_row = insert_attempt(&db, &space_id);
+    let mut collision = AttemptSeed::new(
+        Some(&format!("legacy:{null_row}")),
+        1,
+        "2026-05-07T00:00:03Z",
+    );
+    collision.model = "collision-stored".into();
+    let collision_row = insert_attempt(&db, &collision);
+
+    let page = db.query_request_logs(&RequestLogQuery::default()).unwrap();
+    let find = |request_id: &str| {
+        page.items
+            .iter()
+            .find(|item| item.request_id.as_deref() == Some(request_id))
+            .unwrap_or_else(|| panic!("missing {request_id}"))
+    };
+    let streaming = find("stream-group");
+    assert_eq!(streaming.status, "streaming");
+    assert_eq!(streaming.duration_ms, Some(40));
+    assert_eq!(streaming.http_status, Some(202));
+    assert_eq!(streaming.model, "stream-model");
+    assert_eq!(streaming.cached_tokens, 9);
+    let unknown = find("unknown-group");
+    assert_eq!(unknown.status, "outcome_unknown");
+    assert_eq!(unknown.duration_ms, Some(8));
+    assert_eq!(find("cached-success").status, "success");
+    assert_eq!(find("cancelled-group").status, "cancelled");
+    let zero = find("only-zero");
+    assert_eq!(zero.attempt_count, 0);
+    assert_eq!(zero.recorded_row_count, 1);
+    assert_eq!(zero.cached_tokens, 7);
+    assert_eq!(zero.prompt_tokens, 4);
+    let mixed = find("zero-then-one");
+    assert_eq!(mixed.attempt_count, 1);
+    assert_eq!(mixed.recorded_row_count, 2);
+    assert_eq!(mixed.cached_tokens, 4);
+    assert_eq!(mixed.prompt_tokens, 3);
+
+    let by_model = |model: &str| {
+        page.items
+            .iter()
+            .find(|item| item.model == model)
+            .unwrap_or_else(|| panic!("missing {model}"))
+    };
+    let legacy_null = by_model("legacy-null");
+    assert!(legacy_null.is_legacy);
+    assert!(legacy_null.request_id.is_none());
+    assert_eq!(legacy_null.request_key, format!("legacy:{null_row}"));
+    assert_eq!(
+        by_model("legacy-blank").request_key,
+        format!("legacy:{blank_row}")
+    );
+    assert!(by_model("legacy-blank").is_legacy);
+    assert_eq!(
+        by_model("legacy-space").request_key,
+        format!("legacy:{space_row}")
+    );
+    assert!(by_model("legacy-space").request_id.is_none());
+    let stored_legacy = by_model("collision-stored");
+    assert!(!stored_legacy.is_legacy);
+    assert_eq!(
+        stored_legacy.request_key,
+        format!("request:legacy:{null_row}")
+    );
+    assert_eq!(
+        stored_legacy.request_id.as_deref(),
+        Some(format!("legacy:{null_row}").as_str())
+    );
+
+    let legacy_attempts =
+        request_logs::query_request_attempts_on(&db.conn, &format!("legacy:{null_row}")).unwrap();
+    assert_eq!(legacy_attempts.len(), 1);
+    assert_eq!(legacy_attempts[0].log.id, null_row);
+    assert_eq!(legacy_attempts[0].log.model, "legacy-null");
+    let namespaced =
+        request_logs::query_request_attempts_on(&db.conn, &format!("request:legacy:{null_row}"))
+            .unwrap();
+    assert_eq!(namespaced.len(), 1);
+    assert_eq!(namespaced[0].log.id, collision_row);
+    assert_eq!(namespaced[0].log.model, "collision-stored");
+    assert!(request_logs::query_request_attempts_on(&db.conn, "legacy:01").is_err());
+    assert!(request_logs::query_request_attempts_on(&db.conn, "not-a-key").is_err());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn log_ledger_request_logs_large_history_uses_the_group_index() {
+    let dir = temp_data_dir("v65-large-history");
+    let db = Database::open(dir.clone()).unwrap();
+    let tx = db.conn.unchecked_transaction().unwrap();
+    {
+        let mut stmt = tx
+            .prepare(
+                "INSERT INTO forward_logs (
+                    timestamp, model, account_id, account_name, status, cost_state,
+                    request_id, attempt, prompt_tokens, cached_tokens, route
+                 ) VALUES (?1, 'hist', 'acct', 'acct', 'success', 'unknown', ?2, ?3, 1, 1, 'auto')",
+            )
+            .unwrap();
+        for index in 0..100_000 {
+            let timestamp = (Utc::now() + chrono::Duration::seconds(index)).to_rfc3339();
+            stmt.execute(params![
+                timestamp,
+                format!("hist-{}", index / 2),
+                index % 2 + 1
+            ])
+            .unwrap();
+        }
+    }
+    tx.commit().unwrap();
+    let plan = db.explain_request_attempts("request:hist-0").unwrap();
+    assert!(plan.contains("idx_forward_logs_request_group"), "{plan}");
+    let grouped = db
+        .explain_request_logs(&RequestLogQuery {
+            limit: Some(20),
+            ..RequestLogQuery::default()
+        })
+        .unwrap();
+    assert!(grouped.contains("forward_logs"), "{grouped}");
+    let page = db
+        .query_request_logs(&RequestLogQuery {
+            limit: Some(20),
+            ..RequestLogQuery::default()
+        })
+        .unwrap();
+    assert_eq!(page.total, 50_000);
+    assert_eq!(page.summary.total_attempts, 100_000);
+    assert_eq!(page.summary.prompt_tokens, 100_000);
+    assert_eq!(page.items.len(), 20);
+    assert_eq!(page.items[0].request_id.as_deref(), Some("hist-49999"));
+    assert_eq!(page.items[0].request_key, "request:hist-49999");
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn log_ledger_blank_unicode_ids_are_independent_and_nonblank_ids_remain_exact() {
+    let dir = temp_data_dir("unicode-request-identity");
+    let db = Database::open(dir.clone()).unwrap();
+    for id in ["\t\n", "\t\n", "\u{2003}", "\u{2003}"] {
+        insert_attempt(&db, &AttemptSeed::new(Some(id), 1, "2026-07-01T00:00:00Z"));
+    }
+    for attempt in [1, 2] {
+        insert_attempt(
+            &db,
+            &AttemptSeed::new(Some(" exact "), attempt, "2026-07-01T00:00:00Z"),
+        );
+    }
+    let page = db.query_request_logs(&Default::default()).unwrap();
+    assert_eq!(page.total, 5);
+    assert_eq!(page.items.iter().filter(|row| row.is_legacy).count(), 4);
+    let exact = db
+        .query_request_logs(&RequestLogQuery {
+            request_id: Some(" exact ".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(exact.total, 1);
+    assert_eq!(exact.items[0].request_key, "request: exact ");
+    assert_eq!(exact.summary.total_attempts, 2);
+    assert_eq!(
+        request_logs::query_request_attempts_on(&db.conn, "request: exact ")
+            .unwrap()
+            .len(),
+        2
+    );
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn standalone_operation_receipt_uses_existing_storage_without_initializing_a_home() {
+    let dir = temp_data_dir("standalone-operation");
+    let operation = operation_at(
+        "55555555-5555-4555-8555-555555555555",
+        OperationOutcome::Success,
+        Some(
+            DateTime::parse_from_rfc3339("2026-10-02T00:01:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        ),
+    );
+    assert!(Database::record_existing_operation(&dir, &operation).is_err());
+    assert!(!dir.join("data.sqlite").exists());
+    assert!(!dir.join(".encryption-key").exists());
+    let db = Database::open(dir.clone()).unwrap();
+    Database::record_existing_operation(&dir, &operation).unwrap();
+    assert_eq!(
+        db.query_operation_logs(&Default::default()).unwrap().total,
+        1
+    );
+    assert!(!dir.join(".encryption-key").exists());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn log_ledger_authenticated_v4_reads_redact_stored_secrets() {
+    use crate::state::CoreStateInner;
+    use axum::body::to_bytes;
+    use axum::handler::Handler;
+    use axum::http::{Request, StatusCode, header};
+    use axum::response::{IntoResponse, Response};
+
+    const SECRET: &str = "stored-key-9f3a-not-prefixed";
+    let dir = temp_data_dir("v65-authenticated-read");
+    let cipher = test_host_cipher();
+    let db = Database::open_with_cipher(dir.clone(), cipher.clone()).unwrap();
+    let mut holder = account("acct-secret-holder");
+    holder.key_cipher = cipher.encrypt(SECRET).unwrap();
+    db.create_account(&holder).unwrap();
+
+    let mut attempt = AttemptSeed::new(Some(&format!("req-{SECRET}")), 1, "2026-07-01T00:00:00Z");
+    attempt.status = "streaming".into();
+    attempt.model = format!("m-{SECRET}");
+    attempt.account_id = "acct-secret-holder".into();
+    attempt.account_name = format!("name-{SECRET}");
+    attempt.route = format!("/v1/{SECRET}");
+    attempt.client_key_name = Some(format!("key-{SECRET}"));
+    attempt.requested_model = Some(format!("want-{SECRET}"));
+    let id = insert_attempt(&db, &attempt);
+    db.conn
+        .execute(
+            "UPDATE forward_logs
+             SET error_message = ?1, diagnostic_json = ?2
+             WHERE id = ?3",
+            params![
+                format!("upstream said {SECRET}"),
+                serde_json::json!({"note": SECRET}).to_string(),
+                id
+            ],
+        )
+        .unwrap();
+    let mut operation = operation_at(
+        "77777777-7777-4777-8777-777777777777",
+        OperationOutcome::Success,
+        Some(
+            DateTime::parse_from_rfc3339("2026-07-01T00:01:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        ),
+    );
+    operation.subject_id = Some(SECRET.into());
+    db.record_operation(&operation).unwrap();
+
+    let state = std::sync::Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+    {
+        let db = state.db.lock();
+        let stored = serde_json::to_string(
+            &db.query_operation_logs(&OperationLogQuery::default())
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(stored.contains(SECRET), "{stored}");
+        let requests =
+            serde_json::to_string(&db.query_request_logs(&RequestLogQuery::default()).unwrap())
+                .unwrap();
+        assert!(requests.contains(SECRET), "{requests}");
+    }
+
+    let operations =
+        crate::dashboard_v4::logs::list_operations.layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::dashboard_v3::require_v3_session,
+        ));
+    let requests =
+        crate::dashboard_v4::logs::list_requests.layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::dashboard_v3::require_v3_session,
+        ));
+    let token = state.dashboard_session_token.lock().clone();
+    let cookie = format!("{}={token}", crate::dashboard_session::SESSION_COOKIE);
+    let wrong = format!(
+        "{}=not-the-session",
+        crate::dashboard_session::SESSION_COOKIE
+    );
+    let log_get = |path: &str, cookie: Option<&str>| {
+        let mut builder = Request::builder().uri(path).method("GET");
+        if let Some(cookie) = cookie {
+            builder = builder.header(header::COOKIE, cookie);
+        }
+        builder.body(axum::body::Body::empty()).unwrap()
+    };
+    let json_body = |response: Response| async move {
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1_048_576).await.unwrap();
+        let value = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
+        (status, value)
+    };
+
+    for handler_path in ["/logs/operations", "/logs/requests"] {
+        let (status, value) = if handler_path.ends_with("operations") {
+            json_body(
+                operations
+                    .clone()
+                    .call(log_get(handler_path, None), state.clone())
+                    .await,
+            )
+            .await
+        } else {
+            json_body(
+                requests
+                    .clone()
+                    .call(log_get(handler_path, None), state.clone())
+                    .await,
+            )
+            .await
+        };
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{handler_path}");
+        assert_eq!(value["code"], "unauthorized");
+        let (status, value) = if handler_path.ends_with("operations") {
+            json_body(
+                operations
+                    .clone()
+                    .call(log_get(handler_path, Some(&wrong)), state.clone())
+                    .await,
+            )
+            .await
+        } else {
+            json_body(
+                requests
+                    .clone()
+                    .call(log_get(handler_path, Some(&wrong)), state.clone())
+                    .await,
+            )
+            .await
+        };
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{handler_path}");
+        assert_eq!(value["code"], "unauthorized");
+    }
+
+    let (status, value) = json_body(
+        operations
+            .clone()
+            .call(
+                log_get("/logs/operations?limit=0", Some(&cookie)),
+                state.clone(),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(value["code"], "invalidRequest");
+
+    let (status, operations_body) = json_body(
+        operations
+            .call(log_get("/logs/operations", Some(&cookie)), state.clone())
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let rendered = operations_body.to_string();
+    assert!(!rendered.contains(SECRET), "{rendered}");
+    assert!(rendered.contains("<redacted>"), "{rendered}");
+
+    let (status, requests_body) = json_body(
+        requests
+            .call(
+                log_get("/logs/requests?status=streaming", Some(&cookie)),
+                state.clone(),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let rendered = requests_body.to_string();
+    assert!(!rendered.contains(SECRET), "{rendered}");
+    assert!(rendered.contains("<redacted>"), "{rendered}");
+    assert_eq!(requests_body["items"][0]["status"], "streaming");
+
+    let key = format!("request:req-{SECRET}");
+    let attempts = crate::dashboard_v4::logs::read_request_attempts(&state, &key).unwrap();
+    let rendered = serde_json::to_string(&attempts).unwrap();
+    assert!(rendered.contains("\"errorMessage\""));
+    assert!(rendered.contains("\"requestedModel\""));
+    assert!(rendered.contains("<redacted>"));
+    assert!(!rendered.contains(SECRET), "{rendered}");
+    assert_eq!(attempts.items.len(), 1);
+    let missing =
+        crate::dashboard_v4::logs::read_request_attempts(&state, "legacy:999999").unwrap();
+    assert!(missing.items.is_empty());
+    let invalid = crate::dashboard_v4::logs::read_request_attempts(&state, "not-a-key")
+        .unwrap_err()
+        .into_response();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    let padded = crate::dashboard_v4::logs::read_request_attempts(&state, "legacy:01")
+        .unwrap_err()
+        .into_response();
+    assert_eq!(padded.status(), StatusCode::BAD_REQUEST);
+
+    drop(state);
     fs::remove_dir_all(dir).unwrap();
 }
 

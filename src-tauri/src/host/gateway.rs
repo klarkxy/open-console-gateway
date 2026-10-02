@@ -12,21 +12,18 @@ pub fn start_on_configured_port(core: &CoreState) -> anyhow::Result<()> {
     let gateway_state = core.clone();
     match tauri::async_runtime::block_on(gateway::start_gateway(gateway_state, port)) {
         Ok(handle) => {
-            let _ = core.db.lock().log_gateway(
+            let bound = handle.port;
+            *core.gateway.lock() = Some(handle);
+            core.log_runtime_event(
                 "info",
                 "gateway",
-                &format!("gateway started on port {}", handle.port),
+                &format!("gateway started on port {bound}"),
             );
-            *core.gateway.lock() = Some(handle);
             Ok(())
         }
         Err(error) => {
-            eprintln!("failed to start Gateway on 127.0.0.1:{port}: {error}");
-            let _ = core.db.lock().log_gateway(
-                "error",
-                "gateway",
-                &format!("failed to start gateway: {error}"),
-            );
+            tracing::error!("failed to start Gateway on 127.0.0.1:{port}: {error}");
+            core.log_runtime_event("error", "gateway", "failed to start gateway");
             Err(error)
         }
     }
@@ -35,6 +32,7 @@ pub fn start_on_configured_port(core: &CoreState) -> anyhow::Result<()> {
 pub fn stop_listener(core: &CoreState) {
     if let Some(handle) = core.gateway.lock().take() {
         gateway::stop_gateway(handle);
+        core.clear_gateway_error();
     }
 }
 

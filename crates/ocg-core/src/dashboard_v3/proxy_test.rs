@@ -123,7 +123,21 @@ pub(super) async fn test_proxy(
     State(state): State<CoreState>,
     body: Bytes,
 ) -> Result<Json<ProxyTestResponse>, V3ApiError> {
-    let request = parse_proxy_test_request(&body, &state)?;
+    let mut op = super::settings::open_dashboard(&state, "settings.proxy.test", "settings", None);
+    let request = match parse_proxy_test_request(&body, &state) {
+        Ok(request) => request,
+        Err(error) => {
+            return super::settings::record_after(
+                op,
+                &state,
+                &["proxy_mode"],
+                (None, None, None),
+                None,
+                Err(error),
+            )
+            .map(Json);
+        }
+    };
     let snapshot = {
         let _settings_update = state.settings_update.lock();
         CapturedProxyTest {
@@ -140,55 +154,112 @@ pub(super) async fn test_proxy(
     if let Some(direction) = request.proxy_list_direction {
         config.proxy_list_direction = app_proxy_list_direction(direction);
     }
-    config.proxy_url =
-        normalize_proxy_url(config.proxy_mode, &request.proxy_url).map_err(|message| {
-            V3ApiError {
+    if let Err(message) = normalize_proxy_url(config.proxy_mode, &request.proxy_url).map(|url| {
+        config.proxy_url = url;
+    }) {
+        return super::settings::record_after(
+            op,
+            &state,
+            &["proxy_mode"],
+            (None, None, None),
+            None,
+            Err(V3ApiError {
                 status: StatusCode::BAD_REQUEST,
                 body: V3Error::invalid_request_at(message, revision, process_generation),
-            }
-        })?;
+            }),
+        )
+        .map(Json);
+    }
 
     let connect_timeout_secs = config.connect_timeout_secs;
     let request_timeout_secs = connect_timeout_secs.min(PROXY_TEST_TIMEOUT_SECS);
     let secrets = [config.gateway_key.as_str(), config.proxy_url.as_str()];
     let target = diagnostic_target(process_generation);
 
-    let client = crate::http_client::configured_builder(&config)
-        .and_then(|builder| {
-            builder
-                .connect_timeout(Duration::from_secs(connect_timeout_secs))
-                .redirect(crate::http_client::no_redirect_policy())
-                .build()
-                .map_err(Into::into)
-        })
-        .map_err(|error| {
-            V3ApiError::internal(sanitize_proxy_test_detail(&error.to_string(), &secrets))
-        })?;
+    let client = match crate::http_client::configured_builder(&config).and_then(|builder| {
+        builder
+            .connect_timeout(Duration::from_secs(connect_timeout_secs))
+            .redirect(crate::http_client::no_redirect_policy())
+            .build()
+            .map_err(Into::into)
+    }) {
+        Ok(client) => client,
+        Err(error) => {
+            return super::settings::record_after(
+                op,
+                &state,
+                &["proxy_mode"],
+                (None, None, None),
+                None,
+                Err(V3ApiError::internal(sanitize_proxy_test_detail(
+                    &error.to_string(),
+                    &secrets,
+                ))),
+            )
+            .map(Json);
+        }
+    };
 
+    op.accepted(super::settings::metadata_for(
+        &state,
+        &["proxy_mode"],
+        Some(1),
+        Some(0),
+        None,
+        None,
+    ));
     let started = Instant::now();
-    let response = client
+    let response = match client
         .get(&target)
         .timeout(Duration::from_secs(request_timeout_secs))
         .send()
         .await
-        .map_err(|error| {
-            V3ApiError::outbound_failed_at(
-                revision,
-                process_generation,
-                proxy_test_error_message(&error, &secrets),
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return super::settings::record_after(
+                op,
+                &state,
+                &["proxy_mode"],
+                (Some(1), None, Some(1)),
+                None,
+                Err(V3ApiError::outbound_failed_at(
+                    revision,
+                    process_generation,
+                    proxy_test_error_message(&error, &secrets),
+                )),
             )
-        })?;
+            .map(Json);
+        }
+    };
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let status = response.status().as_u16();
     drop(response);
-
-    Ok(Json(ProxyTestResponse {
-        proxy_mode: request.proxy_mode,
-        status,
-        latency_ms,
-        revision,
-        process_generation,
-    }))
+    let upstream_ok = (200..300).contains(&status);
+    let (succeeded, failed, outcome) = if upstream_ok {
+        (Some(1), None, None)
+    } else {
+        (
+            None,
+            Some(1),
+            Some((crate::log_types::OperationOutcome::Failed, "outboundFailed")),
+        )
+    };
+    super::settings::record_after(
+        op,
+        &state,
+        &["proxy_mode"],
+        (Some(1), succeeded, failed),
+        outcome,
+        Ok(ProxyTestResponse {
+            proxy_mode: request.proxy_mode,
+            status,
+            latency_ms,
+            revision,
+            process_generation,
+        }),
+    )
+    .map(Json)
 }
 
 struct CapturedProxyTest {

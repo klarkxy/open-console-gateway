@@ -149,7 +149,19 @@ export type DashboardApiV4 =
   | TemporaryPolicyRestriction
   | TemporaryPolicyRestrictions
   | TemporaryPolicyUpdate
-  | TemporaryPolicyClearRequest;
+  | TemporaryPolicyClearRequest
+  | OperationSource
+  | OperationOutcome
+  | OperationMetadata
+  | OperationLog
+  | OperationLogPage
+  | OperationLogQuery
+  | RequestLog
+  | RequestLogSummary
+  | RequestLogPage
+  | RequestLogQuery
+  | RequestAttempts
+  | ForwardLog;
 export type ByokClient = "codex" | "kimi" | "minimax" | "zcode";
 export type ByokStatus =
   "unsupported_runtime" | "not_detected" | "ready" | "configured" | "incompatible" | "conflict" | "recovery_required";
@@ -454,6 +466,8 @@ export type TemporaryPolicyRule =
       id: string;
       kind: "builtin_override";
     };
+export type OperationSource = "dashboard" | "cli" | "desktop";
+export type OperationOutcome = "pending" | "success" | "rejected" | "failed" | "partial" | "compensated";
 
 export interface ByokInspection {
   activationRequired: boolean;
@@ -1951,4 +1965,166 @@ export interface TemporaryPolicyUpdate {
 export interface TemporaryPolicyClearRequest {
   expectedRevision: number;
   processGeneration: number;
+}
+/**
+ * Allowlisted, non-secret facts about one user operation.
+ */
+export interface OperationMetadata {
+  changedFields: string[];
+  compensated: boolean | null;
+  completedCount: number | null;
+  failedCount: number | null;
+  relatedIds: string[];
+  requestedCount: number | null;
+  revision: number | null;
+}
+/**
+ * One user-operation receipt. `completed_at` is null only while `pending`.
+ */
+export interface OperationLog {
+  action: string;
+  actorId: string | null;
+  completedAt: string | null;
+  metadata: OperationMetadata;
+  operationId: string;
+  outcome: OperationOutcome;
+  reasonCode: string | null;
+  source: OperationSource;
+  startedAt: string;
+  subjectId: string | null;
+  subjectType: string | null;
+}
+export interface OperationLogPage {
+  items: OperationLog[];
+  limit: number;
+  offset: number;
+  total: number;
+}
+export interface OperationLogQuery {
+  action?: string | null;
+  endTime?: string | null;
+  limit?: number | null;
+  offset?: number | null;
+  outcome?: OperationOutcome | null;
+  source?: OperationSource | null;
+  startTime?: string | null;
+  subjectId?: string | null;
+  subjectType?: string | null;
+}
+/**
+ * One logical request projected from `forward_logs` attempts.
+ */
+export interface RequestLog {
+  accountId: string;
+  accountName: string;
+  /**
+   * Upstream attempts. A pre-upstream `attempt = 0` row contributes zero.
+   */
+  attemptCount: number;
+  cachedTokens: number;
+  clientKeyId: string | null;
+  clientKeyName: string | null;
+  completionTokens: number;
+  credentialAccountId: string | null;
+  /**
+   * Newest attempt's cumulative elapsed, only when that attempt recorded one.
+   */
+  durationMs: number | null;
+  httpStatus: number | null;
+  isLegacy: boolean;
+  model: string;
+  promptTokens: number;
+  providerId: string | null;
+  /**
+   * Stored `forward_logs` rows in this logical request, including attempt 0.
+   */
+  recordedRowCount: number;
+  requestId: string | null;
+  requestKey: string;
+  requestedModel: string | null;
+  resolvedAlias: string | null;
+  route: string;
+  routeAccountId: string | null;
+  status: string;
+  timestamp: string;
+  upstreamModel: string | null;
+}
+export interface RequestLogSummary {
+  cachedTokens: number;
+  completionTokens: number;
+  promptTokens: number;
+  totalAttempts: number;
+  totalRequests: number;
+}
+export interface RequestLogPage {
+  items: RequestLog[];
+  limit: number;
+  offset: number;
+  summary: RequestLogSummary;
+  total: number;
+}
+export interface RequestLogQuery {
+  accountId?: string | null;
+  credentialAccountId?: string | null;
+  endTime?: string | null;
+  keyId?: string | null;
+  limit?: number | null;
+  model?: string | null;
+  offset?: number | null;
+  providerId?: string | null;
+  requestId?: string | null;
+  routeAccountId?: string | null;
+  startTime?: string | null;
+  status?: string | null;
+}
+/**
+ * Attempt detail reuses the V3 forward-log DTO.
+ */
+export interface RequestAttempts {
+  items: ForwardLog[];
+}
+/**
+ * One redacted forward-log row plus native model identity. There is no
+ * `requestedAlias` field.
+ */
+export interface ForwardLog {
+  accountId: string;
+  accountName: string;
+  attempt: number | null;
+  cacheCreationTokens: number;
+  cachedTokens: number;
+  clientKeyId: string | null;
+  clientKeyName: string | null;
+  completionTokens: number;
+  cost: number | null;
+  costState: string;
+  credentialAccountId: string | null;
+  diagnostic: any;
+  durationMs: number | null;
+  effectivePaidCostUsd: number | null;
+  errorMessage: string | null;
+  errorSource: string | null;
+  errorStage: string | null;
+  httpStatus: number | null;
+  id: number;
+  localAdjustmentMultiplier: number | null;
+  model: string;
+  nativeCostCurrency: string | null;
+  nativeCostUnit: string | null;
+  nativeCostValue: number | null;
+  pricingRevisionId: string | null;
+  promptTokens: number;
+  providerId: string | null;
+  quotaDebit: number | null;
+  quotaMultiplier: number | null;
+  rawCostUsd: number | null;
+  requestId: string | null;
+  requestedModel: string | null;
+  resolvedAlias: string | null;
+  route: string;
+  routeAccountId: string | null;
+  serviceTier: string | null;
+  status: string;
+  timestamp: string;
+  upstreamModel: string | null;
 }

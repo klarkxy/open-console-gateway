@@ -89,41 +89,63 @@ pub(super) async fn put(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<DestinationModelMetadata>, V3ApiError> {
-    let input = parse_mutation_json::<DestinationModelMetadataUpdate>(&body)?;
-    // A missing member is not an implicit delete. Reset requires explicit null.
-    let json: serde_json::Value = serde_json::from_slice(&body).map_err(V3ApiError::internal)?;
-    if json.get("metadata").is_none() {
-        return Err(V3ApiError::invalid_request_at(
-            &state,
-            "metadata is required (use null to reset)",
-        ));
-    }
-    if let Some(metadata) = &input.metadata {
-        metadata
-            .validate()
-            .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
-    }
-    let _settings = state.settings_update.lock();
-    check_expectation(&state, &input.expectation)?;
-    let snapshot = crate::routing_snapshot::RoutingSnapshot::load(&state.db.lock())
-        .map_err(V3ApiError::internal)?;
-    let destination = snapshot
-        .projection
-        .destinations
-        .iter()
-        .find(|d| d.id == id)
-        .ok_or_else(|| V3ApiError::not_found_at(&state, "destination not found"))?;
-    let model = destination
-        .catalog
-        .iter()
-        .find(|m| m.public_model == input.public_model)
-        .ok_or_else(|| V3ApiError::not_found_at(&state, "exact public model not found"))?;
-    state
-        .commit_configuration_update(|db| {
-            model_metadata::declare(db, destination, model, input.metadata)
+    let mut receipt = super::applications::DashboardReceipt::open(
+        &state,
+        "metadata.update",
+        "destination",
+        super::applications::opaque_subject(&id),
+    );
+    let result = (|| {
+        let input = parse_mutation_json::<DestinationModelMetadataUpdate>(&body)?;
+        // A missing member is not an implicit delete. Reset requires explicit null.
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).map_err(V3ApiError::internal)?;
+        if json.get("metadata").is_none() {
+            return Err(V3ApiError::invalid_request_at(
+                &state,
+                "metadata is required (use null to reset)",
+            ));
+        }
+        if let Some(metadata) = &input.metadata {
+            metadata
+                .validate()
+                .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
+        }
+        let _settings = state.settings_update.lock();
+        check_expectation(&state, &input.expectation)?;
+        let snapshot = crate::routing_snapshot::RoutingSnapshot::load(&state.db.lock())
+            .map_err(V3ApiError::internal)?;
+        let destination = snapshot
+            .projection
+            .destinations
+            .iter()
+            .find(|d| d.id == id)
+            .ok_or_else(|| V3ApiError::not_found_at(&state, "destination not found"))?;
+        let model = destination
+            .catalog
+            .iter()
+            .find(|m| m.public_model == input.public_model)
+            .ok_or_else(|| V3ApiError::not_found_at(&state, "exact public model not found"))?;
+        receipt
+            .commit_recorded(
+                &state,
+                crate::log_types::OperationMetadata {
+                    changed_fields: vec!["metadata".to_string()],
+                    completed_count: Some(1),
+                    ..crate::log_types::OperationMetadata::default()
+                },
+                |db| model_metadata::declare(db, destination, model, input.metadata),
+            )
+            .map_err(V3ApiError::internal)?;
+        payload(&state, &id)
+    })();
+    receipt
+        .observe(result, None, |value| crate::log_types::OperationMetadata {
+            changed_fields: vec!["metadata".to_string()],
+            revision: Some(value.revision.revision),
+            ..crate::log_types::OperationMetadata::default()
         })
-        .map_err(V3ApiError::internal)?;
-    payload(&state, &id).map(Json)
+        .map(Json)
 }
 
 fn payload(state: &CoreState, id: &str) -> Result<DestinationModelMetadata, V3ApiError> {

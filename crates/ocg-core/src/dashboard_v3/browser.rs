@@ -97,35 +97,101 @@ pub(super) async fn browser_capabilities(
     })
 }
 
+enum OpenOutcome {
+    Ready(Result<Json<BrowserOpen>, V3ApiError>),
+    /// The open was revoked. `restored` is true only when the browser process stop succeeded.
+    Restored {
+        error: V3ApiError,
+        restored: bool,
+    },
+}
+
 pub(super) async fn open_account_browser(
     State(state): State<CoreState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<BrowserOpen>, V3ApiError> {
-    let input = parse_mutation_json::<BrowserOpenRequest>(&body)?;
+    let op = super::settings::open_dashboard(
+        &state,
+        "account.browser.open",
+        "account",
+        Some(id.clone()),
+    );
+    match open_account_browser_inner(state.clone(), id, headers, body).await {
+        OpenOutcome::Ready(result) => {
+            super::settings::record_after(op, &state, &["target"], (None, None, None), None, result)
+        }
+        OpenOutcome::Restored { error, restored } => {
+            let outcome = if restored {
+                crate::log_types::OperationOutcome::Compensated
+            } else {
+                crate::log_types::OperationOutcome::Partial
+            };
+            op.complete(
+                outcome,
+                Some(error.operation_reason()),
+                super::settings::metadata_for(
+                    &state,
+                    &["target"],
+                    None,
+                    None,
+                    Some(1),
+                    Some(restored),
+                ),
+            );
+            Err(error)
+        }
+    }
+}
+
+async fn open_account_browser_inner(
+    state: CoreState,
+    id: String,
+    headers: HeaderMap,
+    body: Bytes,
+) -> OpenOutcome {
+    let input = match parse_mutation_json::<BrowserOpenRequest>(&body) {
+        Ok(input) => input,
+        Err(error) => return OpenOutcome::Ready(Err(error)),
+    };
     {
         let _settings_update = state.settings_update.lock();
-        check_expectation(&state, &input.expectation)?;
-        resolve_browser_url(&state, &id, input.target)?;
+        if let Err(error) = check_expectation(&state, &input.expectation) {
+            return OpenOutcome::Ready(Err(error));
+        }
+        if let Err(error) = resolve_browser_url(&state, &id, input.target) {
+            return OpenOutcome::Ready(Err(error));
+        }
     }
 
     let browser_operation = state.browser.operation().await;
     let url = {
         let _settings_update = state.settings_update.lock();
-        check_expectation(&state, &input.expectation)?;
-        state
-            .recover_browser_profiles_for_account(&id)
-            .map_err(V3ApiError::internal)?;
-        resolve_browser_url(&state, &id, input.target)?
+        if let Err(error) = check_expectation(&state, &input.expectation) {
+            return OpenOutcome::Ready(Err(error));
+        }
+        if let Err(error) = state.recover_browser_profiles_for_account(&id) {
+            return OpenOutcome::Ready(Err(V3ApiError::internal(error)));
+        }
+        match resolve_browser_url(&state, &id, input.target) {
+            Ok(url) => url,
+            Err(error) => return OpenOutcome::Ready(Err(error)),
+        }
     };
-    let binding = dashboard_session_binding(&state, &headers)?;
-    let opened = browser_operation
-        .open(&id, &url, &binding)
-        .await
-        .map_err(|error| {
-            V3ApiError::service_unavailable(&state, sanitize_browser_runtime_message(error))
-        })?;
+    let binding = match dashboard_session_binding(&state, &headers) {
+        Ok(binding) => binding,
+        Err(error) => return OpenOutcome::Ready(Err(error)),
+    };
+    let opened = match browser_operation.open(&id, &url, &binding).await {
+        Ok(opened) => opened,
+        Err(error) => {
+            return OpenOutcome::Ready(Err(V3ApiError::service_unavailable(
+                &state,
+                sanitize_browser_runtime_message(error),
+            )));
+        }
+    };
     let revision = {
         let _settings_update = state.settings_update.lock();
         check_open_still_valid(&state, &id, input.target, &input.expectation)
@@ -138,22 +204,47 @@ pub(super) async fn open_account_browser(
             // A stale open must never remain usable merely because cleanup of
             // the underlying browser process failed.
             state.browser.invalidate_remote_sessions();
-            let _ = browser_operation.stop_account(&id).await;
-            return Err(error);
+            let restored = browser_operation.stop_account(&id).await.is_ok();
+            return OpenOutcome::Restored { error, restored };
         }
     };
-    Ok(Json(BrowserOpen {
+    OpenOutcome::Ready(Ok(Json(BrowserOpen {
         mode: map_browser_mode(opened.mode),
         session_token: opened.session_token,
         revision,
         process_generation: state.process_generation(),
-    }))
+    })))
 }
 
 pub(super) async fn reset_account_browser_profile(
     State(state): State<CoreState>,
     Path(id): Path<String>,
     body: Bytes,
+) -> Result<Json<AccountMutation>, V3ApiError> {
+    let op = super::settings::open_dashboard(
+        &state,
+        "account.browser.reset",
+        "account",
+        Some(id.clone()),
+    );
+    let mut effect = super::settings::CommittedEffect::Atomic;
+    let result = reset_account_browser_profile_inner(state.clone(), id, body, &mut effect).await;
+    super::settings::record_effect(
+        op,
+        &state,
+        &["profile"],
+        (None, None, None),
+        None,
+        effect,
+        result,
+    )
+}
+
+async fn reset_account_browser_profile_inner(
+    state: CoreState,
+    id: String,
+    body: Bytes,
+    effect: &mut super::settings::CommittedEffect,
 ) -> Result<Json<AccountMutation>, V3ApiError> {
     let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
     {
@@ -196,14 +287,14 @@ pub(super) async fn reset_account_browser_profile(
         // profile purge/read so an error cannot leave clients holding a stale
         // revision for state that has changed on disk.
         let revision = state.bump_settings_revision();
-        purge_staged_profiles(&state, staged)?;
-        let account = load_model_account(&state, &id)?;
-        return mutation_at(&state, account, revision).map(Json);
+        effect.note_follow_up(purge_staged_profiles(&state, staged))?;
+        let account = effect.note_follow_up(load_model_account(&state, &id))?;
+        return effect.note_follow_up(mutation_at(&state, account, revision).map(Json));
     }
     purge_staged_profiles(&state, staged)?;
     let revision = state.bump_settings_revision();
-    let account = load_model_account(&state, &id)?;
-    mutation_at(&state, account, revision).map(Json)
+    let account = effect.note_follow_up(load_model_account(&state, &id))?;
+    effect.note_follow_up(mutation_at(&state, account, revision).map(Json))
 }
 
 pub(super) async fn browser_session_websocket(

@@ -13,6 +13,7 @@ use ocg_domain::provider::{ProviderOrigin, ProviderRegistry, builtin_provider};
 use crate::custom;
 use crate::custom::validate_custom_endpoint_url;
 use crate::dynamic::{DynamicProviderRuntime, collides_with_known_id, validate_definition};
+use crate::log_types::OperationMetadata;
 use crate::models::{
     Account as ModelAccount, AccountCustomConfig, AccountCustomConfigInput, AccountModelCapability,
     AccountType, NEW_READY_KEY_ACCOUNT_ENABLED, normalize_account_notes,
@@ -20,6 +21,7 @@ use crate::models::{
 use crate::redaction::redact_known_secret;
 use crate::state::CoreState;
 
+use super::accounts::{DashboardAttempt, RevisionAck};
 use super::types::{
     ControlRevision, MutationAck, MutationExpectation, ProviderDefinition,
     ProviderDefinitionCreate, ProviderDefinitionDiscoverRequest,
@@ -32,8 +34,10 @@ pub(super) async fn create_provider(
     State(state): State<CoreState>,
     body: Bytes,
 ) -> Result<Json<ProviderDefinitionMutation>, V3ApiError> {
-    let input = parse_mutation_json::<ProviderDefinitionCreate>(&body)?;
-    create_locked(&state, input).map(Json)
+    let mut attempt = DashboardAttempt::open(&state, "provider.create", "provider", None);
+    let result = parse_mutation_json::<ProviderDefinitionCreate>(&body)
+        .and_then(|input| create_locked(&state, input, &mut attempt));
+    attempt.finish(result).map(Json)
 }
 
 pub(super) async fn get_provider(
@@ -59,8 +63,15 @@ pub(super) async fn update_provider(
     Path(provider_id): Path<String>,
     body: Bytes,
 ) -> Result<Json<ProviderDefinitionMutation>, V3ApiError> {
-    let input = parse_mutation_json::<ProviderDefinitionUpdate>(&body)?;
-    update_locked(&state, &provider_id, input).map(Json)
+    let mut attempt = DashboardAttempt::open(
+        &state,
+        "provider.update",
+        "provider",
+        Some(provider_id.clone()),
+    );
+    let result = parse_mutation_json::<ProviderDefinitionUpdate>(&body)
+        .and_then(|input| update_locked(&state, &provider_id, input, &mut attempt));
+    attempt.finish(result).map(Json)
 }
 
 pub(super) async fn delete_provider(
@@ -68,21 +79,37 @@ pub(super) async fn delete_provider(
     Path(provider_id): Path<String>,
     body: Bytes,
 ) -> Result<Json<MutationAck>, V3ApiError> {
-    let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
-    delete_locked(&state, &provider_id, &expectation).map(Json)
+    let mut attempt = DashboardAttempt::open(
+        &state,
+        "provider.delete",
+        "provider",
+        Some(provider_id.clone()),
+    );
+    let result = parse_mutation_json::<MutationExpectation>(&body)
+        .and_then(|expectation| delete_locked(&state, &provider_id, &expectation, &mut attempt));
+    attempt.finish(result).map(Json)
 }
 
 pub(super) async fn discover_models(
     State(state): State<CoreState>,
     body: Bytes,
 ) -> Result<Json<ProviderDefinitionDiscoverResponse>, V3ApiError> {
+    let attempt = DashboardAttempt::open(&state, "provider.discover", "provider", None);
+    let result = discover_models_result(&state, body).await;
+    attempt.finish(result).map(Json)
+}
+
+async fn discover_models_result(
+    state: &CoreState,
+    body: Bytes,
+) -> Result<ProviderDefinitionDiscoverResponse, V3ApiError> {
     let input = parse_json::<ProviderDefinitionDiscoverRequest>(&body)?;
-    let captured = ControlRevision::from_state(&state);
+    let captured = ControlRevision::from_state(state);
     let config = state.config();
     let endpoint = validate_custom_endpoint_url(&input.endpoint_url)
-        .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
+        .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
     let auth_kind = DynamicAuthKind::from(input.auth_kind);
-    let key = required_probe_key(&state, auth_kind, input.key.as_deref())?;
+    let key = required_probe_key(state, auth_kind, input.key.as_deref())?;
     let custom_config = AccountCustomConfigInput {
         endpoint_url: endpoint,
         upstream_protocol: input.upstream_protocol.into(),
@@ -90,30 +117,39 @@ pub(super) async fn discover_models(
     let discovery =
         custom::discover_models_with_auth(&config, &custom_config, auth_kind.upstream_auth(), &key)
             .await
-            .map_err(|failure| map_probe_failure(&state, &key, failure.message))?;
-    Ok(Json(ProviderDefinitionDiscoverResponse {
+            .map_err(|failure| map_probe_failure(state, &key, failure.message))?;
+    Ok(ProviderDefinitionDiscoverResponse {
         models: models_without_key(discovery.models, &key),
         truncated: discovery.truncated,
         revision: captured.revision,
         process_generation: captured.process_generation,
-    }))
+    })
 }
 
 pub(super) async fn test_provider(
     State(state): State<CoreState>,
     body: Bytes,
 ) -> Result<Json<ProviderDefinitionTestResponse>, V3ApiError> {
+    let attempt = DashboardAttempt::open(&state, "provider.test", "provider", None);
+    let result = provider_test_result(&state, body).await;
+    finish_provider_test(attempt, result).map(Json)
+}
+
+async fn provider_test_result(
+    state: &CoreState,
+    body: Bytes,
+) -> Result<ProviderDefinitionTestResponse, V3ApiError> {
     let input = parse_json::<ProviderDefinitionTestRequest>(&body)?;
-    let captured = ControlRevision::from_state(&state);
+    let captured = ControlRevision::from_state(state);
     let config = state.config();
     let endpoint = validate_custom_endpoint_url(&input.endpoint_url)
-        .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
+        .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
     let auth_kind = DynamicAuthKind::from(input.auth_kind);
-    let key = required_probe_key(&state, auth_kind, input.key.as_deref())?;
+    let key = required_probe_key(state, auth_kind, input.key.as_deref())?;
     let public_model = ocg_domain::provider::validate_custom_model_id(&input.public_model)
-        .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
+        .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
     let upstream_model = ocg_domain::provider::validate_custom_model_id(&input.upstream_model)
-        .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
+        .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
     let custom_config = AccountCustomConfig {
         account_id: String::new(),
         endpoint_url: endpoint,
@@ -141,17 +177,46 @@ pub(super) async fn test_provider(
         Ok(()) => (true, None),
         Err(failure) => (false, Some(redact_known_secret(&failure.message, &key))),
     };
-    Ok(Json(ProviderDefinitionTestResponse {
+    Ok(ProviderDefinitionTestResponse {
         ok,
         error,
         revision: captured.revision,
         process_generation: captured.process_generation,
-    }))
+    })
+}
+
+fn finish_provider_test(
+    mut attempt: DashboardAttempt,
+    result: Result<ProviderDefinitionTestResponse, V3ApiError>,
+) -> Result<ProviderDefinitionTestResponse, V3ApiError> {
+    match &result {
+        Ok(response) if response.ok => {
+            attempt.note_success(OperationMetadata {
+                revision: Some(response.revision),
+                ..OperationMetadata::default()
+            });
+            attempt.finish(result)
+        }
+        Ok(response) => {
+            let revision = response.revision;
+            attempt.complete_failed(
+                "outboundFailed",
+                OperationMetadata {
+                    revision: Some(revision),
+                    failed_count: Some(1),
+                    ..OperationMetadata::default()
+                },
+            );
+            result
+        }
+        Err(_) => attempt.finish(result),
+    }
 }
 
 fn create_locked(
     state: &CoreState,
     input: ProviderDefinitionCreate,
+    attempt: &mut DashboardAttempt,
 ) -> Result<ProviderDefinitionMutation, V3ApiError> {
     let _settings_update = state.settings_update.lock();
     check_expectation(state, &input.expectation)?;
@@ -236,9 +301,15 @@ fn create_locked(
         }
         .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?
     };
-    state
-        .install_dynamic_providers_snapshot(snapshot)
-        .map_err(V3ApiError::internal)?;
+    attempt.subject(runtime.id.clone());
+    if let Err(error) = state.install_dynamic_providers_snapshot(snapshot) {
+        attempt.note_partial(OperationMetadata {
+            completed_count: Some(1),
+            failed_count: Some(1),
+            ..OperationMetadata::default()
+        });
+        return Err(V3ApiError::internal(error));
+    }
     Ok(provider_mutation(state, runtime, state.settings_revision()))
 }
 
@@ -246,6 +317,7 @@ fn update_locked(
     state: &CoreState,
     provider_id: &str,
     input: ProviderDefinitionUpdate,
+    attempt: &mut DashboardAttempt,
 ) -> Result<ProviderDefinitionMutation, V3ApiError> {
     let _settings_update = state.settings_update.lock();
     check_expectation(state, &input.expectation)?;
@@ -300,8 +372,8 @@ fn update_locked(
     let now = Utc::now();
     let runtime = runtime_from_definition(definition, existing.created_at, now);
     let destination_id = ocg_domain::destination::destination_id_for_dynamic(&existing.id);
-    state
-        .commit_configuration_update(|db| {
+    if let Err(error) = state.commit_configuration_update_recorded(
+        |db| {
             crate::db::destination_commands::replace_http_destination_on(
                 db,
                 &destination_id,
@@ -312,29 +384,44 @@ fn update_locked(
                 db.replace_destination_singleton_key_on(&destination_id, cipher)?;
             }
             Ok(())
-        })
-        .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
-    Ok(provider_mutation(state, runtime, state.settings_revision()))
+        },
+        |revision| attempt.note_own_commit(revision),
+    ) {
+        return Err(V3ApiError::invalid_request_at(state, error.to_string()));
+    }
+    let mutation = provider_mutation(state, runtime, state.settings_revision());
+    attempt.note_success(OperationMetadata {
+        revision: Some(mutation.revision),
+        ..OperationMetadata::default()
+    });
+    Ok(mutation)
 }
 
 fn delete_locked(
     state: &CoreState,
     provider_id: &str,
     expectation: &MutationExpectation,
+    attempt: &mut DashboardAttempt,
 ) -> Result<MutationAck, V3ApiError> {
     let _settings_update = state.settings_update.lock();
     check_expectation(state, expectation)?;
     reject_builtin_id(state, provider_id)?;
     let destination_id = ocg_domain::destination::destination_id_for_dynamic(provider_id);
-    state
-        .commit_configuration_update(|db| {
-            crate::db::destination_commands::delete_http_destination_on(db, &destination_id)
-        })
-        .map_err(|error| map_delete_error(state, error))?;
-    Ok(MutationAck {
+    if let Err(error) = state.commit_configuration_update_recorded(
+        |db| crate::db::destination_commands::delete_http_destination_on(db, &destination_id),
+        |revision| attempt.note_own_commit(revision),
+    ) {
+        return Err(map_delete_error(state, error));
+    }
+    let ack = MutationAck {
         revision: state.settings_revision(),
         process_generation: state.process_generation(),
-    })
+    };
+    attempt.note_success(OperationMetadata {
+        revision: Some(ack.revision),
+        ..OperationMetadata::default()
+    });
+    Ok(ack)
 }
 
 fn reject_builtin_id(state: &CoreState, provider_id: &str) -> Result<(), V3ApiError> {
@@ -564,3 +651,24 @@ fn to_wire(
         process_generation,
     }
 }
+
+impl RevisionAck for ProviderDefinitionMutation {
+    fn acked_revision(&self) -> Option<u64> {
+        Some(self.revision)
+    }
+}
+
+impl RevisionAck for ProviderDefinitionDiscoverResponse {
+    fn acked_revision(&self) -> Option<u64> {
+        Some(self.revision)
+    }
+}
+
+impl RevisionAck for ProviderDefinitionTestResponse {
+    fn acked_revision(&self) -> Option<u64> {
+        Some(self.revision)
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -214,8 +214,8 @@ fn assemble_credential_snapshot(
             .get(&key.key)
             .is_some_and(|entry| entry.id == PRIMARY_KEY_ID)
         {
-            eprintln!(
-                "warning: enabled sub key `{}` shares the primary key's value; \
+            tracing::warn!(
+                "enabled sub key `{}` shares the primary key's value; \
                  attributing the value to the primary key",
                 key.id
             );
@@ -244,7 +244,7 @@ pub fn refresh_snapshot(host: &impl KeyHost) {
     match next {
         Ok(next) => host.replace_credential_snapshot(next),
         Err(error) => {
-            eprintln!("warning: failed to rebuild the credential snapshot: {error}");
+            tracing::warn!("failed to rebuild the credential snapshot: {error}");
         }
     }
 }
@@ -348,8 +348,8 @@ fn revoke_snapshot_value(
     host.with_credential_snapshot_mut(|snapshot| match snapshot.get(value) {
         Some(entry) if entry.id == key_id => snapshot.remove(value),
         Some(entry) => {
-            eprintln!(
-                "warning: value of sub key `{key_id}` collides with the primary key entry \
+            tracing::warn!(
+                "value of sub key `{key_id}` collides with the primary key entry \
                  (`{}`); keeping the primary snapshot entry",
                 entry.id
             );

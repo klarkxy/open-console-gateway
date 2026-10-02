@@ -45,6 +45,8 @@ hex = "0.4"
 hmac = "0.12"
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = [
     "connect",
     "handshake",
@@ -59,6 +61,10 @@ zip = { version = "4.6", default-features = false, features = ["deflate"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", features = ["process", "signal"] }
+
+[dev-dependencies]
+# Deterministic SQLite failure barriers in receipt integrity tests.
+rusqlite = { version = "0.33", features = ["functions"] }
 
 [target.'cfg(windows)'.dependencies]
 # Match Windows browser trust/proxy behavior while retaining WebPKI roots as a fallback.

@@ -1747,8 +1747,8 @@ pub(crate) fn ensure_identity_model_consistent(conn: &Connection) -> Result<()> 
         if identity_account_violations(conn)? == 0 {
             return Ok(());
         }
-        eprintln!(
-            "warning: identity model satellites are incomplete on schema v{version}; repairing with deterministic backfill"
+        tracing::warn!(
+            "identity model satellites are incomplete on schema v{version}; repairing with deterministic backfill"
         );
         let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
         migrate_v45_body(&tx)?;
@@ -1762,8 +1762,8 @@ pub(crate) fn ensure_identity_model_consistent(conn: &Connection) -> Result<()> 
         return Ok(());
     }
     if !identity_facts_on_credentials(conn)? && version < 57 {
-        eprintln!(
-            "warning: identity model satellites are incomplete on schema v{version}; repairing with deterministic backfill"
+        tracing::warn!(
+            "identity model satellites are incomplete on schema v{version}; repairing with deterministic backfill"
         );
         let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
         migrate_v45_body(&tx)?;
@@ -1778,8 +1778,8 @@ pub(crate) fn ensure_identity_model_consistent(conn: &Connection) -> Result<()> 
     if identity_account_violations(conn)? == 0 {
         return Ok(());
     }
-    eprintln!(
-        "warning: identity model satellites are incomplete on schema v{version}; repairing with deterministic backfill"
+    tracing::warn!(
+        "identity model satellites are incomplete on schema v{version}; repairing with deterministic backfill"
     );
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     repair_identity_facts_on_credentials(&tx)?;

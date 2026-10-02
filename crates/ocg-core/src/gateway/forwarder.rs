@@ -905,7 +905,6 @@ pub(crate) async fn forward_request_with_deadline(
             .await
         {
             super::diagnostics::log_event(
-                &state.db.lock(),
                 trace,
                 "warn",
                 "debug_capture",
@@ -916,7 +915,6 @@ pub(crate) async fn forward_request_with_deadline(
         }
     }
     super::diagnostics::log_event(
-        &state.db.lock(),
         trace,
         "debug",
         "routing",
@@ -1204,7 +1202,6 @@ pub(crate) async fn forward_request_with_deadline(
 
     let status = upstream_resp.status();
     super::diagnostics::log_event(
-        &state.db.lock(),
         trace,
         if status.is_success() { "debug" } else { "warn" },
         "upstream",
@@ -2393,11 +2390,7 @@ pub(crate) async fn forward_request_with_deadline(
                             diagnostic.as_ref(),
                             &attempt,
                         ) {
-                            let _ = db.log_gateway(
-                                "warn",
-                                "forwarder",
-                                &format!("failed to finalize streaming row {initial_id}: {e}"),
-                            );
+                            tracing::warn!(log_id = initial_id, error = %e, "failed to finalize streaming row");
                         }
                         if !st_f.lock().error
                             && let Some(permit) = guard.recovery.as_mut()
@@ -2939,11 +2932,7 @@ fn persist_quota_write(
         let persisted = match write(&db) {
             Ok(changed) => changed,
             Err(error) => {
-                let _ = db.log_gateway(
-                    "warn",
-                    "forwarder",
-                    &format!("failed to persist {what}: {error}"),
-                );
+                tracing::warn!(what, error = %error, "failed to persist forwarder state");
                 false
             }
         };
@@ -2966,7 +2955,7 @@ fn persist_quota_write(
             // publish leaves the aggregate one revision behind, which the next
             // reader detects and rebuilds.
             if let Err(error) = state.publish_gateway_preparation(&db) {
-                eprintln!("warning: failed to republish the request preparation view: {error}");
+                tracing::warn!("failed to republish the request preparation view: {error}");
             }
         }
         persisted
@@ -3004,11 +2993,7 @@ impl Drop for CreditRequestGuard {
             None,
             &self.context,
         ) {
-            let _ = db.log_gateway(
-                "warn",
-                "forwarder",
-                &format!("credit request {id} finalization failed: {error}"),
-            );
+            tracing::warn!(log_id = id, error = %error, "credit request finalization failed");
         }
     }
 }
@@ -3185,14 +3170,7 @@ impl Drop for StreamOutcomeGuard {
             diagnostic.as_ref(),
             &self.attempt_context,
         ) {
-            let _ = db.log_gateway(
-                "warn",
-                "forwarder",
-                &format!(
-                    "failed to finalize dropped streaming row {}: {}",
-                    self.log_id, error
-                ),
-            );
+            tracing::warn!(log_id = self.log_id, error = %error, "failed to finalize dropped streaming row");
         }
         drop(db);
         let success = status.starts_with("success");
@@ -3282,11 +3260,7 @@ fn handle_pre_output_stream_failure(
         Some(&diagnostic),
         attempt,
     ) {
-        let _ = db.log_gateway(
-            "warn",
-            "forwarder",
-            &format!("failed to update streaming row {log_id}: {error}"),
-        );
+        tracing::warn!(log_id, error = %error, "failed to update streaming row");
     }
     if retry {
         PreOutputFailure::Retry(ForwardResult {
@@ -3737,11 +3711,10 @@ pub(crate) fn rate_limited_response(
 }
 
 fn log_attempt_outcome(
-    db: &Database,
     context: &ForwardAttemptContext,
     status: &str,
     http_status: Option<i32>,
-    diagnostic: Option<&ForwardLogDiagnosticUpdate<'_>>,
+    _diagnostic: Option<&ForwardLogDiagnosticUpdate<'_>>,
 ) {
     let level = if status.starts_with("success") {
         "info"
@@ -3754,7 +3727,6 @@ fn log_attempt_outcome(
     };
     let fields = serde_json::json!({"status": status, "http_status": http_status});
     super::diagnostics::log_event(
-        db,
         &context.trace,
         level,
         "upstream",
@@ -3762,19 +3734,6 @@ fn log_attempt_outcome(
         Some(context.attempt),
         fields,
     );
-    if let Some(diagnostic) = diagnostic {
-        let _ = db.log_gateway_diagnostic(
-            level,
-            "upstream",
-            "attempt_failure",
-            Some(&context.trace.request_id),
-            Some(i64::from(context.attempt)),
-            Some(diagnostic.error_source),
-            Some(diagnostic.error_stage),
-            Some(diagnostic.duration_ms),
-            Some(diagnostic.diagnostic_json),
-        );
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3813,7 +3772,6 @@ fn log_forward(
         return Ok(id);
     }
     log_attempt_outcome(
-        db,
         context,
         status,
         http_status,
@@ -3911,8 +3869,8 @@ fn finalize_logged_forward(
         error_message,
         diagnostic,
     )?;
-    log_attempt_outcome(db, context, status, http_status, diagnostic);
     persist_log_identity(db, id, context)?;
+    log_attempt_outcome(context, status, http_status, diagnostic);
     Ok(())
 }
 

@@ -48,23 +48,86 @@ const NON_DYNAMIC_DRAFT_MESSAGE: &str =
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Memory-only notice once this attempt's ledger row is durable.
+/// The string is the internal receipt UUID, not the caller's operation id.
+/// Callers must not take the database or settings locks from the callback.
+type CommitNote<'a> = &'a mut dyn FnMut(&str, &StoredOnboardingCommitResult);
+
+const LEGACY_RECEIPT_DOMAIN: &[u8] = b"ocg.operation.onboarding.legacy.v1\0";
+
 pub(super) async fn commit(
     State(state): State<CoreState>,
     body: Bytes,
 ) -> Result<Json<OnboardingCommitResult>, V3ApiError> {
-    let input = parse_mutation_json::<OnboardingCommitRequest>(&body)?;
-    if uuid::Uuid::parse_str(&input.operation_id).is_err() {
-        return Err(V3ApiError::invalid_request_at(
-            &state,
-            "operationId must be a UUID",
-        ));
+    let mut receipt = super::applications::DashboardReceipt::open(
+        &state,
+        "onboarding.commit",
+        "connection",
+        None,
+    );
+    let result = (|| {
+        let input = parse_mutation_json::<OnboardingCommitRequest>(&body)?;
+        if uuid::Uuid::parse_str(&input.operation_id).is_err() {
+            return Err(V3ApiError::invalid_request_at(
+                &state,
+                "operationId must be a UUID",
+            ));
+        }
+        commit_recorded(&state, input, &mut |receipt_id, stored| {
+            if let Ok(id) = uuid::Uuid::parse_str(receipt_id) {
+                receipt.use_operation_id(id);
+            }
+            receipt.subject(&stored.connection_id);
+            receipt.note_committed(committed_metadata(stored));
+        })
+    })();
+    if let Ok(value) = &result {
+        receipt.subject(&value.connection_id);
+        receipt.succeed(crate::log_types::OperationMetadata {
+            revision: Some(value.revision.revision),
+            related_ids: committed_metadata(&StoredOnboardingCommitResult {
+                connection_id: value.connection_id.clone(),
+                credential_id: value.credential_id.clone(),
+                target_ids: value.target_ids.clone(),
+                account_id: value.account_id.clone(),
+                receipt_id: None,
+            })
+            .related_ids,
+            ..crate::log_types::OperationMetadata::default()
+        });
     }
-    commit_locked(&state, input).map(Json)
+    receipt.finish(result).map(Json)
 }
 
-pub(crate) fn commit_locked(
+fn committed_metadata(
+    stored: &StoredOnboardingCommitResult,
+) -> crate::log_types::OperationMetadata {
+    let mut related_ids = Vec::new();
+    if let Some(id) = stored
+        .credential_id
+        .as_deref()
+        .and_then(super::applications::opaque_subject)
+    {
+        related_ids.push(id);
+    }
+    if let Some(id) = stored
+        .account_id
+        .as_deref()
+        .and_then(super::applications::opaque_subject)
+    {
+        related_ids.push(id);
+    }
+    crate::log_types::OperationMetadata {
+        completed_count: Some(1),
+        related_ids,
+        ..crate::log_types::OperationMetadata::default()
+    }
+}
+
+fn commit_recorded(
     state: &CoreState,
     input: OnboardingCommitRequest,
+    note: CommitNote<'_>,
 ) -> Result<OnboardingCommitResult, V3ApiError> {
     let _settings_update = state.settings_update.lock();
     let digest = payload_digest(state, &input)?;
@@ -79,7 +142,11 @@ pub(crate) fn commit_locked(
                 "operationId was reused with a different payload",
             ));
         }
-        return replay_stored(state, &existing.result_json);
+        let stored: StoredOnboardingCommitResult =
+            serde_json::from_str(&existing.result_json).map_err(V3ApiError::internal)?;
+        let receipt_id = receipt_uuid_for(&stored, &existing).to_string();
+        note(&receipt_id, &stored);
+        return Ok(replay_from_stored(state, stored));
     }
 
     check_expectation(state, &input.expectation)?;
@@ -93,6 +160,7 @@ pub(crate) fn commit_locked(
             input.targets,
             input.mode,
             input.authorize_current_endpoint,
+            note,
         ),
         OnboardingConnection::Existing(connection) => commit_existing(
             state,
@@ -103,6 +171,7 @@ pub(crate) fn commit_locked(
             input.targets,
             input.mode,
             input.authorize_current_endpoint,
+            note,
         ),
     }
 }
@@ -118,6 +187,7 @@ fn commit_new(
     targets: Vec<OnboardingTarget>,
     mode: Option<OnboardingCommitMode>,
     authorize_current_endpoint: bool,
+    note: CommitNote<'_>,
 ) -> Result<OnboardingCommitResult, V3ApiError> {
     reject_legacy_authorize_flag(state, mode, authorize_current_endpoint)?;
     let draft = mode == Some(OnboardingCommitMode::Draft);
@@ -189,24 +259,25 @@ fn commit_new(
     let runtime = runtime_from_definition(definition, now, now);
     finish_new(
         state,
-        operation_id,
-        digest,
+        (operation_id, digest),
         runtime,
         first_account,
         draft,
         protocol_routes,
+        note,
     )
 }
 
 fn finish_new(
     state: &CoreState,
-    operation_id: &str,
-    digest: &str,
+    ledger_identity: (&str, &str),
     runtime: DynamicProviderRuntime,
     first_account: Option<ModelAccount>,
     onboarding_draft: bool,
     protocol_routes: Option<Vec<ocg_domain::destination::HttpProtocolRoute>>,
+    note: CommitNote<'_>,
 ) -> Result<OnboardingCommitResult, V3ApiError> {
+    let (operation_id, digest) = ledger_identity;
     let connection_id =
         connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, &runtime.id);
     let (credential_id, account_id) = stored_commit_ids(first_account.as_ref());
@@ -220,6 +291,7 @@ fn finish_new(
         credential_id,
         target_ids,
         account_id,
+        receipt_id: Some(new_receipt_id()),
     };
     let operation = ledger_row(operation_id, digest, &stored)?;
     let snapshot = {
@@ -233,6 +305,7 @@ fn finish_new(
         )
         .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?
     };
+    note_new_receipt(note, &stored);
     state
         .install_dynamic_providers_snapshot(snapshot)
         .map_err(V3ApiError::internal)?;
@@ -250,6 +323,7 @@ fn commit_existing(
     targets: Vec<OnboardingTarget>,
     mode: Option<OnboardingCommitMode>,
     authorize_current_endpoint: bool,
+    note: CommitNote<'_>,
 ) -> Result<OnboardingCommitResult, V3ApiError> {
     if mode.is_none() {
         if connection.configuration.is_some() || authorize_current_endpoint {
@@ -265,6 +339,7 @@ fn commit_existing(
             &connection.connection_id,
             authorization,
             targets,
+            note,
         );
     }
     resume_existing_draft(
@@ -276,6 +351,7 @@ fn commit_existing(
         targets,
         mode,
         authorize_current_endpoint,
+        note,
     )
 }
 
@@ -286,6 +362,7 @@ fn commit_existing_second_key(
     connection_id: &str,
     authorization: Option<OnboardingAuthorization>,
     targets: Vec<OnboardingTarget>,
+    note: CommitNote<'_>,
 ) -> Result<OnboardingCommitResult, V3ApiError> {
     if !targets.is_empty() {
         return Err(V3ApiError::invalid_request_at(
@@ -346,6 +423,7 @@ fn commit_existing_second_key(
         credential_id: Some(credential_id_for_legacy_account(&account.id).to_string()),
         target_ids: Vec::new(),
         account_id: Some(account.id.clone()),
+        receipt_id: Some(new_receipt_id()),
     };
     let operation = ledger_row(operation_id, digest, &stored)?;
     {
@@ -357,6 +435,7 @@ fn commit_existing_second_key(
         )
         .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
     }
+    note_new_receipt(note, &stored);
     state.bump_settings_revision();
     Ok(committed_result(state, stored))
 }
@@ -422,6 +501,7 @@ fn resume_existing_draft(
     targets: Vec<OnboardingTarget>,
     mode: Option<OnboardingCommitMode>,
     authorize_current_endpoint: bool,
+    note: CommitNote<'_>,
 ) -> Result<OnboardingCommitResult, V3ApiError> {
     let Some(configuration) = connection.configuration else {
         return Err(V3ApiError::invalid_request_at(
@@ -652,6 +732,7 @@ fn resume_existing_draft(
             .map(|mapping| target_id_for(&connection_id, &mapping.public_model).to_string())
             .collect(),
         account_id: result_account_id,
+        receipt_id: Some(new_receipt_id()),
     };
     let operation = ledger_row(operation_id, digest, &stored)?;
     let rotate_ref = rotate
@@ -687,6 +768,7 @@ fn resume_existing_draft(
         )
         .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?
     };
+    note_new_receipt(note, &stored);
     state
         .install_dynamic_providers_snapshot(snapshot)
         .map_err(V3ApiError::internal)?;
@@ -1152,6 +1234,61 @@ fn parse_digest_key(value: &str) -> Result<[u8; 32], V3ApiError> {
         .map_err(|_| V3ApiError::internal("dashboard operation digest key is not 32 bytes"))
 }
 
+fn new_receipt_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+fn note_new_receipt(
+    note: &mut dyn FnMut(&str, &StoredOnboardingCommitResult),
+    stored: &StoredOnboardingCommitResult,
+) {
+    let receipt_id = stored
+        .receipt_id
+        .as_deref()
+        .expect("new onboarding ledger result carries a receipt id");
+    note(receipt_id, stored);
+}
+
+fn stored_receipt_uuid(stored: &StoredOnboardingCommitResult) -> Option<uuid::Uuid> {
+    stored
+        .receipt_id
+        .as_deref()
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+}
+
+fn receipt_uuid_for(
+    stored: &StoredOnboardingCommitResult,
+    row: &crate::db::DashboardOperationRow,
+) -> uuid::Uuid {
+    stored_receipt_uuid(stored).unwrap_or_else(|| {
+        legacy_onboarding_receipt_id(&row.kind, &row.operation_id, &row.created_at)
+    })
+}
+
+/// Stable audit id for a ledger row written before `receiptId` existed.
+/// Inputs are the stored kind, the exact raw operation id, and the stored
+/// timestamp. Nothing from the current request or clock is mixed in.
+fn legacy_onboarding_receipt_id(
+    kind: &str,
+    raw_operation_id: &str,
+    created_at: &str,
+) -> uuid::Uuid {
+    use sha2::Digest;
+    let mut material = Vec::new();
+    material.extend_from_slice(LEGACY_RECEIPT_DOMAIN);
+    for part in [kind, raw_operation_id, created_at] {
+        let bytes = part.as_bytes();
+        material.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+        material.extend_from_slice(bytes);
+    }
+    let hashed = Sha256::digest(&material);
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&hashed[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes)
+}
+
 fn ledger_row(
     operation_id: &str,
     digest: &str,
@@ -1179,20 +1316,18 @@ fn committed_result(
     }
 }
 
-fn replay_stored(
+fn replay_from_stored(
     state: &CoreState,
-    result_json: &str,
-) -> Result<OnboardingCommitResult, V3ApiError> {
-    let stored: StoredOnboardingCommitResult =
-        serde_json::from_str(result_json).map_err(V3ApiError::internal)?;
-    Ok(OnboardingCommitResult {
+    stored: StoredOnboardingCommitResult,
+) -> OnboardingCommitResult {
+    OnboardingCommitResult {
         revision: ControlRevision::from_state(state),
         connection_id: stored.connection_id,
         credential_id: stored.credential_id,
         target_ids: stored.target_ids,
         replayed: true,
         account_id: stored.account_id,
-    })
+    }
 }
 
 #[cfg(test)]

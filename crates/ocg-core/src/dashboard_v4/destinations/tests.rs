@@ -81,10 +81,20 @@ fn expect_ok<T>(result: Result<T, DestinationsError>) -> T {
     }
 }
 
+fn open_receipt(state: &CoreState) -> super::super::applications::DashboardReceipt {
+    super::super::applications::DashboardReceipt::open(
+        state,
+        "destination.update",
+        "destination",
+        None,
+    )
+}
+
 #[test]
 fn configurable_destination_patch_round_trips_override_and_delete_requires_no_keys() {
     let state = dynamic_state();
     let destination_id = destination_id_for_dynamic("destination-edit-provider");
+    let mut receipt = open_receipt(&state);
     let result = expect_ok(patch_destination_locked(
         &state,
         &destination_id,
@@ -109,6 +119,7 @@ fn configurable_destination_patch_round_trips_override_and_delete_requires_no_ke
             }],
             authorize_credential_ids: Vec::new(),
         },
+        &mut receipt,
     ));
     assert_eq!(result.destination.name, "After");
     assert_eq!(
@@ -134,10 +145,12 @@ fn configurable_destination_patch_round_trips_override_and_delete_requires_no_ke
         ocg_domain::catalog::UpstreamProtocolKind::Messages
     );
 
+    let mut delete_receipt = open_receipt(&state);
     let deleted = expect_ok(delete_destination_locked(
         &state,
         &destination_id,
         expectation(&state),
+        &mut delete_receipt,
     ));
     assert_eq!(deleted.revision.revision, state.settings_revision());
     assert!(load_destination(&state, &destination_id).is_err());
@@ -177,13 +190,25 @@ fn metadata_edit_keeps_disabled_default_protocol_and_explicit_routes() {
         }],
         authorize_credential_ids: Vec::new(),
     };
-    expect_ok(patch_destination_locked(&state, &id, request.clone()));
+    let mut receipt = open_receipt(&state);
+    expect_ok(patch_destination_locked(
+        &state,
+        &id,
+        request.clone(),
+        &mut receipt,
+    ));
     request.expectation = expectation(&state);
     request.name = "Renamed".into();
     request.protocol_routes = None;
     request.models[0].protocols = None;
     request.models[0].preferred = None;
-    let result = expect_ok(patch_destination_locked(&state, &id, request.clone()));
+    let mut receipt = open_receipt(&state);
+    let result = expect_ok(patch_destination_locked(
+        &state,
+        &id,
+        request.clone(),
+        &mut receipt,
+    ));
     assert_eq!(result.destination.protocol_routes.len(), 2);
     assert_eq!(
         result.destination.catalog[0].protocols,
@@ -195,7 +220,8 @@ fn metadata_edit_keeps_disabled_default_protocol_and_explicit_routes() {
     );
     request.expectation = expectation(&state);
     request.endpoint_url = "https://changed.example/v1".into();
-    assert!(patch_destination_locked(&state, &id, request).is_err());
+    let mut receipt = open_receipt(&state);
+    assert!(patch_destination_locked(&state, &id, request, &mut receipt).is_err());
     assert_eq!(
         expect_ok(load_destination(&state, &id)).base_url.as_deref(),
         Some("https://before.example/v1")
@@ -265,4 +291,107 @@ fn account_controls_keep_profile_and_commercial_facts_independent() {
             .console_link,
         Some(AccountConsoleLinkDto::Ollama)
     );
+}
+
+#[tokio::test]
+async fn postcommit_policy_failure_is_partial_and_cas_reject_is_not() {
+    use axum::extract::{Path, State};
+    let state = dynamic_state();
+    let destination_id = destination_id_for_dynamic("destination-edit-provider");
+    let before_name = expect_ok(load_destination(&state, &destination_id)).name;
+    let before_revision = state.settings_revision();
+    let stale = patch_body(
+        &state,
+        before_revision.wrapping_add(9),
+        "Rejected",
+        "https://before.example/v1",
+    );
+    let rejected = patch_destination(State(state.clone()), Path(destination_id.clone()), stale)
+        .await
+        .unwrap_err();
+    let rejected_http = error_json(rejected).await;
+    assert_eq!(rejected_http["code"], "revisionConflict");
+    assert_eq!(
+        expect_ok(load_destination(&state, &destination_id)).name,
+        before_name
+    );
+    assert_eq!(state.settings_revision(), before_revision);
+    let rows = super::super::applications::operation_receipts(&state);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].outcome,
+        crate::log_types::OperationOutcome::Rejected
+    );
+    assert_eq!(rows[0].reason_code.as_deref(), Some("revision.conflict"));
+    assert!(rows[0].metadata.revision.is_none());
+
+    state
+        .db
+        .lock()
+        .set_setting(crate::gateway::policy::SETTING_KEY, "{not-json}")
+        .unwrap();
+    let body = patch_body(
+        &state,
+        state.settings_revision(),
+        "After",
+        "https://after.example/v1",
+    );
+    let failed = patch_destination(State(state.clone()), Path(destination_id.clone()), body)
+        .await
+        .unwrap_err();
+    let failed_http = error_json(failed).await;
+    assert_eq!(failed_http["code"], "invalidRequest");
+    let message = failed_http["message"].as_str().unwrap().to_string();
+    assert!(!message.is_empty());
+    let stored = expect_ok(load_destination(&state, &destination_id));
+    assert_eq!(stored.name, "After");
+    assert!(state.settings_revision() > before_revision);
+    let rows = super::super::applications::operation_receipts(&state);
+    assert_eq!(rows.len(), 2);
+    let partial = rows
+        .iter()
+        .find(|row| row.outcome == crate::log_types::OperationOutcome::Partial)
+        .unwrap();
+    assert_eq!(partial.action, "destination.update");
+    assert_eq!(partial.reason_code.as_deref(), Some("invalid.request"));
+    assert_eq!(partial.metadata.revision, Some(state.settings_revision()));
+    assert_eq!(partial.metadata.completed_count, Some(1));
+    assert_eq!(partial.metadata.failed_count, Some(1));
+    assert!(
+        partial
+            .metadata
+            .changed_fields
+            .iter()
+            .any(|field| field == "name")
+    );
+    let encoded = serde_json::to_string(&partial.metadata).unwrap();
+    assert!(!encoded.contains(&message));
+    assert!(!encoded.contains("{not-json}"));
+}
+
+fn patch_body(state: &CoreState, revision: u64, name: &str, endpoint: &str) -> axum::body::Bytes {
+    axum::body::Bytes::from(
+        serde_json::to_vec(&serde_json::json!({
+            "expectedRevision": revision,
+            "processGeneration": state.process_generation(),
+            "name": name,
+            "endpointUrl": endpoint,
+            "upstreamProtocol": "responses",
+            "authScheme": "x_api_key",
+            "models": [{
+                "publicModel": "public-after",
+                "upstreamModel": "upstream-after"
+            }]
+        }))
+        .unwrap(),
+    )
+}
+
+async fn error_json(error: DestinationsError) -> serde_json::Value {
+    use axum::response::IntoResponse;
+    let response = error.into_response();
+    let bytes = axum::body::to_bytes(response.into_body(), 65536)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
 }

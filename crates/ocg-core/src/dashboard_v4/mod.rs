@@ -23,6 +23,7 @@ mod credentials;
 mod destination_catalog;
 mod destinations;
 mod identities;
+pub(crate) mod logs;
 mod model_metadata;
 mod official_api;
 mod onboarding;
@@ -165,6 +166,12 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route(
             "/routing/temporary-unavailability/restrictions/{id}/clear",
             post(temporary_policy::clear_restriction),
+        )
+        .route("/logs/operations", get(logs::list_operations))
+        .route("/logs/requests", get(logs::list_requests))
+        .route(
+            "/logs/requests/{request_key}/attempts",
+            get(logs::list_request_attempts),
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

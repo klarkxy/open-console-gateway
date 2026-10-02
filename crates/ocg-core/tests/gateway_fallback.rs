@@ -1763,19 +1763,15 @@ async fn unknown_model_is_rejected_before_any_upstream_attempt() {
         .query_gateway_logs(10, request_logs[0].request_id.as_deref())
         .unwrap();
     assert!(
-        runtime_logs.iter().any(|log| {
-            log.error_source.as_deref() == Some("client")
-                && log.error_stage.as_deref() == Some("validation")
-        }),
-        "request validation must emit a client diagnostic: {runtime_logs:?}"
+        runtime_logs.is_empty(),
+        "request diagnostics belong to the request attempt"
     );
-    assert!(
-        runtime_logs.iter().all(|log| {
-            log.error_source.as_deref() != Some("upstream")
-                && log.error_stage.as_deref() != Some("body_limit")
-        }),
-        "unknown model must not be attributed to an upstream or body limit: {runtime_logs:?}"
-    );
+    let requests = db
+        .query_request_logs(&ocg_core::log_types::RequestLogQuery::default())
+        .unwrap();
+    assert_eq!(requests.items.len(), 1);
+    assert_eq!(requests.items[0].attempt_count, 0);
+    assert_eq!(requests.items[0].status, "client_error");
     drop(db);
     assert!(
         h.account("acct-1").auth_error.is_none(),

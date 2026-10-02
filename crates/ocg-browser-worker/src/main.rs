@@ -121,7 +121,7 @@ impl AppState {
     async fn stop(&self) {
         let mut controller = self.controller.lock().await;
         if let Err(error) = controller.stop(self.config.shutdown_timeout).await {
-            eprintln!("failed to stop Chromium cleanly: {error:#}");
+            tracing::warn!("failed to stop Chromium cleanly: {error:#}");
         }
     }
 }
@@ -203,7 +203,7 @@ impl ApiError {
     }
 
     fn internal(error: anyhow::Error) -> Self {
-        eprintln!("browser worker request failed: {error:#}");
+        tracing::error!(error = %error, "browser worker request failed");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: "browser worker operation failed".into(),
@@ -225,6 +225,30 @@ impl IntoResponse for ApiError {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    use std::io::IsTerminal;
+    let configured = std::env::var("RUST_LOG").ok();
+    let filter = configured
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(tracing_subscriber::EnvFilter::try_new)
+        .transpose();
+    let invalid = filter.is_err();
+    let installed = tracing_subscriber::fmt()
+        .with_env_filter(
+            filter
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| tracing_subscriber::EnvFilter::new("warn,ocg=info")),
+        )
+        .with_writer(std::io::stderr)
+        .log_internal_errors(false)
+        .with_ansi(std::io::stderr().is_terminal())
+        .compact()
+        .try_init()
+        .is_ok();
+    if installed && invalid {
+        tracing::warn!("invalid RUST_LOG; using the default program log filter");
+    }
     let config = Config::from_env()?;
     ensure_safe_directory(&config.profile_root, 0o700)
         .context("failed to prepare browser profile root")?;
@@ -238,7 +262,7 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("failed to listen on {}", config.control_addr))?;
 
-    eprintln!("OCG browser worker listening on {}", config.control_addr);
+    tracing::info!(address = %config.control_addr, "browser worker listening");
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await

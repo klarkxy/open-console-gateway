@@ -364,17 +364,18 @@ pub(super) async fn configure(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<BillingStatus>, V3ApiError> {
-    let input = parse_mutation_json::<CreditConfigureRequest>(&body)?;
-    mutate(&state, &id, &input.expectation, |conn| {
-        storage::configure_on(
-            conn,
-            &id,
-            input.configuration,
-            input.initial_buckets,
-            Utc::now(),
-        )
+    record_billing(&state, &id, "billing.configure", "configuration", || {
+        let input = parse_mutation_json::<CreditConfigureRequest>(&body)?;
+        mutate(&state, &id, &input.expectation, |conn| {
+            storage::configure_on(
+                conn,
+                &id,
+                input.configuration,
+                input.initial_buckets,
+                Utc::now(),
+            )
+        })
     })
-    .map(Json)
 }
 
 pub(super) async fn calibrate(
@@ -382,11 +383,12 @@ pub(super) async fn calibrate(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<BillingStatus>, V3ApiError> {
-    let input = parse_mutation_json::<CreditCalibrationRequest>(&body)?;
-    mutate(&state, &id, &input.expectation, |conn| {
-        storage::calibrate_on(conn, &id, &input.balances, Utc::now())
+    record_billing(&state, &id, "billing.calibrate", "balances", || {
+        let input = parse_mutation_json::<CreditCalibrationRequest>(&body)?;
+        mutate(&state, &id, &input.expectation, |conn| {
+            storage::calibrate_on(conn, &id, &input.balances, Utc::now())
+        })
     })
-    .map(Json)
 }
 
 pub(super) async fn grant(
@@ -394,18 +396,19 @@ pub(super) async fn grant(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<BillingStatus>, V3ApiError> {
-    let input = parse_mutation_json::<CreditGrantRequest>(&body)?;
-    mutate(&state, &id, &input.expectation, |conn| {
-        storage::grant_on(
-            conn,
-            &id,
-            input.label,
-            input.amount,
-            input.expires_at,
-            Utc::now(),
-        )
+    record_billing(&state, &id, "billing.grant", "amount", || {
+        let input = parse_mutation_json::<CreditGrantRequest>(&body)?;
+        mutate(&state, &id, &input.expectation, |conn| {
+            storage::grant_on(
+                conn,
+                &id,
+                input.label,
+                input.amount,
+                input.expires_at,
+                Utc::now(),
+            )
+        })
     })
-    .map(Json)
 }
 
 pub(super) async fn disable(
@@ -413,11 +416,35 @@ pub(super) async fn disable(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<BillingStatus>, V3ApiError> {
-    let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
-    mutate(&state, &id, &expectation, |conn| {
-        storage::disable_on(conn, &id, Utc::now())
+    record_billing(&state, &id, "billing.disable", "enabled", || {
+        let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
+        mutate(&state, &id, &expectation, |conn| {
+            storage::disable_on(conn, &id, Utc::now())
+        })
     })
-    .map(Json)
+}
+
+fn record_billing(
+    state: &CoreState,
+    id: &str,
+    action: &'static str,
+    field: &'static str,
+    work: impl FnOnce() -> Result<BillingStatus, V3ApiError>,
+) -> Result<Json<BillingStatus>, V3ApiError> {
+    let receipt = super::applications::DashboardReceipt::open(
+        state,
+        action,
+        "account",
+        super::applications::opaque_subject(id),
+    );
+    let result = work();
+    receipt
+        .observe(result, None, |value| crate::log_types::OperationMetadata {
+            changed_fields: vec![field.to_string()],
+            revision: Some(value.revision),
+            ..crate::log_types::OperationMetadata::default()
+        })
+        .map(Json)
 }
 
 #[cfg(test)]

@@ -30,8 +30,45 @@ pub(super) async fn test_account_model(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<AccountModelTestResponse>, V3ApiError> {
-    let input = parse_json::<AccountModelTestRequest>(&body)?;
-    let prepared = prepare_account_model_test(&state, &id, input)?;
+    let mut op =
+        super::settings::open_dashboard(&state, "account.model.test", "account", Some(id.clone()));
+    let input = match parse_json::<AccountModelTestRequest>(&body) {
+        Ok(input) => input,
+        Err(error) => {
+            return super::settings::record_after(
+                op,
+                &state,
+                &[],
+                (None, None, None),
+                None,
+                Err(error),
+            )
+            .map(Json);
+        }
+    };
+    let prepared = match prepare_account_model_test(&state, &id, input) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return super::settings::record_after(
+                op,
+                &state,
+                &[],
+                (None, None, None),
+                None,
+                Err(error),
+            )
+            .map(Json);
+        }
+    };
+    op.subject(prepared.account.id.clone());
+    op.accepted(super::settings::metadata_for(
+        &state,
+        &["model"],
+        Some(1),
+        Some(0),
+        None,
+        None,
+    ));
     let started = Instant::now();
     let (success, http_status, error) = match crate::protocol_probe::execute_account_model_test(
         crate::protocol_probe::AccountModelTestInput {
@@ -50,7 +87,7 @@ pub(super) async fn test_account_model(
         Ok(status) => (true, Some(status), None),
         Err((status, message)) => (false, status, Some(message)),
     };
-    Ok(Json(AccountModelTestResponse {
+    let response = AccountModelTestResponse {
         account_id: prepared.account.id,
         model_id: prepared.public_model,
         protocol: AccountUpstreamProtocol::from(prepared.protocol),
@@ -58,7 +95,24 @@ pub(super) async fn test_account_model(
         http_status,
         duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         error,
-    }))
+    };
+    let (outcome, reason) = super::settings::probe_batch_outcome(
+        u32::from(response.success),
+        u32::from(!response.success),
+    );
+    op.complete(
+        outcome,
+        reason,
+        super::settings::metadata_for(
+            &state,
+            &["model"],
+            Some(1),
+            response.success.then_some(1),
+            (!response.success).then_some(1),
+            (outcome == crate::log_types::OperationOutcome::Partial).then_some(false),
+        ),
+    );
+    Ok(Json(response))
 }
 
 struct PreparedAccountModelTest {

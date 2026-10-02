@@ -13,13 +13,12 @@ use std::sync::Arc;
 mod harness;
 
 #[tokio::test]
-async fn listener_bind_and_rebind_are_persisted_without_the_gateway_key() {
+async fn listener_lifecycle_does_not_write_mixed_history_or_user_operations() {
     let dir = harness::temp_data_dir("runtime-logging-listener");
     let db = Database::open(dir.clone()).unwrap();
     let cipher: Arc<dyn KeyCipher + Send + Sync> =
         Arc::new(StaticKeyCipher::new("runtime-logging"));
     let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
-    let gateway_key = state.config().gateway_key;
 
     let handle = gateway::start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
@@ -36,34 +35,23 @@ async fn listener_bind_and_rebind_are_persisted_without_the_gateway_key() {
     let active = state.gateway.lock().take().unwrap();
     gateway::stop_gateway_and_wait(active).await;
 
-    let logs = state.db.lock().list_gateway_logs(20).unwrap();
-    assert!(
-        logs.iter().any(|log| {
-            log.category == "gateway" && log.message.starts_with("event=listener_bound address=")
-        }),
-        "{logs:?}"
+    assert!(state.db.lock().list_gateway_logs(20).unwrap().is_empty());
+    assert_eq!(
+        state
+            .db
+            .lock()
+            .query_operation_logs(&Default::default())
+            .unwrap()
+            .total,
+        0
     );
-    assert!(
-        logs.iter().any(|log| {
-            log.message.contains("event=listener_rebound")
-                && log.message.contains(&format!("previous_port={first_port}"))
-                && log.message.contains(&format!("new_port={second_port}"))
-        }),
-        "{logs:?}"
-    );
-    assert!(
-        logs.iter()
-            .any(|log| log.message == "event=official_usage_worker_started"),
-        "{logs:?}"
-    );
-    assert!(logs.iter().all(|log| !log.message.contains(&gateway_key)));
 
     drop(state);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]
-async fn settings_log_names_changed_fields_without_logging_values() {
+async fn settings_operation_names_changed_fields_without_recording_values() {
     let harness = harness::start_loopback("runtime-logging-settings").await;
     let canary_url = "https://runtime-log-canary.invalid";
     let primary_key = harness.state.config().gateway_key;
@@ -81,16 +69,47 @@ async fn settings_log_names_changed_fields_without_logging_values() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let logs = harness.state.db.lock().list_gateway_logs(20).unwrap();
-    let settings = logs
+    let page = harness
+        .state
+        .db
+        .lock()
+        .query_operation_logs(&Default::default())
+        .unwrap();
+    let settings = page
+        .items
         .iter()
-        .find(|log| log.message.starts_with("event=settings_updated"))
-        .expect("settings update should be visible in runtime logs");
-    assert_eq!(settings.category, "settings");
-    assert!(settings.message.contains("client_root_url"));
-    assert!(settings.message.contains("connect_timeout_secs"));
-    assert!(!settings.message.contains(canary_url));
-    assert!(logs.iter().all(|log| !log.message.contains(&primary_key)));
+        .find(|row| row.action == "settings.update")
+        .unwrap();
+    assert_eq!(
+        settings.outcome,
+        ocg_core::log_types::OperationOutcome::Success
+    );
+    assert!(
+        settings
+            .metadata
+            .changed_fields
+            .iter()
+            .any(|field| field == "client_root_url")
+    );
+    assert!(
+        settings
+            .metadata
+            .changed_fields
+            .iter()
+            .any(|field| field == "connect_timeout_secs")
+    );
+    let encoded = serde_json::to_string(&page).unwrap();
+    assert!(!encoded.contains(canary_url));
+    assert!(!encoded.contains(&primary_key));
+    assert!(
+        harness
+            .state
+            .db
+            .lock()
+            .list_gateway_logs(20)
+            .unwrap()
+            .is_empty()
+    );
 
     harness.stop();
 }

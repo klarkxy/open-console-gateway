@@ -218,9 +218,10 @@ pub fn serialize_diagnostic(mut diagnostic: ErrorDiagnostic) -> String {
     })
 }
 
-/// Only pass non-content metadata; full request content belongs in debug captures.
+/// Program-only request event. `OCG_LOG_LEVEL` does not enable or suppress it.
+/// Severity follows the process filter (`RUST_LOG`) alone. Pass non-content
+/// metadata; full request content belongs in debug captures.
 pub(crate) fn log_event(
-    db: &Database,
     trace: &RequestTrace,
     level: &str,
     category: &str,
@@ -228,27 +229,39 @@ pub(crate) fn log_event(
     attempt: Option<u32>,
     fields: Value,
 ) {
-    let encoded = json!({"event": event, "fields": fields}).to_string();
-    if db
-        .log_gateway_diagnostic(
-            level,
-            category,
-            event,
-            Some(&trace.request_id),
-            attempt.map(i64::from),
-            None,
-            None,
-            Some(trace.elapsed_ms().min(i64::MAX as u64) as i64),
-            Some(&encoded),
-        )
-        .is_err()
-    {
-        eprintln!("WARN runtime_log_write_failed category={category}");
+    let metadata = redact_text(&fields.to_string());
+    macro_rules! emit {
+        ($level:expr) => {
+            tracing::event!($level, category, request_id = %trace.request_id,
+                attempt, duration_ms = trace.elapsed_ms(), metadata = %metadata, "{event}")
+        };
+    }
+    use crate::runtime_log::Level;
+    match Level::parse(level) {
+        Some(Level::Trace) => emit!(tracing::Level::TRACE),
+        Some(Level::Debug) => emit!(tracing::Level::DEBUG),
+        Some(Level::Info) => emit!(tracing::Level::INFO),
+        Some(Level::Warn) => emit!(tracing::Level::WARN),
+        Some(Level::Error) => emit!(tracing::Level::ERROR),
+        None => tracing::warn!(category, "invalid request event severity"),
     }
 }
 
 pub fn emit_failure(diagnostic_json: &str) {
-    eprintln!("OCG_REQUEST_ERROR {diagnostic_json}");
+    // The persisted diagnostic remains rich. Process logs carry only failure
+    // metadata, so upstream error text and request content cannot leak here.
+    if let Ok(diagnostic) = serde_json::from_str::<ErrorDiagnostic>(diagnostic_json) {
+        tracing::warn!(category = "request", request_id = %diagnostic.request_id,
+            attempt = diagnostic.attempt, error_source = %diagnostic.error_source,
+            error_stage = %diagnostic.error_stage, duration_ms = diagnostic.duration_ms,
+            upstream_status = diagnostic.upstream_status, downstream_status = diagnostic.downstream_status,
+            "request attempt failed");
+    } else {
+        tracing::warn!(
+            category = "request",
+            "request attempt failed with an invalid diagnostic"
+        );
+    }
 }
 
 /// Runtime record of a versioned legacy-compat hosted-tool drop.
@@ -262,15 +275,15 @@ pub fn emit_legacy_tool_compat(
     version: u32,
     dropped_hosted_tools: &[String],
 ) {
+    #[cfg(test)]
     let payload = json!({
         "request_id": request_id,
         "profile": profile,
         "version": version,
         "dropped_hosted_tools": dropped_hosted_tools,
     });
-    if crate::runtime_log::Level::from_env() <= crate::runtime_log::Level::Warn {
-        eprintln!("WARN OCG_LEGACY_TOOL_COMPAT {payload}");
-    }
+    tracing::warn!(category = "compatibility", request_id, profile, version,
+        dropped_hosted_tools = ?dropped_hosted_tools, "legacy hosted tools omitted");
     #[cfg(test)]
     record_legacy_tool_compat_emission(&payload);
 }
@@ -300,21 +313,6 @@ pub(crate) fn log_request_failure(
     diagnostic_json: &str,
     message: &str,
 ) {
-    let _ = db.log_gateway_diagnostic(
-        if diagnostic.error_source == "client" {
-            "warn"
-        } else {
-            "error"
-        },
-        "request",
-        "request_rejected",
-        Some(&trace.request_id),
-        Some(i64::from(diagnostic.attempt)),
-        Some(&diagnostic.error_source),
-        Some(&diagnostic.error_stage),
-        Some(trace.elapsed_ms() as i64),
-        Some(diagnostic_json),
-    );
     let diagnostic_value = serde_json::from_str(diagnostic_json).ok();
     let log = ForwardLog {
         id: 0,
@@ -372,7 +370,7 @@ pub(crate) fn log_request_failure(
         diagnostic: diagnostic_value,
     };
     if let Err(error) = db.log_forward(&log) {
-        eprintln!("failed to persist local request failure: {error}");
+        tracing::warn!(error = %error, "failed to persist local request failure");
     }
 }
 

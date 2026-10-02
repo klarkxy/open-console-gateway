@@ -119,22 +119,22 @@ async fn import_uploads_once_reads_back_and_reconciles_retry_without_secret_resp
         let (dir, state) = fixture();
         let (fake, client, server) = server(mode).await;
         let revision = state.settings_revision();
-        let result = body(
+        let result = body(cli_import_response(
             import_cli_credential(&state, &client, input(&state), credential())
                 .await
                 .map_err(|error| error.body.message)
                 .unwrap(),
-        )
+        ))
         .await;
         assert_eq!(result["outcome"], "imported");
         assert!(!result.to_string().contains("private"));
         assert_eq!(state.settings_revision(), revision + 1);
-        let result = body(
+        let result = body(cli_import_response(
             import_cli_credential(&state, &client, input(&state), credential())
                 .await
                 .map_err(|error| error.body.message)
                 .unwrap(),
-        )
+        ))
         .await;
         assert_eq!(result["outcome"], "alreadyImported");
         assert_eq!(fake.posts.load(Ordering::SeqCst), 1);
@@ -163,7 +163,10 @@ async fn rejected_upload_is_sanitized_and_uncertain_upload_is_explicit() {
             assert_eq!(state.settings_revision(), revision);
         } else {
             assert_eq!(
-                body(result.map_err(|error| error.body.message).unwrap()).await["outcome"],
+                body(cli_import_response(
+                    result.map_err(|error| error.body.message).unwrap(),
+                ))
+                .await["outcome"],
                 "unconfirmed"
             );
             assert_eq!(state.settings_revision(), revision + 1);
@@ -216,7 +219,10 @@ async fn import_never_overwrites_case_variant_existing_filenames() {
         let result = import_cli_credential(&state, &client, input(&state), credential()).await;
         if provider == "codex" {
             assert_eq!(
-                body(result.map_err(|error| error.body.message).unwrap()).await["outcome"],
+                body(cli_import_response(
+                    result.map_err(|error| error.body.message).unwrap(),
+                ))
+                .await["outcome"],
                 "alreadyImported"
             );
         } else {

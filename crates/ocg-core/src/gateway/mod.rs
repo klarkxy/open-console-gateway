@@ -45,7 +45,7 @@ fn request_body_limit(value: Option<&str>) -> usize {
     match value.trim().parse::<usize>() {
         Ok(bytes) if bytes > 0 => bytes,
         _ => {
-            eprintln!("Invalid OCG_MAX_REQUEST_BODY_BYTES; using the default 64 MiB limit");
+            tracing::warn!("Invalid OCG_MAX_REQUEST_BODY_BYTES; using the default 64 MiB limit");
             DEFAULT_GATEWAY_REQUEST_BODY_BYTES
         }
     }

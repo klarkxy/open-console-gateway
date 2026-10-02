@@ -24,19 +24,46 @@ pub(super) async fn patch_publication(
     State(state): State<CoreState>,
     body: Bytes,
 ) -> Result<Json<AliasPublication>, V3ApiError> {
-    let input = parse_mutation_json::<AliasPublicationUpdate>(&body)?;
-    let key = normalize_public_model_key(&input.public_model)
-        .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
-    let _settings_update = state.settings_update.lock();
-    check_expectation(&state, &input.expectation)?;
-    let unpublished = state
-        .set_public_model_published(&key, input.published)
-        .map_err(V3ApiError::internal)?;
-    state.bump_settings_revision();
-    Ok(Json(AliasPublication {
-        revision: ControlRevision::from_state(&state),
-        unpublished,
-    }))
+    let receipt = super::applications::DashboardReceipt::open(
+        &state,
+        "publication.update",
+        "publication",
+        None,
+    );
+    let mut durable = None;
+    let result = (|| {
+        let input = parse_mutation_json::<AliasPublicationUpdate>(&body)?;
+        let key = normalize_public_model_key(&input.public_model)
+            .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
+        let _settings_update = state.settings_update.lock();
+        check_expectation(&state, &input.expectation)?;
+        let unpublished = state
+            .set_public_model_published(&key, input.published)
+            .map_err(V3ApiError::internal)?;
+        let revision = state.bump_settings_revision();
+        durable = Some(super::applications::DurableEffect {
+            revision,
+            completed: 1,
+            failed: 1,
+            related_ids: Vec::new(),
+        });
+        Ok(AliasPublication {
+            revision: ControlRevision::from_state(&state),
+            unpublished,
+        })
+    })();
+    if result.is_ok() {
+        durable = None;
+    }
+    receipt
+        .observe(result, durable, |value| {
+            crate::log_types::OperationMetadata {
+                changed_fields: vec!["published".to_string()],
+                revision: Some(value.revision.revision),
+                ..crate::log_types::OperationMetadata::default()
+            }
+        })
+        .map(Json)
 }
 
 fn publication_payload(state: &CoreState) -> AliasPublication {
@@ -45,3 +72,6 @@ fn publication_payload(state: &CoreState) -> AliasPublication {
         unpublished: state.unpublished_public_model_list(),
     }
 }
+
+#[cfg(test)]
+mod tests;

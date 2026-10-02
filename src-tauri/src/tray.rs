@@ -22,12 +22,10 @@ pub fn open_dashboard(app: &AppHandle) {
     };
     #[allow(deprecated)]
     let opened = app.shell().open(url, None);
-    if let Err(e) = opened {
-        let _ = state.core.db.lock().log_gateway(
-            "error",
-            "dashboard",
-            &format!("failed to open dashboard: {}", e),
-        );
+    if let Err(_error) = opened {
+        state
+            .core
+            .log_runtime_event("error", "dashboard", "failed to open dashboard");
     }
 }
 

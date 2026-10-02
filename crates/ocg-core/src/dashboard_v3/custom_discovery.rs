@@ -23,7 +23,33 @@ pub(super) async fn discover_custom_models(
     State(state): State<CoreState>,
     body: Bytes,
 ) -> Result<Json<CustomModelDiscoveryResponse>, V3ApiError> {
+    let mut op = super::settings::open_dashboard(&state, "custom.models.discover", "account", None);
+    let result = discover_custom_models_inner(state.clone(), body, &mut op).await;
+    let counts = match &result {
+        Ok(Json(response)) => {
+            let count = super::settings::count_u32(response.models.len() as u64);
+            (Some(count), Some(count), None)
+        }
+        Err(_) => (Some(1), None, Some(1)),
+    };
+    super::settings::record_after(op, &state, &[], counts, None, result)
+}
+
+async fn discover_custom_models_inner(
+    state: CoreState,
+    body: Bytes,
+    op: &mut crate::user_operation::UserOperation,
+) -> Result<Json<CustomModelDiscoveryResponse>, V3ApiError> {
     let input = parse_json::<CustomModelDiscoveryRequest>(&body)?;
+    if let Some(account_id) = input
+        .account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        && let Some(id) = super::settings::known_subject(account_id)
+    {
+        op.subject(id);
+    }
     let captured = ControlRevision::from_state(&state);
     let config = state.config();
     let job = prepare_custom_model_discovery(&state, input)?;

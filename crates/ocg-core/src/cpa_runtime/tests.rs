@@ -285,9 +285,10 @@ async fn install_without_host_fails_closed_before_download() {
         .await
         .unwrap_err();
     assert!(matches!(
-        error,
+        error.error,
         CpaRuntimeError::Unavailable(message) if message == UNAVAILABLE_REASON
     ));
+    assert_eq!(error.effect, CpaExternalEffect::None);
     drop(state);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -726,8 +727,9 @@ async fn client_key_mutation_requires_owner_manifest() {
         .await
         .unwrap_err();
     assert!(
-        matches!(error, CpaRuntimeError::Invalid(message) if message.contains("not installed"))
+        matches!(error.error, CpaRuntimeError::Invalid(message) if message.contains("not installed"))
     );
+    assert_eq!(error.effect, CpaExternalEffect::None);
     drop(state);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -808,7 +810,8 @@ async fn occupied_managed_port_never_stops_an_unknown_process() {
         .start_cpa_runtime(state.settings_revision(), state.process_generation())
         .await
         .unwrap_err();
-    assert!(matches!(error, CpaRuntimeError::Conflict(_)));
+    assert!(matches!(error.error, CpaRuntimeError::Conflict(_)));
+    assert_eq!(error.effect, CpaExternalEffect::None);
     assert_eq!(host.stops.load(Ordering::SeqCst), 0);
     drop(listener);
     drop(state);
@@ -1323,8 +1326,9 @@ async fn remove_without_owner_does_not_delete_auth() {
         .await
         .unwrap_err();
     assert!(
-        matches!(error, CpaRuntimeError::Invalid(message) if message.contains("not installed"))
+        matches!(error.error, CpaRuntimeError::Invalid(message) if message.contains("not installed"))
     );
+    assert_eq!(error.effect, CpaExternalEffect::None);
     assert!(root.join("auth").join("oauth.json").is_file());
 
     drop(state);
@@ -1335,6 +1339,7 @@ struct ProbeHost {
     running: AtomicBool,
     starts: AtomicUsize,
     stops: AtomicUsize,
+    fail_stop: AtomicBool,
     port: u16,
 }
 
@@ -1344,6 +1349,7 @@ impl ProbeHost {
             running: AtomicBool::new(false),
             starts: AtomicUsize::new(0),
             stops: AtomicUsize::new(0),
+            fail_stop: AtomicBool::new(false),
             port,
         }
     }
@@ -1394,6 +1400,11 @@ impl CpaRuntimeProcessHost for ProbeHost {
 
     fn stop_owned(&self) -> Result<(), CpaRuntimeError> {
         self.stops.fetch_add(1, Ordering::SeqCst);
+        if self.fail_stop.load(Ordering::SeqCst) {
+            return Err(CpaRuntimeError::Failed(
+                "owned CPA child refused to stop".into(),
+            ));
+        }
         self.running.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -1478,8 +1489,12 @@ fn prepare_managed_runtime(dir: &std::path::Path, state: &CoreStateInner, port: 
         .unwrap();
 }
 
-fn assert_revision_conflict(error: CpaRuntimeError) {
-    assert_eq!(error, CpaRuntimeError::Conflict("revisionConflict".into()));
+fn assert_revision_conflict(failure: CpaRuntimeFailure) {
+    assert_eq!(
+        failure.error,
+        CpaRuntimeError::Conflict("revisionConflict".into())
+    );
+    assert_eq!(failure.effect, CpaExternalEffect::None);
 }
 
 #[tokio::test]
@@ -1969,7 +1984,8 @@ async fn failed_initial_manual_start_does_not_invent_run_intent() {
         .start_cpa_runtime(state.settings_revision(), state.process_generation())
         .await
         .unwrap_err();
-    assert!(matches!(error, CpaRuntimeError::Failed(_)));
+    assert!(matches!(error.error, CpaRuntimeError::Failed(_)));
+    assert_eq!(error.effect, CpaExternalEffect::None);
     assert!(!load_managed(&dir).unwrap().unwrap().desired_running);
     drop(state);
     fs::remove_dir_all(dir).unwrap();
@@ -2103,7 +2119,7 @@ fn block_on_start(
     state: Arc<CoreStateInner>,
     revision: u64,
     generation: u64,
-) -> Result<CpaRuntimeSnapshot, CpaRuntimeError> {
+) -> Result<CpaRuntimeSnapshot, CpaRuntimeFailure> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -2205,7 +2221,10 @@ async fn failed_host_stop_keeps_cleared_intent_and_publishes_error() {
     let error = state
         .stop_cpa_runtime(revision, state.process_generation())
         .expect_err("host stop failure must surface");
-    assert!(matches!(error, CpaRuntimeError::Failed(_)));
+    assert!(
+        matches!(error.error, CpaRuntimeError::Failed(ref message) if message == "owned CPA child refused to stop")
+    );
+    assert_eq!(error.effect, CpaExternalEffect::Partial);
     assert_eq!(state.settings_revision(), revision + 1);
     assert!(!load_managed(&dir).unwrap().unwrap().desired_running);
     let snapshot = state.cpa_runtime_snapshot();
@@ -2236,7 +2255,8 @@ async fn manifest_write_failure_does_not_change_intent_or_revision() {
             .start_cpa_runtime(revision, generation)
             .await
             .expect_err("start must not record intent when managed.json cannot be written");
-        assert!(matches!(start_error, CpaRuntimeError::Failed(_)));
+        assert!(matches!(start_error.error, CpaRuntimeError::Failed(_)));
+        assert_eq!(start_error.effect, CpaExternalEffect::None);
     }
     assert_eq!(state.settings_revision(), revision);
     assert!(!load_managed(&dir).unwrap().unwrap().desired_running);
@@ -2249,7 +2269,8 @@ async fn manifest_write_failure_does_not_change_intent_or_revision() {
         let stop_error = state
             .stop_cpa_runtime(revision, generation)
             .expect_err("stop must not clear intent when managed.json cannot be written");
-        assert!(matches!(stop_error, CpaRuntimeError::Failed(_)));
+        assert!(matches!(stop_error.error, CpaRuntimeError::Failed(_)));
+        assert_eq!(stop_error.effect, CpaExternalEffect::None);
     }
     assert_eq!(state.settings_revision(), revision);
     assert!(load_managed(&dir).unwrap().unwrap().desired_running);
@@ -2428,4 +2449,811 @@ fn already_running_start_commit_after_shutdown_does_not_publish_idle() {
     assert_ne!(state.cpa_runtime_snapshot().phase, CpaRuntimePhase::Idle);
     drop(state);
     fs::remove_dir_all(dir).unwrap();
+}
+
+fn hold_exclusive(path: &std::path::Path) -> std::fs::File {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(0);
+    }
+    options.open(path).unwrap()
+}
+
+/// Lets `load_managed` read the file and makes `DeleteFile` fail.
+fn hold_readable_no_delete(path: &std::path::Path) -> std::fs::File {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        const FILE_SHARE_WRITE: u32 = 2;
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    options.open(path).unwrap()
+}
+
+fn rollback_files(dir: &std::path::Path, port: u16) -> (Vec<u8>, Vec<u8>) {
+    let root = runtime_dir(dir);
+    for (version, sha) in [("7.2.147", "a"), ("7.2.140", "b")] {
+        let version_dir = root.join("versions").join(version);
+        fs::create_dir_all(&version_dir).unwrap();
+        fs::write(version_dir.join("cli-proxy-api.exe"), b"mz").unwrap();
+        fs::write(version_dir.join(ASSET_SHA_NAME), sha.repeat(64)).unwrap();
+    }
+    write_config_yaml(
+        &root.join(CONFIG_NAME),
+        port,
+        &root.join("auth"),
+        "inference-key",
+        &["current-extra".into()],
+        None,
+    )
+    .unwrap();
+    write_config_yaml(
+        &root.join(PREVIOUS_CONFIG_NAME),
+        port,
+        &root.join("auth"),
+        "inference-key",
+        &["previous-extra".into()],
+        None,
+    )
+    .unwrap();
+    let current = fs::read(root.join(CONFIG_NAME)).unwrap();
+    let previous = fs::read(root.join(PREVIOUS_CONFIG_NAME)).unwrap();
+    (current, previous)
+}
+
+struct StartFailsHost {
+    running: AtomicBool,
+}
+
+impl CpaRuntimeProcessHost for StartFailsHost {
+    fn start_owned(&self, _spec: &CpaRuntimeProcessSpec) -> Result<(), CpaRuntimeError> {
+        Err(CpaRuntimeError::Failed(
+            "owned CPA child refused to start".into(),
+        ))
+    }
+
+    fn stop_owned(&self) -> Result<(), CpaRuntimeError> {
+        self.running.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn owned_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    fn logs(&self) -> CpaRuntimeLogTail {
+        CpaRuntimeLogTail {
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
+    fn add_log_secret(&self, _secret: &CpaRuntimeSecret) {}
+}
+
+#[tokio::test]
+async fn switched_config_write_after_stop_is_compensated_when_runtime_restore_succeeds() {
+    let port = free_loopback_port();
+    let dir = temp_dir("rollback-write-compensated");
+    let (current, _) = rollback_files(&dir, port);
+    save_managed(
+        &dir,
+        &ManagedCpa {
+            current_version: "7.2.147".into(),
+            previous_version: Some("7.2.140".into()),
+            asset_sha256: "a".repeat(64),
+            port,
+            desired_running: false,
+        },
+    )
+    .unwrap();
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    state
+        .persist_managed_connection(
+            port,
+            "management-key",
+            "inference-key",
+            vec!["model".into()],
+        )
+        .unwrap();
+    let host = Arc::new(ProbeHost::new(port));
+    host.running.store(true, Ordering::SeqCst);
+    state.set_cpa_runtime_host(host.clone());
+    let config = runtime_dir(&dir).join(CONFIG_NAME);
+    let _fault = FailAtomicWrites::arm(&config, 0, 1);
+
+    let error = state
+        .rollback_cpa_runtime(state.settings_revision(), state.process_generation())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.error,
+        CpaRuntimeError::Failed("CPA runtime file error: atomic write failed".into())
+    );
+    assert_eq!(error.effect, CpaExternalEffect::Compensated);
+    assert_eq!(fs::read(&config).unwrap(), current);
+    assert!(host.owned_running());
+    assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn switched_config_write_after_stop_is_partial_when_runtime_restore_fails() {
+    let port = free_loopback_port();
+    let dir = temp_dir("rollback-write-partial");
+    rollback_files(&dir, port);
+    save_managed(
+        &dir,
+        &ManagedCpa {
+            current_version: "7.2.147".into(),
+            previous_version: Some("7.2.140".into()),
+            asset_sha256: "a".repeat(64),
+            port,
+            desired_running: false,
+        },
+    )
+    .unwrap();
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    state
+        .persist_managed_connection(
+            port,
+            "management-key",
+            "inference-key",
+            vec!["model".into()],
+        )
+        .unwrap();
+    let host = Arc::new(StartFailsHost {
+        running: AtomicBool::new(true),
+    });
+    state.set_cpa_runtime_host(host.clone());
+    let _fault = FailAtomicWrites::arm(&runtime_dir(&dir).join(CONFIG_NAME), 0, 1);
+
+    let error = state
+        .rollback_cpa_runtime(state.settings_revision(), state.process_generation())
+        .await
+        .unwrap_err();
+    let message = error.error.to_string();
+    assert!(message.contains("CPA runtime file error: atomic write failed"));
+    assert!(message.contains("restoring the previous CPA runtime also failed"));
+    assert!(message.contains("owned CPA child refused to start"));
+    assert_eq!(error.effect, CpaExternalEffect::Partial);
+    assert!(!host.owned_running());
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn persistence_backup_after_rollback_switch_is_compensated() {
+    let port = free_loopback_port();
+    let dir = temp_dir("rollback-backup-compensated");
+    let (current, previous) = rollback_files(&dir, port);
+    save_managed(
+        &dir,
+        &ManagedCpa {
+            current_version: "7.2.147".into(),
+            previous_version: Some("7.2.140".into()),
+            asset_sha256: "a".repeat(64),
+            port,
+            desired_running: false,
+        },
+    )
+    .unwrap();
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    state
+        .persist_managed_connection(
+            port,
+            "management-key",
+            "inference-key",
+            vec!["model".into()],
+        )
+        .unwrap();
+    state.set_cpa_runtime_host(Arc::new(ProbeHost::new(port)));
+    let _fault = FailNextPersistenceCapture::arm(&dir);
+
+    let error = state
+        .rollback_cpa_runtime(state.settings_revision(), state.process_generation())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.error,
+        CpaRuntimeError::Failed("CPA persistence backup failed".into())
+    );
+    assert_eq!(error.effect, CpaExternalEffect::Compensated);
+    let root = runtime_dir(&dir);
+    assert_eq!(fs::read(root.join(CONFIG_NAME)).unwrap(), current);
+    assert_eq!(fs::read(root.join(PREVIOUS_CONFIG_NAME)).unwrap(), previous);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+async fn rollback_catalog_publication_failure(restore_can_publish: bool) {
+    let port = free_loopback_port();
+    let dir = temp_dir("rollback-catalog-publication");
+    let (current, previous) = rollback_files(&dir, port);
+    save_managed(
+        &dir,
+        &ManagedCpa {
+            current_version: "7.2.147".into(),
+            previous_version: Some("7.2.140".into()),
+            asset_sha256: "a".repeat(64),
+            port,
+            desired_running: false,
+        },
+    )
+    .unwrap();
+    let state = Arc::new(
+        CoreStateInner::new(
+            Database::open(dir.clone()).unwrap(),
+            dir.clone(),
+            Arc::new(StaticKeyCipher::new("cpa-runtime")),
+        )
+        .unwrap(),
+    );
+    crate::account_control::create_go_api_key(
+        &state,
+        "Publication fixture".into(),
+        "fixture-key".into(),
+        None,
+        None,
+    )
+    .unwrap();
+    state
+        .persist_managed_connection(
+            port,
+            "management-key",
+            "inference-key",
+            vec!["old-model".into()],
+        )
+        .unwrap();
+    state
+        .set_cpa_model_routing(&["old-model".to_string()])
+        .unwrap();
+    let catalog_before = state.db.lock().cpa_model_catalog().unwrap().unwrap();
+    state.set_cpa_runtime_host(Arc::new(ProbeHost::new(port)));
+    state
+        .db
+        .lock()
+        .conn
+        .execute_batch(
+            "CREATE TRIGGER break_rollback_publication AFTER UPDATE ON provider_model_catalogs
+         WHEN OLD.models_json LIKE '%old-model%' AND NEW.models_json NOT LIKE '%old-model%'
+         BEGIN UPDATE credentials SET credential_version = 0; END;",
+        )
+        .unwrap();
+    if restore_can_publish {
+        state.db.lock().conn.execute_batch(
+            "CREATE TRIGGER restore_publication BEFORE DELETE ON destinations
+             BEGIN UPDATE credentials SET credential_version = 1 WHERE credential_version = 0; END;"
+        ).unwrap();
+    }
+    let failure = state
+        .rollback_cpa_runtime(state.settings_revision(), state.process_generation())
+        .await
+        .unwrap_err();
+    assert!(
+        failure.error.to_string().contains("credential"),
+        "{failure}"
+    );
+    if restore_can_publish {
+        assert_eq!(failure.effect, CpaExternalEffect::Compensated);
+        let restored = state.db.lock().cpa_model_catalog().unwrap().unwrap();
+        assert_eq!(restored.models, catalog_before.models);
+        assert_eq!(&*state.cpa_model_catalog(), &["old-model".to_string()]);
+    } else {
+        assert_eq!(failure.effect, CpaExternalEffect::Partial);
+        assert_ne!(&*state.cpa_model_catalog(), &["old-model".to_string()]);
+    }
+    assert_eq!(
+        fs::read(runtime_dir(&dir).join(CONFIG_NAME)).unwrap(),
+        current
+    );
+    assert_eq!(
+        fs::read(runtime_dir(&dir).join(PREVIOUS_CONFIG_NAME)).unwrap(),
+        previous
+    );
+    assert_eq!(
+        load_managed(&dir).unwrap().unwrap().current_version,
+        "7.2.147"
+    );
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn rollback_catalog_publication_restores_catalog_before_compensated() {
+    rollback_catalog_publication_failure(true).await;
+}
+
+#[tokio::test]
+async fn rollback_catalog_publication_failed_restore_stays_partial() {
+    rollback_catalog_publication_failure(false).await;
+}
+
+#[tokio::test]
+async fn runtime_restore_with_failed_previous_config_restore_is_partial() {
+    let port = free_loopback_port();
+    let dir = temp_dir("rollback-previous-partial");
+    let (current, previous) = rollback_files(&dir, port);
+    save_managed(
+        &dir,
+        &ManagedCpa {
+            current_version: "7.2.147".into(),
+            previous_version: Some("7.2.140".into()),
+            asset_sha256: "a".repeat(64),
+            port,
+            desired_running: false,
+        },
+    )
+    .unwrap();
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    state
+        .persist_managed_connection(
+            port,
+            "management-key",
+            "inference-key",
+            vec!["model".into()],
+        )
+        .unwrap();
+    state.set_cpa_runtime_host(Arc::new(ProbeHost::new(port)));
+    let root = runtime_dir(&dir);
+    let _capture = FailNextPersistenceCapture::arm(&dir);
+    let _write = FailAtomicWrites::arm(&root.join(PREVIOUS_CONFIG_NAME), 1, 1);
+
+    let error = state
+        .rollback_cpa_runtime(state.settings_revision(), state.process_generation())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.error,
+        CpaRuntimeError::Failed("CPA persistence backup failed".into())
+    );
+    assert_eq!(error.effect, CpaExternalEffect::Partial);
+    assert_eq!(fs::read(root.join(CONFIG_NAME)).unwrap(), current);
+    assert_ne!(fs::read(root.join(PREVIOUS_CONFIG_NAME)).unwrap(), previous);
+    assert_eq!(fs::read(root.join(PREVIOUS_CONFIG_NAME)).unwrap(), current);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn arm_update_release(state: &CoreStateInner) {
+    state
+        .cpa_runtime
+        .set_test_release(super::TestManagedRelease {
+            version: "7.2.200".into(),
+            archive: write_zip(&[("cli-proxy-api.exe", b"mz")]),
+            kind: super::extract::CpaArchiveKind::Zip,
+        });
+}
+
+#[tokio::test]
+async fn running_update_stop_failure_after_config_write_is_partial() {
+    let dir = temp_dir("update-stop-after-config");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    prepare_managed_runtime(&dir, &state, free_loopback_port());
+    let config = runtime_dir(&dir).join(CONFIG_NAME);
+    let before = fs::read(&config).unwrap();
+    let host = Arc::new(FailingStopHost {
+        running: AtomicBool::new(true),
+        stops: AtomicUsize::new(0),
+    });
+    state.set_cpa_runtime_host(host.clone());
+    arm_update_release(&state);
+
+    let error = state
+        .update_cpa_runtime(state.settings_revision(), state.process_generation(), None)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.error,
+        CpaRuntimeError::Failed("owned CPA child refused to stop".into())
+    );
+    assert_eq!(error.effect, CpaExternalEffect::Partial);
+    assert_eq!(host.stops.load(Ordering::SeqCst), 1);
+    assert_eq!(fs::read(config).unwrap(), before);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn update_stop_after_launched_candidate_is_partial() {
+    let port = free_loopback_port();
+    let dir = temp_dir("update-stop-after-launch");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    prepare_managed_runtime(&dir, &state, port);
+    let config = runtime_dir(&dir).join(CONFIG_NAME);
+    let before = fs::read(&config).unwrap();
+    let host = Arc::new(ProbeHost::new(port));
+    host.fail_stop.store(true, Ordering::SeqCst);
+    state.set_cpa_runtime_host(host.clone());
+    arm_update_release(&state);
+
+    let error = state
+        .update_cpa_runtime(state.settings_revision(), state.process_generation(), None)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.error,
+        CpaRuntimeError::Failed("owned CPA child refused to stop".into())
+    );
+    assert_eq!(error.effect, CpaExternalEffect::Partial);
+    assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+    assert!(host.owned_running());
+    assert_eq!(fs::read(config).unwrap(), before);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn removal_before_any_owned_delete_stays_none() {
+    let dir = temp_dir("remove-before-effect");
+    let root = runtime_dir(&dir);
+    fs::create_dir_all(&root).unwrap();
+    let config = root.join(CONFIG_NAME);
+    fs::write(&config, b"api-keys:\n  - \"inference-key\"\n").unwrap();
+    save_managed(
+        &dir,
+        &ManagedCpa {
+            current_version: "7.2.147".into(),
+            previous_version: None,
+            asset_sha256: "a".repeat(64),
+            port: 8317,
+            desired_running: false,
+        },
+    )
+    .unwrap();
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    state.set_cpa_runtime_host(Arc::new(StoppedHost));
+    state
+        .persist_managed_connection(
+            8317,
+            "management-key",
+            "inference-key",
+            vec!["model".into()],
+        )
+        .unwrap();
+    let _held = hold_exclusive(&config);
+
+    let error = state
+        .remove_cpa_runtime(state.settings_revision(), state.process_generation())
+        .await
+        .unwrap_err();
+    assert!(error.error.to_string().contains("CPA runtime file error"));
+    assert!(!error.error.to_string().contains("restoring the previous"));
+    assert_eq!(error.effect, CpaExternalEffect::None);
+    assert!(config.is_file());
+    drop(_held);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn removal_after_an_owned_delete_is_partial() {
+    let dir = temp_dir("remove-after-delete");
+    let root = runtime_dir(&dir);
+    fs::create_dir_all(&root).unwrap();
+    let config = root.join(CONFIG_NAME);
+    fs::write(&config, b"api-keys:\n  - \"inference-key\"\n").unwrap();
+    let auth = root.join("auth");
+    fs::write(&auth, b"token").unwrap();
+    save_managed(
+        &dir,
+        &ManagedCpa {
+            current_version: "7.2.147".into(),
+            previous_version: None,
+            asset_sha256: "a".repeat(64),
+            port: 8317,
+            desired_running: false,
+        },
+    )
+    .unwrap();
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    state.set_cpa_runtime_host(Arc::new(StoppedHost));
+    state
+        .persist_managed_connection(
+            8317,
+            "management-key",
+            "inference-key",
+            vec!["model".into()],
+        )
+        .unwrap();
+    let _held = hold_exclusive(&auth);
+
+    let error = state
+        .remove_cpa_runtime(state.settings_revision(), state.process_generation())
+        .await
+        .unwrap_err();
+    assert!(error.error.to_string().contains("CPA runtime file error"));
+    assert!(
+        !error
+            .error
+            .to_string()
+            .contains("restoring the previous CPA runtime also failed")
+    );
+    assert_eq!(error.effect, CpaExternalEffect::Partial);
+    assert!(!config.exists());
+    assert!(auth.is_file());
+    drop(_held);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn removal_manifest_failure_after_deletes_stays_partial() {
+    let dir = temp_dir("remove-manifest-partial");
+    let root = runtime_dir(&dir);
+    fs::create_dir_all(root.join("auth")).unwrap();
+    fs::create_dir_all(root.join("versions")).unwrap();
+    fs::write(
+        root.join(CONFIG_NAME),
+        b"api-keys:\n  - \"inference-key\"\n",
+    )
+    .unwrap();
+    save_managed(
+        &dir,
+        &ManagedCpa {
+            current_version: "7.2.147".into(),
+            previous_version: None,
+            asset_sha256: "a".repeat(64),
+            port: 8317,
+            desired_running: false,
+        },
+    )
+    .unwrap();
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    state.set_cpa_runtime_host(Arc::new(StoppedHost));
+    state
+        .persist_managed_connection(
+            8317,
+            "management-key",
+            "inference-key",
+            vec!["model".into()],
+        )
+        .unwrap();
+    let managed = root.join(MANAGED_NAME);
+    let _held = hold_readable_no_delete(&managed);
+
+    let error = state
+        .remove_cpa_runtime(state.settings_revision(), state.process_generation())
+        .await
+        .unwrap_err();
+    let message = error.error.to_string();
+    assert!(
+        message.contains("CPA runtime file error"),
+        "unexpected removal error: {message}"
+    );
+    assert!(
+        !message.contains("restoring the previous CPA runtime also failed"),
+        "unexpected removal error: {message}"
+    );
+    assert_eq!(error.effect, CpaExternalEffect::Partial);
+    assert!(!root.join(CONFIG_NAME).exists());
+    assert!(!root.join("auth").exists());
+    assert!(managed.is_file());
+    assert!(state.db.lock().cpa_integration().unwrap().is_some());
+    drop(_held);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn host_stop_failure_without_intent_change_stays_none() {
+    let dir = temp_dir("stop-unchanged-intent");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    prepare_managed_runtime(&dir, &state, free_loopback_port());
+    let host = Arc::new(FailingStopHost {
+        running: AtomicBool::new(true),
+        stops: AtomicUsize::new(0),
+    });
+    state.set_cpa_runtime_host(host);
+    let error = state
+        .stop_cpa_runtime(state.settings_revision(), state.process_generation())
+        .unwrap_err();
+    assert_eq!(
+        error.error,
+        CpaRuntimeError::Failed("owned CPA child refused to stop".into())
+    );
+    assert_eq!(error.effect, CpaExternalEffect::None);
+    assert!(!load_managed(&dir).unwrap().unwrap().desired_running);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+async fn launched_start_cas_failure(stop_fails: bool) {
+    let port = free_loopback_port();
+    let dir = temp_dir(if stop_fails {
+        "start-cas-partial"
+    } else {
+        "start-cas-compensated"
+    });
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state = Arc::new(
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap(),
+    );
+    prepare_managed_runtime(&dir, &state, port);
+    let host = Arc::new(ProbeHost::new(port));
+    host.fail_stop.store(stop_fails, Ordering::SeqCst);
+    state.set_cpa_runtime_host(host.clone());
+    let gate = SpawnBoundary::new();
+    state
+        .cpa_runtime
+        .set_before_manual_start_commit_pause(gate.pause());
+    let revision = state.settings_revision();
+    let generation = state.process_generation();
+    let worker = state.clone();
+    let launch = std::thread::spawn(move || block_on_start(worker, revision, generation));
+    gate.arrived.wait();
+    state.bump_settings_revision();
+    gate.release.wait();
+    let error = launch.join().expect("start thread").unwrap_err();
+    assert_eq!(
+        error.error,
+        CpaRuntimeError::Conflict("revisionConflict".into())
+    );
+    assert_eq!(state.settings_revision(), revision + 1);
+    assert!(!load_managed(&dir).unwrap().unwrap().desired_running);
+    if stop_fails {
+        assert_eq!(error.effect, CpaExternalEffect::Partial);
+        assert!(host.owned_running());
+    } else {
+        assert_eq!(error.effect, CpaExternalEffect::Compensated);
+        assert!(!host.owned_running());
+    }
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn launched_start_cas_failure_stop_success_is_compensated() {
+    launched_start_cas_failure(false).await;
+}
+
+#[tokio::test]
+async fn launched_start_cas_failure_stop_failure_is_partial() {
+    launched_start_cas_failure(true).await;
+}
+
+#[derive(Clone)]
+struct RuntimeKeys {
+    keys: Arc<std::sync::Mutex<Vec<String>>>,
+    puts: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+async fn spawn_runtime_keys(api: RuntimeKeys) -> u16 {
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use serde_json::json;
+
+    async fn list(
+        axum::extract::State(api): axum::extract::State<RuntimeKeys>,
+    ) -> Json<serde_json::Value> {
+        Json(json!(api.keys.lock().unwrap().clone()))
+    }
+    async fn put(
+        axum::extract::State(api): axum::extract::State<RuntimeKeys>,
+        Json(body): Json<Vec<String>>,
+    ) -> Json<serde_json::Value> {
+        api.puts.fetch_add(1, Ordering::SeqCst);
+        *api.keys.lock().unwrap() = body;
+        Json(json!([]))
+    }
+    let app = Router::new()
+        .route("/v0/management/api-keys", get(list).put(put))
+        .with_state(api);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    port
+}
+
+async fn key_yaml_restore(failed_restores: usize, file_restored: bool) {
+    let api = RuntimeKeys {
+        keys: Arc::new(std::sync::Mutex::new(vec!["inference-key".into()])),
+        puts: Arc::new(AtomicUsize::new(0)),
+    };
+    let port = spawn_runtime_keys(api.clone()).await;
+    let dir = temp_dir(if file_restored {
+        "key-yaml-later"
+    } else {
+        "key-yaml-partial"
+    });
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    let root = runtime_dir(&dir);
+    write_config_yaml(
+        &root.join(CONFIG_NAME),
+        port,
+        &root.join("auth"),
+        "inference-key",
+        &[],
+        None,
+    )
+    .unwrap();
+    let original = fs::read(root.join(CONFIG_NAME)).unwrap();
+    fs::create_dir(root.join(PREVIOUS_CONFIG_NAME)).unwrap();
+    save_managed(
+        &dir,
+        &ManagedCpa {
+            current_version: "7.2.147".into(),
+            previous_version: None,
+            asset_sha256: "a".repeat(64),
+            port,
+            desired_running: true,
+        },
+    )
+    .unwrap();
+    state
+        .persist_managed_connection(
+            port,
+            "management-key",
+            "inference-key",
+            vec!["model".into()],
+        )
+        .unwrap();
+    state.set_cpa_runtime_host(Arc::new(RecordingHost::new(true)));
+    let _fault = FailAtomicWrites::arm(&root.join(CONFIG_NAME), 1, failed_restores);
+
+    let error = state
+        .create_cpa_runtime_key(state.settings_revision(), state.process_generation())
+        .await
+        .unwrap_err();
+    let message = error.error.to_string();
+    assert!(message.contains("CPA runtime file error"), "{message}");
+    assert!(
+        !message.contains("restoring CPA client keys also failed"),
+        "{message}"
+    );
+    assert_eq!(error.effect, CpaExternalEffect::Partial);
+    assert_eq!(api.puts.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        api.keys.lock().unwrap().clone(),
+        vec!["inference-key".to_string()]
+    );
+    let now = fs::read(root.join(CONFIG_NAME)).unwrap();
+    if file_restored {
+        assert_eq!(now, original);
+    } else {
+        assert_ne!(now, original);
+        let text = String::from_utf8(now).unwrap();
+        assert!(text.contains("cpa-"), "{text}");
+    }
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn upstream_restore_with_failed_yaml_restore_is_partial() {
+    key_yaml_restore(2, false).await;
+}
+
+#[tokio::test]
+async fn later_yaml_restore_keeps_an_earlier_partial() {
+    key_yaml_restore(1, true).await;
 }

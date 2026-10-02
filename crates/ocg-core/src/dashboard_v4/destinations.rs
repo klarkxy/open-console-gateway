@@ -55,6 +55,15 @@ impl From<V3ApiError> for DestinationsError {
     }
 }
 
+impl super::applications::ReceiptError for DestinationsError {
+    fn receipt_reason(&self) -> &str {
+        match self {
+            Self::Api(error) => error.operation_reason(),
+            Self::Refused(_) => "conflict",
+        }
+    }
+}
+
 impl IntoResponse for DestinationsError {
     fn into_response(self) -> Response {
         match self {
@@ -101,8 +110,24 @@ pub(super) async fn patch_destination(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<DestinationPatchResult>, DestinationsError> {
-    let input = parse_mutation_json::<DestinationPatchRequest>(&body)?;
-    patch_destination_locked(&state, &id, input).map(Json)
+    let mut receipt = super::applications::DashboardReceipt::open(
+        &state,
+        "destination.update",
+        "destination",
+        super::applications::opaque_subject(&id),
+    );
+    let result = (|| {
+        let input = parse_mutation_json::<DestinationPatchRequest>(&body)?;
+        let changed_fields = destination_changed_fields(&input);
+        let value = patch_destination_locked(&state, &id, input, &mut receipt)?;
+        receipt.succeed(crate::log_types::OperationMetadata {
+            changed_fields,
+            revision: Some(value.revision.revision),
+            ..crate::log_types::OperationMetadata::default()
+        });
+        Ok(value)
+    })();
+    receipt.finish(result).map(Json)
 }
 
 pub(super) async fn delete_destination(
@@ -110,65 +135,109 @@ pub(super) async fn delete_destination(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<DestinationDeleteResult>, DestinationsError> {
-    let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
-    delete_destination_locked(&state, &id, expectation).map(Json)
+    let mut receipt = super::applications::DashboardReceipt::open(
+        &state,
+        "destination.delete",
+        "destination",
+        super::applications::opaque_subject(&id),
+    );
+    let result = (|| {
+        let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
+        delete_destination_locked(&state, &id, expectation, &mut receipt)
+    })();
+    receipt
+        .observe(result, None, |value| crate::log_types::OperationMetadata {
+            revision: Some(value.revision.revision),
+            ..crate::log_types::OperationMetadata::default()
+        })
+        .map(Json)
+}
+
+fn destination_changed_fields(input: &DestinationPatchRequest) -> Vec<String> {
+    let mut fields = vec![
+        "name".to_string(),
+        "endpoint_url".to_string(),
+        "upstream_protocol".to_string(),
+        "auth_scheme".to_string(),
+        "models".to_string(),
+    ];
+    if input.protocol_routes.is_some() {
+        fields.push("protocol_routes".to_string());
+    }
+    if input.enabled.is_some() {
+        fields.push("enabled".to_string());
+    }
+    if !input.authorize_credential_ids.is_empty() {
+        fields.push("authorize_credential_ids".to_string());
+    }
+    fields
 }
 
 fn patch_destination_locked(
     state: &CoreState,
     destination_id: &str,
     input: DestinationPatchRequest,
+    receipt: &mut super::applications::DashboardReceipt,
 ) -> Result<DestinationPatchResult, DestinationsError> {
     let _settings_update = state.settings_update.lock();
     check_expectation(state, &input.expectation)?;
     let destination = load_destination(state, destination_id)?;
     let definition = destination_definition(&destination, &input)
         .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
-    state
-        .commit_configuration_update(|db| {
-            let routes = input.protocol_routes.as_ref().map(|routes| {
-                routes
-                    .iter()
-                    .map(ocg_domain::destination::HttpProtocolRoute::from)
-                    .collect::<Vec<_>>()
-            });
-            crate::db::destination_commands::replace_http_destination_with_routes_on(
-                db,
-                destination_id,
-                &definition,
-                &input.authorize_credential_ids,
-                routes.as_deref(),
-            )?;
-            if let Some(enabled) = input.enabled {
-                db.conn.execute(
-                    "UPDATE destinations SET enabled = ?2 WHERE id = ?1",
-                    rusqlite::params![destination_id, enabled],
+    let changed_fields = destination_changed_fields(&input);
+    receipt
+        .commit_recorded(
+            state,
+            crate::log_types::OperationMetadata {
+                changed_fields,
+                completed_count: Some(1),
+                ..crate::log_types::OperationMetadata::default()
+            },
+            |db| {
+                let routes = input.protocol_routes.as_ref().map(|routes| {
+                    routes
+                        .iter()
+                        .map(ocg_domain::destination::HttpProtocolRoute::from)
+                        .collect::<Vec<_>>()
+                });
+                crate::db::destination_commands::replace_http_destination_with_routes_on(
+                    db,
+                    destination_id,
+                    &definition,
+                    &input.authorize_credential_ids,
+                    routes.as_deref(),
                 )?;
-            }
-            let configured = crate::destination_projection::load_runtime(db)?
-                .destinations
-                .into_iter()
-                .find(|row| row.id == destination_id)
-                .ok_or_else(|| anyhow::anyhow!("destination not found"))?;
-            let updates: Vec<_> = input
-                .models
-                .iter()
-                .map(|model| DestinationCatalogModelUpdate {
-                    public_model: model.public_model.clone(),
-                    enabled: model.enabled,
-                    protocols: model.protocols.clone(),
-                    preferred: model.preferred,
-                })
-                .collect();
-            let catalog = super::destination_catalog::apply_updates(&configured, &updates, &[])
-                .map_err(anyhow::Error::msg)?;
-            crate::db::destination_store::replace_destination_catalog(
-                &db.conn,
-                destination_id,
-                &catalog,
-            )?;
-            Ok(())
-        })
+                if let Some(enabled) = input.enabled {
+                    db.conn.execute(
+                        "UPDATE destinations SET enabled = ?2 WHERE id = ?1",
+                        rusqlite::params![destination_id, enabled],
+                    )?;
+                }
+                let configured = crate::destination_projection::load_runtime(db)?
+                    .destinations
+                    .into_iter()
+                    .find(|row| row.id == destination_id)
+                    .ok_or_else(|| anyhow::anyhow!("destination not found"))?;
+                let updates: Vec<_> = input
+                    .models
+                    .iter()
+                    .map(|model| DestinationCatalogModelUpdate {
+                        public_model: model.public_model.clone(),
+                        enabled: model.enabled,
+                        protocols: model.protocols.clone(),
+                        preferred: model.preferred,
+                    })
+                    .collect();
+                let catalog = super::destination_catalog::apply_updates(&configured, &updates, &[])
+                    .map_err(anyhow::Error::msg)?;
+                crate::db::destination_store::replace_destination_catalog(
+                    &db.conn,
+                    destination_id,
+                    &catalog,
+                )?;
+                Ok(())
+            },
+        )
         .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
 
     mutation_result_locked(state, destination_id)
@@ -215,13 +284,19 @@ fn delete_destination_locked(
     state: &CoreState,
     destination_id: &str,
     expectation: MutationExpectation,
+    receipt: &mut super::applications::DashboardReceipt,
 ) -> Result<DestinationDeleteResult, DestinationsError> {
     let _settings_update = state.settings_update.lock();
     check_expectation(state, &expectation)?;
-    state
-        .commit_configuration_update(|db| {
-            crate::db::destination_commands::delete_http_destination_on(db, destination_id)
-        })
+    receipt
+        .commit_recorded(
+            state,
+            crate::log_types::OperationMetadata {
+                completed_count: Some(1),
+                ..crate::log_types::OperationMetadata::default()
+            },
+            |db| crate::db::destination_commands::delete_http_destination_on(db, destination_id),
+        )
         .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
     Ok(DestinationDeleteResult {
         revision: ControlRevision::from_state(state),

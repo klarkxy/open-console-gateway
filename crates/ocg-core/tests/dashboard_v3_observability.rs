@@ -394,7 +394,7 @@ async fn dashboard_v3_observability_gets_are_local_secret_free_and_share_one_sna
 }
 
 #[tokio::test]
-async fn dashboard_v3_stopped_gateway_status_redacts_account_secret_from_last_error() {
+async fn dashboard_v3_gateway_status_uses_current_listener_failure_and_ignores_history() {
     let harness = start_loopback("obs-last-error").await;
     let primary = harness.state.config().gateway_key.clone();
     harness
@@ -427,24 +427,41 @@ async fn dashboard_v3_stopped_gateway_status_redacts_account_secret_from_last_er
     assert_eq!(status, StatusCode::OK, "{body}");
     let parsed: GatewayStatus = serde_json::from_value(body.clone()).unwrap();
     assert!(!parsed.running);
+    assert!(
+        parsed.last_error.is_none(),
+        "historical mixed errors are not current listener failures"
+    );
+
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    assert!(
+        ocg_core::gateway::start_gateway_on(harness.state.clone(), occupied.local_addr().unwrap(),)
+            .await
+            .is_err()
+    );
+    let (status, body) = harness
+        .get_json(&format!("{}/gateway/status", harness.v3_base))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: GatewayStatus = serde_json::from_value(body.clone()).unwrap();
     let last_error = parsed
         .last_error
         .as_deref()
-        .expect("stopped gateway must surface lastError");
-    assert!(
-        last_error.contains("listener failed"),
-        "lastError should keep the persisted gateway error text: {last_error}"
-    );
-    assert!(
-        last_error.contains("<redacted>"),
-        "lastError should apply known-secret redaction: {last_error}"
-    );
+        .expect("current bind failure must surface lastError");
+    assert!(!last_error.contains("listener failed with"));
     assert!(!last_error.contains(ACCOUNT_SECRET));
     assert!(!last_error.contains(&primary));
     assert!(body.as_object().unwrap().contains_key("lastError"));
     assert!(body.get("key").is_none());
     assert_secret_free(&body, &[ACCOUNT_SECRET, primary.as_str()]);
     assert_snapshot_tokens(&body, &harness);
+
+    drop(occupied);
+    let replacement =
+        ocg_core::gateway::start_gateway_on(harness.state.clone(), "127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+    assert!(harness.state.gateway_last_error().is_none());
+    ocg_core::gateway::stop_gateway_and_wait(replacement).await;
 
     harness.stop();
 }

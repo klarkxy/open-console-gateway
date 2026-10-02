@@ -84,6 +84,7 @@ impl GatewayLifecycle {
         let prepared = match Self::prepare(addr).await {
             Ok(prepared) => prepared,
             Err(error) => {
+                state.record_gateway_error(&error.to_string());
                 state.log_runtime_event(
                     "error",
                     "gateway",
@@ -124,6 +125,7 @@ impl GatewayLifecycle {
             local_addr,
         } = prepared;
         let dashboard_is_local = local_addr.ip().is_loopback();
+        state.clear_gateway_error();
         let public_registration =
             (!dashboard_is_local).then(|| PublicListenerRegistration::new(state.clone()));
         spawn_forward_log_backfill(state.clone());
@@ -142,11 +144,23 @@ impl GatewayLifecycle {
                 let _ = shutdown_rx.await;
             });
             if let Err(e) = server.await {
-                eprintln!("gateway server error: {e}");
+                // A draining, displaced listener cannot replace the new
+                // listener's status with its own late failure.
+                if task_state
+                    .gateway
+                    .lock()
+                    .as_ref()
+                    .is_none_or(|handle| handle.listen_addr == local_addr)
+                {
+                    task_state.record_gateway_error(&e.to_string());
+                }
                 task_state.log_runtime_event(
                     "error",
                     "gateway",
-                    &format!("event=listener_task_failed address={local_addr}"),
+                    &format!(
+                        "event=listener_task_failed address={local_addr} error={}",
+                        crate::redaction::redact_text(&e.to_string())
+                    ),
                 );
             }
         });
@@ -198,7 +212,7 @@ impl GatewayLifecycle {
             Ok(Ok(())) => ListenerStopOutcome::Graceful,
             Ok(Err(error)) if error.is_cancelled() => ListenerStopOutcome::TaskCancelled,
             Ok(Err(error)) => {
-                eprintln!("gateway listener task failed during shutdown: {error}");
+                tracing::warn!("gateway listener task failed during shutdown: {error}");
                 ListenerStopOutcome::TaskPanicked
             }
             Err(_) => {
@@ -207,7 +221,9 @@ impl GatewayLifecycle {
                     Ok(()) => {}
                     Err(error) if error.is_cancelled() => {}
                     Err(error) => {
-                        eprintln!("gateway listener task failed after shutdown timeout: {error}");
+                        tracing::warn!(
+                            "gateway listener task failed after shutdown timeout: {error}"
+                        );
                     }
                 }
                 ListenerStopOutcome::AbortedAfterTimeout
@@ -274,6 +290,7 @@ impl GatewayLifecycle {
             let prepared = match Self::prepare(addr).await {
                 Ok(prepared) => prepared,
                 Err(error) => {
+                    state.record_gateway_error(&error.to_string());
                     state.log_runtime_event(
                         "error",
                         "gateway",
@@ -311,6 +328,7 @@ impl GatewayLifecycle {
             Ok(prepared) => prepared,
             Err(error) => {
                 let previous_port = state.gateway.lock().as_ref().map(|handle| handle.port);
+                state.record_gateway_error(&error.to_string());
                 state.log_runtime_event(
                     "error",
                     "gateway",
@@ -458,11 +476,13 @@ fn spawn_forward_log_backfill(state: CoreState) {
         ),
         Ok(false) => return,
         Err(error) => {
-            eprintln!("warning: forward log key backfill unavailable: {error}");
             state.log_runtime_event(
                 "warn",
                 "observability",
-                "event=forward_log_key_backfill_failed phase=initial",
+                &format!(
+                    "event=forward_log_key_backfill_failed phase=initial error={}",
+                    crate::redaction::redact_text(&error.to_string())
+                ),
             );
             return;
         }
@@ -491,11 +511,13 @@ fn spawn_forward_log_backfill(state: CoreState) {
                         return;
                     }
                     Err(error) => {
-                        eprintln!("warning: forward log key backfill paused: {error}");
                         state.log_runtime_event(
                             "warn",
                             "observability",
-                            "event=forward_log_key_backfill_failed phase=background",
+                            &format!(
+                                "event=forward_log_key_backfill_failed phase=background error={}",
+                                crate::redaction::redact_text(&error.to_string())
+                            ),
                         );
                         return;
                     }
@@ -503,11 +525,13 @@ fn spawn_forward_log_backfill(state: CoreState) {
             }
         });
     if let Err(error) = spawn_result {
-        eprintln!("warning: forward log key backfill thread failed to start: {error}");
         state.log_runtime_event(
             "warn",
             "observability",
-            "event=forward_log_key_backfill_failed phase=thread_spawn",
+            &format!(
+                "event=forward_log_key_backfill_failed phase=thread_spawn error={}",
+                crate::redaction::redact_text(&error.to_string())
+            ),
         );
     }
 }

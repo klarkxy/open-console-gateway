@@ -35,7 +35,10 @@ export function shortRequestId(requestId: string): string {
   return requestId.length <= 18 ? requestId : `${requestId.slice(0, 13)}…${requestId.slice(-4)}`;
 }
 
-export function renderRequestId(row: GatewayLog | ForwardLog, ctx: LogsColumnContext) {
+export function renderRequestId(
+  row: { id: string | number; request_id: string | null },
+  ctx: LogsColumnContext,
+) {
   const { NButton, NIcon, CheckOutlined, CopyOutlined } = ctx.components;
   const requestId = row.request_id;
   if (!requestId) return "—";

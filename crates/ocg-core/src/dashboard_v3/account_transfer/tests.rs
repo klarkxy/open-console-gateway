@@ -1,6 +1,37 @@
 use super::*;
+use crate::log_types::OperationOutcome;
 use ocg_domain::credential::ModelScope;
 use std::collections::{HashMap, HashSet};
+
+#[test]
+fn import_receipt_counts_duplicates_separately_from_failures() {
+    let clean = transfer_import_receipt(2, 3, 0);
+    assert!(clean.outcome.is_none());
+    assert_eq!(clean.requested, 5);
+    assert_eq!(clean.completed, 2);
+    assert!(clean.failed.is_none());
+
+    let partial = transfer_import_receipt(2, 1, 4);
+    assert_eq!(
+        partial.outcome,
+        Some((OperationOutcome::Partial, "internal"))
+    );
+    assert_eq!(partial.requested, 7);
+    assert_eq!(partial.completed, 2);
+    assert_eq!(partial.failed, Some(4));
+
+    let failed = transfer_import_receipt(0, 2, 3);
+    assert_eq!(failed.outcome, Some((OperationOutcome::Failed, "internal")));
+    assert_eq!(failed.requested, 5);
+    assert_eq!(failed.completed, 0);
+    assert_eq!(failed.failed, Some(3));
+
+    let excluded = transfer_exclusion_receipt(4, 2);
+    assert!(excluded.outcome.is_none());
+    assert_eq!(excluded.requested, 6);
+    assert_eq!(excluded.completed, 4);
+    assert!(excluded.failed.is_none());
+}
 
 #[test]
 fn credit_v10_transfer_restores_new_accounts_but_never_refills_existing_accounts() {
@@ -2303,6 +2334,7 @@ fn local_import(
         "bundle": bundle,
     }))
     .unwrap();
+    let mut effect = super::super::settings::CommittedEffect::Atomic;
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -2311,6 +2343,7 @@ fn local_import(
             state.clone(),
             headers,
             Bytes::from(body),
+            &mut effect,
         ))
         .map(|axum::Json(result)| result)
 }

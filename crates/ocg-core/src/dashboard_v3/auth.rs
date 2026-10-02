@@ -33,6 +33,19 @@ pub(super) async fn register_admin(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, V3ApiError> {
+    let result = register_admin_inner(state, headers, body).await;
+    tracing::debug!(
+        succeeded = result.is_ok(),
+        "dashboard registration completed"
+    );
+    result
+}
+
+async fn register_admin_inner(
+    state: CoreState,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, V3ApiError> {
     let input = parse_mutation_json::<AuthRegister>(&body)?;
     // Preserve CAS precedence (including for malformed credentials), but
     // cheaply reject an already-initialized single-admin database before
@@ -77,6 +90,16 @@ pub(super) async fn login_admin(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, V3ApiError> {
+    let result = login_admin_inner(state, headers, body).await;
+    tracing::debug!(succeeded = result.is_ok(), "dashboard login completed");
+    result
+}
+
+async fn login_admin_inner(
+    state: CoreState,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, V3ApiError> {
     let input = parse_mutation_json::<AuthLogin>(&body)?;
     require_expectation(&state, &input.expectation)?;
     let valid = dashboard_session::credentials_match(&state.db, &input.username, &input.password)
@@ -106,6 +129,16 @@ pub(super) async fn login_admin(
 
 pub(super) async fn logout_admin(
     State(state): State<CoreState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, V3ApiError> {
+    let result = logout_admin_inner(state, headers, body).await;
+    tracing::debug!(succeeded = result.is_ok(), "dashboard logout completed");
+    result
+}
+
+async fn logout_admin_inner(
+    state: CoreState,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, V3ApiError> {

@@ -68,6 +68,27 @@ async fn dsh_failed_install_creates_one_named_key_and_retry_reuses_it() {
         *observed.lock().unwrap(),
         vec![keys[0].key.clone(), keys[0].key.clone()]
     );
+    let rows = operation_receipts(&state);
+    assert_eq!(rows.len(), 2);
+    let partial = rows
+        .iter()
+        .find(|row| row.outcome == OperationOutcome::Partial)
+        .unwrap();
+    let failed = rows
+        .iter()
+        .find(|row| row.outcome == OperationOutcome::Failed)
+        .unwrap();
+    assert_eq!(partial.action, "application.install");
+    assert_eq!(partial.reason_code.as_deref(), Some("internal"));
+    assert_eq!(partial.metadata.related_ids, vec![keys[0].id.clone()]);
+    assert_eq!(partial.metadata.revision, Some(revision + 1));
+    assert_eq!(partial.metadata.completed_count, Some(1));
+    assert_eq!(partial.metadata.failed_count, Some(1));
+    assert_eq!(failed.action, "application.install");
+    assert_eq!(failed.reason_code.as_deref(), Some("internal"));
+    assert!(failed.metadata.related_ids.is_empty());
+    let encoded = serde_json::to_string(&rows).unwrap();
+    assert!(!encoded.contains(&keys[0].key));
     drop(state);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -111,4 +132,29 @@ fn install_and_uninstall_reject_unknown_fields() {
         )
         .is_ok()
     );
+}
+
+#[test]
+fn persistable_reason_splits_camel_case_and_keeps_rejected_classes() {
+    assert_eq!(persistable_reason("invalidJson"), "invalid.json");
+    assert_eq!(persistable_reason("revisionConflict"), "revision.conflict");
+    assert_eq!(
+        persistable_reason("preconditionFailed"),
+        "precondition.failed"
+    );
+    assert_eq!(persistable_reason("internal"), "internal");
+    assert_eq!(persistable_reason("outboundFailed"), "outbound.failed");
+    assert_eq!(persistable_reason("not a code"), "failed");
+    assert_eq!(classify_reason("invalidJson"), OperationOutcome::Rejected);
+    assert_eq!(classify_reason("throttled"), OperationOutcome::Rejected);
+    assert_eq!(classify_reason("internal"), OperationOutcome::Failed);
+    assert_eq!(classify_reason("outboundFailed"), OperationOutcome::Failed);
+    assert_eq!(batch_outcome(0, 0), OperationOutcome::Success);
+    assert_eq!(batch_outcome(2, 0), OperationOutcome::Success);
+    assert_eq!(batch_outcome(0, 3), OperationOutcome::Failed);
+    assert_eq!(batch_outcome(1, 1), OperationOutcome::Partial);
+    assert!(opaque_subject("sk-live").is_none());
+    assert!(opaque_subject("acct-1").is_some());
+    assert!(!field_name_ok("api_key"));
+    assert!(field_name_ok("published"));
 }

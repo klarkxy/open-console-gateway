@@ -19,13 +19,15 @@ use super::types::{
 pub(super) async fn get_gateway_status(State(state): State<CoreState>) -> Json<GatewayStatus> {
     let _settings_update = state.settings_update.lock();
     let config = state.config();
-    let running = state.gateway.lock().is_some();
+    let running = state
+        .gateway
+        .lock()
+        .as_ref()
+        .is_some_and(|handle| !handle.task.is_finished());
     let last_error = if running {
         None
     } else {
-        observability::redacted_latest_gateway_error(&state.db.lock(), |cipher| {
-            state.decrypt_key(cipher).ok()
-        })
+        state.gateway_last_error()
     };
     let runtime = observability::gateway_runtime_status(
         running,
@@ -253,7 +255,7 @@ fn gateway_log_from_model(log: crate::models::GatewayLog) -> GatewayLog {
     }
 }
 
-fn forward_log_from_enriched(item: EnrichedForwardLog) -> ForwardLog {
+pub(crate) fn forward_log_from_enriched(item: EnrichedForwardLog) -> ForwardLog {
     let log = item.log;
     ForwardLog {
         id: log.id,

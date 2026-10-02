@@ -1,5 +1,8 @@
 //! BYOK control plane: same model publication, enabled Keys, CAS, and no secret responses.
+use super::applications::{DashboardReceipt, opaque_subject};
 use super::types::{ByokApplication, ByokConfigureRequest, ByokMutationRequest};
+use crate::byok_application::ByokStatus;
+use crate::log_types::{OperationMetadata, OperationOutcome};
 use crate::{
     byok_application::{
         ByokClient, ByokError, ByokErrorKind, ByokHostRequest, ByokInspection, ByokModel,
@@ -52,9 +55,27 @@ pub(super) async fn configure(
     Path(client): Path<String>,
     body: Bytes,
 ) -> Result<Json<ByokApplication>, V3ApiError> {
-    let client = parse_client(&state, &client)?;
-    let input = parse_mutation_json::<ByokConfigureRequest>(&body)?;
-    let result = tokio::task::spawn_blocking(move || {
+    let mut receipt = DashboardReceipt::open(
+        &state,
+        "application.configure",
+        "application",
+        opaque_subject(&client),
+    );
+    let (result, created) = configure_work(state, client, body).await;
+    note_byok(&mut receipt, &result, created, ByokKind::Configure);
+    receipt.finish(result).map(Json)
+}
+
+async fn configure_work(
+    state: CoreState,
+    client: String,
+    body: Bytes,
+) -> (Result<ByokApplication, V3ApiError>, Option<(String, u64)>) {
+    let created = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let slot = created.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        let client = parse_client(&state, &client)?;
+        let input = parse_mutation_json::<ByokConfigureRequest>(&body)?;
         let host = state.byok_application_host().ok_or_else(|| {
             V3ApiError::precondition_failed_at(
                 &state,
@@ -77,13 +98,17 @@ pub(super) async fn configure(
                 "No models are published by this Key yet; configure a model source first",
             ));
         }
-        let secret = super::applications::application_gateway_key(&state, client.key_name())?;
+        let effect =
+            super::applications::application_gateway_key_effect(&state, client.key_name())?;
+        if let (Some(id), Some(revision)) = (effect.created_id, effect.revision) {
+            *slot.lock().unwrap_or_else(|poison| poison.into_inner()) = Some((id, revision));
+        }
         let inspection = host(ByokHostRequest::Configure {
             client,
             target_path: clean_target(input.target_path),
             expected_fingerprint: input.expected_fingerprint,
             gateway_v1_url: gateway_url(&state),
-            secret: ByokSecret::new(secret),
+            secret: ByokSecret::new(effect.key),
             models,
             // The host selects the existing public default or first model while
             // holding its file lock and checking the inspected fingerprint.
@@ -94,9 +119,16 @@ pub(super) async fn configure(
         state.bump_settings_revision();
         Ok::<_, V3ApiError>(payload_locked(&state, inspection))
     })
-    .await
-    .map_err(|_| V3ApiError::internal("BYOK configuration failed"))??;
-    Ok(Json(result))
+    .await;
+    let created = created
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    let result = match joined {
+        Ok(result) => result,
+        Err(_) => Err(V3ApiError::internal("BYOK configuration failed")),
+    };
+    (result, created)
 }
 
 pub(super) async fn remove(
@@ -104,7 +136,7 @@ pub(super) async fn remove(
     Path(client): Path<String>,
     body: Bytes,
 ) -> Result<Json<ByokApplication>, V3ApiError> {
-    mutate_without_key(state, client, body, false).await
+    record_without_key(state, client, body, false).await
 }
 
 pub(super) async fn recover(
@@ -112,7 +144,102 @@ pub(super) async fn recover(
     Path(client): Path<String>,
     body: Bytes,
 ) -> Result<Json<ByokApplication>, V3ApiError> {
-    mutate_without_key(state, client, body, true).await
+    record_without_key(state, client, body, true).await
+}
+
+async fn record_without_key(
+    state: CoreState,
+    client: String,
+    body: Bytes,
+    recovery: bool,
+) -> Result<Json<ByokApplication>, V3ApiError> {
+    let mut receipt = DashboardReceipt::open(
+        &state,
+        if recovery {
+            "application.recover"
+        } else {
+            "application.remove"
+        },
+        "application",
+        opaque_subject(&client),
+    );
+    let result = mutate_without_key(state, client, body, recovery)
+        .await
+        .map(|Json(value)| value);
+    note_byok(
+        &mut receipt,
+        &result,
+        None,
+        if recovery {
+            ByokKind::Recover
+        } else {
+            ByokKind::Remove
+        },
+    );
+    receipt.finish(result).map(Json)
+}
+
+enum ByokKind {
+    Configure,
+    Remove,
+    Recover,
+}
+
+fn note_byok(
+    receipt: &mut DashboardReceipt,
+    result: &Result<ByokApplication, V3ApiError>,
+    created: Option<(String, u64)>,
+    kind: ByokKind,
+) {
+    match result {
+        Ok(payload) => {
+            let mut metadata = OperationMetadata {
+                revision: Some(payload.revision.revision),
+                ..OperationMetadata::default()
+            };
+            if let Some((id, _)) = &created {
+                metadata.related_ids.push(id.clone());
+            }
+            if byok_failed(payload.inspection.status, &kind) && created.is_some() {
+                metadata.requested_count = Some(2);
+                metadata.completed_count = Some(1);
+                metadata.failed_count = Some(1);
+                receipt.decide(OperationOutcome::Partial, Some("business.failed"), metadata);
+            } else if byok_failed(payload.inspection.status, &kind) {
+                receipt.decide(OperationOutcome::Failed, Some("business.failed"), metadata);
+            } else {
+                if created.is_some() {
+                    metadata.completed_count = Some(1);
+                }
+                receipt.succeed(metadata);
+            }
+        }
+        Err(_) => {
+            if let Some((id, revision)) = created {
+                receipt.decide(
+                    OperationOutcome::Partial,
+                    None,
+                    OperationMetadata {
+                        revision: Some(revision),
+                        requested_count: Some(2),
+                        completed_count: Some(1),
+                        failed_count: Some(1),
+                        related_ids: vec![id],
+                        ..OperationMetadata::default()
+                    },
+                );
+            }
+        }
+    }
+}
+
+fn byok_failed(status: ByokStatus, kind: &ByokKind) -> bool {
+    match kind {
+        ByokKind::Configure | ByokKind::Recover => {
+            !matches!(status, ByokStatus::Configured | ByokStatus::Ready)
+        }
+        ByokKind::Remove => !matches!(status, ByokStatus::NotDetected | ByokStatus::Ready),
+    }
 }
 
 async fn mutate_without_key(

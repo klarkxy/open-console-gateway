@@ -99,8 +99,32 @@ pub(super) async fn create_credential(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<IdentityCredentialCreateResult>, V3ApiError> {
-    let input = parse_mutation_json::<IdentityCredentialCreateRequest>(&body)?;
-    create_credential_locked(&state, &id, input).map(Json)
+    let mut receipt = super::applications::DashboardReceipt::open(
+        &state,
+        "credential.create",
+        "credential",
+        None,
+    );
+    let result = (|| {
+        let input = parse_mutation_json::<IdentityCredentialCreateRequest>(&body)?;
+        create_credential_locked(&state, &id, input)
+    })();
+    if let Ok(value) = &result {
+        receipt.subject(&value.credential_id);
+        let mut related_ids = Vec::new();
+        if let Some(account_id) = super::applications::opaque_subject(&value.account_id) {
+            related_ids.push(account_id);
+        }
+        if let Some(binding_id) = super::applications::opaque_subject(&value.binding_id) {
+            related_ids.push(binding_id);
+        }
+        receipt.succeed(crate::log_types::OperationMetadata {
+            revision: Some(value.revision.revision),
+            related_ids,
+            ..crate::log_types::OperationMetadata::default()
+        });
+    }
+    receipt.finish(result).map(Json)
 }
 
 fn create_credential_locked(

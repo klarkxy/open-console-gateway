@@ -92,7 +92,141 @@ test("a newer log filter aborts the request it replaces", async () => {
   assert.equal(store.gatewayError, "");
 });
 
-test("session teardown clears both log snapshots and rejects late forward responses", async () => {
+function requestPage(id: string, offset: number) {
+  return {
+    items: [{
+      requestKey: `request:${id}`,
+      requestId: id,
+      timestamp: "2026-10-02T00:00:00.000Z",
+      status: "success",
+      httpStatus: 200,
+      model: "public",
+      requestedModel: "public",
+      resolvedAlias: "alias",
+      upstreamModel: "upstream-exact",
+      attemptCount: 0,
+      recordedRowCount: 1,
+      promptTokens: 1,
+      completionTokens: 1,
+      cachedTokens: 1,
+      durationMs: null,
+      isLegacy: false,
+      clientKeyId: "key-1",
+      clientKeyName: "deleted key",
+      providerId: "provider",
+      accountId: "route-account",
+      accountName: "Route",
+      routeAccountId: "route-account",
+      credentialAccountId: "credential-account",
+      route: "proxy",
+    }],
+    total: 50,
+    limit: 20,
+    offset,
+    summary: {
+      totalRequests: 4,
+      totalAttempts: 7,
+      promptTokens: 10,
+      completionTokens: 3,
+      cachedTokens: 2,
+    },
+  };
+}
+
+test("request reload keeps the previous page and discards an older offset", async () => {
+  const pinia = createPinia();
+  setActivePinia(pinia);
+  const calls = deferredFetch();
+  const store = useObservabilityStore(pinia);
+  const first = store.loadRequests({ limit: 20, offset: 0 });
+  calls[0]!.resolve(requestPage("one", 0));
+  await first;
+  assert.equal(store.requestLogs[0]?.requestKey, "request:one");
+  assert.equal(store.requestLoaded, true);
+  assert.equal(store.requestSummary.totalRequests, 4);
+  assert.equal(store.requestSummary.totalAttempts, 7);
+  assert.equal(store.requestTotal, 50);
+  assert.equal(store.requestLogs[0]?.attemptCount, 0);
+
+  const stale = store.loadRequests({ limit: 20, offset: 20 });
+  const current = store.loadRequests({ limit: 20, offset: 40, status: "error" });
+  assert.equal(store.requestLogs[0]?.requestKey, "request:one");
+  assert.equal(store.requestLoading, true);
+  assert.equal(store.requestLoaded, true);
+  calls[2]!.resolve(requestPage("three", 40));
+  await current;
+  calls[1]!.resolve(requestPage("two", 20));
+  await stale;
+  assert.equal(store.requestLogs[0]?.requestKey, "request:three");
+  assert.equal(store.requestOffset, 40);
+  assert.equal(store.requestSummary.totalAttempts, 7);
+  assert.equal(store.requestLoading, false);
+});
+
+test("a changed request query drops attempt details and ignores the stale detail response", async () => {
+  const pinia = createPinia();
+  setActivePinia(pinia);
+  installWindowDashboard();
+  const requests: { url: string; signal: AbortSignal }[] = [];
+  const pending: Array<{ url: string; resolve: (body: object) => void }> = [];
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: (input: string, init: RequestInit = {}) => new Promise<Response>((resolve) => {
+      requests.push({ url: input, signal: init.signal! });
+      pending.push({
+        url: input,
+        resolve: (body) => resolve(new Response(JSON.stringify(body), {
+          headers: { "Content-Type": "application/json" },
+        })),
+      });
+    }),
+  });
+  const store = useObservabilityStore(pinia);
+  const page = store.loadRequests({ limit: 20, offset: 0, requestId: "one" });
+  pending[0]!.resolve(requestPage("one", 0));
+  await page;
+  const detail = store.loadRequestAttempts("request:one");
+  assert.equal(requests[1]?.url.includes("/logs/requests/request%3Aone/attempts"), true);
+  assert.equal(store.requestDetails["request:one"]?.loading, true);
+
+  const filtered = store.loadRequests({ limit: 20, offset: 0, requestId: "two" });
+  assert.equal(requests[1]?.signal.aborted, true);
+  assert.equal(store.requestDetails["request:one"]?.loading, false);
+  pending[1]!.resolve({ items: [{ id: 9, requestId: "one", status: "error" }] });
+  await detail;
+  assert.equal(store.requestDetails["request:one"]?.loaded, false);
+
+  pending[2]!.resolve(requestPage("two", 0));
+  await filtered;
+  assert.equal(store.requestLogs[0]?.requestId, "two");
+  assert.deepEqual(store.requestDetails, {});
+  assert.equal(store.requestLoaded, true);
+});
+
+test("a same-page refresh omits a departed request and ignores its late attempt error", async () => {
+  const pinia = createPinia();
+  setActivePinia(pinia);
+  const calls = deferredFetch();
+  const store = useObservabilityStore(pinia);
+  const page = store.loadRequests({ limit: 20, offset: 0 });
+  calls[0]!.resolve(requestPage("one", 0));
+  await page;
+  const detail = store.loadRequestAttempts("request:one");
+  assert.equal(store.requestDetails["request:one"]?.loading, true);
+
+  const refresh = store.loadRequests({ limit: 20, offset: 0 });
+  calls[2]!.resolve(requestPage("other", 0));
+  await refresh;
+  assert.equal(store.requestLogs[0]?.requestKey, "request:other");
+  assert.equal(store.requestDetails["request:one"], undefined);
+
+  calls[1]!.reject(new Error("attempt failed"));
+  assert.equal(await detail, undefined);
+  assert.equal(store.requestDetails["request:one"], undefined);
+  assert.deepEqual(store.requestDetails, {});
+});
+
+test("session teardown clears operation, request, summary, and attempt caches", async () => {
   const pinia = createPinia();
   setActivePinia(pinia);
   const calls = deferredFetch();
@@ -118,4 +252,100 @@ test("session teardown clears both log snapshots and rejects late forward respon
   assert.deepEqual(store.forwardLogs, []);
   assert.equal(store.forwardTotals.total_requests, 0);
   assert.equal(store.forwardLoading, false);
+});
+
+test("logout clears a loaded operation page, request summary, and late attempt rows", async () => {
+  const pinia = createPinia();
+  setActivePinia(pinia);
+  const calls = deferredFetch();
+  const store = useObservabilityStore(pinia);
+  const session = useSessionStore(pinia);
+  const operations = store.loadOperations({ limit: 20, offset: 0, outcome: "pending" });
+  calls[0]!.resolve({
+    items: [{
+      operationId: "op-1",
+      startedAt: "2026-10-02T00:00:00.000Z",
+      completedAt: null,
+      action: "account.create",
+      source: "cli",
+      actorId: null,
+      subjectType: "account",
+      subjectId: "acc-1",
+      outcome: "pending",
+      reasonCode: null,
+      metadata: {
+        changedFields: [],
+        requestedCount: null,
+        completedCount: null,
+        failedCount: null,
+        revision: null,
+        compensated: null,
+        relatedIds: [],
+      },
+    }],
+    total: 3,
+    limit: 20,
+    offset: 0,
+  });
+  await operations;
+  const requests = store.loadRequests({ limit: 20, offset: 0 });
+  calls[1]!.resolve(requestPage("kept", 0));
+  await requests;
+  const attempts = store.loadRequestAttempts("request:kept");
+  assert.equal(store.operationLogs[0]?.actorId, null);
+  assert.equal(store.operationTotal, 3);
+  assert.equal(store.requestSummary.totalRequests, 4);
+  session.dropSession();
+  assert.deepEqual(store.operationLogs, []);
+  assert.equal(store.operationTotal, 0);
+  assert.equal(store.operationLoaded, false);
+  assert.deepEqual(store.requestLogs, []);
+  assert.equal(store.requestSummary.totalRequests, 0);
+  assert.equal(store.requestSummary.totalAttempts, 0);
+  assert.equal(store.requestLoaded, false);
+  calls[2]!.resolve({ items: [{ id: 1, requestId: "kept" }] });
+  await attempts;
+  assert.deepEqual(store.requestDetails, {});
+  assert.equal(store.requestLoading, false);
+  assert.equal(store.operationLoading, false);
+});
+
+test("refreshing an expanded request preserves its rendered attempts until a fresh receipt arrives", async () => {
+  const pinia = createPinia();
+  const calls = deferredFetch();
+  const store = useObservabilityStore(pinia);
+  const initial = store.loadRequests({ limit: 20, offset: 0 });
+  calls[0]!.resolve(requestPage("kept", 0));
+  await initial;
+  const firstDetail = store.loadRequestAttempts("request:kept");
+  calls[1]!.resolve({ items: [{ id: 1, status: "streaming", requestId: "kept" }] });
+  await firstDetail;
+  const refresh = store.loadRequestAttempts("request:kept", true);
+  assert.equal(store.requestDetails["request:kept"]?.loaded, true);
+  assert.equal(store.requestDetails["request:kept"]?.loading, true);
+  assert.equal(store.requestDetails["request:kept"]?.items[0]?.status, "streaming");
+  calls[2]!.resolve({ items: [{ id: 1, status: "success", requestId: "kept" }] });
+  await refresh;
+  assert.equal(store.requestDetails["request:kept"]?.loading, false);
+  assert.equal(store.requestDetails["request:kept"]?.items[0]?.status, "success");
+});
+
+test("a rolling request-window reload can refill the same expanded request", async () => {
+  const pinia = createPinia();
+  const calls = deferredFetch();
+  const store = useObservabilityStore(pinia);
+  const initial = store.loadRequests({ limit: 20, startTime: "2026-10-01T00:00:00Z" });
+  calls[0]!.resolve(requestPage("kept", 0));
+  await initial;
+  const firstDetail = store.loadRequestAttempts("request:kept");
+  calls[1]!.resolve({ items: [{ id: 1, status: "streaming", requestId: "kept" }] });
+  await firstDetail;
+  const page = store.loadRequests({ limit: 20, startTime: "2026-10-01T00:01:00Z" });
+  calls[2]!.resolve(requestPage("kept", 0));
+  await page;
+  const detail = store.loadRequestAttempts("request:kept", true);
+  calls[3]!.resolve({ items: [{ id: 1, status: "success", requestId: "kept" }] });
+  await detail;
+  assert.equal(store.requestDetails["request:kept"]?.loaded, true);
+  assert.equal(store.requestDetails["request:kept"]?.items[0]?.status, "success");
 });

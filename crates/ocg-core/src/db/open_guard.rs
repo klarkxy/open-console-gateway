@@ -7,7 +7,7 @@ use std::path::Path;
 
 pub(super) struct DatabaseOpenGuard {
     // On failed initialization, release the lifetime lock before the open gate
-    // so the next opener can acquire EX and recover abandoned receipts.
+    // so the next opener can acquire EX for initialization.
     file: File,
     gate: Option<File>,
     exclusive: bool,
@@ -48,6 +48,7 @@ impl DatabaseOpenGuard {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn can_recover_pending(&self) -> bool {
         self.exclusive
     }

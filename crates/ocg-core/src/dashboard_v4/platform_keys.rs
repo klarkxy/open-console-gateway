@@ -11,6 +11,7 @@ use std::collections::HashSet;
 
 use crate::custom;
 use crate::dashboard_v3::{ControlRevision, V3ApiError, check_expectation, parse_mutation_json};
+use crate::log_types::{OperationMetadata, OperationOutcome};
 use crate::models::{
     Account as ModelAccount, AccountCustomConfigInput, AccountModelCapabilityInput,
     AccountSetupStep as ModelSetupStep, AccountType as ModelAccountType,
@@ -30,6 +31,24 @@ pub(super) async fn import_keys(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<PlatformKeyImportResult>, V3ApiError> {
+    let mut receipt = super::applications::DashboardReceipt::open(
+        &state,
+        "platform.import",
+        "platform.account",
+        super::applications::opaque_subject(&id),
+    );
+    let mut durable = None;
+    let result = import_keys_work(state, id, body, &mut durable).await;
+    note_platform_import(&mut receipt, &result, durable);
+    receipt.finish(result).map(Json)
+}
+
+async fn import_keys_work(
+    state: CoreState,
+    id: String,
+    body: Bytes,
+    durable: &mut Option<super::applications::DurableEffect>,
+) -> Result<PlatformKeyImportResult, V3ApiError> {
     let input = parse_mutation_json::<PlatformKeyImportRequest>(&body)?;
     let page = input.page.unwrap_or(1);
     if !(1..=import::MAX_PAGE).contains(&page) {
@@ -218,9 +237,16 @@ pub(super) async fn import_keys(
         }
         if imported > 0 {
             state.bump_settings_revision();
+            *durable = Some(super::applications::DurableEffect {
+                revision: state.settings_revision(),
+                completed: imported,
+                failed: super::applications::count_u32(failed.len()).saturating_add(1),
+                related_ids: Vec::new(),
+            });
             state
                 .reload_provider_contracts()
                 .map_err(V3ApiError::internal)?;
+            *durable = None;
         }
     }
 
@@ -231,14 +257,49 @@ pub(super) async fn import_keys(
             code,
         })
         .collect();
-    Ok(Json(PlatformKeyImportResult {
+    Ok(PlatformKeyImportResult {
         next_page,
         imported,
         skipped_existing,
         skipped_disabled: u32::try_from(skipped_disabled).unwrap_or(u32::MAX),
         failed,
         revision: ControlRevision::from_state(&state),
-    }))
+    })
+}
+
+fn note_platform_import(
+    receipt: &mut super::applications::DashboardReceipt,
+    result: &Result<PlatformKeyImportResult, V3ApiError>,
+    durable: Option<super::applications::DurableEffect>,
+) {
+    match result {
+        Ok(value) => {
+            let failed = super::applications::count_u32(value.failed.len());
+            let completed = value.imported;
+            let requested = completed
+                .saturating_add(failed)
+                .saturating_add(value.skipped_existing)
+                .saturating_add(value.skipped_disabled);
+            let outcome = super::applications::batch_outcome(completed, failed);
+            let reason = (outcome == OperationOutcome::Failed).then_some("business.failed");
+            receipt.decide(
+                outcome,
+                reason,
+                OperationMetadata {
+                    revision: Some(value.revision.revision),
+                    requested_count: Some(requested),
+                    completed_count: Some(completed),
+                    failed_count: Some(failed),
+                    ..OperationMetadata::default()
+                },
+            );
+        }
+        Err(_) => {
+            if let Some(effect) = durable {
+                receipt.decide(OperationOutcome::Partial, None, effect.into_metadata());
+            }
+        }
+    }
 }
 
 fn local_custom_keys(state: &CoreState, parent_id: &str) -> Result<HashSet<String>, V3ApiError> {
@@ -263,3 +324,6 @@ fn local_custom_keys(state: &CoreState, parent_id: &str) -> Result<HashSet<Strin
     }
     Ok(keys)
 }
+
+#[cfg(test)]
+mod tests;

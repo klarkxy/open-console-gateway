@@ -159,6 +159,30 @@ pub(super) async fn patch_zen_free_settings(
     State(state): State<CoreState>,
     body: Bytes,
 ) -> Result<Json<ZenFreeSettings>, V3ApiError> {
+    let op = super::settings::open_dashboard(
+        &state,
+        "provider.zen.update",
+        "provider",
+        super::settings::known_subject(OPENCODE_ZEN_FREE_PROVIDER_ID),
+    );
+    let mut effect = super::settings::CommittedEffect::Atomic;
+    let result = patch_zen_free_settings_inner(state.clone(), body, &mut effect).await;
+    super::settings::record_effect(
+        op,
+        &state,
+        &["enabled"],
+        (Some(1), Some(1), None),
+        None,
+        effect,
+        result,
+    )
+}
+
+async fn patch_zen_free_settings_inner(
+    state: CoreState,
+    body: Bytes,
+    effect: &mut super::settings::CommittedEffect,
+) -> Result<Json<ZenFreeSettings>, V3ApiError> {
     let input = parse_mutation_json::<ZenFreeSettingsUpdate>(&body)?;
     let _settings_update = state.settings_update.lock();
     check_expectation(&state, &input.expectation)?;
@@ -176,7 +200,7 @@ pub(super) async fn patch_zen_free_settings(
             input.enabled
         ),
     );
-    zen_free_settings_from_state(&state).map(Json)
+    effect.note_follow_up(zen_free_settings_from_state(&state).map(Json))
 }
 
 pub(super) async fn get_zen_free_models(State(state): State<CoreState>) -> Json<ZenFreeModels> {
@@ -187,6 +211,30 @@ pub(super) async fn get_zen_free_models(State(state): State<CoreState>) -> Json<
 pub(super) async fn refresh_zen_free_models(
     State(state): State<CoreState>,
     body: Bytes,
+) -> Result<Json<ZenFreeModels>, V3ApiError> {
+    let op = super::settings::open_dashboard(
+        &state,
+        "provider.zen.refresh",
+        "provider",
+        super::settings::known_subject(OPENCODE_ZEN_FREE_PROVIDER_ID),
+    );
+    let mut effect = super::settings::CommittedEffect::Atomic;
+    let result = refresh_zen_free_models_inner(state.clone(), body, &mut effect).await;
+    super::settings::record_effect(
+        op,
+        &state,
+        &["catalog"],
+        (Some(1), Some(1), None),
+        None,
+        effect,
+        result,
+    )
+}
+
+async fn refresh_zen_free_models_inner(
+    state: CoreState,
+    body: Bytes,
+    effect: &mut super::settings::CommittedEffect,
 ) -> Result<Json<ZenFreeModels>, V3ApiError> {
     let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
     let _refresh = state.zen_free_models_refresh.try_lock().map_err(|_| {
@@ -228,16 +276,20 @@ pub(super) async fn refresh_zen_free_models(
     let now = Utc::now();
     {
         let db = state.db.lock();
-        db.apply_official_protocol_baseline(
-            &ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID),
-            &models,
-            &official_protocols,
-            now,
-        )
-        .map_err(V3ApiError::internal)?;
-        state
-            .reload_provider_contracts_locked(&db)
-            .map_err(V3ApiError::internal)?;
+        effect.note_follow_up(
+            db.apply_official_protocol_baseline(
+                &ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID),
+                &models,
+                &official_protocols,
+                now,
+            )
+            .map_err(V3ApiError::internal),
+        )?;
+        effect.note_follow_up(
+            state
+                .reload_provider_contracts_locked(&db)
+                .map_err(V3ApiError::internal),
+        )?;
     }
     state.routing.reset();
     let revision = state.bump_settings_revision();
@@ -278,6 +330,7 @@ async fn refresh_go_or_command_catalog(
     state: &CoreState,
     provider_id: &str,
     expectation: &MutationExpectation,
+    effect: &mut super::settings::CommittedEffect,
 ) -> Result<GoCommandCatalogRefresh, V3ApiError> {
     if provider_id != OPENCODE_PROVIDER_ID && provider_id != COMMAND_CODE_PROVIDER_ID {
         return Err(V3ApiError::invalid_request_at(
@@ -374,21 +427,28 @@ async fn refresh_go_or_command_catalog(
         let db = state.db.lock();
         db.refresh_contract_catalog_preserving_settings(&scope, &models, now, source, &source_url)
             .map_err(V3ApiError::internal)?;
-        db.apply_official_protocol_baseline(&scope, &models, &official_protocols, now)
-            .map_err(V3ApiError::internal)?;
-        state
-            .reload_provider_contracts_locked(&db)
-            .map_err(V3ApiError::internal)?;
+        effect.note_follow_up(
+            db.apply_official_protocol_baseline(&scope, &models, &official_protocols, now)
+                .map_err(V3ApiError::internal),
+        )?;
+        effect.note_follow_up(
+            state
+                .reload_provider_contracts_locked(&db)
+                .map_err(V3ApiError::internal),
+        )?;
     }
     {
         let db = state.db.lock();
-        let snapshot =
-            crate::routing_snapshot::RoutingSnapshot::load(&db).map_err(V3ApiError::internal)?;
+        let snapshot = effect.note_follow_up(
+            crate::routing_snapshot::RoutingSnapshot::load(&db).map_err(V3ApiError::internal),
+        )?;
         let adapter = ocg_domain::destination::adapter_kind_for_builtin(provider_id);
         for destination in &snapshot.projection.destinations {
             if Some(destination.adapter) == adapter {
-                crate::model_metadata::observe(&db, destination, &discovery.metadata)
-                    .map_err(V3ApiError::internal)?;
+                effect.note_follow_up(
+                    crate::model_metadata::observe(&db, destination, &discovery.metadata)
+                        .map_err(V3ApiError::internal),
+                )?;
             }
         }
     }
@@ -410,9 +470,34 @@ pub(super) async fn refresh_provider_models(
     Path(provider_id): Path<String>,
     body: Bytes,
 ) -> Result<Json<ProviderModels>, V3ApiError> {
+    let op = super::settings::open_dashboard(
+        &state,
+        "provider.models.refresh",
+        "provider",
+        super::settings::known_subject(&provider_id),
+    );
+    let mut effect = super::settings::CommittedEffect::Atomic;
+    let result = refresh_provider_models_inner(state.clone(), provider_id, body, &mut effect).await;
+    let counts = match &result {
+        Ok(Json(models)) => {
+            let count = super::settings::count_u32(models.models.len() as u64);
+            (Some(count), Some(count), None)
+        }
+        Err(_) => (Some(1), None, Some(1)),
+    };
+    super::settings::record_effect(op, &state, &["catalog"], counts, None, effect, result)
+}
+
+async fn refresh_provider_models_inner(
+    state: CoreState,
+    provider_id: String,
+    body: Bytes,
+    effect: &mut super::settings::CommittedEffect,
+) -> Result<Json<ProviderModels>, V3ApiError> {
     let input = parse_mutation_json::<ProviderModelsRefreshUpdate>(&body)?;
     // The optional legacy accountId is accepted but is not used for public discovery.
-    let refreshed = refresh_go_or_command_catalog(&state, &provider_id, &input.expectation).await?;
+    let refreshed =
+        refresh_go_or_command_catalog(&state, &provider_id, &input.expectation, effect).await?;
     Ok(Json(ProviderModels {
         provider_id: refreshed.provider_id,
         account_id: refreshed.account_id,
@@ -430,6 +515,34 @@ pub(super) async fn refresh_contract_catalog(
     Path((scope_kind, scope_id)): Path<(String, String)>,
     body: Bytes,
 ) -> Result<Json<ProviderContracts>, V3ApiError> {
+    let op = super::settings::open_dashboard(
+        &state,
+        "provider.catalog.refresh",
+        "provider",
+        super::settings::known_subject(&scope_id),
+    );
+    let mut effect = super::settings::CommittedEffect::Atomic;
+    let result =
+        refresh_contract_catalog_inner(state.clone(), scope_kind, scope_id, body, &mut effect)
+            .await;
+    super::settings::record_effect(
+        op,
+        &state,
+        &["catalog"],
+        (Some(1), Some(1), None),
+        None,
+        effect,
+        result,
+    )
+}
+
+async fn refresh_contract_catalog_inner(
+    state: CoreState,
+    scope_kind: String,
+    scope_id: String,
+    body: Bytes,
+    effect: &mut super::settings::CommittedEffect,
+) -> Result<Json<ProviderContracts>, V3ApiError> {
     let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
     let scope = ContractScope::parse(&scope_kind, &scope_id)
         .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
@@ -443,8 +556,8 @@ pub(super) async fn refresh_contract_catalog(
         return Err(V3ApiError::not_found_at(&state, "provider scope not found"));
     }
     if scope_id == OPENCODE_ZEN_FREE_PROVIDER_ID {
-        let _ = refresh_zen_free_models(State(state.clone()), body).await?;
-        return provider_contracts_response(&state);
+        let _ = refresh_zen_free_models_inner(state.clone(), body, effect).await?;
+        return effect.note_follow_up(provider_contracts_response(&state));
     }
     if scope_id == OLLAMA_PROVIDER_ID {
         // Public keyless GET /models: no account, no Key verification, explicit
@@ -497,14 +610,16 @@ pub(super) async fn refresh_contract_catalog(
                 &source_url,
             )
             .map_err(V3ApiError::internal)?;
-            state
-                .reload_provider_contracts_locked(&db)
-                .map_err(V3ApiError::internal)?;
+            effect.note_follow_up(
+                state
+                    .reload_provider_contracts_locked(&db)
+                    .map_err(V3ApiError::internal),
+            )?;
         }
         state.routing.reset();
         let revision = state.bump_settings_revision();
         audit_catalog_success(&state, &scope_id, models.len(), revision);
-        return provider_contracts_response(&state);
+        return effect.note_follow_up(provider_contracts_response(&state));
     }
     if matches!(scope_id.as_str(), MINIMAX_PROVIDER_ID | KIMI_PROVIDER_ID) {
         let _refresh = state.provider_models_refresh.try_lock().map_err(|_| {
@@ -584,18 +699,20 @@ pub(super) async fn refresh_contract_catalog(
                 &source_url,
             )
             .map_err(V3ApiError::internal)?;
-            state
-                .reload_provider_contracts_locked(&db)
-                .map_err(V3ApiError::internal)?;
+            effect.note_follow_up(
+                state
+                    .reload_provider_contracts_locked(&db)
+                    .map_err(V3ApiError::internal),
+            )?;
         }
         state.routing.reset();
         let revision = state.bump_settings_revision();
         audit_catalog_success(&state, &scope_id, models.len(), revision);
-        return provider_contracts_response(&state);
+        return effect.note_follow_up(provider_contracts_response(&state));
     }
     if scope_id == COMMAND_CODE_PROVIDER_ID || scope_id == OPENCODE_PROVIDER_ID {
-        refresh_go_or_command_catalog(&state, &scope_id, &expectation).await?;
-        return provider_contracts_response(&state);
+        refresh_go_or_command_catalog(&state, &scope_id, &expectation, effect).await?;
+        return effect.note_follow_up(provider_contracts_response(&state));
     }
     Err(V3ApiError::not_found_at(&state, "provider scope not found"))
 }
@@ -622,6 +739,33 @@ pub(super) async fn put_provider_model_protocol_overrides(
     Path(scope_id): Path<String>,
     body: Bytes,
 ) -> Result<Json<ProviderContracts>, V3ApiError> {
+    let op = super::settings::open_dashboard(
+        &state,
+        "provider.protocol.update",
+        "provider",
+        super::settings::known_subject(&scope_id),
+    );
+    let mut effect = super::settings::CommittedEffect::Atomic;
+    let result =
+        put_provider_model_protocol_overrides_inner(state.clone(), scope_id, body, &mut effect)
+            .await;
+    super::settings::record_effect(
+        op,
+        &state,
+        &["protocol"],
+        (Some(1), Some(1), None),
+        None,
+        effect,
+        result,
+    )
+}
+
+async fn put_provider_model_protocol_overrides_inner(
+    state: CoreState,
+    scope_id: String,
+    body: Bytes,
+    effect: &mut super::settings::CommittedEffect,
+) -> Result<Json<ProviderContracts>, V3ApiError> {
     let input = parse_mutation_json::<ModelProtocolOverridesUpdate>(&body)?;
     let _settings_update = state.settings_update.lock();
     check_expectation(&state, &input.expectation)?;
@@ -633,6 +777,7 @@ pub(super) async fn put_provider_model_protocol_overrides(
         &scope,
         input.overrides,
         &input.authorize_credential_ids,
+        effect,
     )
 }
 
@@ -674,6 +819,33 @@ pub(super) async fn reset_provider_model_protocols_to_static(
     State(state): State<CoreState>,
     Path(scope_id): Path<String>,
     body: Bytes,
+) -> Result<Json<ProviderContracts>, V3ApiError> {
+    let op = super::settings::open_dashboard(
+        &state,
+        "provider.protocol.reset",
+        "provider",
+        super::settings::known_subject(&scope_id),
+    );
+    let mut effect = super::settings::CommittedEffect::Atomic;
+    let result =
+        reset_provider_model_protocols_to_static_inner(state.clone(), scope_id, body, &mut effect)
+            .await;
+    super::settings::record_effect(
+        op,
+        &state,
+        &["protocol"],
+        (Some(1), Some(1), None),
+        None,
+        effect,
+        result,
+    )
+}
+
+async fn reset_provider_model_protocols_to_static_inner(
+    state: CoreState,
+    scope_id: String,
+    body: Bytes,
+    effect: &mut super::settings::CommittedEffect,
 ) -> Result<Json<ProviderContracts>, V3ApiError> {
     let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
     let docs_baseline = crate::official_protocols::uses_official_docs_protocol_baseline(&scope_id);
@@ -724,9 +896,11 @@ pub(super) async fn reset_provider_model_protocols_to_static(
         // The reset transaction is already durable. Advance CAS before the
         // fallible reload so persisted state can never hide behind an old token.
         let revision = state.bump_settings_revision();
-        state
-            .reload_provider_contracts_locked(&db)
-            .map_err(V3ApiError::internal)?;
+        effect.note_follow_up(
+            state
+                .reload_provider_contracts_locked(&db)
+                .map_err(V3ApiError::internal),
+        )?;
         revision
     };
     state.routing.reset();
@@ -738,13 +912,44 @@ pub(super) async fn reset_provider_model_protocols_to_static(
             models.len()
         ),
     );
-    provider_contracts_response(&state)
+    effect.note_follow_up(provider_contracts_response(&state))
 }
 
 pub(super) async fn put_custom_endpoint_model_protocol_overrides(
     State(state): State<CoreState>,
     Path(scope_id): Path<String>,
     body: Bytes,
+) -> Result<Json<ProviderContracts>, V3ApiError> {
+    let op = super::settings::open_dashboard(
+        &state,
+        "provider.custom.protocol.update",
+        "provider",
+        super::settings::known_subject(&scope_id),
+    );
+    let mut effect = super::settings::CommittedEffect::Atomic;
+    let result = put_custom_endpoint_model_protocol_overrides_inner(
+        state.clone(),
+        scope_id,
+        body,
+        &mut effect,
+    )
+    .await;
+    super::settings::record_effect(
+        op,
+        &state,
+        &["protocol"],
+        (Some(1), Some(1), None),
+        None,
+        effect,
+        result,
+    )
+}
+
+async fn put_custom_endpoint_model_protocol_overrides_inner(
+    state: CoreState,
+    scope_id: String,
+    body: Bytes,
+    effect: &mut super::settings::CommittedEffect,
 ) -> Result<Json<ProviderContracts>, V3ApiError> {
     let input = parse_mutation_json::<ModelProtocolOverridesUpdate>(&body)?;
     let _settings_update = state.settings_update.lock();
@@ -778,7 +983,7 @@ pub(super) async fn put_custom_endpoint_model_protocol_overrides(
             "HTTP route authorization belongs to the destination editor",
         ));
     }
-    commit_model_protocol_overrides(&state, &scope, input.overrides, &[])
+    commit_model_protocol_overrides(&state, &scope, input.overrides, &[], effect)
 }
 
 fn commit_model_protocol_overrides(
@@ -786,6 +991,7 @@ fn commit_model_protocol_overrides(
     scope: &ContractScope,
     overrides: Vec<ModelProtocolOverride>,
     authorize_credential_ids: &[String],
+    effect: &mut super::settings::CommittedEffect,
 ) -> Result<Json<ProviderContracts>, V3ApiError> {
     if overrides.is_empty() {
         return Err(V3ApiError::invalid_request_at(
@@ -833,15 +1039,19 @@ fn commit_model_protocol_overrides(
             authorize_credential_ids,
         )
         .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
-        state
-            .reload_provider_contracts_locked(&db)
-            .map_err(V3ApiError::internal)?;
+        effect.note_follow_up(
+            state
+                .reload_provider_contracts_locked(&db)
+                .map_err(V3ApiError::internal),
+        )?;
     }
     state.routing.reset();
     let _revision = state.bump_settings_revision();
     let contracts = state.provider_contracts();
-    let (accounts, statuses) = load_accounts_with_verification(state)?;
-    provider_contracts_from_state(state, &contracts, &accounts, &statuses).map(Json)
+    let (accounts, statuses) = effect.note_follow_up(load_accounts_with_verification(state))?;
+    effect.note_follow_up(
+        provider_contracts_from_state(state, &contracts, &accounts, &statuses).map(Json),
+    )
 }
 
 fn override_state_to_domain(state: ProtocolOverrideState) -> DomainProtocolOverrideState {
@@ -857,15 +1067,87 @@ pub(super) async fn run_provider_protocol_probes(
     Path(provider_id): Path<String>,
     body: Bytes,
 ) -> Result<Json<ProtocolProbeResponse>, V3ApiError> {
-    let input = parse_mutation_json::<ProtocolProbeRequest>(&body)?;
+    let op = super::settings::open_dashboard(
+        &state,
+        "provider.protocol.probe",
+        "provider",
+        super::settings::known_subject(&provider_id),
+    );
+    let input = match parse_mutation_json::<ProtocolProbeRequest>(&body) {
+        Ok(input) => input,
+        Err(error) => {
+            return super::settings::record_after(
+                op,
+                &state,
+                &["model"],
+                (Some(1), None, Some(1)),
+                None,
+                Err(error),
+            );
+        }
+    };
     let prepared = {
         let _settings_update = state.settings_update.lock();
-        check_expectation(&state, &input.expectation)?;
-        prepare_protocol_probe(&state, &provider_id, &input)?
+        match check_expectation(&state, &input.expectation)
+            .and_then(|_| prepare_protocol_probe(&state, &provider_id, &input))
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                drop(_settings_update);
+                return super::settings::record_after(
+                    op,
+                    &state,
+                    &["model"],
+                    (Some(1), None, Some(1)),
+                    None,
+                    Err(error),
+                );
+            }
+        }
     };
+    let mut op = op;
+    op.accepted(super::settings::metadata_for(
+        &state,
+        &["model"],
+        Some(u32::try_from(prepared.protocols.len()).unwrap_or(u32::MAX)),
+        Some(0),
+        None,
+        None,
+    ));
+    let mut effect = super::settings::CommittedEffect::Atomic;
+    let result = complete_provider_protocol_probes(&state, prepared, &mut effect).await;
+    let (counts, ok_outcome) = match &result {
+        Ok(Json(response)) => {
+            let succeeded = response
+                .results
+                .iter()
+                .filter(|item| item.success && !item.skipped)
+                .count() as u32;
+            let failed = response
+                .results
+                .iter()
+                .filter(|item| !item.success && !item.skipped)
+                .count() as u32;
+            let requested = super::settings::count_u32(response.results.len() as u64);
+            let (outcome, reason) = super::settings::probe_batch_outcome(succeeded, failed);
+            (
+                (Some(requested), Some(succeeded), Some(failed)),
+                reason.map(|reason| (outcome, reason)),
+            )
+        }
+        Err(_) => ((Some(1), None, Some(1)), None),
+    };
+    super::settings::record_effect(op, &state, &["model"], counts, ok_outcome, effect, result)
+}
+
+async fn complete_provider_protocol_probes(
+    state: &CoreState,
+    prepared: PreparedProtocolProbe,
+    effect: &mut super::settings::CommittedEffect,
+) -> Result<Json<ProtocolProbeResponse>, V3ApiError> {
     let outcomes = protocol_probe::run_protocol_probes(
         &ProtocolProbeContext {
-            state: &state,
+            state,
             config: &prepared.config,
             accounts: &prepared.accounts,
             adapter: prepared.adapter,
@@ -879,10 +1161,10 @@ pub(super) async fn run_provider_protocol_probes(
     )
     .await
     .map_err(|error| match error {
-        ProtocolProbeRunError::Apply(message) => V3ApiError::invalid_request_at(&state, message),
+        ProtocolProbeRunError::Apply(message) => V3ApiError::invalid_request_at(state, message),
         ProtocolProbeRunError::Evidence(message) => V3ApiError::internal(message),
     })?;
-    log_protocol_probe_requests(&state, &prepared, &outcomes);
+    log_protocol_probe_requests(state, &prepared, &outcomes);
     let observations: Vec<_> = outcomes
         .iter()
         .filter_map(|outcome| outcome.observation.clone())
@@ -891,22 +1173,29 @@ pub(super) async fn run_provider_protocol_probes(
     // preference are configuration, never a side effect of testing.
     let overrides = Vec::new();
     let _settings_update = state.settings_update.lock();
-    check_expectation(&state, &prepared.expectation)?;
+    check_expectation(state, &prepared.expectation)?;
     ensure_probe_model_is_current(
-        &state,
+        state,
         &prepared.scope,
         &prepared.provider_id,
         &prepared.model_id,
     )?;
-    persist_probe_results(
-        &state,
+    let committed = persist_probe_results(
+        state,
         &prepared.scope,
         &observations,
         &overrides,
         prepared.now,
+        effect,
     )?;
-    let revision = ControlRevision::from_state(&state);
-    let contract = provider_contracts_response(&state)?
+    let revision = ControlRevision::from_state(state);
+    let contracts = provider_contracts_response(state);
+    let contracts = if committed {
+        effect.note_follow_up(contracts)?
+    } else {
+        contracts?
+    };
+    let contract = contracts
         .0
         .providers
         .into_iter()
@@ -947,9 +1236,10 @@ fn persist_probe_results(
         DomainProtocolOverrideState,
     )],
     now: DateTime<Utc>,
-) -> Result<(), V3ApiError> {
+    effect: &mut super::settings::CommittedEffect,
+) -> Result<bool, V3ApiError> {
     if observations.is_empty() && overrides.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     {
         let db = state.db.lock();
@@ -958,12 +1248,14 @@ fn persist_probe_results(
         // Advance CAS immediately after commit so a later reload/read
         // failure cannot hide the persisted mutation behind an unchanged token.
         let _revision = state.bump_settings_revision();
-        state
-            .reload_provider_contracts_locked(&db)
-            .map_err(V3ApiError::internal)?;
+        effect.note_follow_up(
+            state
+                .reload_provider_contracts_locked(&db)
+                .map_err(V3ApiError::internal),
+        )?;
     }
     state.routing.reset();
-    Ok(())
+    Ok(true)
 }
 
 fn log_protocol_probe_requests(
@@ -1039,12 +1331,7 @@ fn log_protocol_probe_requests(
                 diagnostic: Some(diagnostic),
             };
             if let Err(error) = db.log_forward(&log) {
-                let _ = db.log_gateway(
-                    "error",
-                    "observability",
-                    "Failed to persist a protocol probe request log.",
-                );
-                eprintln!("failed to persist protocol probe request log: {error}");
+                tracing::warn!("failed to persist protocol probe request log: {error}");
             }
         }
     }

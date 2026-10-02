@@ -25,6 +25,30 @@ pub(super) async fn refresh(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<DestinationCatalogRefreshResult>, V3ApiError> {
+    let mut receipt = super::applications::DashboardReceipt::open(
+        &state,
+        "catalog.refresh",
+        "destination",
+        super::applications::opaque_subject(&id),
+    );
+    let result = refresh_work(state, id, body, &mut receipt).await;
+    receipt
+        .observe(result, None, |value| crate::log_types::OperationMetadata {
+            revision: Some(value.revision.revision),
+            requested_count: Some(super::applications::count_u32(value.added_count)),
+            completed_count: Some(super::applications::count_u32(value.added_count)),
+            failed_count: Some(0),
+            ..crate::log_types::OperationMetadata::default()
+        })
+        .map(Json)
+}
+
+async fn refresh_work(
+    state: CoreState,
+    id: String,
+    body: Bytes,
+    receipt: &mut super::applications::DashboardReceipt,
+) -> Result<DestinationCatalogRefreshResult, V3ApiError> {
     let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
     let _refresh = state.provider_models_refresh.try_lock().map_err(|_| {
         V3ApiError::conflict_at(&state, "provider model refresh is already running")
@@ -143,26 +167,34 @@ pub(super) async fn refresh(
         .collect();
     let catalog = merge_discovered_models(&destination.catalog, &models, &available);
     let added_count = catalog.len() - destination.catalog.len();
-    state
-        .commit_configuration_update(|db| {
-            crate::db::destination_commands::replace_http_catalog_on(
-                &db.conn,
-                &destination,
-                &catalog,
-            )?;
-            let mut updated = destination.clone();
-            updated.catalog = catalog.clone();
-            crate::model_metadata::observe(db, &updated, &metadata)
-        })
+    let completed = super::applications::count_u32(added_count);
+    receipt
+        .commit_recorded(
+            &state,
+            crate::log_types::OperationMetadata {
+                completed_count: Some(completed),
+                ..crate::log_types::OperationMetadata::default()
+            },
+            |db| {
+                crate::db::destination_commands::replace_http_catalog_on(
+                    &db.conn,
+                    &destination,
+                    &catalog,
+                )?;
+                let mut updated = destination.clone();
+                updated.catalog = catalog.clone();
+                crate::model_metadata::observe(db, &updated, &metadata)
+            },
+        )
         .map_err(V3ApiError::internal)?;
     let mut updated = destination;
     updated.catalog = catalog;
-    Ok(Json(DestinationCatalogRefreshResult {
+    Ok(DestinationCatalogRefreshResult {
         revision: ControlRevision::from_state(&state),
         destination: DestinationDto::from(&updated),
         added_count,
         truncated: discovered.truncated,
-    }))
+    })
 }
 
 fn discovery_credential_allowed(
@@ -230,7 +262,41 @@ pub(super) async fn update(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<DestinationPatchResult>, super::destinations::DestinationsError> {
+    let mut requested = 0_u32;
+    let mut receipt = super::applications::DashboardReceipt::open(
+        &state,
+        "catalog.update",
+        "destination",
+        super::applications::opaque_subject(&id),
+    );
+    let result = update_work(state, id, body, &mut requested, &mut receipt);
+    let requested = requested;
+    receipt
+        .observe(result, None, |value| crate::log_types::OperationMetadata {
+            changed_fields: vec!["catalog".to_string()],
+            revision: Some(value.revision.revision),
+            requested_count: Some(requested),
+            completed_count: Some(requested),
+            failed_count: Some(0),
+            ..crate::log_types::OperationMetadata::default()
+        })
+        .map(Json)
+}
+
+fn update_work(
+    state: CoreState,
+    id: String,
+    body: Bytes,
+    requested: &mut u32,
+    receipt: &mut super::applications::DashboardReceipt,
+) -> Result<DestinationPatchResult, super::destinations::DestinationsError> {
     let input = parse_mutation_json::<DestinationCatalogUpdate>(&body)?;
+    *requested = super::applications::count_u32(
+        input
+            .updates
+            .len()
+            .saturating_add(input.remove_models.len()),
+    );
     if input.updates.is_empty() && input.remove_models.is_empty() {
         return Err(V3ApiError::invalid_request_at(&state, "catalog update is empty").into());
     }
@@ -245,16 +311,25 @@ pub(super) async fn update(
         .ok_or_else(|| V3ApiError::not_found_at(&state, "destination not found"))?;
     let catalog = apply_updates(destination, &input.updates, &input.remove_models)
         .map_err(|error| V3ApiError::invalid_request_at(&state, error))?;
-    state
-        .commit_configuration_update(|db| {
-            crate::db::destination_commands::replace_http_catalog_on(
-                &db.conn,
-                destination,
-                &catalog,
-            )
-        })
+    let completed = *requested;
+    receipt
+        .commit_recorded(
+            &state,
+            crate::log_types::OperationMetadata {
+                changed_fields: vec!["catalog".to_string()],
+                completed_count: Some(completed),
+                ..crate::log_types::OperationMetadata::default()
+            },
+            |db| {
+                crate::db::destination_commands::replace_http_catalog_on(
+                    &db.conn,
+                    destination,
+                    &catalog,
+                )
+            },
+        )
         .map_err(V3ApiError::internal)?;
-    super::destinations::mutation_result_locked(&state, &id).map(Json)
+    super::destinations::mutation_result_locked(&state, &id)
 }
 
 pub(super) fn apply_updates(
@@ -334,6 +409,39 @@ pub(super) async fn test_model(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<DestinationModelTestResult>, V3ApiError> {
+    let mut receipt = super::applications::DashboardReceipt::open(
+        &state,
+        "catalog.test",
+        "destination",
+        super::applications::opaque_subject(&id),
+    );
+    let result = test_model_work(state, id, body).await;
+    if let Ok(value) = &result {
+        let metadata = crate::log_types::OperationMetadata {
+            revision: Some(value.revision.revision),
+            requested_count: Some(1),
+            completed_count: Some(u32::from(value.ok)),
+            failed_count: Some(u32::from(!value.ok)),
+            ..crate::log_types::OperationMetadata::default()
+        };
+        if value.ok {
+            receipt.succeed(metadata);
+        } else {
+            receipt.decide(
+                crate::log_types::OperationOutcome::Failed,
+                Some("business.failed"),
+                metadata,
+            );
+        }
+    }
+    receipt.finish(result).map(Json)
+}
+
+async fn test_model_work(
+    state: CoreState,
+    id: String,
+    body: Bytes,
+) -> Result<DestinationModelTestResult, V3ApiError> {
     let input = parse_mutation_json::<DestinationModelTestRequest>(&body)?;
     let protocol: Protocol = input.protocol.into();
     let (destination, model, credential, route, config, key) = {
@@ -474,13 +582,13 @@ pub(super) async fn test_model(
             "connection or Key changed during model test",
         ));
     }
-    Ok(Json(DestinationModelTestResult {
+    Ok(DestinationModelTestResult {
         revision: ControlRevision::from_state(&state),
         public_model: model.public_model,
         protocol: input.protocol,
         ok: error.is_none(),
         error,
-    }))
+    })
 }
 
 #[cfg(test)]

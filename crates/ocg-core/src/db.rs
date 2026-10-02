@@ -63,8 +63,10 @@ pub(crate) mod identity;
 pub(crate) mod identity_v57;
 mod official_api;
 mod open_guard;
+pub(crate) mod operation_logs;
 pub(crate) mod platform;
 pub(crate) mod quota_recovery;
+pub(crate) mod request_logs;
 pub(crate) mod routing_cards;
 pub(crate) mod routing_credentials;
 
@@ -343,8 +345,12 @@ pub const PRE_V48_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v48.";
 /// destinations.
 pub const PRE_V58_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v58.";
 pub const PRE_V59_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v59.";
+/// Unique never-overwritten SQLite snapshot taken before a non-fresh v64
+/// database gains operation receipts and logical request groups.
+pub const PRE_V65_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v65.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
 pub const CURRENT_SCHEMA_VERSION: i32 = 66;
+
 pub const V57_SCHEMA_VERSION: i32 = 57;
 /// Canonical source schema for the v48 inert-column / empty-table cleanup.
 pub const V47_SCHEMA_VERSION: i32 = 47;
@@ -1967,8 +1973,8 @@ struct ForeignKeysRestore<'a> {
 impl Drop for ForeignKeysRestore<'_> {
     fn drop(&mut self) {
         if let Err(error) = self.conn.pragma_update(None, "foreign_keys", self.previous) {
-            eprintln!(
-                "warning: failed to restore PRAGMA foreign_keys={}: {error}",
+            tracing::warn!(
+                "failed to restore PRAGMA foreign_keys={}: {error}",
                 self.previous
             );
         }
@@ -3537,6 +3543,36 @@ fn migrate_to_v64(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// v65: operation receipts and logical request groups. Historical forward rows
+/// and credit receipts stay byte-for-byte. A non-fresh v64 source gets a
+/// verified pre-v65 snapshot before the transactional DDL. Reopening v65
+/// runs the same storage ensure and does not write another snapshot.
+fn migrate_to_v65(conn: &Connection, db_path: &Path, is_fresh: bool) -> Result<()> {
+    let version = schema_version_on(conn)?;
+    if version >= 65 {
+        operation_logs::ensure_v65_storage(conn)?;
+        return Ok(());
+    }
+    anyhow::ensure!(version == 64, "v65 requires schema v64");
+    if !is_fresh {
+        create_pre_version_backup(conn, db_path, PRE_V65_BACKUP_FILE_PREFIX, 64)?;
+    }
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let locked = schema_version_on(&tx)?;
+    if locked >= 65 {
+        tx.commit()?;
+        return Ok(());
+    }
+    anyhow::ensure!(
+        locked == 64,
+        "v65 writer lock observed schema {locked}, expected 64"
+    );
+    operation_logs::ensure_v65_storage(&tx)?;
+    tx.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (65);")?;
+    tx.commit()?;
+    Ok(())
+}
+
 // v65 is reserved for the operation-ledger migration under development on main.
 // This additive migration supports either canonical v64 or that v65 database.
 fn migrate_to_v66(conn: &Connection) -> Result<()> {
@@ -4928,7 +4964,9 @@ impl Database {
         migrate_to_v62(&db.conn)?;
         migrate_to_v63(&db.conn)?;
         migrate_to_v64(&db.conn)?;
+        migrate_to_v65(&db.conn, &db_path, is_fresh)?;
         migrate_to_v66(&db.conn)?;
+
         if let Some(cipher) = cipher {
             repair_legacy_account_ciphertext(&db.conn, cipher)?;
         }
@@ -10998,7 +11036,7 @@ fn record_account_usage_sync_success_on(
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ObservedPercentUsage {
     pub window_5h: Option<f64>,
     pub window_week: Option<f64>,
@@ -11006,19 +11044,6 @@ pub struct ObservedPercentUsage {
     pub resets_in_5h: Option<DateTime<Utc>>,
     pub resets_in_week: Option<DateTime<Utc>>,
     pub resets_in_month: Option<DateTime<Utc>>,
-}
-
-impl Default for ObservedPercentUsage {
-    fn default() -> Self {
-        Self {
-            window_5h: None,
-            window_week: None,
-            window_month: None,
-            resets_in_5h: None,
-            resets_in_week: None,
-            resets_in_month: None,
-        }
-    }
 }
 
 fn percent_window_is_observed(window: &QuotaWindow) -> bool {
@@ -11856,7 +11881,7 @@ fn parse_datetime(s: String) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(&s)
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(|e| {
-            eprintln!("error: failed to parse datetime '{s}': {e}, using now");
+            tracing::warn!("error: failed to parse datetime '{s}': {e}, using now");
             Utc::now()
         })
 }

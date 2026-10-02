@@ -108,17 +108,6 @@ pub(crate) fn gateway_runtime_status(
     }
 }
 
-/// Latest `error`/`gateway` log message, with every known decrypted account
-/// secret redacted using the same policy as gateway log lists.
-pub(crate) fn redacted_latest_gateway_error(
-    db: &Database,
-    decrypt_key: impl Fn(&str) -> Option<String>,
-) -> Option<String> {
-    let message = db.latest_gateway_error().ok().flatten()?;
-    let secrets = dashboard_account_secrets(db, decrypt_key).ok()?;
-    Some(redact_known_secrets(&message, &secrets))
-}
-
 pub(crate) fn application_models(contracts: Option<&EffectiveContractSet>) -> Vec<String> {
     application_models_from_snapshot(contracts)
 }
@@ -413,12 +402,34 @@ pub(crate) fn dashboard_account_secrets(
     db: &Database,
     decrypt_key: impl Fn(&str) -> Option<String>,
 ) -> Result<BTreeMap<String, String>, ObservabilityError> {
-    let accounts = db.list_accounts()?;
-    Ok(accounts
+    dashboard_account_secrets_on(&db.conn, decrypt_key)
+}
+
+pub(crate) fn dashboard_account_secrets_on(
+    conn: &rusqlite::Connection,
+    decrypt_key: impl Fn(&str) -> Option<String>,
+) -> Result<BTreeMap<String, String>, ObservabilityError> {
+    let accounts = crate::db::account_store::list_accounts_on(conn)?;
+    let mut secrets: BTreeMap<_, _> = accounts
         .into_iter()
         .filter(|account| !account.key_cipher.is_empty())
         .filter_map(|account| decrypt_key(&account.key_cipher).map(|secret| (account.id, secret)))
-        .collect())
+        .collect();
+    // Include disabled/deleted receiving Keys as well: historical rows can
+    // still contain their values in caller-supplied labels or error text.
+    let mut statement = conn
+        .prepare("SELECT id, key FROM access_keys")
+        .map_err(anyhow::Error::from)?;
+    let keys = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(anyhow::Error::from)?;
+    for key in keys {
+        let (id, value) = key.map_err(anyhow::Error::from)?;
+        secrets.insert(format!("access:{id}"), value);
+    }
+    Ok(secrets)
 }
 
 pub(crate) fn redact_known_secrets(text: &str, secrets: &BTreeMap<String, String>) -> String {

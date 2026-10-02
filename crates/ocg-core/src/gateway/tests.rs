@@ -357,11 +357,15 @@ async fn unauthorized_and_expected_fallback_requests_are_not_persisted() {
         let runtime = db
             .query_gateway_logs(10, Some(invalid_request_id))
             .expect("runtime logs should query");
-        assert!(
-            runtime
-                .iter()
-                .any(|row| row.level == "warn" && row.error_stage.as_deref() == Some("parse"))
-        );
+        assert!(runtime.is_empty());
+        let logical = db
+            .query_request_logs(&crate::log_types::RequestLogQuery {
+                request_id: Some(invalid_request_id.to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(logical.total, 1);
+        assert_eq!(logical.summary.total_attempts, 0);
         assert!(
             runtime
                 .iter()

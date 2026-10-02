@@ -377,6 +377,20 @@ async fn refresh_imports_stepfun_and_generic_http_models_without_replacing_saved
         assert_eq!(first.added_count, 1);
         assert_eq!(first.destination.catalog.len(), 2);
         assert!(!serde_json::to_string(&first).unwrap().contains(SECRET));
+        let refresh_rows =
+            super::super::applications::operation_receipts(fixture.state.as_ref().unwrap());
+        let refresh_row = refresh_rows
+            .iter()
+            .find(|row| row.action == "catalog.refresh")
+            .unwrap();
+        assert_eq!(
+            refresh_row.outcome,
+            crate::log_types::OperationOutcome::Success
+        );
+        assert_eq!(refresh_row.metadata.completed_count, Some(1));
+        let refresh_meta = serde_json::to_string(&refresh_row.metadata).unwrap();
+        assert!(!refresh_meta.contains(SECRET));
+        assert!(!refresh_meta.contains("fresh-model"));
         let request = requests.recv().await.unwrap();
         assert!(
             request.starts_with("GET /v1/models HTTP/1.1\r\n"),
@@ -590,6 +604,21 @@ async fn catalog_update_persists_multi_protocol_controls_and_removals() {
     assert_eq!(reloaded_model.protocols, vec![Protocol::Messages]);
     assert_eq!(reloaded_model.preferred, Some(Protocol::Messages));
     assert!(reloaded_model.enabled);
+    let update_rows =
+        super::super::applications::operation_receipts(fixture.state.as_ref().unwrap());
+    assert_eq!(update_rows.len(), 1);
+    assert_eq!(update_rows[0].action, "catalog.update");
+    assert_eq!(
+        update_rows[0].outcome,
+        crate::log_types::OperationOutcome::Success
+    );
+    assert_eq!(update_rows[0].metadata.requested_count, Some(1));
+    assert_eq!(update_rows[0].metadata.changed_fields, vec!["catalog"]);
+    assert!(
+        !serde_json::to_string(&update_rows[0].metadata)
+            .unwrap()
+            .contains("multi-model")
+    );
 
     update_once(&fixture, Vec::new(), vec!["alias-keep".into()])
         .await
@@ -733,7 +762,51 @@ async fn model_test_uses_selected_messages_route_and_preserves_catalog_switches(
         before,
         "probe must not alter switches"
     );
+    let rows = super::super::applications::operation_receipts(fixture.state.as_ref().unwrap());
+    let row = rows
+        .iter()
+        .find(|row| row.action == "catalog.test")
+        .unwrap();
+    assert_eq!(row.outcome, crate::log_types::OperationOutcome::Success);
+    assert_eq!(row.metadata.completed_count, Some(1));
+    assert_eq!(row.metadata.failed_count, Some(0));
+    let encoded = serde_json::to_string(row).unwrap();
+    assert!(!encoded.contains(SECRET));
+    assert!(!encoded.contains("multi-model"));
     task.await.unwrap();
+}
+
+#[tokio::test]
+async fn model_test_business_failure_is_failed_without_model_or_secret() {
+    let (endpoint, _requests, task) = start_models_upstream(vec!["not-json".into()]).await;
+    let fixture = fixture(
+        "model-test-fail",
+        &endpoint,
+        DynamicAuthKind::Bearer,
+        true,
+        false,
+    );
+    install_chat_and_messages_routes(&fixture);
+    add_multi_route_model(&fixture);
+    grant_message_endpoint(&fixture);
+    let result = test_once(&fixture, fixture.expectation()).await.unwrap();
+    assert!(!result.ok);
+    let rows = super::super::applications::operation_receipts(fixture.state.as_ref().unwrap());
+    let row = rows
+        .iter()
+        .find(|row| row.action == "catalog.test")
+        .unwrap();
+    assert_eq!(row.outcome, crate::log_types::OperationOutcome::Failed);
+    assert_eq!(row.reason_code.as_deref(), Some("business.failed"));
+    assert_eq!(row.metadata.completed_count, Some(0));
+    assert_eq!(row.metadata.failed_count, Some(1));
+    let encoded = serde_json::to_string(row).unwrap();
+    assert!(!encoded.contains(SECRET));
+    assert!(!encoded.contains("multi-model"));
+    if let Some(error) = &result.error {
+        assert!(!encoded.contains(error));
+    }
+    task.abort();
 }
 
 #[tokio::test]

@@ -537,26 +537,9 @@ async fn dashboard_v3_create_rename_enable_disable_delete_and_regenerate() {
     );
 
     let audits = harness.state.db.lock().list_gateway_logs(100).unwrap();
-    for expected in [
-        "created key `Laptop`",
-        "renamed key `Laptop` to `Deck`",
-        "disabled key `Deck`",
-        "enabled key `Deck`",
-        "regenerated key `Deck`",
-        "deleted key `Deck`",
-    ] {
-        assert!(
-            audits
-                .iter()
-                .any(|log| log.category == "keys" && log.message.contains(expected)),
-            "missing audit containing {expected:?}"
-        );
-    }
     assert!(
-        !audits
-            .iter()
-            .any(|log| log.category == "keys" && log.message.contains("gateway key")),
-        "audit wording must say \"key\" only"
+        audits.iter().all(|log| log.category != "keys"),
+        "key lifecycle must not write legacy gateway audit rows"
     );
 
     harness.stop();
@@ -601,9 +584,10 @@ async fn dashboard_v3_primary_rotate_refetch_reveals_the_new_value() {
     );
 
     let audits = harness.state.db.lock().list_gateway_logs(100).unwrap();
-    assert!(audits.iter().any(|log| {
-        log.category == "keys" && log.message.contains("regenerated primary key `Primary`")
-    }));
+    assert!(
+        audits.iter().all(|log| log.category != "keys"),
+        "primary rotation must not write a legacy gateway audit row"
+    );
 
     harness.stop();
 }
@@ -622,13 +606,6 @@ async fn dashboard_v3_noop_patch_does_not_bump_revision() {
     let (_, _, connection) = get_connection(&harness).await;
     let sub_id = connection.sub_keys[0].id.clone();
     let before = harness.state.settings_revision();
-    let audit_before = harness
-        .state
-        .db
-        .lock()
-        .list_gateway_logs(100)
-        .unwrap()
-        .len();
     bind_sticky(&harness);
 
     let (status, body) = send_json(
@@ -649,14 +626,11 @@ async fn dashboard_v3_noop_patch_does_not_bump_revision() {
     assert_eq!(ack.revision, before);
     assert_eq!(harness.state.settings_revision(), before);
     assert!(sticky_alive(&harness), "no-op patch must not reset routing");
-    let audit_after = harness
-        .state
-        .db
-        .lock()
-        .list_gateway_logs(100)
-        .unwrap()
-        .len();
-    assert_eq!(audit_after, audit_before);
+    let audits = harness.state.db.lock().list_gateway_logs(100).unwrap();
+    assert!(
+        audits.iter().all(|log| log.category != "keys"),
+        "no-op key patch must not write a legacy gateway audit row"
+    );
 
     harness.stop();
 }

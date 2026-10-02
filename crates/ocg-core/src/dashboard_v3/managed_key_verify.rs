@@ -150,24 +150,111 @@ pub(super) async fn verify_managed_account_key(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<AccountMutation>, V3ApiError> {
-    let input = parse_mutation_json::<AccountManagedKeyVerify>(&body)?;
+    let mut op =
+        super::settings::open_dashboard(&state, "account.key.verify", "account", Some(id.clone()));
+    let input = match parse_mutation_json::<AccountManagedKeyVerify>(&body) {
+        Ok(input) => input,
+        Err(error) => {
+            return super::settings::record_after(
+                op,
+                &state,
+                &[],
+                (None, None, None),
+                None,
+                Err(error),
+            );
+        }
+    };
     let key = input.key.trim().to_string();
     if key.is_empty() {
-        return Err(V3ApiError::invalid_request_at(&state, "key is required"));
+        return super::settings::record_after(
+            op,
+            &state,
+            &[],
+            (None, None, None),
+            None,
+            Err(V3ApiError::invalid_request_at(&state, "key is required")),
+        );
     }
     if key.len() > MAX_KEY_CHARS {
-        return Err(V3ApiError::invalid_request_at(&state, "key is too long"));
+        return super::settings::record_after(
+            op,
+            &state,
+            &[],
+            (None, None, None),
+            None,
+            Err(V3ApiError::invalid_request_at(&state, "key is too long")),
+        );
     }
-    let key_cipher = state.encrypt_key(&key).map_err(V3ApiError::internal)?;
+    let key_cipher = match state.encrypt_key(&key) {
+        Ok(cipher) => cipher,
+        Err(error) => {
+            return super::settings::record_after(
+                op,
+                &state,
+                &[],
+                (None, None, None),
+                None,
+                Err(V3ApiError::internal(error)),
+            );
+        }
+    };
 
     let prepared = {
         let _settings_update = state.settings_update.lock();
-        check_expectation(&state, &input.expectation)?;
-        prepare_managed_key_verify(&state, &id, key, key_cipher)?
+        match check_expectation(&state, &input.expectation)
+            .and_then(|()| prepare_managed_key_verify(&state, &id, key, key_cipher))
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                drop(_settings_update);
+                return super::settings::record_after(
+                    op,
+                    &state,
+                    &[],
+                    (None, None, None),
+                    None,
+                    Err(error),
+                );
+            }
+        }
     };
 
+    op.accepted(super::settings::metadata_for(
+        &state,
+        &[],
+        Some(1),
+        Some(0),
+        None,
+        None,
+    ));
     let outcome = execute_managed_key_verify(&prepared).await;
-    commit_managed_key_verify(&state, &id, &input.expectation, &prepared, outcome)
+    let verified = matches!(
+        outcome,
+        VerifyOutcome::Success | VerifyOutcome::RateLimited { .. }
+    );
+    let mut effect = super::settings::CommittedEffect::Atomic;
+    let result = commit_managed_key_verify(
+        &state,
+        &id,
+        &input.expectation,
+        &prepared,
+        outcome,
+        &mut effect,
+    );
+    let ok_outcome = (!verified).then_some((
+        crate::log_types::OperationOutcome::Failed,
+        "verificationFailed",
+    ));
+    super::settings::record_effect(
+        op,
+        &state,
+        &[],
+        (Some(1), verified.then_some(1), (!verified).then_some(1)),
+        ok_outcome,
+        effect,
+        result,
+    )
 }
 
 struct PreparedVerify {
@@ -471,6 +558,7 @@ fn commit_managed_key_verify(
     expectation: &MutationExpectation,
     prepared: &PreparedVerify,
     outcome: VerifyOutcome,
+    effect: &mut super::settings::CommittedEffect,
 ) -> Result<Json<AccountMutation>, V3ApiError> {
     enum ResponseKind {
         Verified,
@@ -576,16 +664,22 @@ fn commit_managed_key_verify(
         let revision = state.bump_settings_revision();
         match response_kind {
             ResponseKind::Verified => {
-                let account = load_model_account(state, id)?;
+                let account = effect.note_follow_up(load_model_account(state, id))?;
                 (
-                    Ok(Json(account_mutation_at(state, account, revision)?)),
+                    effect.note_follow_up(account_mutation_at(state, account, revision).map(Json)),
                     rate_limited,
                 )
             }
             ResponseKind::InvalidRequest(message) => {
+                *effect = super::settings::CommittedEffect::Failed {
+                    reason: "verificationFailed",
+                };
                 (Err(V3ApiError::invalid_request_at(state, message)), false)
             }
             ResponseKind::OutboundFailed(message) => {
+                *effect = super::settings::CommittedEffect::Failed {
+                    reason: "verificationFailed",
+                };
                 (Err(V3ApiError::outbound_failed(state, message)), false)
             }
         }

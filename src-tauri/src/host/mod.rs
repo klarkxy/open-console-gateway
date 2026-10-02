@@ -46,13 +46,13 @@ pub fn register_native_browser(
                 .map_err(anyhow::Error::msg)
             });
             if let Err(error) = core.browser.register_native_hooks(launcher, stopper) {
-                let _ = core.db.lock().log_gateway(
+                core.log_runtime_event(
                     "warn",
                     "browser",
                     &format!("failed to register native browser hooks: {error}"),
                 );
             } else {
-                let _ = core.db.lock().log_gateway(
+                core.log_runtime_event(
                     "info",
                     "browser",
                     &format!("native browser available: {browser_name}"),
@@ -64,13 +64,13 @@ pub fn register_native_browser(
                 .browser
                 .register_native_unavailable_reason(reason.clone())
             {
-                let _ = core.db.lock().log_gateway(
+                core.log_runtime_event(
                     "warn",
                     "browser",
                     &format!("failed to register native browser availability: {error}"),
                 );
             }
-            let _ = core.db.lock().log_gateway("warn", "browser", &reason);
+            core.log_runtime_event("warn", "browser", &reason);
         }
     }
 }
@@ -94,11 +94,11 @@ pub fn register_desktop_settings(core: &CoreState) {
     ))]
     {
         core.set_auto_start_sync(crate::autostart::sync);
-        if let Err(e) = core.sync_auto_start(core.config().auto_start) {
-            let _ = core.db.lock().log_gateway(
+        if let Err(error) = core.sync_auto_start(core.config().auto_start) {
+            core.log_runtime_event(
                 "warn",
                 "startup",
-                &format!("failed to synchronize auto-start: {e}"),
+                &format!("failed to synchronize auto-start: {error}"),
             );
         }
     }
@@ -115,7 +115,7 @@ pub fn register_dock_visibility(core: &CoreState, app: &tauri::App) {
                 .map_err(anyhow::Error::from)
         }));
         if let Err(error) = core.sync_dock_visibility(core.config().show_dock_icon) {
-            let _ = core.db.lock().log_gateway(
+            core.log_runtime_event(
                 "warn",
                 "startup",
                 &format!("failed to synchronize Dock visibility: {error}"),

@@ -95,7 +95,7 @@ pub(super) fn run(executable: &Path, config: &Path, device: bool) -> ! {
         Ok(child) => child,
         Err(error) => {
             // Never include environment values or executable arguments.
-            eprintln!("failed to start owned CPA: {error}");
+            tracing::error!("failed to start owned CPA: {error}");
             std::process::exit(1);
         }
     };

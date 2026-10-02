@@ -80,6 +80,7 @@ async fn get_returns_builtin_catalog_and_empty_rules() {
     assert_eq!(config.builtins[0].id, GOAT_CREDITS_REJECTION_RULE);
     let Json(listed) = get_restrictions(State(state.clone())).await.unwrap();
     assert!(listed.restrictions.is_empty());
+    assert!(super::super::applications::operation_receipts(&state).is_empty());
 }
 
 #[tokio::test]
@@ -101,6 +102,14 @@ async fn put_rejects_unknown_destination_without_writing() {
     let error = put_configuration(State(state.clone()), body).await;
     assert!(error.is_err());
     assert_eq!(state.db.lock().get_setting(SETTING_KEY).unwrap(), before);
+    let rows = super::super::applications::operation_receipts(&state);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].action, "policy.update");
+    assert_eq!(
+        rows[0].outcome,
+        crate::log_types::OperationOutcome::Rejected
+    );
+    assert_eq!(rows[0].reason_code.as_deref(), Some("invalid.request"));
 }
 
 #[tokio::test]
@@ -119,6 +128,13 @@ async fn put_cas_conflict_does_not_write() {
     let bytes = Bytes::from(serde_json::to_vec(&body).unwrap());
     let error = put_configuration(State(state.clone()), bytes).await;
     assert!(error.is_err());
+    let rows = super::super::applications::operation_receipts(&state);
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| {
+        row.action == "policy.update"
+            && row.outcome == crate::log_types::OperationOutcome::Rejected
+            && row.reason_code.as_deref() == Some("revision.conflict")
+    }));
 }
 
 #[tokio::test]
@@ -135,6 +151,11 @@ async fn clear_absent_id_is_idempotent() {
         .await
         .unwrap();
     assert!(listed.restrictions.is_empty());
+    let rows = super::super::applications::operation_receipts(&state);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].action, "policy.clear");
+    assert_eq!(rows[0].outcome, crate::log_types::OperationOutcome::Success);
+    assert_eq!(rows[0].subject_id.as_deref(), Some("tp-missing"));
 }
 
 #[test]

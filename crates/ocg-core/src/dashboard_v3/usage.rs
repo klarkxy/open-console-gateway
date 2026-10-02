@@ -16,7 +16,7 @@ use crate::db::Database;
 use crate::kernel::pricing::PricingLimits;
 use crate::models::{
     Account as ModelAccount, CreditBalance as ModelCreditBalance, ProviderUsageSyncState,
-    QuotaWindow as ModelQuotaWindow, UsageWindow as ModelUsageWindow, UsageWindowKind,
+    QuotaWindow as ModelQuotaWindow, UsageWindowKind,
 };
 use crate::provider::{ProviderAdapterKind, ProviderRegistry, QUOTA_WINDOW_FREE};
 use crate::state::CoreState;
@@ -49,8 +49,24 @@ pub(super) async fn patch_account_usage(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<UsageMutation>, V3ApiError> {
-    let input = parse_mutation_json::<AccountUsageUpdate>(&body)?;
-    patch_account_usage_locked(&state, &id, input).map(Json)
+    let op = super::settings::open_dashboard(
+        &state,
+        "account.usage.update",
+        "account",
+        super::settings::known_subject(&id),
+    );
+    let result = (|| {
+        let input = parse_mutation_json::<AccountUsageUpdate>(&body)?;
+        patch_account_usage_locked(&state, &id, input).map(Json)
+    })();
+    super::settings::record_after(
+        op,
+        &state,
+        &["window"],
+        (Some(1), Some(1), None),
+        None,
+        result,
+    )
 }
 
 pub(super) async fn get_provider_usage(
@@ -127,6 +143,21 @@ fn balance_refresh_kind(
 pub(super) async fn refresh_provider_usage(
     State(state): State<CoreState>,
     Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Json<ProviderUsage>, RefreshApiError> {
+    let op = super::settings::open_dashboard(
+        &state,
+        "account.provider.usage.refresh",
+        "account",
+        super::settings::known_subject(&id),
+    );
+    let result = refresh_provider_usage_inner(state.clone(), id, body).await;
+    super::usage_refresh::record_refresh(op, &state, result)
+}
+
+async fn refresh_provider_usage_inner(
+    state: CoreState,
+    id: String,
     body: Bytes,
 ) -> Result<Json<ProviderUsage>, RefreshApiError> {
     let expectation = parse_mutation_json::<MutationExpectation>(&body)?;

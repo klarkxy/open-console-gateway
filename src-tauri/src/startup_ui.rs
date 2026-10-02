@@ -207,10 +207,10 @@ mod imp {
             )
         };
         if (result as usize) <= 32 {
-            eprintln!(
-                "warning: failed to open {}: {}",
-                super::RELEASES_PAGE_URL,
-                std::io::Error::last_os_error()
+            tracing::warn!(
+                url = super::RELEASES_PAGE_URL,
+                error = %std::io::Error::last_os_error(),
+                "failed to open release page"
             );
         }
     }

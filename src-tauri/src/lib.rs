@@ -25,6 +25,7 @@ use tauri::Manager;
 const GATEWAY_PORT_ENV: &str = "OCG_GATEWAY_PORT";
 
 pub fn run() {
+    ocg_core::process_log::init();
     ocg_core::cpa_runtime::host::run_internal_supervisor_if_requested();
     if let Some(found) = newer_schema_version() {
         if startup_ui::prompt_update_for_newer_schema(found, ocg_core::db::CURRENT_SCHEMA_VERSION) {
@@ -48,6 +49,7 @@ pub fn run() {
         .setup(|app| {
             // Plugin setup (including single-instance ownership) precedes this
             // callback, so a secondary process never opens data or binds ports.
+            ocg_core::process_log::activate_file_sink(&data_dir());
             let mut app_state = initialize_host()?;
             if startup_recovery::prepare(&app_state.core)? {
                 // The old CLI could have written while its recovery prompt was
@@ -62,22 +64,19 @@ pub fn run() {
                     Ok(result)
                         if result.status != ocg_core::skill_install::SkillSyncStatus::UpToDate =>
                     {
-                        let _ = core.db.lock().log_gateway(
-                            "info",
-                            "skill",
-                            &format!(
-                                "Codex skill {:?} at {}",
-                                result.status,
-                                result.path.display()
-                            ),
-                        );
+                        let status = match result.status {
+                            ocg_core::skill_install::SkillSyncStatus::Installed => "installed",
+                            ocg_core::skill_install::SkillSyncStatus::Updated => "updated",
+                            ocg_core::skill_install::SkillSyncStatus::UpToDate => "up to date",
+                        };
+                        core.log_runtime_event("info", "skill", &format!("Codex skill {status}"));
                     }
                     Ok(_) => {}
-                    Err(error) => {
-                        let _ = core.db.lock().log_gateway(
+                    Err(_) => {
+                        core.log_runtime_event(
                             "warn",
                             "skill",
-                            &format!("Codex skill synchronization failed: {error:#}"),
+                            "Codex skill synchronization failed",
                         );
                     }
                 }
@@ -121,10 +120,7 @@ pub fn run() {
             host::close_native_browsers(&state.browser_processes, &core.data_dir());
             host::cpa_runtime::stop_on_exit(core);
             host::gateway::stop_listener(core);
-            let _ = core
-                .db
-                .lock()
-                .log_gateway("info", "gateway", "application exiting");
+            core.log_runtime_event("info", "gateway", "application exiting");
         }
     });
 }
@@ -142,7 +138,7 @@ fn newer_schema_version() -> Option<i32> {
         Ok(Some(found)) if found > ocg_core::db::CURRENT_SCHEMA_VERSION => Some(found),
         Ok(_) => None,
         Err(error) => {
-            eprintln!("warning: failed to probe the database schema version: {error:#}");
+            tracing::warn!("failed to probe the database schema version: {error:#}");
             None
         }
     }

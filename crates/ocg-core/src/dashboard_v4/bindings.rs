@@ -19,8 +19,36 @@ pub(super) async fn patch(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<BindingPatchResult>, V3ApiError> {
-    let input = parse_mutation_json::<BindingPatchRequest>(&body)?;
-    patch_locked(&state, &id, input).map(Json)
+    let mut receipt = super::applications::DashboardReceipt::open(
+        &state,
+        "binding.update",
+        "binding",
+        super::applications::opaque_subject(&id),
+    );
+    let result = (|| {
+        let input = parse_mutation_json::<BindingPatchRequest>(&body)?;
+        let mut changed_fields = Vec::new();
+        if input.model_scope.is_some() {
+            changed_fields.push("model_scope".to_string());
+        }
+        if input.enabled.is_some() {
+            changed_fields.push("enabled".to_string());
+        }
+        if input.allowed_endpoint_ids.is_some() {
+            changed_fields.push("allowed_endpoint_ids".to_string());
+        }
+        if input.allowed_origins.is_some() {
+            changed_fields.push("allowed_origins".to_string());
+        }
+        let value = patch_locked(&state, &id, input)?;
+        receipt.succeed(crate::log_types::OperationMetadata {
+            changed_fields,
+            revision: Some(value.revision.revision),
+            ..crate::log_types::OperationMetadata::default()
+        });
+        Ok(value)
+    })();
+    receipt.finish(result).map(Json)
 }
 
 fn patch_locked(
@@ -135,3 +163,6 @@ fn reject_meaningless_binding_mutation(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

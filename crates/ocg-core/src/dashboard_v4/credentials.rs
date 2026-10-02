@@ -28,8 +28,23 @@ pub(super) async fn rotate(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<CredentialRotateResult>, V3ApiError> {
-    let input = parse_mutation_json::<CredentialRotateRequest>(&body)?;
-    rotate_locked(&state, &id, input).map(Json)
+    let receipt = super::applications::DashboardReceipt::open(
+        &state,
+        "credential.rotate",
+        "credential",
+        super::applications::opaque_subject(&id),
+    );
+    let result = (|| {
+        let input = parse_mutation_json::<CredentialRotateRequest>(&body)?;
+        rotate_locked(&state, &id, input)
+    })();
+    receipt
+        .observe(result, None, |value| crate::log_types::OperationMetadata {
+            changed_fields: vec!["version".to_string()],
+            revision: Some(value.revision.revision),
+            ..crate::log_types::OperationMetadata::default()
+        })
+        .map(Json)
 }
 
 fn rotate_locked(
@@ -140,8 +155,23 @@ pub(super) async fn quota_retry(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<QuotaRetryResult>, DestinationsError> {
-    let input = parse_mutation_json::<MutationExpectation>(&body)?;
-    quota_retry_locked(&state, &id, input).map(Json)
+    let receipt = super::applications::DashboardReceipt::open(
+        &state,
+        "credential.quota.retry",
+        "credential",
+        super::applications::opaque_subject(&id),
+    );
+    let result = (|| {
+        let input = parse_mutation_json::<MutationExpectation>(&body)?;
+        quota_retry_locked(&state, &id, input)
+    })();
+    receipt
+        .observe(result, None, |value| crate::log_types::OperationMetadata {
+            changed_fields: vec!["next_retry_at".to_string()],
+            revision: Some(value.revision.revision),
+            ..crate::log_types::OperationMetadata::default()
+        })
+        .map(Json)
 }
 
 fn quota_retry_locked(

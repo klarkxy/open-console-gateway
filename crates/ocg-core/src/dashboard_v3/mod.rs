@@ -31,11 +31,13 @@ mod custom_discovery;
 pub(crate) mod dynamic_providers;
 mod keys;
 mod managed_key_verify;
-mod observability;
+pub(crate) mod observability;
 mod platforms;
 mod pricing;
 mod providers;
 mod proxy_test;
+#[cfg(test)]
+mod receipt_test_support;
 mod settings;
 mod types;
 mod updater;
@@ -472,6 +474,10 @@ impl V3ApiError {
         &self.body
     }
 
+    pub(crate) fn operation_reason(&self) -> &str {
+        &self.body.code
+    }
+
     pub(crate) fn unauthorized() -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
@@ -748,19 +754,6 @@ pub(crate) fn check_expectation(
     if expectation.expected_revision != state.settings_revision()
         || expectation.process_generation != state.process_generation()
     {
-        Err(V3ApiError::revision_conflict(state))
-    } else {
-        Ok(())
-    }
-}
-
-fn check_pricing_expectation(
-    state: &CoreState,
-    expectation: &MutationExpectation,
-    expected_pricing_revision: &str,
-) -> Result<(), V3ApiError> {
-    check_expectation(state, expectation)?;
-    if expected_pricing_revision != state.pricing_snapshot().revision {
         Err(V3ApiError::revision_conflict(state))
     } else {
         Ok(())

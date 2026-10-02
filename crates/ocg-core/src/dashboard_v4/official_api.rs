@@ -130,6 +130,37 @@ pub(super) async fn refresh_balance(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<OfficialApiStatus>, V3ApiError> {
+    let receipt = super::applications::DashboardReceipt::open(
+        &state,
+        "balance.refresh",
+        "account",
+        super::applications::opaque_subject(&id),
+    );
+    let mut durable = None;
+    let result = refresh_balance_work(state, id, body, &mut durable).await;
+    if result.is_ok() {
+        durable = None;
+    }
+    receipt
+        .observe(result, durable, |value| {
+            crate::log_types::OperationMetadata {
+                changed_fields: vec!["balances".to_string()],
+                revision: Some(value.revision),
+                requested_count: Some(1),
+                completed_count: Some(1),
+                failed_count: Some(0),
+                ..crate::log_types::OperationMetadata::default()
+            }
+        })
+        .map(Json)
+}
+
+async fn refresh_balance_work(
+    state: CoreState,
+    id: String,
+    body: Bytes,
+    stored: &mut Option<super::applications::DurableEffect>,
+) -> Result<OfficialApiStatus, V3ApiError> {
     let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
     let worker_state = state.clone();
     let worker_id = id.clone();
@@ -142,9 +173,15 @@ pub(super) async fn refresh_balance(
         move || async move { refresh_balance_inner(worker_state, worker_id, expected).await },
     )
     .await?;
+    *stored = Some(super::applications::DurableEffect {
+        revision: state.settings_revision(),
+        completed: 1,
+        failed: 1,
+        related_ids: Vec::new(),
+    });
     let _settings = state.settings_update.lock();
     check_expectation(&state, &expectation)?;
-    status_locked(&state, &state.db.lock(), &id).map(Json)
+    status_locked(&state, &state.db.lock(), &id)
 }
 
 async fn refresh_balance_inner(
@@ -230,3 +267,6 @@ async fn refresh_balance_inner(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

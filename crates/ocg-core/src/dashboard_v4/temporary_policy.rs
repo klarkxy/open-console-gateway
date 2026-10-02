@@ -35,28 +35,57 @@ pub(super) async fn put_configuration(
     State(state): State<CoreState>,
     body: Bytes,
 ) -> Result<Json<TemporaryPolicyConfiguration>, V3ApiError> {
-    let input = parse_mutation_json::<TemporaryPolicyUpdate>(&body)?;
-    let _settings_update = state.settings_update.lock();
-    check_expectation(&state, &input.expectation)?;
-    let rules = input
-        .rules
-        .iter()
-        .map(rule_from_dto)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
-    {
-        let db = state.db.lock();
-        let destinations = destination_ids(&db).map_err(V3ApiError::internal)?;
-        validate_configured(&rules, &destinations)
+    let receipt =
+        super::applications::DashboardReceipt::open(&state, "policy.update", "policy", None);
+    let mut durable = None;
+    let mut rule_count = 0_u32;
+    let result = (|| {
+        let input = parse_mutation_json::<TemporaryPolicyUpdate>(&body)?;
+        let _settings_update = state.settings_update.lock();
+        check_expectation(&state, &input.expectation)?;
+        let rules = input
+            .rules
+            .iter()
+            .map(rule_from_dto)
+            .collect::<Result<Vec<_>, _>>()
             .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
-        persist_configured_rules(&db, &rules)
-            .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
-        let previous = state.recovery.policy_snapshot();
-        let compiled = compile_from_previous(&rules, &previous);
-        state.recovery.install_snapshot(compiled);
+        {
+            let db = state.db.lock();
+            let destinations = destination_ids(&db).map_err(V3ApiError::internal)?;
+            validate_configured(&rules, &destinations)
+                .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
+            persist_configured_rules(&db, &rules)
+                .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
+            let previous = state.recovery.policy_snapshot();
+            let compiled = compile_from_previous(&rules, &previous);
+            state.recovery.install_snapshot(compiled);
+        }
+        let revision = state.bump_settings_revision();
+        rule_count = super::applications::count_u32(rules.len());
+        durable = Some(super::applications::DurableEffect {
+            revision,
+            completed: 1,
+            failed: 1,
+            related_ids: Vec::new(),
+        });
+        configuration_locked(&state).map(|Json(value)| value)
+    })();
+    if result.is_ok() {
+        durable = None;
     }
-    state.bump_settings_revision();
-    configuration_locked(&state)
+    let rule_count = rule_count;
+    receipt
+        .observe(result, durable, |value| {
+            crate::log_types::OperationMetadata {
+                changed_fields: vec!["rules".to_string()],
+                revision: Some(value.revision.revision),
+                requested_count: Some(rule_count),
+                completed_count: Some(rule_count),
+                failed_count: Some(0),
+                ..crate::log_types::OperationMetadata::default()
+            }
+        })
+        .map(Json)
 }
 
 pub(super) async fn get_restrictions(
@@ -71,12 +100,26 @@ pub(super) async fn clear_restriction(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<TemporaryPolicyRestrictions>, V3ApiError> {
-    let input = parse_mutation_json::<TemporaryPolicyClearRequest>(&body)?;
-    let _settings_update = state.settings_update.lock();
-    check_expectation(&state, &input.expectation)?;
-    state.recovery.clear_restriction(&id);
-    state.bump_settings_revision();
-    Ok(Json(restrictions_locked(&state)))
+    let receipt = super::applications::DashboardReceipt::open(
+        &state,
+        "policy.clear",
+        "restriction",
+        super::applications::opaque_subject(&id),
+    );
+    let result = (|| {
+        let input = parse_mutation_json::<TemporaryPolicyClearRequest>(&body)?;
+        let _settings_update = state.settings_update.lock();
+        check_expectation(&state, &input.expectation)?;
+        state.recovery.clear_restriction(&id);
+        state.bump_settings_revision();
+        Ok(restrictions_locked(&state))
+    })();
+    receipt
+        .observe(result, None, |value| crate::log_types::OperationMetadata {
+            revision: Some(value.revision.revision),
+            ..crate::log_types::OperationMetadata::default()
+        })
+        .map(Json)
 }
 
 fn configuration_locked(

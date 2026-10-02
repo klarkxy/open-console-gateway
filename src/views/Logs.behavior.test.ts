@@ -15,7 +15,7 @@ import {
   type HostNode,
 } from "../test-helpers/vue-host-runtime.ts";
 
-type ForwardQuery = { status?: string; account_id?: string; request_id?: string };
+type RequestQuery = { status?: string | null; requestId?: string | null };
 type GatewayQuery = { level?: string | null; category?: string | null };
 
 type ObservabilityStub = {
@@ -24,18 +24,28 @@ type ObservabilityStub = {
   gatewayLoading: boolean;
   gatewayError: string;
   gatewayLoadedAt: number;
-  forwardLogs: unknown[];
-  forwardTotals: { total_requests: number; prompt_tokens: number; completion_tokens: number; cached_tokens: number; cost: number };
-  forwardLoaded: boolean;
-  forwardLoading: boolean;
-  forwardError: string;
-  forwardLoadedAt: number;
+  requestLogs: unknown[];
+  requestSummary: { totalRequests: number; totalAttempts: number; promptTokens: number; completionTokens: number; cachedTokens: number };
+  requestTotal: number;
+  requestLoaded: boolean;
+  requestLoading: boolean;
+  requestError: string;
+  requestLoadedAt: number;
+  requestDetails: Record<string, unknown>;
+  operationLogs: unknown[];
+  operationTotal: number;
+  operationLoaded: boolean;
+  operationLoading: boolean;
+  operationError: string;
+  operationLoadedAt: number;
   models: string[];
   clientKeys: unknown[];
-  forwardQueries: ForwardQuery[];
+  requestQueries: RequestQuery[];
   gatewayQueries: GatewayQuery[];
   loadGateway: (query: GatewayQuery) => Promise<null>;
-  loadForward: (query: ForwardQuery) => Promise<null>;
+  loadRequests: (query: RequestQuery) => Promise<null>;
+  loadOperations: () => Promise<null>;
+  loadRequestAttempts: () => Promise<null>;
   loadModels: () => Promise<null>;
   loadKeys: () => Promise<null>;
 };
@@ -95,16 +105,26 @@ function logsHarnessPlugin() {
           gatewayLoading: ref(impl.gatewayLoading),
           gatewayError: ref(impl.gatewayError),
           gatewayLoadedAt: ref(impl.gatewayLoadedAt),
-          forwardLogs: ref(impl.forwardLogs),
-          forwardTotals: ref(impl.forwardTotals),
-          forwardLoaded: ref(impl.forwardLoaded),
-          forwardLoading: ref(impl.forwardLoading),
-          forwardError: ref(impl.forwardError),
-          forwardLoadedAt: ref(impl.forwardLoadedAt),
+          requestLogs: ref(impl.requestLogs),
+          requestSummary: ref(impl.requestSummary),
+          requestTotal: ref(impl.requestTotal),
+          requestLoaded: ref(impl.requestLoaded),
+          requestLoading: ref(impl.requestLoading),
+          requestError: ref(impl.requestError),
+          requestLoadedAt: ref(impl.requestLoadedAt),
+          requestDetails: ref(impl.requestDetails),
+          operationLogs: ref(impl.operationLogs),
+          operationTotal: ref(impl.operationTotal),
+          operationLoaded: ref(impl.operationLoaded),
+          operationLoading: ref(impl.operationLoading),
+          operationError: ref(impl.operationError),
+          operationLoadedAt: ref(impl.operationLoadedAt),
           models: ref(impl.models),
           clientKeys: ref(impl.clientKeys),
           loadGateway: (...args) => impl.loadGateway(...args),
-          loadForward: (...args) => impl.loadForward(...args),
+          loadRequests: (...args) => impl.loadRequests(...args),
+          loadOperations: (...args) => impl.loadOperations(...args),
+          loadRequestAttempts: (...args) => impl.loadRequestAttempts(...args),
           loadModels: (...args) => impl.loadModels(...args),
           loadKeys: (...args) => impl.loadKeys(...args),
         };
@@ -181,7 +201,7 @@ const Shell = defineComponent({
 });
 
 function createObservability(): ObservabilityStub {
-  const forwardQueries: ForwardQuery[] = [];
+  const requestQueries: RequestQuery[] = [];
   const gatewayQueries: GatewayQuery[] = [];
   return {
     gatewayLogs: [],
@@ -189,22 +209,36 @@ function createObservability(): ObservabilityStub {
     gatewayLoading: false,
     gatewayError: "",
     gatewayLoadedAt: Date.now(),
-    forwardLogs: [],
-    forwardTotals: { total_requests: 0, prompt_tokens: 0, completion_tokens: 0, cached_tokens: 0, cost: 0 },
-    forwardLoaded: true,
-    forwardLoading: false,
-    forwardError: "",
-    forwardLoadedAt: Date.now(),
+    requestLogs: [],
+    requestSummary: { totalRequests: 0, totalAttempts: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0 },
+    requestTotal: 0,
+    requestLoaded: true,
+    requestLoading: false,
+    requestError: "",
+    requestLoadedAt: Date.now(),
+    requestDetails: {},
+    operationLogs: [],
+    operationTotal: 0,
+    operationLoaded: true,
+    operationLoading: false,
+    operationError: "",
+    operationLoadedAt: Date.now(),
     models: [],
     clientKeys: [],
-    forwardQueries,
+    requestQueries,
     gatewayQueries,
     async loadGateway(query) {
       gatewayQueries.push(query);
       return null;
     },
-    async loadForward(query) {
-      forwardQueries.push(query);
+    async loadRequests(query) {
+      requestQueries.push(query);
+      return null;
+    },
+    async loadOperations() {
+      return null;
+    },
+    async loadRequestAttempts() {
       return null;
     },
     async loadModels() {
@@ -296,13 +330,13 @@ async function awaitHistoryNavigation(router: Router, navigate: () => unknown): 
 test("the same Logs instance reloads when its query changes", async () => {
   const mounted = await mountAt({ status: "success" });
   try {
-    assert.equal(mounted.observability.forwardQueries.at(-1)?.status, "success");
+    assert.equal(mounted.observability.requestQueries.at(-1)?.status, "success");
     const loadsAfterMount = mounted.accountLoads.count;
     await mounted.router.push({ name: "logs", query: { status: "error" } });
     await settle(20);
     assert.equal(mounted.accountLoads.count, loadsAfterMount, "query change reuses the KeepAlive instance");
-    assert.equal(mounted.observability.forwardQueries.at(-1)?.status, "error");
-    assert.ok(mounted.observability.forwardQueries.length <= 4, "inbound query must not loop replace/fetch");
+    assert.equal(mounted.observability.requestQueries.at(-1)?.status, "error");
+    assert.ok(mounted.observability.requestQueries.length <= 4, "inbound query must not loop replace/fetch");
   } finally {
     mounted.app.unmount();
   }
@@ -314,13 +348,13 @@ test("Back and Forward on the same Logs instance sync the fetch filter", async (
     const loadsAfterMount = mounted.accountLoads.count;
     await mounted.router.push({ name: "logs", query: { status: "error" } });
     await settle(20);
-    assert.equal(mounted.observability.forwardQueries.at(-1)?.status, "error");
+    assert.equal(mounted.observability.requestQueries.at(-1)?.status, "error");
     await awaitHistoryNavigation(mounted.router, () => mounted.router.back());
     assert.equal(mounted.accountLoads.count, loadsAfterMount, "Back reuses the KeepAlive Logs instance");
-    assert.equal(mounted.observability.forwardQueries.at(-1)?.status, "success");
+    assert.equal(mounted.observability.requestQueries.at(-1)?.status, "success");
     await awaitHistoryNavigation(mounted.router, () => mounted.router.forward());
     assert.equal(mounted.accountLoads.count, loadsAfterMount, "Forward reuses the KeepAlive Logs instance");
-    assert.equal(mounted.observability.forwardQueries.at(-1)?.status, "error");
+    assert.equal(mounted.observability.requestQueries.at(-1)?.status, "error");
   } finally {
     mounted.app.unmount();
   }
@@ -335,7 +369,7 @@ test("returning to Logs with a different query syncs the fetch filter on the cac
     await mounted.router.push({ name: "logs", query: { status: "client_error" } });
     await settle(20);
     assert.equal(mounted.accountLoads.count, loadsAfterMount, "leave/return reuses the KeepAlive Logs instance");
-    assert.equal(mounted.observability.forwardQueries.at(-1)?.status, "client_error");
+    assert.equal(mounted.observability.requestQueries.at(-1)?.status, "client_error");
   } finally {
     mounted.app.unmount();
   }

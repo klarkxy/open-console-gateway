@@ -9,9 +9,11 @@ rust-version.workspace = true
 description = "Headless CLI for Open Console Gateway"
 
 [features]
-default = ["dsh-local-host", "install-codex-skill"]
+default = ["dsh-local-host", "install-codex-skill", "program-log-file"]
 dsh-local-host = ["ocg-core/dsh-local-host"]
 install-codex-skill = []
+# Docker builds this package with --no-default-features and stays stderr-only.
+program-log-file = []
 
 [[bin]]
 name = "ocg-manager-cli"
@@ -23,7 +25,6 @@ anyhow = "1"
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"
-
-[dev-dependencies]
+tracing = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }

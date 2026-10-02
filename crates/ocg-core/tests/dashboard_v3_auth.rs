@@ -281,6 +281,17 @@ async fn first_register_issues_cookie_and_authorizes_protected_v3() {
         .unwrap();
     V3Harness::assert_v2_removed(v2.status(), &v2.json().await.unwrap());
 
+    assert_eq!(
+        harness
+            .state
+            .db
+            .lock()
+            .query_operation_logs(&ocg_core::log_types::OperationLogQuery::default())
+            .unwrap()
+            .total,
+        0,
+        "authentication and reads do not create user-operation receipts"
+    );
     harness.stop();
 }
 

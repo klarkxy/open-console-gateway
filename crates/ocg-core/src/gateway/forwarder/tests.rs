@@ -2019,11 +2019,31 @@ async fn r06_selected_then_rotate_disable_or_narrow_does_not_emit_old_key() {
         &rotated.error_message.unwrap_or_default(),
         &[old_key, new_key],
     );
+    assert_eq!(
+        state
+            .db
+            .lock()
+            .query_request_logs(&Default::default())
+            .unwrap()
+            .summary
+            .total_attempts,
+        0
+    );
 
     let live_account = state.db.lock().get_account(&account.id).unwrap().unwrap();
     let fresh = live_send_selection(&state, &live_account, &plan);
     let first = forward_once(&state, &live_account, &plan, &fresh, &[]).await;
     assert_eq!(hits.load(Ordering::SeqCst), 1, "{:?}", first.error_message);
+    assert_eq!(
+        state
+            .db
+            .lock()
+            .query_request_logs(&Default::default())
+            .unwrap()
+            .summary
+            .total_attempts,
+        1
+    );
 
     let binding_id = state
         .db

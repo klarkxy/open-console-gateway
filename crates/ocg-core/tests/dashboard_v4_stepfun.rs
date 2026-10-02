@@ -82,7 +82,14 @@ async fn personal_credit_setup_calibration_and_grant_are_local_cas_operations() 
     assert_eq!(status, StatusCode::OK, "{initial}");
     assert_eq!(initial["model"], "credits");
     assert!(initial["credits"].is_null());
-    let configuration = initial["presets"][0]["configuration"].clone();
+    let mut configuration = initial["presets"][0]["configuration"].clone();
+    // The read view retains historical rates; manual setup accepts only
+    // editable configuration fields.
+    configuration.as_object_mut().unwrap().remove("rates");
+    configuration
+        .as_object_mut()
+        .unwrap()
+        .remove("creditsPerCurrency");
     let grant = initial["presets"][0]["initialGrant"].as_f64().unwrap();
     let now = chrono::Utc::now().to_rfc3339();
     let configure = json!({
@@ -117,7 +124,7 @@ async fn personal_credit_setup_calibration_and_grant_are_local_cas_operations() 
         configured["credits"]["remaining"].as_f64(),
         Some(grant * 0.75)
     );
-    assert_eq!(configured["source"], "local_estimate");
+    assert_eq!(configured["source"], "official");
     assert!(!configured.to_string().contains("stepfun-inference-fixture"));
     let (status, _) = request(
         &harness,

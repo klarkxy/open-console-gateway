@@ -15,12 +15,14 @@ use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 
 use crate::go_usage::GoUsageError;
+use crate::log_types::OperationOutcome;
 use crate::models::UsageWindow as ModelUsageWindow;
 use crate::state::CoreState;
 use crate::usage_sync::{
     OfficialUsageRefreshError, OfficialUsageRefreshSuccess, UsageSyncCommitAuthorization,
     UsageSyncTrigger, refresh_official_usage_with_authorization,
 };
+use crate::user_operation::UserOperation;
 
 use super::types::{
     ERROR_THROTTLED, UsageRefresh, UsageRefreshThrottleError, UsageRefreshUpdate, UsageWindow,
@@ -61,9 +63,52 @@ impl IntoResponse for RefreshApiError {
     }
 }
 
+pub(super) fn record_refresh<T>(
+    op: UserOperation,
+    state: &CoreState,
+    result: Result<T, RefreshApiError>,
+) -> Result<T, RefreshApiError> {
+    match &result {
+        Ok(_) => op.complete(
+            OperationOutcome::Success,
+            None,
+            super::settings::metadata_for(state, &[], Some(1), Some(1), None, None),
+        ),
+        Err(RefreshApiError::Throttled { .. }) => op.complete(
+            OperationOutcome::Rejected,
+            Some("throttled"),
+            super::settings::metadata_for(state, &[], Some(1), None, Some(1), None),
+        ),
+        Err(RefreshApiError::Api(error)) => {
+            let reason = error.operation_reason();
+            op.complete(
+                super::settings::outcome_for_api_reason(reason),
+                Some(reason),
+                super::settings::metadata_for(state, &[], Some(1), None, Some(1), None),
+            );
+        }
+    }
+    result
+}
+
 pub(super) async fn refresh_account_usage(
     State(state): State<CoreState>,
     Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Json<UsageRefresh>, RefreshApiError> {
+    let op = super::settings::open_dashboard(
+        &state,
+        "account.usage.refresh",
+        "account",
+        super::settings::known_subject(&id),
+    );
+    let result = refresh_account_usage_inner(state.clone(), id, body).await;
+    record_refresh(op, &state, result)
+}
+
+async fn refresh_account_usage_inner(
+    state: CoreState,
+    id: String,
     body: Bytes,
 ) -> Result<Json<UsageRefresh>, RefreshApiError> {
     let input = parse_mutation_json::<UsageRefreshUpdate>(&body)?;

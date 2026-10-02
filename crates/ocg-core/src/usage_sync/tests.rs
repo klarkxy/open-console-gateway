@@ -513,19 +513,16 @@ async fn manual_throttle_and_dedupe_share_one_upstream_call() {
     let rb = b.await.unwrap().unwrap();
     assert_eq!(ra.last_success_at, rb.last_success_at);
     assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
-    let success_events: Vec<_> = state
-        .db
-        .lock()
-        .list_gateway_logs(20)
-        .unwrap()
-        .into_iter()
-        .filter(|log| {
-            log.message
-                .starts_with("event=official_usage_refresh_succeeded account_id=acc-1")
-        })
-        .collect();
-    assert_eq!(success_events.len(), 1, "deduped refresh logs once");
-    assert!(!success_events[0].message.contains("sk-acc-1"));
+    assert!(state.db.lock().list_gateway_logs(20).unwrap().is_empty());
+    assert_eq!(
+        state
+            .db
+            .lock()
+            .query_operation_logs(&Default::default())
+            .unwrap()
+            .total,
+        0
+    );
 
     let throttled = refresh_official_usage(&state, "acc-1", UsageSyncTrigger::Manual).await;
     match throttled {
@@ -788,19 +785,16 @@ async fn failure_preserves_last_success_and_calibration() {
     assert_eq!(sync.last_success_at, success_at);
     assert_eq!(sync.failure_streak, 1);
     assert_eq!(sync.next_eligible_at, Some(later + failure_backoff(1)));
-    let failure_events: Vec<_> = state
+    assert!(state.db.lock().list_gateway_logs(20).unwrap().is_empty());
+    assert_eq!(
+        state
             .db
             .lock()
-            .list_gateway_logs(20)
+            .query_operation_logs(&Default::default())
             .unwrap()
-            .into_iter()
-            .filter(|log| {
-                log.message
-                    == "event=official_usage_refresh_failed account_id=acc-2 trigger=manual reason=upstream_timeout"
-            })
-            .collect();
-    assert_eq!(failure_events.len(), 1);
-    assert!(!failure_events[0].message.contains("sk-acc-2"));
+            .total,
+        0
+    );
 
     drop(state);
     std::fs::remove_dir_all(dir).unwrap();
@@ -1823,7 +1817,12 @@ impl UsageSyncStore for FakeUsageInner {
         }
         Ok(())
     }
-    fn log_gateway(&self, _level: &str, _category: &str, _message: &str) -> anyhow::Result<()> {
+    fn log_program_event(
+        &self,
+        _level: &str,
+        _category: &str,
+        _message: &str,
+    ) -> anyhow::Result<()> {
         Ok(())
     }
 }

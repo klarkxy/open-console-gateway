@@ -202,8 +202,8 @@ pub(crate) fn effective(
 }
 
 /// Effective facts with the models.dev catalog filling fields the route never
-/// learned. Per-field priority is operator declaration > upstream observation
-/// > models.dev > unknown: a public-catalog hit supplies only absent facts and
+/// learned. Per-field priority is operator declaration, upstream observation,
+/// models.dev, then unknown. A public-catalog hit supplies only absent facts and
 /// never overrides a route-specific one, and an operator declaration stays
 /// untouched. The bool reports whether models.dev contributed at least one
 /// field, so callers can credit it alongside the primary source.

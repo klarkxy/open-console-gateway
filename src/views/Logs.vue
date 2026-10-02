@@ -1,81 +1,32 @@
 <template>
   <section class="logs-card">
     <n-tabs v-model:value="activeTab" type="line" animated>
-      <n-tab-pane name="gateway" :tab="t('运行日志')">
-        <div class="log-toolbar">
-          <n-input
-            v-model:value="requestIdFilter"
-            clearable
-            class="request-id-filter"
-            :placeholder="t('按请求 ID 精确搜索')"
-            :input-props="{ 'aria-label': t('请求 ID') }"
-          />
-          <n-select
-            v-model:value="gatewayLevelFilter"
-            class="gateway-level-filter"
-            :options="gatewayLevelOptions"
-            :aria-label="t('级别')"
-          />
-          <n-input
-            v-model:value="gatewayCategoryFilter"
-            clearable
-            class="gateway-category-filter"
-            :placeholder="t('按分类精确搜索')"
-            :input-props="{ 'aria-label': t('分类') }"
-          />
-          <n-tooltip trigger="hover">
-            <template #trigger>
-              <n-button
-                circle
-                quaternary
-                :loading="gatewayLoading"
-                :aria-label="t('刷新运行日志')"
-                @click="loadGatewayLogs"
-              >
-                <template #icon><n-icon :component="ReloadOutlined" /></template>
-              </n-button>
-            </template>
-            {{ t("刷新运行日志") }}
-          </n-tooltip>
-        </div>
-        <n-alert v-if="gatewayError" type="error" :title="t('加载运行日志失败：{error}', { error: gatewayError })">
-          <n-button size="small" secondary @click="loadGatewayLogs">{{ t("重试") }}</n-button>
-        </n-alert>
-        <p class="log-limit-note">{{ t("仅显示最近 {count} 条运行日志", { count: 200 }) }}</p>
-        <n-data-table
-          :columns="gatewayColumns"
-          :data="gatewayLogs"
-          :row-key="logRowKey"
-          :loading="gatewayLoading && !gatewayLoaded"
-          :pagination="gatewayPagination"
-          :scroll-x="1200"
-          :virtual-scroll="true"
-          max-height="560"
-          size="small"
-          @update:page="changeGatewayPage"
-        />
-      </n-tab-pane>
-      <n-tab-pane name="forward" :tab="t('请求日志')">
+      <n-tab-pane name="requests" :tab="t('逻辑请求')">
+        <p class="log-limit-note">{{ t("逻辑请求说明") }}</p>
         <div class="stats-row">
           <div class="stat-card">
-            <div class="stat-label">{{ t("请求数") }}</div>
-            <div class="stat-value">{{ formatNumber(forwardTotals.total_requests) }}</div>
+            <div class="stat-label">{{ t("逻辑请求数") }}</div>
+            <div class="stat-value">{{ formatNumber(requestUsage.totalRequests) }}</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">{{ t("上游尝试") }}</div>
+            <div class="stat-value">{{ formatNumber(requestUsage.totalAttempts) }}</div>
           </div>
           <div class="stat-card">
             <div class="stat-label">{{ t("输入") }}</div>
-            <div class="stat-value">{{ formatNumber(forwardTotals.prompt_tokens) }}</div>
+            <div class="stat-value">{{ formatNumber(requestUsage.inputTokens) }}</div>
           </div>
           <div class="stat-card">
             <div class="stat-label">{{ t("输出") }}</div>
-            <div class="stat-value">{{ formatNumber(forwardTotals.completion_tokens) }}</div>
+            <div class="stat-value">{{ formatNumber(requestUsage.outputTokens) }}</div>
           </div>
           <div class="stat-card">
-            <div class="stat-label">{{ t("缓存") }}</div>
-            <div class="stat-value">{{ formatNumber(forwardTotals.cached_tokens) }}</div>
+            <div class="stat-label">{{ t("缓存已包含在输入中") }}</div>
+            <div class="stat-value">{{ formatNumber(requestUsage.cachedTokens) }}</div>
           </div>
           <div class="stat-card">
             <div class="stat-label">{{ t("总 Tokens") }}</div>
-            <div class="stat-value">{{ formatNumber(forwardTotals.prompt_tokens + forwardTotals.completion_tokens) }}</div>
+            <div class="stat-value">{{ formatNumber(requestUsage.totalTokens) }}</div>
           </div>
         </div>
         <n-button class="advanced-filter-toggle" size="small" :aria-expanded="showAdvancedFilters" aria-controls="request-log-filters" @click="showAdvancedFilters = !showAdvancedFilters">
@@ -93,84 +44,38 @@
           </div>
           <div class="filter-field">
             <span class="filter-label">{{ t("状态") }}</span>
-            <n-select
-              v-model:value="statusFilter"
-              :options="statusOptions"
-              :placeholder="t('状态')"
-              :aria-label="t('状态')"
-            />
+            <n-select v-model:value="statusFilter" :options="requestStatusOptions" :placeholder="t('状态')" :aria-label="t('状态')" />
           </div>
           <div class="filter-field advanced-filter">
             <span class="filter-label">{{ t("账号") }}</span>
-            <n-select
-              v-model:value="accountFilter"
-              :options="accountOptions"
-              :placeholder="t('账号')"
-              :aria-label="t('账号')"
-            />
+            <n-select v-model:value="accountFilter" :options="accountOptions" :placeholder="t('账号')" :aria-label="t('账号')" />
           </div>
           <div class="filter-field">
             <span class="filter-label">{{ t("模型") }}</span>
-            <n-select
-              v-model:value="modelFilter"
-              :options="modelOptions"
-              :placeholder="t('模型')"
-              :aria-label="t('模型')"
-            />
+            <n-select v-model:value="modelFilter" :options="modelOptions" :placeholder="t('模型')" :aria-label="t('模型')" />
           </div>
           <div class="filter-field key-filter-field advanced-filter">
             <span class="filter-label">{{ t("接入 Key") }}</span>
-            <n-select
-              v-model:value="keyFilter"
-              :options="keyOptions"
-              :placeholder="t('接入 Key')"
-              :aria-label="t('接入 Key')"
-              :consistent-menu-width="false"
-            />
+            <n-select v-model:value="keyFilter" :options="keyOptions" :placeholder="t('接入 Key')" :aria-label="t('接入 Key')" :consistent-menu-width="false" />
           </div>
           <div class="filter-field advanced-filter">
             <span class="filter-label">{{ t("服务商") }}</span>
-            <n-select
-              v-model:value="providerFilter"
-              :options="providerOptions"
-              :placeholder="t('服务商')"
-              :aria-label="t('服务商')"
-              :consistent-menu-width="false"
-            />
+            <n-select v-model:value="providerFilter" :options="providerOptions" :placeholder="t('服务商')" :aria-label="t('服务商')" :consistent-menu-width="false" />
           </div>
           <div class="filter-field advanced-filter">
             <span class="filter-label">{{ t("路由账号") }}</span>
-            <n-select
-              v-model:value="routeAccountFilter"
-              :options="routeAccountOptions"
-              :placeholder="t('路由账号')"
-              :aria-label="t('路由账号')"
-              :consistent-menu-width="false"
-            />
+            <n-select v-model:value="routeAccountFilter" :options="routeAccountOptions" :placeholder="t('路由账号')" :aria-label="t('路由账号')" :consistent-menu-width="false" />
           </div>
           <div class="filter-field advanced-filter">
             <span class="filter-label">{{ t("凭证账号") }}</span>
-            <n-select
-              v-model:value="credentialAccountFilter"
-              :options="credentialAccountOptions"
-              :placeholder="t('凭证账号')"
-              :aria-label="t('凭证账号')"
-              :consistent-menu-width="false"
-            />
+            <n-select v-model:value="credentialAccountFilter" :options="credentialAccountOptions" :placeholder="t('凭证账号')" :aria-label="t('凭证账号')" :consistent-menu-width="false" />
           </div>
           <div class="filter-field time-range-field">
             <span class="filter-label">{{ t("时间范围") }}</span>
-            <n-popover
-              trigger="click"
-              placement="bottom-start"
-              :show="showTimePanel"
-              @update:show="showTimePanel = $event"
-            >
+            <n-popover trigger="click" placement="bottom-start" :show="showTimePanel" @update:show="showTimePanel = $event">
               <template #trigger>
                 <n-button class="time-range-trigger">
-                  <template #icon>
-                    <n-icon :component="CalendarOutlined" />
-                  </template>
+                  <template #icon><n-icon :component="CalendarOutlined" /></template>
                   {{ timeRangeLabel }}
                 </n-button>
               </template>
@@ -187,10 +92,7 @@
                     {{ item.label }}
                   </n-button>
                 </div>
-                <div
-                  class="custom-range-wrapper"
-                  :class="{ 'is-visible': activePreset === 'custom' }"
-                >
+                <div class="custom-range-wrapper" :class="{ 'is-visible': activePreset === 'custom' }">
                   <span class="custom-range-title">{{ t("自定义范围") }}</span>
                   <n-date-picker
                     v-model:value="customTimeRange"
@@ -204,36 +106,10 @@
               </div>
             </n-popover>
           </div>
-          <div class="filter-field advanced-filter">
-            <span class="filter-label">{{ t("排序") }}</span>
-            <n-select
-              v-model:value="sortBy"
-              :options="sortOptions"
-              :placeholder="t('排序')"
-              :aria-label="t('排序')"
-              :consistent-menu-width="false"
-              class="sort-select"
-            />
-          </div>
           <div class="filter-actions">
-            <n-tooltip trigger="hover">
+            <n-tooltip v-if="hasRequestFilters" trigger="hover">
               <template #trigger>
-                <n-button
-                  circle
-                  quaternary
-                  :aria-label="sortOrder === 'asc' ? t('升序') : t('降序')"
-                  @click="toggleSortOrder"
-                >
-                  <template #icon>
-                    <n-icon :component="sortOrder === 'asc' ? ArrowUpOutlined : ArrowDownOutlined" />
-                  </template>
-                </n-button>
-              </template>
-              {{ sortOrder === "asc" ? t("升序") : t("降序") }}
-            </n-tooltip>
-            <n-tooltip v-if="hasFilters" trigger="hover">
-              <template #trigger>
-                <n-button circle quaternary :aria-label="t('清除筛选')" @click="clearFilters">
+                <n-button circle quaternary :aria-label="t('清除筛选')" @click="clearRequestFilters">
                   <template #icon><n-icon :component="ClearOutlined" /></template>
                 </n-button>
               </template>
@@ -241,39 +117,184 @@
             </n-tooltip>
             <n-tooltip trigger="hover">
               <template #trigger>
-                <n-button
-                  circle
-                  quaternary
-                  :loading="forwardLoading"
-                  :aria-label="t('刷新请求日志')"
-                  @click="refreshForwardLogs"
-                >
+                <n-button circle quaternary :loading="requestLoading" :aria-label="t('刷新逻辑请求')" @click="refreshRequestLogs">
                   <template #icon><n-icon :component="ReloadOutlined" /></template>
                 </n-button>
               </template>
-              {{ t("刷新请求日志") }}
+              {{ t("刷新逻辑请求") }}
             </n-tooltip>
           </div>
         </div>
-        <p v-if="keyFilter" class="key-filter-note" role="status">
-          {{ t("升级前用量统一计入主 Key") }}
-        </p>
-        <n-alert v-if="forwardError" type="error" :title="t('加载请求日志失败：{error}', { error: forwardError })">
-          <n-button size="small" secondary @click="loadForwardLogs">{{ t("重试") }}</n-button>
+        <p v-if="keyFilter" class="key-filter-note" role="status">{{ t("升级前用量统一计入主 Key") }}</p>
+        <n-alert v-if="requestError" type="error" :title="t('加载逻辑请求失败：{error}', { error: requestError })">
+          <n-button size="small" secondary @click="loadRequestLogs">{{ t("重试") }}</n-button>
         </n-alert>
+        <div class="requests-table">
+          <n-data-table
+            :columns="requestColumns"
+            :data="requestLogs"
+            :row-key="requestRowKey"
+            :loading="showResourceSkeleton(requestLoading, requestLoaded)"
+            :pagination="requestPagination"
+            :expanded-row-keys="expandedRequestKeys"
+            :scroll-x="1680"
+            remote
+            size="small"
+            @update:page="changeRequestPage"
+            @update:expanded-row-keys="onRequestExpanded"
+          >
+            <template #empty>
+              <n-empty :description="t('暂无逻辑请求')" />
+            </template>
+          </n-data-table>
+        </div>
+      </n-tab-pane>
+      <n-tab-pane name="operations" :tab="t('用户操作')">
+        <p class="log-limit-note">{{ t("用户操作说明") }}</p>
+        <div class="filter-bar">
+          <div class="filter-field">
+            <span class="filter-label">{{ t("操作结果") }}</span>
+            <n-select v-model:value="outcomeFilter" :options="outcomeOptions" :aria-label="t('操作结果')" />
+          </div>
+          <div class="filter-field">
+            <span class="filter-label">{{ t("来源") }}</span>
+            <n-select v-model:value="sourceFilter" :options="sourceOptions" :aria-label="t('来源')" />
+          </div>
+          <div class="filter-field">
+            <span class="filter-label">{{ t("动作码") }}</span>
+            <n-input v-model:value="actionFilter" clearable :placeholder="t('动作码')" :input-props="{ 'aria-label': t('动作码') }" />
+          </div>
+          <div class="filter-field">
+            <span class="filter-label">{{ t("主体类型") }}</span>
+            <n-input v-model:value="subjectTypeFilter" clearable :input-props="{ 'aria-label': t('主体类型') }" />
+          </div>
+          <div class="filter-field">
+            <span class="filter-label">{{ t("主体标识") }}</span>
+            <n-input v-model:value="subjectIdFilter" clearable :input-props="{ 'aria-label': t('主体标识') }" />
+          </div>
+          <div class="filter-field time-range-field">
+            <span class="filter-label">{{ t("时间范围") }}</span>
+            <n-popover trigger="click" placement="bottom-start" :show="showOperationTimePanel" @update:show="showOperationTimePanel = $event">
+              <template #trigger>
+                <n-button class="time-range-trigger">
+                  <template #icon><n-icon :component="CalendarOutlined" /></template>
+                  {{ timeRangeLabel }}
+                </n-button>
+              </template>
+              <div class="time-range-panel">
+                <div class="preset-list">
+                  <n-button
+                    v-for="item in timePresetOptions"
+                    :key="item.value"
+                    quaternary
+                    :type="activePreset === item.value ? 'primary' : 'default'"
+                    class="preset-item"
+                    @click="applyTimePreset(item.value)"
+                  >
+                    {{ item.label }}
+                  </n-button>
+                </div>
+                <div class="custom-range-wrapper" :class="{ 'is-visible': activePreset === 'custom' }">
+                  <span class="custom-range-title">{{ t("自定义范围") }}</span>
+                  <n-date-picker
+                    v-model:value="customTimeRange"
+                    type="daterange"
+                    :panel="true"
+                    :actions="null"
+                    class="custom-time-picker"
+                    @update:value="applyCustomTimeRange"
+                  />
+                </div>
+              </div>
+            </n-popover>
+          </div>
+          <div class="filter-actions">
+            <n-tooltip v-if="hasOperationFilters" trigger="hover">
+              <template #trigger>
+                <n-button circle quaternary :aria-label="t('清除筛选')" @click="clearOperationFilters">
+                  <template #icon><n-icon :component="ClearOutlined" /></template>
+                </n-button>
+              </template>
+              {{ t("清除筛选") }}
+            </n-tooltip>
+            <n-tooltip trigger="hover">
+              <template #trigger>
+                <n-button circle quaternary :loading="operationLoading" :aria-label="t('刷新用户操作')" @click="loadOperationLogs">
+                  <template #icon><n-icon :component="ReloadOutlined" /></template>
+                </n-button>
+              </template>
+              {{ t("刷新用户操作") }}
+            </n-tooltip>
+          </div>
+        </div>
+        <n-alert v-if="operationError" type="error" :title="t('加载用户操作失败：{error}', { error: operationError })">
+          <n-button size="small" secondary @click="loadOperationLogs">{{ t("重试") }}</n-button>
+        </n-alert>
+        <div class="operations-table">
+          <n-data-table
+            :columns="operationColumns"
+            :data="operationLogs"
+            :row-key="operationRowKey"
+            :loading="showResourceSkeleton(operationLoading, operationLoaded)"
+            :pagination="operationPagination"
+            :expanded-row-keys="expandedOperationIds"
+            :scroll-x="1280"
+            remote
+            size="small"
+            @update:page="changeOperationPage"
+            @update:expanded-row-keys="onOperationExpanded"
+          >
+            <template #empty>
+              <n-empty :description="t('暂无用户操作')" />
+            </template>
+          </n-data-table>
+        </div>
+      </n-tab-pane>
+      <n-tab-pane name="history" :tab="t('历史混合日志')">
+        <p class="log-limit-note">{{ t("历史混合日志说明") }}</p>
+        <div class="log-toolbar">
+          <n-input
+            v-model:value="requestIdFilter"
+            clearable
+            class="request-id-filter"
+            :placeholder="t('按请求 ID 精确搜索')"
+            :input-props="{ 'aria-label': t('请求 ID') }"
+          />
+          <n-select v-model:value="gatewayLevelFilter" class="gateway-level-filter" :options="gatewayLevelOptions" :aria-label="t('级别')" />
+          <n-input
+            v-model:value="gatewayCategoryFilter"
+            clearable
+            class="gateway-category-filter"
+            :placeholder="t('按分类精确搜索')"
+            :input-props="{ 'aria-label': t('分类') }"
+          />
+          <n-tooltip trigger="hover">
+            <template #trigger>
+              <n-button circle quaternary :loading="gatewayLoading" :aria-label="t('刷新历史混合日志')" @click="loadGatewayLogs">
+                <template #icon><n-icon :component="ReloadOutlined" /></template>
+              </n-button>
+            </template>
+            {{ t("刷新历史混合日志") }}
+          </n-tooltip>
+        </div>
+        <n-alert v-if="gatewayError" type="error" :title="t('加载历史混合日志失败：{error}', { error: gatewayError })">
+          <n-button size="small" secondary @click="loadGatewayLogs">{{ t("重试") }}</n-button>
+        </n-alert>
+        <p class="log-limit-note">{{ t("仅显示最近 {count} 条历史混合日志", { count: 200 }) }}</p>
         <n-data-table
-          :columns="forwardColumns"
-          :data="forwardLogs"
+          :columns="gatewayColumns"
+          :data="gatewayLogs"
           :row-key="logRowKey"
-          :loading="forwardLoading && !forwardLoaded"
-          :pagination="forwardPagination"
-          :scroll-x="1870"
-          remote
+          :loading="showResourceSkeleton(gatewayLoading, gatewayLoaded)"
+          :pagination="gatewayPagination"
+          :scroll-x="1200"
+          :virtual-scroll="true"
+          max-height="560"
           size="small"
-          @update:page="changeForwardPage"
+          @update:page="changeGatewayPage"
         >
           <template #empty>
-            <n-empty :description="t('暂无请求日志')" />
+            <n-empty :description="t('暂无历史混合日志')" />
           </template>
         </n-data-table>
       </n-tab-pane>
@@ -300,49 +321,38 @@ import {
   NTooltip,
   useMessage,
 } from "naive-ui";
-import { ArrowDownOutlined, ArrowUpOutlined, CalendarOutlined, CheckOutlined, ClearOutlined, CopyOutlined, ReloadOutlined } from "@vicons/antd";
+import { CalendarOutlined, CheckOutlined, ClearOutlined, CopyOutlined, ReloadOutlined } from "@vicons/antd";
 import { UNATTRIBUTED_KEY_FILTER } from "../api/dashboard";
-import type {
-  ForwardLog,
-  GatewayLog,
-} from "../api/dashboard";
+import type { GatewayLog } from "../api/dashboard";
+import type { OperationLog, OperationOutcome, OperationSource, RequestLog } from "../api/log-ledger-types.ts";
 import { t } from "../i18n/index.ts";
 import { locale } from "../i18n/index.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
 import { useProvidersStore } from "../stores/providers.ts";
 import { useObservabilityStore } from "../stores/observability.ts";
 import { storeToRefs } from "pinia";
-import { formatCost, formatNumber, useClipboard } from "../utils/format.ts";
+import { formatNumber, useClipboard } from "../utils/format.ts";
 import { computeTimeRange, resolveTimeRange, timePresetValues } from "./log-time-range.ts";
 import { routeQuerySearch } from "./app-navigation.ts";
 import type { TimePreset } from "./log-time-range.ts";
 import { gatewayLogMessage } from "./gateway-log-message.ts";
 import { gatewayLogLevelTag, parseGatewayLogLevel, type GatewayLogLevel } from "./gateway-log-level.ts";
+import { renderDiagnostic, renderForwardDetail, renderRequestId, type LogsColumnContext } from "./logs-columns.ts";
 import {
-  forwardLogAlias,
-  forwardLogLatencyMs,
-  forwardLogPresentedStatus,
-  forwardLogTotalTokens,
-} from "./forward-log-display.ts";
-import {
-  renderDiagnostic,
-  renderForwardDetail,
-  renderRequestId,
-  type LogsColumnContext,
-} from "./logs-columns.ts";
-import { formatNativeCostEstimate, forwardLogNativeEstimate } from "../domain/native-cost.ts";
+  OPERATION_OUTCOME_KEYS,
+  OPERATION_SOURCE_KEYS,
+  REQUEST_STATUS_KEYS,
+  attemptPanelId,
+  describeOperationAction,
+  logicalRequestStatus,
+  operationOutcomeKey,
+  operationSourceKey,
+  requestStatusKey,
+  requestUsageTotals,
+  showResourceSkeleton,
+} from "../domain/log-ledger.ts";
 
-type LogTab = "gateway" | "forward";
-type SortBy = "timestamp" | "attempt" | "prompt_tokens" | "completion_tokens" | "cached_tokens" | "cost";
-type SortOrder = "asc" | "desc";
-const sortValues = new Set<SortBy>([
-  "timestamp",
-  "attempt",
-  "prompt_tokens",
-  "completion_tokens",
-  "cached_tokens",
-  "cost",
-]);
+type LogTab = "requests" | "operations" | "history";
 
 const route = useRoute();
 const router = useRouter();
@@ -352,34 +362,42 @@ const providersStore = useProvidersStore();
 const observabilityStore = useObservabilityStore();
 const {
   gatewayLogs, gatewayLoaded, gatewayLoading, gatewayError, gatewayLoadedAt,
-  forwardLogs, forwardTotals, forwardLoaded, forwardLoading, forwardError, forwardLoadedAt,
+  requestLogs, requestSummary, requestTotal, requestLoaded, requestLoading, requestError, requestLoadedAt,
+  requestDetails,
+  operationLogs, operationTotal, operationLoaded, operationLoading, operationError, operationLoadedAt,
   models, clientKeys,
 } = storeToRefs(observabilityStore);
 const { copiedTarget, copy, cleanup } = useClipboard();
-const activeTab = ref<LogTab>("forward");
+const activeTab = ref<LogTab>("requests");
 const accounts = computed(() => accountsStore.accounts);
 const providerCatalog = computed(() => providersStore.catalog);
-const statusFilter = ref<string>("");
-const accountFilter = ref<string>("");
-const modelFilter = ref<string>("");
-const keyFilter = ref<string>("");
-const providerFilter = ref<string>("");
-const routeAccountFilter = ref<string>("");
-const credentialAccountFilter = ref<string>("");
-const requestIdFilter = ref<string>("");
+const statusFilter = ref("");
+const accountFilter = ref("");
+const modelFilter = ref("");
+const keyFilter = ref("");
+const providerFilter = ref("");
+const routeAccountFilter = ref("");
+const credentialAccountFilter = ref("");
+const requestIdFilter = ref("");
+const outcomeFilter = ref<OperationOutcome | "">("");
+const sourceFilter = ref<OperationSource | "">("");
+const actionFilter = ref("");
+const subjectTypeFilter = ref("");
+const subjectIdFilter = ref("");
 const gatewayLevelFilter = ref<GatewayLogLevel>("");
 const gatewayCategoryFilter = ref("");
-const sortBy = ref<SortBy>("timestamp");
-const sortOrder = ref<SortOrder>("desc");
+const expandedRequestKeys = ref<string[]>([]);
+const expandedOperationIds = ref<string[]>([]);
 const advancedFilterCount = computed(() => [
   requestIdFilter.value, accountFilter.value, keyFilter.value, providerFilter.value,
   routeAccountFilter.value, credentialAccountFilter.value,
-  sortBy.value !== 'timestamp' ? sortBy.value : '',
 ].filter(Boolean).length);
 const timeRange = ref<[number, number] | null>(resolveTimeRange("last24h", null));
 const activePreset = ref<TimePreset>("last24h");
 const customTimeRange = ref<[number, number] | null>(timeRange.value);
 const showTimePanel = ref(false);
+const showOperationTimePanel = ref(false);
+const requestUsage = computed(() => requestUsageTotals(requestSummary.value));
 
 function parseQueryTimeRange(params: URLSearchParams): [number, number] | null {
   const start = params.get("start");
@@ -395,13 +413,25 @@ function sameTimeRange(a: [number, number] | null, b: [number, number] | null): 
   return a === b || (a !== null && b !== null && a[0] === b[0] && a[1] === b[1]);
 }
 
-// Restore filter state from a logs URL. Setup runs this once for the inbound
-// deep link; the route watcher further down reuses it for same-instance
-// navigations. Values that round-trip our own syncQueryState writes compare
-// equal and are kept as-is, so router.replace echoes never look like changes.
+function parseLogTab(value: string | null): LogTab {
+  if (value === "history" || value === "gateway") return "history";
+  if (value === "operations") return "operations";
+  return "requests";
+}
+
+function parseOutcome(value: string | null): OperationOutcome | "" {
+  if (value && Object.hasOwn(OPERATION_OUTCOME_KEYS, value)) return value as OperationOutcome;
+  return "";
+}
+
+function parseSource(value: string | null): OperationSource | "" {
+  if (value && Object.hasOwn(OPERATION_SOURCE_KEYS, value)) return value as OperationSource;
+  return "";
+}
+
 function applyRouteQuery(search: string): void {
   const params = new URLSearchParams(search);
-  activeTab.value = params.get("tab") === "gateway" ? "gateway" : "forward";
+  activeTab.value = parseLogTab(params.get("tab"));
   const status = params.get("status") ?? "";
   statusFilter.value = status === "success_unpriced" ? "success" : status;
   accountFilter.value = params.get("account") ?? "";
@@ -411,24 +441,20 @@ function applyRouteQuery(search: string): void {
   routeAccountFilter.value = params.get("route_account") ?? "";
   credentialAccountFilter.value = params.get("credential_account") ?? "";
   requestIdFilter.value = params.get("request_id") ?? "";
+  outcomeFilter.value = parseOutcome(params.get("outcome"));
+  sourceFilter.value = parseSource(params.get("op_source"));
+  actionFilter.value = params.get("action") ?? "";
+  subjectTypeFilter.value = params.get("subject_type") ?? "";
+  subjectIdFilter.value = params.get("subject_id") ?? "";
   gatewayLevelFilter.value = parseGatewayLogLevel(params.get("level"));
   gatewayCategoryFilter.value = params.get("category") ?? "";
-  const sort = params.get("sort");
-  sortBy.value = sort !== null && sortValues.has(sort as SortBy) ? sort as SortBy : "timestamp";
-  const order = params.get("order");
-  sortOrder.value = order === "asc" || order === "desc" ? order : "desc";
   const queryRange = parseQueryTimeRange(params);
   const preset = params.get("range");
   const nextPreset: TimePreset = queryRange
     ? "custom"
-    : preset !== null
-        && preset !== "custom"
-        && timePresetValues.has(preset as TimePreset)
+    : preset !== null && preset !== "custom" && timePresetValues.has(preset as TimePreset)
       ? preset as TimePreset
       : "last24h";
-  // A preset window re-anchors only when the preset changes; loaders resolve
-  // the live window from the preset, so the stored range is just a display
-  // anchor and reusing it avoids echo writes that would read as a change.
   const nextRange = queryRange
     ?? (nextPreset === activePreset.value ? timeRange.value : resolveTimeRange(nextPreset, null));
   activePreset.value = nextPreset;
@@ -438,31 +464,20 @@ function applyRouteQuery(search: string): void {
 
 applyRouteQuery(routeQuerySearch("logs", route.query));
 const showAdvancedFilters = ref(advancedFilterCount.value > 0);
-const forwardPage = ref(1);
+const requestPage = ref(1);
+const operationPage = ref(1);
 const gatewayPage = ref(1);
 const pageSize = 20;
-const gatewayPagination = computed(() => ({
-  page: gatewayPage.value,
-  pageSize,
-}));
-const forwardPagination = computed(() => ({
-  page: forwardPage.value,
-  pageSize,
-  itemCount: forwardTotals.value.total_requests,
-}));
+const requestPagination = computed(() => ({ page: requestPage.value, pageSize, itemCount: requestTotal.value }));
+const operationPagination = computed(() => ({ page: operationPage.value, pageSize, itemCount: operationTotal.value }));
+const gatewayPagination = computed(() => ({ page: gatewayPage.value, pageSize }));
 
 const dateFormatter = computed(() => new Intl.DateTimeFormat(locale.value, {
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
+  year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", second: "2-digit",
 }));
 const dateOnlyFormatter = computed(() => new Intl.DateTimeFormat(locale.value, {
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
+  year: "numeric", month: "2-digit", day: "2-digit",
 }));
 const timePresetOptions = computed(() => [
   { label: t("24 小时内"), value: "last24h" as TimePreset },
@@ -480,38 +495,30 @@ const timeRangeLabel = computed(() => {
   const [start, end] = timeRange.value;
   return `${dateOnlyFormatter.value.format(new Date(start))} ~ ${dateOnlyFormatter.value.format(new Date(end))}`;
 });
-const statusMeta = computed<Record<string, { label: string; type: "success" | "warning" | "error" | "default" }>>(() => ({
-  success: { label: t("成功"), type: "success" },
-  success_no_usage: { label: t("成功·无用量"), type: "success" },
-  outcome_unknown: { label: t("结果未知"), type: "warning" },
-  streaming: { label: t("进行中"), type: "warning" },
-  client_error: { label: t("客户端错误"), type: "error" },
-  error: { label: t("错误"), type: "error" },
-}));
 const allOption = computed(() => ({ label: t("全部"), value: "" }));
-const gatewayLevelOptions = computed(() => [allOption.value, ...(["TRACE", "DEBUG", "INFO", "WARN", "ERROR"] as const)
-  .map((value) => ({ label: value, value }))]);
-const statusOptions = computed(() => [allOption.value, ...Object.entries(statusMeta.value).map(([value, meta]) => ({ label: meta.label, value }))]);
+const requestStatusOptions = computed(() => [
+  allOption.value,
+  ...Object.entries(REQUEST_STATUS_KEYS).map(([value, key]) => ({ label: t(key), value })),
+]);
+const outcomeOptions = computed(() => [
+  allOption.value,
+  ...Object.entries(OPERATION_OUTCOME_KEYS).map(([value, key]) => ({ label: t(key), value })),
+]);
+const sourceOptions = computed(() => [
+  allOption.value,
+  ...Object.entries(OPERATION_SOURCE_KEYS).map(([value, key]) => ({ label: t(key), value })),
+]);
+const gatewayLevelOptions = computed(() => [
+  allOption.value,
+  ...(["TRACE", "DEBUG", "INFO", "WARN", "ERROR"] as const).map((value) => ({ label: value, value })),
+]);
 const accountOptions = computed(() => [allOption.value, ...accounts.value.map((account) => ({ label: account.name, value: account.id }))]);
 const modelOptions = computed(() => [allOption.value, ...models.value.map((model) => ({ label: model, value: model }))]);
-// Keys come from the log table itself (not config) so disabled, deleted, and
-// dangling ids stay filterable exactly as they appear on the rows.
 const keyOptions = computed(() => [
   allOption.value,
   ...clientKeys.value.map((key) => ({ label: key.name, value: key.id })),
   { label: t("未归因"), value: UNATTRIBUTED_KEY_FILTER },
 ]);
-const sortOptions = computed(() => [
-  { label: t("时间"), value: "timestamp" },
-  { label: t("尝试次数"), value: "attempt" },
-  { label: t("输入"), value: "prompt_tokens" },
-  { label: t("输出"), value: "completion_tokens" },
-  { label: t("缓存"), value: "cached_tokens" },
-  { label: t("旧口径"), value: "cost" },
-]);
-// Provider options come from the loaded accounts' provider ids;
-// route/credential account options reuse the same account list. All three are
-// sent as exact remote query params — rows are never filtered client-side.
 const providerOptions = computed(() => [
   allOption.value,
   ...[...new Set(accounts.value.map((account) => account.provider_id).filter(Boolean))]
@@ -519,17 +526,13 @@ const providerOptions = computed(() => [
 ]);
 const routeAccountOptions = computed(() => accountOptions.value);
 const credentialAccountOptions = computed(() => accountOptions.value);
-const hasFilters = computed(() =>
-  !!statusFilter.value
-  || !!accountFilter.value
-  || !!modelFilter.value
-  || !!keyFilter.value
-  || !!providerFilter.value
-  || !!routeAccountFilter.value
-  || !!credentialAccountFilter.value
-  || !!requestIdFilter.value
-  || !!timeRange.value,
-);
+const hasRequestFilters = computed(() =>
+  !!statusFilter.value || !!accountFilter.value || !!modelFilter.value || !!keyFilter.value
+  || !!providerFilter.value || !!routeAccountFilter.value || !!credentialAccountFilter.value
+  || !!requestIdFilter.value || !!timeRange.value);
+const hasOperationFilters = computed(() =>
+  !!outcomeFilter.value || !!sourceFilter.value || !!actionFilter.value.trim()
+  || !!subjectTypeFilter.value.trim() || !!subjectIdFilter.value.trim() || !!timeRange.value);
 
 function formatDate(value: string): string {
   const date = new Date(value);
@@ -540,6 +543,11 @@ function toIsoString(ms: number): string {
   return new Date(ms).toISOString();
 }
 
+function blank(value: string): string | null {
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
 function applyTimePreset(preset: TimePreset) {
   if (preset === "custom") {
     const currentRange = resolveTimeRange(activePreset.value, timeRange.value);
@@ -547,6 +555,7 @@ function applyTimePreset(preset: TimePreset) {
     timeRange.value = currentRange;
     customTimeRange.value = currentRange;
     showTimePanel.value = true;
+    showOperationTimePanel.value = true;
     return;
   }
   if (preset === "all") {
@@ -554,6 +563,7 @@ function applyTimePreset(preset: TimePreset) {
     timeRange.value = null;
     customTimeRange.value = null;
     showTimePanel.value = false;
+    showOperationTimePanel.value = false;
     return;
   }
   const range = computeTimeRange(preset);
@@ -561,6 +571,7 @@ function applyTimePreset(preset: TimePreset) {
   timeRange.value = range;
   customTimeRange.value = range;
   showTimePanel.value = false;
+  showOperationTimePanel.value = false;
 }
 
 function applyCustomTimeRange(value: [number, number] | null) {
@@ -574,27 +585,7 @@ function applyCustomTimeRange(value: [number, number] | null) {
   timeRange.value = range;
   customTimeRange.value = range;
   showTimePanel.value = false;
-}
-
-function formatQuotaCost(row: ForwardLog): string {
-  const cost = row.cost;
-  if (
-    cost === null
-    || row.cost_state === "free"
-    || row.cost_state === "unpriced"
-    || row.cost_state === "outcome_unknown"
-    || !Number.isFinite(cost)
-    || cost <= 0
-  ) {
-    return "—";
-  }
-  return formatCost(cost, 5);
-}
-
-// Stored native amount from an earlier record. Missing and non-positive values stay blank.
-function formatNativeCost(row: ForwardLog): string {
-  const estimate = forwardLogNativeEstimate(row);
-  return estimate ? formatNativeCostEstimate(estimate, locale.value) : "—";
+  showOperationTimePanel.value = false;
 }
 
 async function copyText(target: string, value: string, label: string) {
@@ -606,14 +597,19 @@ async function copyText(target: string, value: string, label: string) {
   }
 }
 
-function logRowKey(row: GatewayLog | ForwardLog): number {
+function logRowKey(row: GatewayLog): number {
   return row.id;
+}
+function requestRowKey(row: RequestLog): string {
+  return row.requestKey;
+}
+function operationRowKey(row: OperationLog): string {
+  return row.operationId;
 }
 
 function focusRequestChain(requestId: string) {
   requestIdFilter.value = requestId;
-  sortBy.value = "attempt";
-  sortOrder.value = "asc";
+  activeTab.value = "requests";
 }
 
 const logsColumnContext: LogsColumnContext = {
@@ -624,6 +620,110 @@ const logsColumnContext: LogsColumnContext = {
   accounts,
   catalog: providerCatalog,
 };
+
+function actionLabel(action: string): string {
+  const described = describeOperationAction(action);
+  if (described.kind === "mapped") return t(described.key);
+  if (described.kind === "domain") return `${t(described.domainKey)} · ${described.verb}`;
+  return t(described.key, { action: described.action });
+}
+
+function textOrDash(value: string | null | undefined): string {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : "—";
+}
+
+function toggleRequest(requestKey: string) {
+  const open = expandedRequestKeys.value.includes(requestKey);
+  onRequestExpanded(open
+    ? expandedRequestKeys.value.filter((key) => key !== requestKey)
+    : [...expandedRequestKeys.value, requestKey]);
+}
+
+function onRequestExpanded(keys: Array<string | number>) {
+  const next = keys.map(String);
+  const added = next.filter((key) => !expandedRequestKeys.value.includes(key));
+  expandedRequestKeys.value = next;
+  for (const key of added) void observabilityStore.loadRequestAttempts(key);
+}
+
+function toggleOperation(operationId: string) {
+  onOperationExpanded(expandedOperationIds.value.includes(operationId)
+    ? expandedOperationIds.value.filter((id) => id !== operationId)
+    : [...expandedOperationIds.value, operationId]);
+}
+
+function onOperationExpanded(keys: Array<string | number>) {
+  expandedOperationIds.value = keys.map(String);
+}
+
+function renderModelIdentity(row: RequestLog) {
+  const requested = row.requestedModel?.trim() || row.model;
+  const alias = row.resolvedAlias?.trim() || "";
+  const upstream = row.upstreamModel?.trim() || "";
+  return h("div", { class: "model-identity" }, [
+    h("div", requested || "—"),
+    alias ? h("div", { class: "model-identity-meta" }, `${t("解析别名")} ${alias}`) : null,
+    upstream ? h("div", { class: "model-identity-meta" }, `${t("上游模型")} ${upstream}`) : null,
+  ]);
+}
+
+function renderRequestAttempts(row: RequestLog) {
+  const detail = requestDetails.value[row.requestKey];
+  if (!detail || (!detail.loaded && !detail.error)) return h("p", { class: "log-limit-note" }, t("正在加载上游尝试"));
+  if (detail.error && detail.items.length === 0) {
+    return h("div", [
+      h(NAlert, { type: "error", title: t("加载上游尝试失败：{error}", { error: detail.error }) }),
+      h(NButton, {
+        size: "small",
+        secondary: true,
+        onClick: () => void observabilityStore.loadRequestAttempts(row.requestKey, true),
+      }, { default: () => t("重试") }),
+    ]);
+  }
+  return h("div", { id: attemptPanelId(row.requestKey), class: "attempt-list" }, [
+    h("p", { class: "log-limit-note" }, t("上游尝试 {attempts}，记录行 {rows}", {
+      attempts: row.attemptCount,
+      rows: row.recordedRowCount,
+    })),
+    ...detail.items.map((item) => h("article", { class: "attempt-row", key: item.id }, [
+      h("dl", { class: "diagnostic-meta" }, [
+        [t("时间"), formatDate(item.timestamp)],
+        [t("状态"), t(requestStatusKey(logicalRequestStatus(item.status)) ?? "未知")],
+        ["HTTP", item.http_status === null ? "—" : String(item.http_status)],
+        [t("输入"), formatNumber(item.prompt_tokens)],
+        [t("输出"), formatNumber(item.completion_tokens)],
+        [t("缓存已包含在输入中"), formatNumber(item.cached_tokens)],
+        [t("接入 Key"), item.client_key_name ?? item.client_key_id ?? "—"],
+      ].flatMap(([label, value]) => [h("dt", label), h("dd", value)])),
+      renderForwardDetail(item, logsColumnContext),
+    ])),
+  ]);
+}
+
+function renderOperationFacts(row: OperationLog) {
+  const metadata = row.metadata;
+  const facts: Array<[string, string]> = [];
+  if (row.completedAt) facts.push([t("完成时间"), formatDate(row.completedAt)]);
+  if (row.reasonCode) facts.push([t("原因码"), row.reasonCode]);
+  if (metadata?.changedFields?.length) facts.push([t("变更字段"), metadata.changedFields.join(", ")]);
+  if (metadata?.requestedCount !== null && metadata?.requestedCount !== undefined) {
+    facts.push([t("请求数量"), String(metadata.requestedCount)]);
+  }
+  if (metadata?.completedCount !== null && metadata?.completedCount !== undefined) {
+    facts.push([t("完成数"), String(metadata.completedCount)]);
+  }
+  if (metadata?.failedCount !== null && metadata?.failedCount !== undefined) {
+    facts.push([t("失败数"), String(metadata.failedCount)]);
+  }
+  if (metadata?.revision !== null && metadata?.revision !== undefined) facts.push([t("修订"), String(metadata.revision)]);
+  if (metadata?.compensated !== null && metadata?.compensated !== undefined) {
+    facts.push([t("已补偿"), metadata.compensated ? t("已补偿") : "—"]);
+  }
+  if (metadata?.relatedIds?.length) facts.push([t("相关标识"), metadata.relatedIds.join(", ")]);
+  if (!facts.length) return h("p", { class: "log-limit-note" }, t("无附加事实"));
+  return h("dl", { class: "diagnostic-meta" }, facts.flatMap(([label, value]) => [h("dt", label), h("dd", value)]));
+}
 
 const gatewayColumns = computed(() => [
   {
@@ -640,60 +740,137 @@ const gatewayColumns = computed(() => [
   { title: t("分类"), key: "category", width: 100 },
   { title: t("消息"), key: "message", minWidth: 480, ellipsis: { tooltip: true }, render: (row: GatewayLog) => gatewayLogMessage(row.message) },
 ]);
-const forwardColumns = computed(() => [
+
+const requestColumns = computed(() => [
   {
     type: "expand" as const,
-    width: 44,
+    width: 0,
     expandable: () => true,
-    renderExpand: (row: ForwardLog) => renderForwardDetail(row, logsColumnContext),
+    renderExpand: renderRequestAttempts,
   },
-  { title: t("时间"), key: "timestamp", width: 150, render: (row: ForwardLog) => formatDate(row.timestamp) },
   {
-    title: t("尝试次数"),
-    key: "attempt",
-    width: 82,
-    align: "center" as const,
-    render: (row: ForwardLog) => row.attempt ? `#${row.attempt}` : "—",
+    key: "expand-request",
+    width: 56,
+    render: (row: RequestLog) => {
+      const open = expandedRequestKeys.value.includes(row.requestKey);
+      return h(NButton, {
+        quaternary: true,
+        size: "small",
+        "aria-expanded": open ? "true" : "false",
+        "aria-controls": attemptPanelId(row.requestKey),
+        "aria-label": open ? t("收起上游尝试") : t("展开上游尝试"),
+        onClick: () => toggleRequest(row.requestKey),
+      }, { default: () => (open ? "▾" : "▸") });
+    },
   },
-  { title: t("模型别名"), key: "model_alias", width: 180, ellipsis: { tooltip: true }, render: (row: ForwardLog) => forwardLogAlias(row) },
+  { title: t("时间"), key: "timestamp", width: 150, render: (row: RequestLog) => formatDate(row.timestamp) },
+  {
+    title: t("请求 ID"),
+    key: "requestId",
+    width: 170,
+    render: (row: RequestLog) => row.requestId
+      ? renderRequestId({ id: row.requestKey, request_id: row.requestId }, logsColumnContext)
+      : "—",
+  },
   {
     title: t("状态"),
     key: "status",
-    width: 112,
-    render: (row: ForwardLog) => {
-      const sourceLabel = row.error_source === "upstream"
-        ? t("上游拒绝")
-        : row.error_source === "transport"
-          ? t("上游连接错误")
-          : row.error_source === "client" || (row.error_source === "gateway" && ["auth", "parse", "validation", "body_limit"].includes(row.error_stage ?? ""))
-            ? t("请求错误")
-            : row.error_source === "downstream"
-              ? t("下游断开")
-              : null;
-      const presentedStatus = forwardLogPresentedStatus(row.status);
-      const meta = sourceLabel
-        ? { label: sourceLabel, type: row.error_source === "downstream" ? "warning" as const : "error" as const }
-        : statusMeta.value[presentedStatus] ?? { label: presentedStatus, type: "default" as const };
-      const tags = [h(NTag, { type: meta.type, size: "small", bordered: false }, { default: () => meta.label })];
-      if (row.cost_state === "legacy_estimate" && formatQuotaCost(row) !== "—") {
-        tags.push(h(NTag, { type: "default", size: "small", bordered: false }, { default: () => t("旧口径") }));
-      }
+    width: 132,
+    render: (row: RequestLog) => {
+      const logical = logicalRequestStatus(row.status);
+      const key = requestStatusKey(logical);
+      const type = logical === "success"
+        ? "success" as const
+        : logical === "error" || logical === "client_error"
+          ? "error" as const
+          : logical === "streaming" || logical === "outcome_unknown" || logical === "cancelled"
+            ? "warning" as const
+            : "default" as const;
+      const tags = [h(NTag, { type, size: "small", bordered: false }, { default: () => key ? t(key) : logical })];
+      if (row.isLegacy) tags.push(h(NTag, { size: "small", bordered: false }, { default: () => t("历史行") }));
       return h("div", { class: "status-tags" }, tags);
     },
   },
-  { title: t("总 Tokens"), key: "total_tokens", width: 110, align: "right" as const, render: (row: ForwardLog) => formatNumber(forwardLogTotalTokens(row)) },
-  { title: t("耗时"), key: "latency", width: 100, align: "right" as const, render: (row: ForwardLog) => { const ms = forwardLogLatencyMs(row); return ms === null ? "—" : `${ms} ms`; } },
-  { title: "HTTP", key: "http_status", width: 72 },
-  { title: t("输入"), key: "prompt_tokens", width: 92, align: "right" as const, render: (row: ForwardLog) => formatNumber(row.prompt_tokens) },
-  { title: t("输出"), key: "completion_tokens", width: 92, align: "right" as const, render: (row: ForwardLog) => formatNumber(row.completion_tokens) },
-  { title: t("缓存"), key: "cached_tokens", width: 92, align: "right" as const, render: (row: ForwardLog) => formatNumber(row.cached_tokens) },
-  { title: t("缓存写"), key: "cache_creation_tokens", width: 92, align: "right" as const, render: (row: ForwardLog) => formatNumber(row.cache_creation_tokens) },
-  { title: t("旧口径"), key: "cost", width: 152, align: "right" as const, render: formatQuotaCost },
-  { title: t("原始供应商成本"), key: "native_cost", width: 150, align: "right" as const, render: formatNativeCost },
-  { title: t("错误"), key: "error_message", minWidth: 220, ellipsis: { tooltip: true } },
+  { title: "HTTP", key: "httpStatus", width: 72, render: (row: RequestLog) => row.httpStatus ?? "—" },
+  { title: t("请求模型"), key: "requestedModel", width: 200, render: renderModelIdentity },
+  { title: t("上游尝试"), key: "attemptCount", width: 96, align: "right" as const, render: (row: RequestLog) => formatNumber(row.attemptCount) },
+  { title: t("输入"), key: "promptTokens", width: 90, align: "right" as const, render: (row: RequestLog) => formatNumber(row.promptTokens) },
+  { title: t("输出"), key: "completionTokens", width: 90, align: "right" as const, render: (row: RequestLog) => formatNumber(row.completionTokens) },
+  { title: t("缓存"), key: "cachedTokens", width: 90, align: "right" as const, render: (row: RequestLog) => formatNumber(row.cachedTokens) },
+  {
+    title: t("总 Tokens"),
+    key: "totalTokens",
+    width: 110,
+    align: "right" as const,
+    render: (row: RequestLog) => formatNumber(row.promptTokens + row.completionTokens),
+  },
+  { title: t("耗时"), key: "durationMs", width: 100, align: "right" as const, render: (row: RequestLog) => row.durationMs === null ? "—" : `${row.durationMs} ms` },
+  { title: t("接入 Key"), key: "clientKeyName", width: 140, ellipsis: { tooltip: true }, render: (row: RequestLog) => textOrDash(row.clientKeyName || row.clientKeyId) },
+  { title: t("路由账号"), key: "routeAccountId", width: 140, ellipsis: { tooltip: true }, render: (row: RequestLog) => textOrDash(row.routeAccountId || row.accountName) },
+  { title: t("凭证账号"), key: "credentialAccountId", width: 140, ellipsis: { tooltip: true }, render: (row: RequestLog) => textOrDash(row.credentialAccountId) },
+  { title: t("服务商"), key: "providerId", width: 120, ellipsis: { tooltip: true }, render: (row: RequestLog) => textOrDash(row.providerId) },
 ]);
 
-function clearFilters() {
+const operationColumns = computed(() => [
+  {
+    type: "expand" as const,
+    width: 0,
+    expandable: () => true,
+    renderExpand: renderOperationFacts,
+  },
+  {
+    key: "expand-operation",
+    width: 56,
+    render: (row: OperationLog) => {
+      const open = expandedOperationIds.value.includes(row.operationId);
+      return h(NButton, {
+        quaternary: true,
+        size: "small",
+        "aria-expanded": open ? "true" : "false",
+        "aria-label": open ? t("收起操作事实") : t("展开操作事实"),
+        onClick: () => toggleOperation(row.operationId),
+      }, { default: () => (open ? "▾" : "▸") });
+    },
+  },
+  { title: t("时间"), key: "startedAt", width: 160, render: (row: OperationLog) => formatDate(row.startedAt) },
+  { title: t("动作"), key: "action", minWidth: 180, ellipsis: { tooltip: true }, render: (row: OperationLog) => actionLabel(row.action) },
+  {
+    title: t("来源"),
+    key: "source",
+    width: 120,
+    render: (row: OperationLog) => {
+      const key = operationSourceKey(row.source);
+      return key ? t(key) : row.source;
+    },
+  },
+  { title: t("执行者"), key: "actorId", width: 140, ellipsis: { tooltip: true }, render: (row: OperationLog) => textOrDash(row.actorId) },
+  {
+    title: t("主体"),
+    key: "subject",
+    minWidth: 180,
+    ellipsis: { tooltip: true },
+    render: (row: OperationLog) => [row.subjectType, row.subjectId].filter(Boolean).join(" ") || "—",
+  },
+  {
+    title: t("操作结果"),
+    key: "outcome",
+    width: 140,
+    render: (row: OperationLog) => {
+      const key = operationOutcomeKey(row.outcome);
+      const type = row.outcome === "success" || row.outcome === "compensated"
+        ? "success" as const
+        : row.outcome === "failed"
+          ? "error" as const
+          : row.outcome === "rejected" || row.outcome === "partial" || row.outcome === "pending"
+            ? "warning" as const
+            : "default" as const;
+      return h(NTag, { type, size: "small", bordered: false }, { default: () => key ? t(key) : row.outcome });
+    },
+  },
+  { title: t("原因码"), key: "reasonCode", width: 160, ellipsis: { tooltip: true }, render: (row: OperationLog) => textOrDash(row.reasonCode) },
+]);
+
+function clearRequestFilters() {
   statusFilter.value = "";
   accountFilter.value = "";
   modelFilter.value = "";
@@ -706,10 +883,20 @@ function clearFilters() {
   timeRange.value = null;
   customTimeRange.value = null;
   showTimePanel.value = false;
+  showOperationTimePanel.value = false;
 }
 
-function toggleSortOrder() {
-  sortOrder.value = sortOrder.value === "asc" ? "desc" : "asc";
+function clearOperationFilters() {
+  outcomeFilter.value = "";
+  sourceFilter.value = "";
+  actionFilter.value = "";
+  subjectTypeFilter.value = "";
+  subjectIdFilter.value = "";
+  activePreset.value = "all";
+  timeRange.value = null;
+  customTimeRange.value = null;
+  showTimePanel.value = false;
+  showOperationTimePanel.value = false;
 }
 
 function syncQueryState() {
@@ -722,6 +909,11 @@ function syncQueryState() {
   if (routeAccountFilter.value) query.route_account = routeAccountFilter.value;
   if (credentialAccountFilter.value) query.credential_account = credentialAccountFilter.value;
   if (requestIdFilter.value) query.request_id = requestIdFilter.value;
+  if (outcomeFilter.value) query.outcome = outcomeFilter.value;
+  if (sourceFilter.value) query.op_source = sourceFilter.value;
+  if (actionFilter.value.trim()) query.action = actionFilter.value.trim();
+  if (subjectTypeFilter.value.trim()) query.subject_type = subjectTypeFilter.value.trim();
+  if (subjectIdFilter.value.trim()) query.subject_id = subjectIdFilter.value.trim();
   if (gatewayLevelFilter.value) query.level = gatewayLevelFilter.value;
   if (gatewayCategoryFilter.value.trim()) query.category = gatewayCategoryFilter.value.trim();
   if (activePreset.value === "custom" && timeRange.value) {
@@ -730,31 +922,33 @@ function syncQueryState() {
   } else {
     query.range = activePreset.value;
   }
-  if (sortBy.value) query.sort = sortBy.value;
-  if (sortOrder.value) query.order = sortOrder.value;
   void router.replace({ query });
 }
 
-// Query keys this view writes and reads back; a navigation carrying any of
-// them is a logs deep link that owns the filter state.
 const LOGS_QUERY_KEYS = [
   "tab", "status", "account", "model", "key", "provider", "route_account",
-  "credential_account", "request_id", "level", "category", "start", "end",
-  "range", "sort", "order",
+  "credential_account", "request_id", "outcome", "op_source", "action",
+  "subject_type", "subject_id", "level", "category", "start", "end", "range",
 ];
 
-// Set while a route-driven restore assigns filters; the filter watchers skip
-// their own sync/load then, so one navigation commits one consolidated round
-// of requests instead of one per watcher.
 let applyingRouteQuery = false;
 
-function forwardQuerySignature(): string {
+function requestQuerySignature(): string {
   const range = timeRange.value;
   return [
     statusFilter.value, accountFilter.value, modelFilter.value, keyFilter.value,
     providerFilter.value, routeAccountFilter.value, credentialAccountFilter.value,
     requestIdFilter.value, activePreset.value,
-    range ? `${range[0]}:${range[1]}` : "", sortBy.value, sortOrder.value,
+    range ? `${range[0]}:${range[1]}` : "",
+  ].join(" ");
+}
+
+function operationQuerySignature(): string {
+  const range = timeRange.value;
+  return [
+    outcomeFilter.value, sourceFilter.value, actionFilter.value.trim(),
+    subjectTypeFilter.value.trim(), subjectIdFilter.value.trim(), activePreset.value,
+    range ? `${range[0]}:${range[1]}` : "",
   ].join(" ");
 }
 
@@ -762,18 +956,11 @@ function gatewayQuerySignature(): string {
   return [gatewayLevelFilter.value, gatewayCategoryFilter.value, requestIdFilter.value].join(" ");
 }
 
-// KeepAlive reuses this instance across /logs navigations, so the URL can
-// change under a live view (deep links, Back/Forward, leaving and returning
-// with a different query). Restore the filters an inbound query carries and
-// reload once per real change; navigations without logs params (plain menu
-// revisits) and round-trips of our own writes keep local filters untouched.
-// Neither path writes back to the router — UI→URL sync stays with the filter
-// watchers — so an inbound navigation cannot loop or strand a pending replace
-// that would collide with a following Back/Forward.
 function applyInboundQuery(query: LocationQuery): void {
   if (!LOGS_QUERY_KEYS.some((key) => key in query)) return;
   const tabBefore = activeTab.value;
-  const forwardBefore = forwardQuerySignature();
+  const requestBefore = requestQuerySignature();
+  const operationBefore = operationQuerySignature();
   const gatewayBefore = gatewayQuerySignature();
   applyingRouteQuery = true;
   applyRouteQuery(routeQuerySearch("logs", query));
@@ -781,33 +968,33 @@ function applyInboundQuery(query: LocationQuery): void {
     applyingRouteQuery = false;
   });
   const tabChanged = activeTab.value !== tabBefore;
-  const forwardChanged = forwardQuerySignature() !== forwardBefore;
+  const requestChanged = requestQuerySignature() !== requestBefore;
+  const operationChanged = operationQuerySignature() !== operationBefore;
   const gatewayChanged = gatewayQuerySignature() !== gatewayBefore;
-  if (!tabChanged && !forwardChanged && !gatewayChanged) return;
-  if (forwardChanged) forwardPage.value = 1;
+  if (!tabChanged && !requestChanged && !operationChanged && !gatewayChanged) return;
+  if (requestChanged) {
+    requestPage.value = 1;
+    expandedRequestKeys.value = [];
+  }
+  if (operationChanged) {
+    operationPage.value = 1;
+    expandedOperationIds.value = [];
+  }
   if (gatewayChanged) gatewayPage.value = 1;
-  if ((tabChanged && activeTab.value === "forward") || forwardChanged) void loadForwardLogs();
-  if ((tabChanged && activeTab.value === "gateway") || gatewayChanged) void loadGatewayLogs();
+  if ((tabChanged && activeTab.value === "requests") || requestChanged) void loadRequestLogs();
+  if ((tabChanged && activeTab.value === "operations") || operationChanged) void loadOperationLogs();
+  if ((tabChanged && activeTab.value === "history") || gatewayChanged) void loadGatewayLogs();
 }
 
-// Same-record navigations (another /logs link, Back/Forward between logs
-// entries) are applied from the update guard, which runs while the navigation
-// is still resolving instead of only after the route commits.
 onBeforeRouteUpdate((to) => {
   applyInboundQuery(to.query);
 });
 
-// Re-entry (leave, then return with a different query) is not an update of
-// the cached record, so the watcher covers it after the route commits; the
-// signature check keeps it from duplicating a navigation the guard applied.
 watch(() => route.query, (query) => {
   if (route.name !== "logs") return;
   applyInboundQuery(query);
 });
 
-// Auto-refresh on activation skips resources loaded recently, and never
-// duplicates a load that is already in flight (the loading flags cover
-// user-driven triggers too, since those carry the current filters).
 const ACTIVATED_REFRESH_FRESHNESS_MS = 30_000;
 
 async function loadGatewayLogs() {
@@ -817,28 +1004,47 @@ async function loadGatewayLogs() {
     level: gatewayLevelFilter.value || null,
     category: gatewayCategoryFilter.value.trim() || null,
   });
-  if (error) message.error(t("加载运行日志失败：{error}", { error }));
+  if (error) message.error(t("加载历史混合日志失败：{error}", { error }));
 }
 
-async function loadForwardLogs() {
+async function loadRequestLogs() {
   const requestRange = resolveTimeRange(activePreset.value, timeRange.value);
-  const error = await observabilityStore.loadForward({
+  const error = await observabilityStore.loadRequests({
     limit: pageSize,
-    offset: (forwardPage.value - 1) * pageSize,
-    status: statusFilter.value,
-    account_id: accountFilter.value,
-    model: modelFilter.value,
-    key_id: keyFilter.value,
-    provider_id: providerFilter.value,
-    route_account_id: routeAccountFilter.value,
-    credential_account_id: credentialAccountFilter.value,
-    request_id: requestIdFilter.value,
-    start_time: requestRange ? toIsoString(requestRange[0]) : null,
-    end_time: requestRange ? toIsoString(requestRange[1]) : null,
-    sort_by: sortBy.value,
-    sort_order: sortOrder.value,
+    offset: (requestPage.value - 1) * pageSize,
+    status: blank(statusFilter.value),
+    accountId: blank(accountFilter.value),
+    model: blank(modelFilter.value),
+    keyId: blank(keyFilter.value),
+    providerId: blank(providerFilter.value),
+    routeAccountId: blank(routeAccountFilter.value),
+    credentialAccountId: blank(credentialAccountFilter.value),
+    requestId: blank(requestIdFilter.value),
+    startTime: requestRange ? toIsoString(requestRange[0]) : null,
+    endTime: requestRange ? toIsoString(requestRange[1]) : null,
   });
-  if (error) message.error(t("加载请求日志失败：{error}", { error }));
+  if (error) message.error(t("加载逻辑请求失败：{error}", { error }));
+  if (error === null) {
+    const present = new Set(requestLogs.value.map((row) => row.requestKey));
+    expandedRequestKeys.value = expandedRequestKeys.value.filter((key) => present.has(key));
+    await Promise.all(expandedRequestKeys.value.map((key) => observabilityStore.loadRequestAttempts(key, true)));
+  }
+}
+
+async function loadOperationLogs() {
+  const requestRange = resolveTimeRange(activePreset.value, timeRange.value);
+  const error = await observabilityStore.loadOperations({
+    limit: pageSize,
+    offset: (operationPage.value - 1) * pageSize,
+    action: blank(actionFilter.value),
+    source: sourceFilter.value || null,
+    outcome: outcomeFilter.value || null,
+    subjectType: blank(subjectTypeFilter.value),
+    subjectId: blank(subjectIdFilter.value),
+    startTime: requestRange ? toIsoString(requestRange[0]) : null,
+    endTime: requestRange ? toIsoString(requestRange[1]) : null,
+  });
+  if (error) message.error(t("加载用户操作失败：{error}", { error }));
 }
 
 async function loadAccounts() {
@@ -867,13 +1073,20 @@ async function loadProviderCatalog() {
   }
 }
 
-async function refreshForwardLogs() {
-  await Promise.all([loadForwardLogs(), loadForwardLogModels(), loadForwardLogKeys()]);
+async function refreshRequestLogs() {
+  await Promise.all([loadRequestLogs(), loadForwardLogModels(), loadForwardLogKeys()]);
 }
 
-function changeForwardPage(page: number) {
-  forwardPage.value = page;
-  void loadForwardLogs();
+function changeRequestPage(page: number) {
+  requestPage.value = page;
+  expandedRequestKeys.value = [];
+  void loadRequestLogs();
+}
+
+function changeOperationPage(page: number) {
+  operationPage.value = page;
+  expandedOperationIds.value = [];
+  void loadOperationLogs();
 }
 
 function changeGatewayPage(page: number) {
@@ -902,51 +1115,75 @@ watch(gatewayCategoryFilter, () => {
 watch(activeTab, (tab) => {
   if (applyingRouteQuery) return;
   syncQueryState();
-  // The shared request ID may have changed while this tab was hidden.
-  if (tab === "gateway") void loadGatewayLogs();
-  if (tab === "forward") void loadForwardLogs();
+  if (tab === "history") void loadGatewayLogs();
+  if (tab === "requests") void loadRequestLogs();
+  if (tab === "operations") void loadOperationLogs();
 });
+
 watch(
-  [statusFilter, accountFilter, modelFilter, keyFilter, providerFilter, routeAccountFilter, credentialAccountFilter, timeRange, activePreset, sortBy, sortOrder],
+  [statusFilter, accountFilter, modelFilter, keyFilter, providerFilter, routeAccountFilter, credentialAccountFilter, timeRange, activePreset],
   () => {
     if (applyingRouteQuery) return;
-    forwardPage.value = 1;
+    requestPage.value = 1;
+    expandedRequestKeys.value = [];
     syncQueryState();
-    void loadForwardLogs();
+    void loadRequestLogs();
   },
 );
-// Typing a request id fires both list loads; debounce so each keystroke
-// batch turns into at most one round-trip per list.
+
+watch([outcomeFilter, sourceFilter, timeRange, activePreset], () => {
+  if (applyingRouteQuery) return;
+  operationPage.value = 1;
+  expandedOperationIds.value = [];
+  syncQueryState();
+  void loadOperationLogs();
+});
+
+let operationTextDebounce: ReturnType<typeof setTimeout> | null = null;
+watch([actionFilter, subjectTypeFilter, subjectIdFilter], () => {
+  if (applyingRouteQuery) return;
+  if (operationTextDebounce !== null) clearTimeout(operationTextDebounce);
+  operationPage.value = 1;
+  expandedOperationIds.value = [];
+  operationTextDebounce = setTimeout(() => {
+    operationTextDebounce = null;
+    syncQueryState();
+    void loadOperationLogs();
+  }, 300);
+});
+
 let requestIdDebounce: ReturnType<typeof setTimeout> | null = null;
 watch(requestIdFilter, () => {
   if (applyingRouteQuery) return;
   if (requestIdDebounce !== null) clearTimeout(requestIdDebounce);
-  forwardPage.value = 1;
+  requestPage.value = 1;
   gatewayPage.value = 1;
+  expandedRequestKeys.value = [];
   requestIdDebounce = setTimeout(() => {
     requestIdDebounce = null;
     syncQueryState();
-    void loadForwardLogs();
+    void loadRequestLogs();
     void loadGatewayLogs();
   }, 300);
 });
+
 onUnmounted(() => {
   if (requestIdDebounce !== null) clearTimeout(requestIdDebounce);
   if (categoryDebounce !== null) clearTimeout(categoryDebounce);
+  if (operationTextDebounce !== null) clearTimeout(operationTextDebounce);
 });
 
 let activatedOnce = false;
-// Logs accumulate server-side while another tab is active (this view is kept
-// alive by App.vue); refresh both lists when returning, keeping filters.
 onActivated(() => {
   if (activatedOnce) {
-    // Only the automatic refresh is gated; user actions (search, filters,
-    // paging, refresh buttons) call the loaders directly and stay immediate.
-    if (activeTab.value === "gateway" && !gatewayLoading.value && Date.now() - gatewayLoadedAt.value >= ACTIVATED_REFRESH_FRESHNESS_MS) {
+    if (activeTab.value === "history" && !gatewayLoading.value && Date.now() - gatewayLoadedAt.value >= ACTIVATED_REFRESH_FRESHNESS_MS) {
       void loadGatewayLogs();
     }
-    if (activeTab.value === "forward" && !forwardLoading.value && Date.now() - forwardLoadedAt.value >= ACTIVATED_REFRESH_FRESHNESS_MS) {
-      void loadForwardLogs();
+    if (activeTab.value === "requests" && !requestLoading.value && Date.now() - requestLoadedAt.value >= ACTIVATED_REFRESH_FRESHNESS_MS) {
+      void loadRequestLogs();
+    }
+    if (activeTab.value === "operations" && !operationLoading.value && Date.now() - operationLoadedAt.value >= ACTIVATED_REFRESH_FRESHNESS_MS) {
+      void loadOperationLogs();
     }
   } else {
     activatedOnce = true;
@@ -955,8 +1192,9 @@ onActivated(() => {
 
 onMounted(() => {
   syncQueryState();
-  if (activeTab.value === "gateway") void loadGatewayLogs();
-  if (activeTab.value === "forward") void loadForwardLogs();
+  if (activeTab.value === "history") void loadGatewayLogs();
+  if (activeTab.value === "requests") void loadRequestLogs();
+  if (activeTab.value === "operations") void loadOperationLogs();
   void loadAccounts();
   void loadForwardLogModels();
   void loadForwardLogKeys();
@@ -967,18 +1205,14 @@ onUnmounted(cleanup);
 </script>
 
 <style scoped>
-.key-filter-note {
-  margin: -6px 0 10px;
-  color: var(--ocg-subtle);
-  font-size: var(--ocg-font-xs);
-}
+.key-filter-note,
 .log-limit-note {
   margin: 6px 0 10px;
   color: var(--ocg-subtle);
   font-size: var(--ocg-font-xs);
 }
-
 .logs-card {
+  container-type: inline-size;
   max-width: 1480px;
   margin: 0 auto;
   padding: var(--ocg-space-xs) 18px 18px;
@@ -989,7 +1223,7 @@ onUnmounted(cleanup);
 }
 .stats-row {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: var(--ocg-space-md);
   margin-bottom: var(--ocg-space-lg);
 }
@@ -1026,53 +1260,22 @@ onUnmounted(cleanup);
   flex: 1 1 160px;
   min-width: 0;
 }
-.filter-field.request-id-field {
-  flex: 2 1 220px;
-  max-width: 320px;
-}
-.filter-field.time-range-field {
-  flex: 1 1 200px;
-}
-.filter-actions {
+.filter-field.request-id-field { flex: 2 1 220px; max-width: 320px; }
+.filter-field.time-range-field { flex: 1 1 200px; }
+.filter-actions, .log-toolbar {
   display: flex;
+  justify-content: flex-end;
   gap: var(--ocg-space-xs);
-  flex: 0 0 auto;
-  margin-left: auto;
 }
-.filter-label {
-  font-size: var(--ocg-font-xs);
-  color: var(--ocg-subtle);
-  line-height: 1.2;
-}
-.time-range-trigger {
-  width: 100%;
-  min-width: 120px;
-  max-width: 240px;
-  justify-content: flex-start;
-}
-.time-range-trigger :deep(.n-button__content) {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.time-range-panel {
-  display: inline-flex;
-  flex-direction: row;
-  gap: var(--ocg-space-sm);
-  max-width: calc(100vw - 48px);
-}
-.preset-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 100px;
-}
-.preset-item {
-  justify-content: flex-start;
-}
-.preset-item :deep(.n-button__content) {
-  white-space: nowrap;
-}
+.filter-actions { flex: 0 0 auto; margin-left: auto; }
+.log-toolbar { margin-bottom: var(--ocg-space-sm); }
+.filter-label { font-size: var(--ocg-font-xs); color: var(--ocg-subtle); line-height: 1.2; }
+.time-range-trigger { width: 100%; min-width: 120px; max-width: 240px; justify-content: flex-start; }
+.time-range-trigger :deep(.n-button__content) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.time-range-panel { display: inline-flex; flex-direction: row; gap: var(--ocg-space-sm); max-width: calc(100vw - 48px); }
+.preset-list { display: flex; flex-direction: column; gap: 2px; min-width: 100px; }
+.preset-item { justify-content: flex-start; }
+.preset-item :deep(.n-button__content) { white-space: nowrap; }
 .custom-range-wrapper {
   display: flex;
   flex-direction: column;
@@ -1090,98 +1293,56 @@ onUnmounted(cleanup);
   padding-left: var(--ocg-space-sm);
   border-left-color: var(--ocg-border);
 }
-.custom-range-title {
-  font-size: var(--ocg-font-sm);
-  color: var(--ocg-muted);
-  white-space: nowrap;
-}
-.custom-time-picker {
-  min-width: 0;
-}
-.custom-time-picker :deep(.n-date-panel) {
-  box-shadow: none;
-  background: transparent;
-}
+.custom-range-title { font-size: var(--ocg-font-sm); color: var(--ocg-muted); white-space: nowrap; }
+.custom-time-picker { min-width: 0; }
+.custom-time-picker :deep(.n-date-panel) { box-shadow: none; background: transparent; }
 .custom-time-picker :deep(.n-date-panel-header),
 .custom-time-picker :deep(.n-date-panel-calendar__picker-col),
-.custom-time-picker :deep(.n-date-panel-actions) {
-  background: transparent;
-}
-.sort-select {
-  min-width: 110px;
-}
-.log-toolbar,
-.filter-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--ocg-space-xs);
-}
-.log-toolbar {
-  margin-bottom: var(--ocg-space-sm);
-}
-.request-id-filter {
-  width: min(360px, 100%);
-  margin-right: auto;
-}
-.gateway-level-filter {
-  width: 130px;
-}
-.gateway-category-filter {
-  width: min(220px, 100%);
+.custom-time-picker :deep(.n-date-panel-actions) { background: transparent; }
+.request-id-filter { width: min(360px, 100%); margin-right: auto; }
+.gateway-level-filter { width: 130px; }
+.gateway-category-filter { width: min(220px, 100%); }
+:deep(.model-identity) { display: grid; gap: 2px; }
+:deep(.model-identity-meta) { color: var(--ocg-subtle); font-size: var(--ocg-font-xs); }
+:deep(.attempt-list) { display: grid; gap: var(--ocg-space-md); width: min(100%, calc(100cqw - 2 * var(--ocg-space-md))); }
+:deep(.attempt-row) { display: grid; gap: var(--ocg-space-md); padding-top: var(--ocg-space-sm); border-top: 1px solid var(--ocg-border); }
+.requests-table :deep(.n-data-table-expand-trigger),
+.operations-table :deep(.n-data-table-expand-trigger) { display: none; }
+.requests-table :deep(.n-data-table-td--expand),
+.requests-table :deep(.n-data-table-th--expand),
+.operations-table :deep(.n-data-table-td--expand),
+.operations-table :deep(.n-data-table-th--expand) {
+  width: 0;
+  padding: 0;
+  border-right-color: transparent;
 }
 @media (max-width: 650px) {
-  .log-toolbar {
-    flex-wrap: wrap;
-  }
-  .request-id-filter {
-    width: 100%;
-  }
-  .gateway-category-filter {
-    flex: 1 1 140px;
-  }
+  .log-toolbar { flex-wrap: wrap; }
+  .request-id-filter { width: 100%; }
+  .gateway-category-filter { flex: 1 1 140px; }
 }
-:deep(.request-id-cell) {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
+:deep(.request-id-cell) { display: flex; align-items: center; gap: 6px; }
 :deep(.request-id-cell code) {
   overflow: hidden;
   font: var(--ocg-font-xs)/1.4 "Cascadia Mono", Consolas, monospace;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-:deep(.status-tags) {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 3px;
-}
-.diagnostic-detail {
-  display: grid;
-  gap: var(--ocg-space-md);
-  padding: var(--ocg-space-sm) 0;
-}
-.diagnostic-detail h4 {
-  margin: 0 0 5px;
-  color: var(--ocg-muted);
-  font-size: var(--ocg-font-sm);
-}
-.diagnostic-meta {
+:deep(.status-tags) { display: flex; flex-wrap: wrap; gap: 3px; }
+:deep(.diagnostic-detail) { display: grid; gap: var(--ocg-space-md); padding: var(--ocg-space-sm) 0; }
+:deep(.diagnostic-detail h4) { margin: 0 0 5px; color: var(--ocg-muted); font-size: var(--ocg-font-sm); }
+:deep(.diagnostic-meta) {
   display: grid;
   grid-template-columns: max-content minmax(120px, 1fr) max-content minmax(120px, 1fr);
   gap: 5px var(--ocg-space-md);
   margin: 0;
 }
-.diagnostic-meta dt {
-  color: var(--ocg-subtle);
+:deep(.diagnostic-meta dt) { color: var(--ocg-subtle); }
+:deep(.diagnostic-meta dd) { margin: 0; font-family: "Cascadia Mono", Consolas, monospace; word-break: break-word; }
+@container (max-width: 640px) {
+  :deep(.diagnostic-meta) { grid-template-columns: max-content minmax(0, 1fr); }
 }
-.diagnostic-meta dd {
-  margin: 0;
-  font-family: "Cascadia Mono", Consolas, monospace;
-  word-break: break-word;
-}
-.diagnostic-json,
-.error-text {
+:deep(.diagnostic-json), :deep(.error-text) {
   margin: 0;
   padding: 10px var(--ocg-space-md);
   border: 1px solid var(--ocg-border);
@@ -1194,18 +1355,11 @@ onUnmounted(cleanup);
   white-space: pre-wrap;
   word-break: break-word;
 }
-.diagnostic-json {
-  max-height: 320px;
-  overflow: auto;
-}
-
+:deep(.diagnostic-json) { max-height: 320px; overflow: auto; }
 .advanced-filter-toggle { display: inline-flex; margin-bottom: var(--ocg-space-md); }
 .filter-bar:not(.show-advanced) .advanced-filter { display: none; }
-
 @media (max-width: 860px) {
-  .time-range-panel {
-    flex-direction: column;
-  }
+  .time-range-panel { flex-direction: column; }
   .custom-range-wrapper.is-visible {
     width: auto;
     max-width: 100%;
@@ -1214,32 +1368,16 @@ onUnmounted(cleanup);
     padding-left: 0;
     padding-top: var(--ocg-space-sm);
   }
-  .custom-time-picker {
-    overflow-x: auto;
-  }
+  .custom-time-picker { overflow-x: auto; }
 }
-
 @media (max-width: 760px) {
-  .stats-row {
-    grid-template-columns: repeat(3, 1fr);
-    gap: var(--ocg-space-sm);
-  }
+  .stats-row { grid-template-columns: repeat(3, 1fr); gap: var(--ocg-space-sm); }
 }
-
 @media (max-width: 560px) {
   .stat-card { padding: 10px; }
-  .stats-row { margin-bottom: var(--ocg-space-md); }
-  .logs-card {
-    padding: 2px var(--ocg-space-md) var(--ocg-space-md);
-  }
-  .stats-row {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-  .filter-field {
-    flex: 1 1 140px;
-  }
-  .filter-actions {
-    margin-left: 0;
-  }
+  .stats-row { margin-bottom: var(--ocg-space-md); grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .logs-card { padding: 2px var(--ocg-space-md) var(--ocg-space-md); }
+  .filter-field { flex: 1 1 140px; }
+  .filter-actions { margin-left: 0; }
 }
 </style>

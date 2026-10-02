@@ -20,7 +20,7 @@ mod fake_upstream;
 #[path = "fixtures/dashboard_v3/harness.rs"]
 mod harness;
 
-use fake_upstream::{FakeReply, start_fake_upstream, start_fake_upstream_with_delay};
+use fake_upstream::{FakeReply, start_fake_upstream, start_fake_upstream_with_gate};
 use harness::{V3Harness, start_loopback};
 
 const CHAT_OK: &str = r#"{"id":"ok","object":"chat.completion","model":"vendor/opus","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
@@ -1202,8 +1202,7 @@ async fn patch_preserves_cooldown_resets_verification_and_usage_is_unpriced() {
             harness.v3_base
         ))
         .await;
-    assert_eq!(status, StatusCode::OK, "{pricing}");
-    assert_eq!(pricing["availability"], "unpriced");
+    assert_eq!(status, StatusCode::NOT_FOUND, "{pricing}");
     harness.stop();
 }
 
@@ -1380,8 +1379,8 @@ async fn in_flight_fallback_stops_after_provider_destination_changes() {
             body: CHAT_OK,
         }]),
     );
-    let (upstream, calls, _stop) =
-        start_fake_upstream_with_delay(replies, Duration::from_millis(400)).await;
+    let (release, first_response) = tokio::sync::oneshot::channel();
+    let (upstream, calls, _stop) = start_fake_upstream_with_gate(replies, first_response).await;
     let harness = start_loopback("dyn-snapshot").await;
     let mut config = harness.state.config();
     config.proxy_mode = ProxyMode::Direct;
@@ -1468,17 +1467,15 @@ async fn in_flight_fallback_stops_after_provider_destination_changes() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{patched}");
+    release.send(()).unwrap();
     let response = pending.await.unwrap();
     let status = response.status();
     let body = response.text().await.unwrap();
-    // Materialization remains frozen, but a later attempt must still pass
-    // the live destination gate. It cannot send to the old destination or
-    // silently retarget the captured request to the newly edited address.
+    // Live selection excludes the edited destination. Preserve the original
+    // upstream failure without sending a fallback to either address.
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-    assert!(
-        body.contains("destination is not the current granted route"),
-        "{body}"
-    );
+    let error: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["error"]["type"], "api_error");
     assert_eq!(calls.lock().expect("fake call log").len(), 1);
     harness.stop();
 }

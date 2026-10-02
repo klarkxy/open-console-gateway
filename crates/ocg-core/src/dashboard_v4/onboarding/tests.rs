@@ -5,6 +5,13 @@ use crate::dashboard_v3::{
 };
 use axum::response::IntoResponse;
 
+fn commit_locked(
+    state: &CoreState,
+    input: OnboardingCommitRequest,
+) -> Result<OnboardingCommitResult, V3ApiError> {
+    commit_recorded(state, input, &mut |_, _| {})
+}
+
 fn sample_request(
     expected_revision: u64,
     process_generation: u64,
@@ -469,4 +476,561 @@ async fn explicit_routes_persist_before_first_and_second_key_safe_grants() {
     );
     drop(reopened);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn postcommit_publication_failure_then_replay_keeps_one_partial_receipt() {
+    use crate::crypto::{KeyCipher, StaticKeyCipher};
+    use crate::db::Database;
+    use crate::state::CoreStateInner;
+    use axum::extract::State;
+    use std::sync::Arc;
+
+    let dir = std::env::temp_dir().join(format!("ocg-onboard-postcommit-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cipher: Arc<dyn KeyCipher + Send + Sync> =
+        Arc::new(StaticKeyCipher::new("onboard-postcommit"));
+    let state = Arc::new(
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap(),
+    );
+    let business_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let cas_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+
+    let mut invalid = sample_request(
+        state.settings_revision(),
+        state.process_generation(),
+        "sk-invalid",
+    );
+    invalid.operation_id = "not-a-uuid".into();
+    let rejected = commit(State(state.clone()), body_of(&invalid))
+        .await
+        .unwrap_err();
+    let rejected_http = error_json(rejected).await;
+    assert_eq!(rejected_http["code"], "invalidRequest");
+    let rows = super::super::applications::operation_receipts(&state);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].outcome,
+        crate::log_types::OperationOutcome::Rejected
+    );
+    assert_ne!(rows[0].operation_id, "not-a-uuid");
+    assert!(rows[0].metadata.revision.is_none());
+
+    let mut stale = sample_request(
+        state.settings_revision().wrapping_add(9),
+        state.process_generation(),
+        "sk-stale",
+    );
+    stale.operation_id = cas_id.into();
+    if let OnboardingConnection::New(connection) = &mut stale.connection {
+        connection.name = "Rejected".into();
+    }
+    let cas = commit(State(state.clone()), body_of(&stale))
+        .await
+        .unwrap_err();
+    let cas_http = error_json(cas).await;
+    assert_eq!(cas_http["code"], "revisionConflict");
+    assert!(
+        state
+            .db
+            .lock()
+            .list_control_plane_dynamic_providers()
+            .unwrap()
+            .iter()
+            .all(|provider| provider.name != "Rejected")
+    );
+    let rows = super::super::applications::operation_receipts(&state);
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.operation_id != cas_id));
+    assert!(
+        rows.iter()
+            .all(|row| row.outcome != crate::log_types::OperationOutcome::Partial)
+    );
+
+    let poisoned = state
+        .db
+        .lock()
+        .conn
+        .execute(
+            "UPDATE credentials SET quota_recovery_json = '{not-json}'
+             WHERE rowid = (SELECT rowid FROM credentials ORDER BY id LIMIT 1)",
+            [],
+        )
+        .unwrap();
+    assert!(poisoned >= 1);
+    let mut request = sample_request(
+        state.settings_revision(),
+        state.process_generation(),
+        "sk-publication",
+    );
+    request.operation_id = business_id.into();
+    if let OnboardingConnection::New(connection) = &mut request.connection {
+        connection.name = "After".into();
+    }
+    let bytes = body_of(&request);
+    let failed = commit(State(state.clone()), bytes.clone())
+        .await
+        .unwrap_err();
+    let failed_http = error_json(failed).await;
+    assert_eq!(failed_http["code"], "internal");
+    let message = failed_http["message"].as_str().unwrap().to_string();
+    assert!(!message.is_empty());
+    let ledger = state
+        .db
+        .lock()
+        .find_dashboard_operation(business_id)
+        .unwrap()
+        .unwrap();
+    let stored: StoredOnboardingCommitResult = serde_json::from_str(&ledger.result_json).unwrap();
+    assert!(
+        state
+            .db
+            .lock()
+            .list_control_plane_dynamic_providers()
+            .unwrap()
+            .iter()
+            .any(|provider| provider.name == "After")
+    );
+    let receipt_id = stored.receipt_id.clone().unwrap();
+    assert_ne!(receipt_id, business_id);
+    let partial = partial_receipt(&state);
+    assert_eq!(partial.operation_id, receipt_id);
+    assert_eq!(partial.action, "onboarding.commit");
+    assert_eq!(partial.reason_code.as_deref(), Some("internal"));
+    assert_eq!(
+        partial.subject_id.as_deref(),
+        Some(stored.connection_id.as_str())
+    );
+    assert_eq!(partial.metadata.completed_count, Some(1));
+    assert_eq!(partial.metadata.failed_count, Some(1));
+    assert!(partial.metadata.revision.is_none());
+    assert!(
+        partial
+            .metadata
+            .related_ids
+            .contains(stored.credential_id.as_ref().unwrap())
+    );
+    assert!(
+        partial
+            .metadata
+            .related_ids
+            .contains(stored.account_id.as_ref().unwrap())
+    );
+    let encoded = serde_json::to_string(&partial.metadata).unwrap();
+    assert!(!encoded.contains(&message));
+    assert!(!encoded.contains("{not-json}"));
+    assert!(!encoded.contains("sk-publication"));
+    let before_replay = partial.clone();
+
+    let replayed = commit(State(state.clone()), bytes).await.unwrap().0;
+    assert!(replayed.replayed);
+    assert_eq!(replayed.connection_id, stored.connection_id);
+    assert_eq!(replayed.account_id, stored.account_id);
+    assert!(
+        serde_json::to_value(&replayed)
+            .unwrap()
+            .get("receiptId")
+            .is_none()
+    );
+    let rows = super::super::applications::operation_receipts(&state);
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.outcome == crate::log_types::OperationOutcome::Partial)
+            .count(),
+        1
+    );
+    assert_eq!(partial_receipt(&state), before_replay);
+    assert!(
+        state
+            .db
+            .lock()
+            .list_control_plane_dynamic_providers()
+            .unwrap()
+            .iter()
+            .any(|provider| provider.name == "After")
+    );
+
+    let mut mismatch = request;
+    mismatch.authorization = Some(OnboardingAuthorization::ApiKey(
+        OnboardingAuthorizationApiKey {
+            secret_input: "sk-other-payload".into(),
+            account_label: Some("Other".into()),
+            notes: None,
+        },
+    ));
+    let mismatch_error = commit(State(state.clone()), body_of(&mismatch))
+        .await
+        .unwrap_err();
+    let mismatch_http = error_json(mismatch_error).await;
+    assert_eq!(mismatch_http["code"], "operationPayloadMismatch");
+    let rows = super::super::applications::operation_receipts(&state);
+    assert_eq!(partial_receipt(&state), before_replay);
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.operation_id == receipt_id)
+            .count(),
+        1
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.operation_id == business_id)
+            .count(),
+        0
+    );
+    let mismatch_row = rows
+        .iter()
+        .find(|row| {
+            row.outcome == crate::log_types::OperationOutcome::Rejected
+                && row.reason_code.as_deref() == Some("operation.payload.mismatch")
+        })
+        .unwrap();
+    assert_ne!(mismatch_row.operation_id, business_id);
+    assert_ne!(mismatch_row.operation_id, receipt_id);
+    assert_ne!(mismatch_row.operation_id, cas_id);
+
+    drop(state);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn private_receipt_identity_survives_spelling_expiry_and_audit_reuse() {
+    use crate::crypto::{KeyCipher, StaticKeyCipher};
+    use crate::db::Database;
+    use crate::state::CoreStateInner;
+    use axum::extract::State;
+    use std::sync::Arc;
+
+    let dir = std::env::temp_dir().join(format!("ocg-onboard-identity-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cipher: Arc<dyn KeyCipher + Send + Sync> =
+        Arc::new(StaticKeyCipher::new("onboard-identity"));
+    let state = Arc::new(
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap(),
+    );
+    let upper = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
+    let lower = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let canonical = uuid::Uuid::parse_str(upper).unwrap().to_string();
+    assert_eq!(canonical, uuid::Uuid::parse_str(lower).unwrap().to_string());
+
+    let mut stale = named_request(&state, upper, "Stale", "sk-stale-identity");
+    stale.expectation.expected_revision = state.settings_revision().wrapping_add(9);
+    let stale_error = commit(State(state.clone()), body_of(&stale))
+        .await
+        .unwrap_err();
+    assert_eq!(error_json(stale_error).await["code"], "revisionConflict");
+    let rejected = super::super::applications::operation_receipts(&state);
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(
+        rejected[0].outcome,
+        crate::log_types::OperationOutcome::Rejected
+    );
+    assert_ne!(rejected[0].operation_id, upper);
+    assert_ne!(rejected[0].operation_id, canonical);
+
+    let upper_request = named_request(&state, upper, "Upper", "sk-upper");
+    let upper_bytes = body_of(&upper_request);
+    let upper_result = commit(State(state.clone()), upper_bytes.clone())
+        .await
+        .unwrap()
+        .0;
+    assert!(!upper_result.replayed);
+    assert!(public_has_no_receipt_id(&upper_result));
+    let upper_row = state
+        .db
+        .lock()
+        .find_dashboard_operation(upper)
+        .unwrap()
+        .unwrap();
+    assert!(
+        state
+            .db
+            .lock()
+            .find_dashboard_operation(lower)
+            .unwrap()
+            .is_none()
+    );
+    let upper_stored: StoredOnboardingCommitResult =
+        serde_json::from_str(&upper_row.result_json).unwrap();
+    let upper_receipt = upper_stored.receipt_id.clone().unwrap();
+    assert_ne!(upper_receipt, upper);
+    assert_ne!(upper_receipt, canonical);
+    assert_success_ids(&state, &[&upper_receipt]);
+
+    let lower_result = commit(
+        State(state.clone()),
+        body_of(&named_request(&state, lower, "Lower", "sk-lower")),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert!(!lower_result.replayed);
+    assert!(public_has_no_receipt_id(&lower_result));
+    let lower_row = state
+        .db
+        .lock()
+        .find_dashboard_operation(lower)
+        .unwrap()
+        .unwrap();
+    let lower_stored: StoredOnboardingCommitResult =
+        serde_json::from_str(&lower_row.result_json).unwrap();
+    let lower_receipt = lower_stored.receipt_id.unwrap();
+    assert_ne!(lower_receipt, upper_receipt);
+    assert_ne!(lower_receipt, canonical);
+    assert_success_ids(&state, &[&lower_receipt, &upper_receipt]);
+
+    let replayed = commit(State(state.clone()), upper_bytes).await.unwrap().0;
+    assert!(replayed.replayed);
+    assert_eq!(replayed.connection_id, upper_result.connection_id);
+    assert!(public_has_no_receipt_id(&replayed));
+    assert_success_ids(&state, &[&lower_receipt, &upper_receipt]);
+    let upper_log = receipt_by_id(&state, &upper_receipt);
+    assert_eq!(
+        upper_log.outcome,
+        crate::log_types::OperationOutcome::Success
+    );
+
+    let deleted = state
+        .db
+        .lock()
+        .conn
+        .execute(
+            "DELETE FROM dashboard_operations WHERE operation_id = ?1",
+            [upper],
+        )
+        .unwrap();
+    assert_eq!(deleted, 1);
+    assert!(
+        state
+            .db
+            .lock()
+            .find_dashboard_operation(upper)
+            .unwrap()
+            .is_none()
+    );
+    let reused = commit(
+        State(state.clone()),
+        body_of(&named_request(&state, upper, "Reused", "sk-reused")),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert!(!reused.replayed);
+    assert_ne!(reused.connection_id, upper_result.connection_id);
+    let reused_row = state
+        .db
+        .lock()
+        .find_dashboard_operation(upper)
+        .unwrap()
+        .unwrap();
+    let reused_receipt =
+        serde_json::from_str::<StoredOnboardingCommitResult>(&reused_row.result_json)
+            .unwrap()
+            .receipt_id
+            .unwrap();
+    assert_ne!(reused_receipt, upper_receipt);
+    assert_eq!(receipt_by_id(&state, &upper_receipt), upper_log);
+    assert_eq!(
+        state
+            .db
+            .lock()
+            .list_control_plane_dynamic_providers()
+            .unwrap()
+            .iter()
+            .filter(|provider| provider.name == "Upper" || provider.name == "Reused")
+            .count(),
+        2
+    );
+
+    let unrelated = commit(
+        State(state.clone()),
+        body_of(&named_request(
+            &state,
+            &upper_receipt,
+            "Unrelated",
+            "sk-unrelated",
+        )),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert!(!unrelated.replayed);
+    let unrelated_row = state
+        .db
+        .lock()
+        .find_dashboard_operation(&upper_receipt)
+        .unwrap()
+        .unwrap();
+    let unrelated_receipt =
+        serde_json::from_str::<StoredOnboardingCommitResult>(&unrelated_row.result_json)
+            .unwrap()
+            .receipt_id
+            .unwrap();
+    assert_ne!(unrelated_receipt, upper_receipt);
+    assert_eq!(receipt_by_id(&state, &upper_receipt), upper_log);
+    assert_eq!(
+        super::super::applications::operation_receipts(&state)
+            .iter()
+            .filter(|row| row.operation_id == upper_receipt)
+            .count(),
+        1
+    );
+
+    let legacy_raw = "DdDdDdDd-dddd-4ddd-8ddd-dddddddddddd";
+    let legacy_request = named_request(&state, legacy_raw, "Legacy", "sk-legacy");
+    commit_locked(&state, legacy_request.clone()).unwrap();
+    let legacy_row = state
+        .db
+        .lock()
+        .find_dashboard_operation(legacy_raw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(legacy_row.operation_id, legacy_raw);
+    let expected = legacy_onboarding_receipt_id(
+        &legacy_row.kind,
+        &legacy_row.operation_id,
+        &legacy_row.created_at,
+    );
+    assert_eq!(
+        expected,
+        legacy_onboarding_receipt_id(
+            &legacy_row.kind,
+            &legacy_row.operation_id,
+            &legacy_row.created_at,
+        )
+    );
+    assert_ne!(
+        expected,
+        legacy_onboarding_receipt_id(
+            &legacy_row.kind,
+            &legacy_raw.to_ascii_lowercase(),
+            &legacy_row.created_at,
+        )
+    );
+    assert_ne!(
+        expected,
+        legacy_onboarding_receipt_id(
+            &legacy_row.kind,
+            &legacy_row.operation_id,
+            &format!("{} ", legacy_row.created_at),
+        )
+    );
+    assert_ne!(
+        expected,
+        legacy_onboarding_receipt_id("other", &legacy_row.operation_id, &legacy_row.created_at)
+    );
+    let legacy_bytes = expected.as_bytes();
+    assert_eq!(legacy_bytes[6] >> 4, 8);
+    assert_eq!(legacy_bytes[8] & 0b1100_0000, 0b1000_0000);
+    let mut legacy_stored: StoredOnboardingCommitResult =
+        serde_json::from_str(&legacy_row.result_json).unwrap();
+    legacy_stored.receipt_id = None;
+    assert_eq!(receipt_uuid_for(&legacy_stored, &legacy_row), expected);
+    legacy_stored.receipt_id = Some("not-a-uuid".to_string());
+    assert_eq!(receipt_uuid_for(&legacy_stored, &legacy_row), expected);
+    let mut legacy_json: serde_json::Value = serde_json::from_str(&legacy_row.result_json).unwrap();
+    assert!(legacy_json.get("receiptId").is_some());
+    legacy_json.as_object_mut().unwrap().remove("receiptId");
+    state
+        .db
+        .lock()
+        .conn
+        .execute(
+            "UPDATE dashboard_operations SET result_json = ?1 WHERE operation_id = ?2",
+            rusqlite::params![legacy_json.to_string(), legacy_raw],
+        )
+        .unwrap();
+    let legacy_result = commit(State(state.clone()), body_of(&legacy_request))
+        .await
+        .unwrap()
+        .0;
+    assert!(legacy_result.replayed);
+    assert!(public_has_no_receipt_id(&legacy_result));
+    let legacy_log = receipt_by_id(&state, &expected.to_string());
+    assert_eq!(legacy_log.action, "onboarding.commit");
+    assert_eq!(
+        legacy_log.outcome,
+        crate::log_types::OperationOutcome::Success
+    );
+    assert_ne!(legacy_log.operation_id, legacy_raw);
+    assert_ne!(
+        legacy_log.operation_id,
+        uuid::Uuid::parse_str(legacy_raw).unwrap().to_string()
+    );
+    let again = commit(State(state.clone()), body_of(&legacy_request))
+        .await
+        .unwrap()
+        .0;
+    assert!(again.replayed);
+    assert_eq!(again.connection_id, legacy_result.connection_id);
+    assert_eq!(receipt_by_id(&state, &expected.to_string()), legacy_log);
+
+    drop(state);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+fn named_request(
+    state: &CoreState,
+    operation_id: &str,
+    name: &str,
+    secret: &str,
+) -> OnboardingCommitRequest {
+    let mut request = sample_request(
+        state.settings_revision(),
+        state.process_generation(),
+        secret,
+    );
+    request.operation_id = operation_id.to_string();
+    if let OnboardingConnection::New(connection) = &mut request.connection {
+        connection.name = name.to_string();
+    }
+    request
+}
+
+fn public_has_no_receipt_id(result: &OnboardingCommitResult) -> bool {
+    serde_json::to_value(result)
+        .unwrap()
+        .get("receiptId")
+        .is_none()
+}
+
+fn assert_success_ids(state: &CoreState, expected: &[&str]) {
+    let mut expected: Vec<String> = expected.iter().map(|id| (*id).to_string()).collect();
+    expected.sort();
+    let mut actual: Vec<String> = super::super::applications::operation_receipts(state)
+        .into_iter()
+        .filter(|row| {
+            row.action == "onboarding.commit"
+                && row.outcome == crate::log_types::OperationOutcome::Success
+        })
+        .map(|row| row.operation_id)
+        .collect();
+    actual.sort();
+    assert_eq!(actual, expected);
+}
+
+fn receipt_by_id(state: &CoreState, operation_id: &str) -> crate::log_types::OperationLog {
+    super::super::applications::operation_receipts(state)
+        .into_iter()
+        .find(|row| row.operation_id == operation_id)
+        .unwrap()
+}
+
+fn body_of(request: &OnboardingCommitRequest) -> axum::body::Bytes {
+    axum::body::Bytes::from(serde_json::to_vec(request).unwrap())
+}
+
+fn partial_receipt(state: &CoreState) -> crate::log_types::OperationLog {
+    super::super::applications::operation_receipts(state)
+        .into_iter()
+        .find(|row| row.outcome == crate::log_types::OperationOutcome::Partial)
+        .unwrap()
+}
+
+async fn error_json(error: V3ApiError) -> serde_json::Value {
+    use axum::response::IntoResponse;
+    let response = error.into_response();
+    let bytes = axum::body::to_bytes(response.into_body(), 65536)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
 }

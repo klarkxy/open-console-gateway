@@ -45,6 +45,11 @@ import {
   type WithoutExpectation,
 } from "./dashboard-v3.ts";
 import {
+  getOperationLogs,
+  getRequestLogAttempts,
+  getRequestLogs,
+} from "./log-ledger.ts";
+import {
   accountCreateInput,
   accountUpdateInput,
   presentAccount,
@@ -328,6 +333,9 @@ export const dashboardApi = {
     (await dashboardV3.getGatewayLogs(query, signal)).items.map(presentGatewayLog),
   getForwardLogs: async (query: ForwardLogQuery = {}, signal?: AbortSignal) =>
     presentForwardLogs(await dashboardV3.getForwardLogs(forwardLogQuery(query), signal)),
+  getOperationLogs,
+  getRequestLogs,
+  getRequestLogAttempts,
   getForwardLogModels: async () => (await dashboardV3.getForwardLogModels()).models,
   getForwardLogKeys: async () => (await dashboardV3.getForwardLogKeys()).keys,
   getDashboardSummary: async () => presentDashboardSummary(await dashboardV3.getDashboardSummary()),

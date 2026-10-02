@@ -81,9 +81,29 @@ pub(super) async fn create(
     State(state): State<CoreState>,
     body: Bytes,
 ) -> Result<Json<PlatformAccounts>, V3ApiError> {
+    let mut op = super::settings::open_dashboard(&state, "platform.create", "platform", None);
+    let mut effect = super::settings::CommittedEffect::Atomic;
+    let result = create_inner(&state, body, &mut op, &mut effect).await;
+    super::settings::record_effect(
+        op,
+        &state,
+        &["kind"],
+        (Some(1), Some(1), None),
+        None,
+        effect,
+        result,
+    )
+}
+
+async fn create_inner(
+    state: &CoreState,
+    body: Bytes,
+    op: &mut crate::user_operation::UserOperation,
+    effect: &mut super::settings::CommittedEffect,
+) -> Result<Json<PlatformAccounts>, V3ApiError> {
     let input = parse_mutation_json::<PlatformCreate>(&body)?;
     let _lock = state.settings_update.lock();
-    check_expectation(&state, &input.expectation)?;
+    check_expectation(state, &input.expectation)?;
     let credential = input
         .user_credential
         .as_deref()
@@ -91,25 +111,52 @@ pub(super) async fn create(
         .map(|s| state.encrypt_key(s.trim()))
         .transpose()
         .map_err(V3ApiError::internal)?;
+    let id = uuid::Uuid::new_v4().to_string();
+    op.subject(id.clone());
     state
         .db
         .lock()
         .create_platform_account(
-            &uuid::Uuid::new_v4().to_string(),
+            &id,
             input.kind,
             &input.name,
             &input.base_url,
             credential.as_deref(),
         )
-        .map_err(|e| V3ApiError::invalid_request_at(&state, e.to_string()))?;
+        .map_err(|e| V3ApiError::invalid_request_at(state, e.to_string()))?;
     state.bump_settings_revision();
-    view(&state).map(Json)
+    effect.note_follow_up(view(state).map(Json))
 }
 
 pub(super) async fn update(
     State(state): State<CoreState>,
     Path(id): Path<String>,
     body: Bytes,
+) -> Result<Json<PlatformAccounts>, V3ApiError> {
+    let op = super::settings::open_dashboard(
+        &state,
+        "platform.update",
+        "platform",
+        super::settings::known_subject(&id),
+    );
+    let mut effect = super::settings::CommittedEffect::Atomic;
+    let result = update_inner(state.clone(), id, body, &mut effect).await;
+    super::settings::record_effect(
+        op,
+        &state,
+        &[],
+        (Some(1), Some(1), None),
+        None,
+        effect,
+        result,
+    )
+}
+
+async fn update_inner(
+    state: CoreState,
+    id: String,
+    body: Bytes,
+    effect: &mut super::settings::CommittedEffect,
 ) -> Result<Json<PlatformAccounts>, V3ApiError> {
     let input = parse_mutation_json::<PlatformUpdate>(&body)?;
     let _lock = state.settings_update.lock();
@@ -134,12 +181,27 @@ pub(super) async fn update(
         )
         .map_err(|e| V3ApiError::invalid_request_at(&state, e.to_string()))?;
     state.bump_settings_revision();
-    view(&state).map(Json)
+    effect.note_follow_up(view(&state).map(Json))
 }
 
 pub(super) async fn delete(
     State(state): State<CoreState>,
     Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Json<MutationAck>, V3ApiError> {
+    let op = super::settings::open_dashboard(
+        &state,
+        "platform.delete",
+        "platform",
+        super::settings::known_subject(&id),
+    );
+    let result = delete_inner(state.clone(), id, body).await;
+    super::settings::record_after(op, &state, &[], (Some(1), Some(1), None), None, result)
+}
+
+async fn delete_inner(
+    state: CoreState,
+    id: String,
     body: Bytes,
 ) -> Result<Json<MutationAck>, V3ApiError> {
     let input = parse_mutation_json::<MutationExpectation>(&body)?;
@@ -161,6 +223,31 @@ pub(super) async fn link(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<PlatformAccounts>, V3ApiError> {
+    let op = super::settings::open_dashboard(
+        &state,
+        "platform.link",
+        "platform",
+        super::settings::known_subject(&id),
+    );
+    let mut effect = super::settings::CommittedEffect::Atomic;
+    let result = link_inner(state.clone(), id, body, &mut effect).await;
+    super::settings::record_effect(
+        op,
+        &state,
+        &["group"],
+        (Some(1), Some(1), None),
+        None,
+        effect,
+        result,
+    )
+}
+
+async fn link_inner(
+    state: CoreState,
+    id: String,
+    body: Bytes,
+    effect: &mut super::settings::CommittedEffect,
+) -> Result<Json<PlatformAccounts>, V3ApiError> {
     let input = parse_mutation_json::<PlatformLinkWrite>(&body)?;
     let _lock = state.settings_update.lock();
     check_expectation(&state, &input.expectation)?;
@@ -170,16 +257,43 @@ pub(super) async fn link(
         .link_platform_account(&id, &input.platform_account_id, &input.group)
         .map_err(|e| V3ApiError::invalid_request_at(&state, e.to_string()))?;
     state.bump_settings_revision();
-    state
-        .reload_provider_contracts()
-        .map_err(V3ApiError::internal)?;
-    view(&state).map(Json)
+    effect.note_follow_up(
+        state
+            .reload_provider_contracts()
+            .map_err(V3ApiError::internal),
+    )?;
+    effect.note_follow_up(view(&state).map(Json))
 }
 
 pub(super) async fn unlink(
     State(state): State<CoreState>,
     Path(id): Path<String>,
     body: Bytes,
+) -> Result<Json<PlatformAccounts>, V3ApiError> {
+    let op = super::settings::open_dashboard(
+        &state,
+        "platform.unlink",
+        "platform",
+        super::settings::known_subject(&id),
+    );
+    let mut effect = super::settings::CommittedEffect::Atomic;
+    let result = unlink_inner(state.clone(), id, body, &mut effect).await;
+    super::settings::record_effect(
+        op,
+        &state,
+        &[],
+        (Some(1), Some(1), None),
+        None,
+        effect,
+        result,
+    )
+}
+
+async fn unlink_inner(
+    state: CoreState,
+    id: String,
+    body: Bytes,
+    effect: &mut super::settings::CommittedEffect,
 ) -> Result<Json<PlatformAccounts>, V3ApiError> {
     let input = parse_mutation_json::<MutationExpectation>(&body)?;
     let _lock = state.settings_update.lock();
@@ -190,7 +304,7 @@ pub(super) async fn unlink(
         .unlink_platform_account(&id)
         .map_err(V3ApiError::internal)?;
     state.bump_settings_revision();
-    view(&state).map(Json)
+    effect.note_follow_up(view(&state).map(Json))
 }
 
 pub(super) async fn refresh(
@@ -198,6 +312,33 @@ pub(super) async fn refresh(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<PlatformAccounts>, V3ApiError> {
+    let op = super::settings::open_dashboard(
+        &state,
+        "platform.refresh",
+        "platform",
+        super::settings::known_subject(&id),
+    );
+    let result = refresh_inner(state.clone(), id, body).await;
+    let (ok_outcome, counts) = match &result {
+        Ok((_, errors)) if *errors > 0 => (
+            Some((
+                crate::log_types::OperationOutcome::Partial,
+                "outboundFailed",
+            )),
+            (Some(1), Some(1), Some(*errors)),
+        ),
+        Ok(_) => (None, (Some(1), Some(1), None)),
+        Err(_) => (None, (Some(1), None, Some(1))),
+    };
+    let result = result.map(|(view, _)| view);
+    super::settings::record_after(op, &state, &[], counts, ok_outcome, result)
+}
+
+async fn refresh_inner(
+    state: CoreState,
+    id: String,
+    body: Bytes,
+) -> Result<(Json<PlatformAccounts>, u32), V3ApiError> {
     let input = parse_mutation_json::<PlatformRefresh>(&body)?;
     let (parent, group, credential, key, token) = {
         let _lock = state.settings_update.lock();
@@ -256,7 +397,8 @@ pub(super) async fn refresh(
         },
     )
     .await;
-    if !snapshot.errors.is_empty() {
+    let error_count = u32::try_from(snapshot.errors.len()).unwrap_or(u32::MAX);
+    if error_count > 0 {
         snapshot.stale = true;
     }
     // Do not copy user-credential balances into every child. New API Key
@@ -286,7 +428,7 @@ pub(super) async fn refresh(
     // The snapshot is an observation. Inference reads it from SQLite on the
     // next attempt, and platform_version / link_version already reject a stale
     // refresh. Leave the configuration CAS token unchanged.
-    view(&state).map(Json)
+    view(&state).map(|view| (Json(view), error_count))
 }
 
 #[cfg(test)]

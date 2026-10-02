@@ -314,7 +314,7 @@ pub(crate) fn confirm_execution_send(
             // revision; republish so the aggregate is not left claiming the
             // previous generation.
             if let Err(error) = state.publish_gateway_preparation(&db) {
-                eprintln!("warning: failed to republish the request preparation view: {error}");
+                tracing::warn!("failed to republish the request preparation view: {error}");
             }
             Ok(Some(episode))
         }

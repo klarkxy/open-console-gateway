@@ -39,7 +39,6 @@ pub async fn request_trace_middleware(
     let record_events = authenticated && !path.ends_with(":countTokens");
     if record_events {
         super::diagnostics::log_event(
-            &state.db.lock(),
             &trace,
             "debug",
             "request",
@@ -59,7 +58,6 @@ pub async fn request_trace_middleware(
             "info"
         };
         super::diagnostics::log_event(
-            &state.db.lock(),
             &trace,
             level,
             "request",
@@ -78,7 +76,7 @@ pub async fn request_trace_middleware(
     {
         let mut diagnostic = ErrorDiagnostic::new(
             &trace,
-            1,
+            0,
             "client",
             "body_limit",
             client_format_for_path(&path),
@@ -851,7 +849,7 @@ fn local_failure_response(
     client_body_bytes: Option<usize>,
     summary_body: Option<&[u8]>,
 ) -> axum::response::Response {
-    let mut diagnostic = ErrorDiagnostic::new(trace, 1, error_source, error_stage, format);
+    let mut diagnostic = ErrorDiagnostic::new(trace, 0, error_source, error_stage, format);
     diagnostic.client_body_bytes = client_body_bytes;
     diagnostic.downstream_status = Some(status.as_u16());
     if let Some(body) = summary_body {
@@ -870,6 +868,9 @@ fn local_failure_response(
 fn active_cpa_model_ids(state: &CoreState) -> std::sync::Arc<Vec<String>> {
     std::sync::Arc::new(runtime_catalog_snapshot(state).unwrap().cpa)
 }
+
+#[cfg(test)]
+mod local_receipt_tests;
 
 #[cfg(test)]
 mod tests {

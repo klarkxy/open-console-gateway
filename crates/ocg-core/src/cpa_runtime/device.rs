@@ -15,6 +15,7 @@ pub(super) struct DeviceSession {
     host: CpaRuntimeHost,
     deadline: Instant,
     result: Mutex<DeviceResult>,
+    operation: Mutex<Option<crate::user_operation::UserOperation>>,
 }
 
 #[derive(Default)]
@@ -94,11 +95,60 @@ impl DeviceSession {
                 error: None,
             })
     }
+
+    pub(super) fn attach_operation(&self, operation: crate::user_operation::UserOperation) {
+        *self.operation.lock() = Some(operation);
+        self.finish_receipt_if_terminal();
+    }
+
+    /// Finish the attached operation only after the result mutex is released.
+    /// Unknown and `wait` statuses stay pending. Drop does not guess.
+    pub(super) fn finish_receipt_if_terminal(&self) {
+        let status = self.result.lock().terminal.clone();
+        let Some(status) = status else {
+            return;
+        };
+        let Some((outcome, reason)) = device_terminal_receipt(&status.status) else {
+            return;
+        };
+        let Some(operation) = self.operation.lock().take() else {
+            return;
+        };
+        operation.complete(
+            outcome,
+            reason,
+            crate::log_types::OperationMetadata::default(),
+        );
+    }
+}
+
+fn device_terminal_receipt(
+    status: &str,
+) -> Option<(crate::log_types::OperationOutcome, Option<&'static str>)> {
+    use crate::log_types::OperationOutcome::{Failed, Rejected, Success};
+    match status {
+        "ok" => Some((Success, None)),
+        "error" => Some((Failed, Some("outboundFailed"))),
+        "expired" => Some((Failed, Some("expired"))),
+        "cancelled" => Some((Rejected, Some("cancelled"))),
+        _ => None,
+    }
 }
 
 impl Drop for DeviceSession {
     fn drop(&mut self) {
         let _ = self.host.stop_owned();
+    }
+}
+
+/// The session Arc returned by start. Attachment does not look up the slot.
+pub struct CpaDeviceLoginSession {
+    session: Arc<DeviceSession>,
+}
+
+impl CpaDeviceLoginSession {
+    pub fn attach(self, operation: crate::user_operation::UserOperation) {
+        self.session.attach_operation(operation);
     }
 }
 
@@ -147,7 +197,9 @@ impl CpaRuntimeCapabilities {
 }
 
 impl CoreStateInner {
-    pub async fn start_cpa_device_oauth(&self) -> Result<CpaOAuthStart, CpaRuntimeError> {
+    pub async fn start_cpa_device_oauth(
+        &self,
+    ) -> Result<(CpaOAuthStart, CpaDeviceLoginSession), CpaRuntimeError> {
         self.require_supported()?;
         if std::env::var_os(crate::cpa::CPA_BASE_URL_ENV).is_some() {
             return Err(CpaRuntimeError::Invalid(
@@ -194,6 +246,7 @@ impl CoreStateInner {
                 host,
                 deadline: Instant::now() + AUTH_TIMEOUT,
                 result: Mutex::new(DeviceResult::default()),
+                operation: Mutex::new(None),
             });
             *slot = Some(session.clone());
             session
@@ -208,6 +261,7 @@ impl CoreStateInner {
                         break;
                     };
                     session.refresh();
+                    session.finish_receipt_if_terminal();
                     if session.result.lock().terminal.is_some() {
                         break;
                     }
@@ -229,19 +283,22 @@ impl CoreStateInner {
             }
             if let Some(code) = code {
                 pending.0.take();
-                return Ok(CpaOAuthStart {
-                    provider: CpaOAuthProvider::Codex,
-                    state: session.state.clone(),
-                    url: DEVICE_URL.into(),
-                    flow: "device".into(),
-                    user_code: Some(code),
-                    expires_in: Some(
-                        session
-                            .deadline
-                            .saturating_duration_since(Instant::now())
-                            .as_secs(),
-                    ),
-                });
+                return Ok((
+                    CpaOAuthStart {
+                        provider: CpaOAuthProvider::Codex,
+                        state: session.state.clone(),
+                        url: DEVICE_URL.into(),
+                        flow: "device".into(),
+                        user_code: Some(code),
+                        expires_in: Some(
+                            session
+                                .deadline
+                                .saturating_duration_since(Instant::now())
+                                .as_secs(),
+                        ),
+                    },
+                    CpaDeviceLoginSession { session },
+                ));
             }
             if Instant::now() >= prompt_deadline {
                 return Err(CpaRuntimeError::Failed("CPA did not return a device code in time. Check network/proxy connectivity and CPA device-login support.".into()));
@@ -268,6 +325,19 @@ impl CoreStateInner {
                     CpaRuntimeError::Invalid("Unknown or replaced CPA device login session.".into())
                 }),
         )
+    }
+
+    pub fn finish_cpa_device_oauth_operation(&self, oauth_state: &str) {
+        let session = self
+            .cpa_runtime
+            .device
+            .lock()
+            .as_ref()
+            .filter(|session| session.state == oauth_state)
+            .cloned();
+        if let Some(session) = session {
+            session.finish_receipt_if_terminal();
+        }
     }
 
     pub fn cancel_cpa_device_oauth(&self, state: &str) -> Option<Result<bool, CpaRuntimeError>> {

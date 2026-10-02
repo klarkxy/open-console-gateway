@@ -23,17 +23,58 @@ pub(super) async fn remove_models(
     Path((scope_kind, scope_id)): Path<(String, String)>,
     body: Bytes,
 ) -> Result<Json<CatalogModelsRemoveResult>, V3ApiError> {
+    let receipt = super::applications::DashboardReceipt::open(
+        &state,
+        "catalog.remove",
+        "provider.catalog",
+        super::applications::opaque_subject(&scope_id),
+    );
+    let mut durable = None;
+    let mut removed = 0_u32;
+    let result = remove_models_work(
+        &state,
+        scope_kind,
+        scope_id,
+        body,
+        &mut durable,
+        &mut removed,
+    );
+    if result.is_ok() {
+        durable = None;
+    }
+    let removed = removed;
+    receipt
+        .observe(result, durable, |value| {
+            crate::log_types::OperationMetadata {
+                revision: Some(value.revision.revision),
+                requested_count: Some(removed),
+                completed_count: Some(removed),
+                failed_count: Some(0),
+                ..crate::log_types::OperationMetadata::default()
+            }
+        })
+        .map(Json)
+}
+
+fn remove_models_work(
+    state: &CoreState,
+    scope_kind: String,
+    scope_id: String,
+    body: Bytes,
+    durable: &mut Option<super::applications::DurableEffect>,
+    removed: &mut u32,
+) -> Result<CatalogModelsRemoveResult, V3ApiError> {
     let input = parse_mutation_json::<CatalogModelsRemoveRequest>(&body)?;
     let scope = ContractScope::parse(&scope_kind, &scope_id)
-        .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
+        .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
     if scope_kind == SCOPE_KIND_CUSTOM_ENDPOINT {
         return Err(V3ApiError::invalid_request_at(
-            &state,
+            state,
             "Custom API model catalogs are account declarations and cannot be edited here",
         ));
     }
     if scope_kind != SCOPE_KIND_PROVIDER || !builtin_provider_scope_ids().contains(&scope.id()) {
-        return Err(V3ApiError::not_found_at(&state, "provider scope not found"));
+        return Err(V3ApiError::not_found_at(state, "provider scope not found"));
     }
 
     let mut seen = HashSet::new();
@@ -42,7 +83,7 @@ pub(super) async fn remove_models(
         let model_id = model_id.trim();
         if model_id.is_empty() || !seen.insert(model_id) {
             return Err(V3ApiError::invalid_request_at(
-                &state,
+                state,
                 "modelIds must be distinct nonempty catalog models",
             ));
         }
@@ -50,15 +91,15 @@ pub(super) async fn remove_models(
     }
     if model_ids.is_empty() {
         return Err(V3ApiError::invalid_request_at(
-            &state,
+            state,
             "modelIds must be nonempty",
         ));
     }
 
     let now = Utc::now();
-    let snapshot = {
+    {
         let _settings_update = state.settings_update.lock();
-        check_expectation(&state, &input.expectation)?;
+        check_expectation(state, &input.expectation)?;
         let (row, reload) = {
             let db = state.db.lock();
             let Some(current) = db
@@ -66,7 +107,7 @@ pub(super) async fn remove_models(
                 .map_err(V3ApiError::internal)?
             else {
                 return Err(V3ApiError::precondition_failed_at(
-                    &state,
+                    state,
                     "provider model catalog has not been refreshed",
                 ));
             };
@@ -76,7 +117,7 @@ pub(super) async fn remove_models(
                 .any(|model_id| !known.contains(model_id.as_str()))
             {
                 return Err(V3ApiError::invalid_request_at(
-                    &state,
+                    state,
                     "modelIds must be distinct models from the saved catalog",
                 ));
             }
@@ -94,15 +135,23 @@ pub(super) async fn remove_models(
             state.restrict_provider_catalog_after_reload_failure(&row);
         }
         state.routing.reset();
+        *removed = super::applications::count_u32(model_ids.len());
         let snapshot = CatalogModelsRemoveResult {
-            revision: ControlRevision::from_state(&state),
+            revision: ControlRevision::from_state(state),
             removed_ids: model_ids,
             catalog_models: row.catalog_models,
         };
+        if reload.is_err() {
+            *durable = Some(super::applications::DurableEffect {
+                revision: state.settings_revision(),
+                completed: *removed,
+                failed: 1,
+                related_ids: Vec::new(),
+            });
+        }
         reload.map_err(V3ApiError::internal)?;
-        snapshot
-    };
-    Ok(Json(snapshot))
+        Ok(snapshot)
+    }
 }
 
 pub(super) async fn add_models(
@@ -110,30 +159,65 @@ pub(super) async fn add_models(
     Path((scope_kind, scope_id)): Path<(String, String)>,
     body: Bytes,
 ) -> Result<Json<crate::dashboard_v3::ProviderContracts>, V3ApiError> {
+    let mut receipt = super::applications::DashboardReceipt::open(
+        &state,
+        "catalog.add",
+        "provider.catalog",
+        super::applications::opaque_subject(&scope_id),
+    );
+    let mut added = 0_u32;
+    let result = add_models_work(&state, scope_kind, scope_id, body, &mut added, &mut receipt);
+    let added = added;
+    receipt
+        .observe(result, None, |value| crate::log_types::OperationMetadata {
+            revision: Some(value.revision),
+            requested_count: Some(added),
+            completed_count: Some(added),
+            failed_count: Some(0),
+            ..crate::log_types::OperationMetadata::default()
+        })
+        .map(Json)
+}
+
+fn add_models_work(
+    state: &CoreState,
+    scope_kind: String,
+    scope_id: String,
+    body: Bytes,
+    added: &mut u32,
+    receipt: &mut super::applications::DashboardReceipt,
+) -> Result<crate::dashboard_v3::ProviderContracts, V3ApiError> {
     let input = parse_mutation_json::<super::types::CatalogModelsAddRequest>(&body)?;
     if scope_kind != SCOPE_KIND_PROVIDER
         || !builtin_provider_scope_ids().contains(&scope_id.as_str())
     {
         return Err(V3ApiError::invalid_request_at(
-            &state,
+            state,
             "only built-in provider catalogs can be added here",
         ));
     }
     let scope = ContractScope::provider(&scope_id);
     let _settings = state.settings_update.lock();
-    check_expectation(&state, &input.expectation)?;
+    check_expectation(state, &input.expectation)?;
     let contracts = state.provider_contracts();
     let current = contracts
         .scope(&scope)
-        .ok_or_else(|| V3ApiError::not_found_at(&state, "provider scope not found"))?;
+        .ok_or_else(|| V3ApiError::not_found_at(state, "provider scope not found"))?;
     let model_ids = validate_additions(&current.catalog.models, &input.model_ids)
-        .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
-    state
-        .commit_configuration_update(|db| {
-            db.add_contract_catalog_models(&scope, &model_ids, Utc::now())
-        })
+        .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
+    *added = super::applications::count_u32(model_ids.len());
+    let completed = *added;
+    receipt
+        .commit_recorded(
+            state,
+            crate::log_types::OperationMetadata {
+                completed_count: Some(completed),
+                ..crate::log_types::OperationMetadata::default()
+            },
+            |db| db.add_contract_catalog_models(&scope, &model_ids, Utc::now()),
+        )
         .map_err(V3ApiError::internal)?;
-    crate::dashboard_v3::provider_contracts_response(&state)
+    crate::dashboard_v3::provider_contracts_response(state).map(|value| value.0)
 }
 
 fn validate_additions(existing: &[String], input: &[String]) -> Result<Vec<String>, &'static str> {
@@ -166,16 +250,45 @@ pub(super) async fn edit_model(
     Path(scope_id): Path<String>,
     body: Bytes,
 ) -> Result<Json<crate::dashboard_v3::ProviderContracts>, V3ApiError> {
+    let mut receipt = super::applications::DashboardReceipt::open(
+        &state,
+        "catalog.edit",
+        "provider.catalog",
+        super::applications::opaque_subject(&scope_id),
+    );
+    let result = edit_model_work(&state, scope_id, body, &mut receipt);
+    receipt
+        .observe(result, None, |value| crate::log_types::OperationMetadata {
+            changed_fields: vec![
+                "public_model".to_string(),
+                "upstream_model".to_string(),
+                "protocols".to_string(),
+                "enabled".to_string(),
+            ],
+            revision: Some(value.revision),
+            completed_count: Some(1),
+            failed_count: Some(0),
+            ..crate::log_types::OperationMetadata::default()
+        })
+        .map(Json)
+}
+
+fn edit_model_work(
+    state: &CoreState,
+    scope_id: String,
+    body: Bytes,
+    receipt: &mut super::applications::DashboardReceipt,
+) -> Result<crate::dashboard_v3::ProviderContracts, V3ApiError> {
     let input = parse_mutation_json::<super::types::CatalogModelEditRequest>(&body)?;
     if !builtin_provider_scope_ids().contains(&scope_id.as_str()) {
         return Err(V3ApiError::invalid_request_at(
-            &state,
+            state,
             "unknown built-in provider",
         ));
     }
     let scope = ContractScope::provider(&scope_id);
     let _settings = state.settings_update.lock();
-    check_expectation(&state, &input.expectation)?;
+    check_expectation(state, &input.expectation)?;
     let model = ocg_domain::destination::CatalogModel {
         public_model: input.public_model.trim().to_string(),
         upstream_model: input.upstream_model.trim().to_string(),
@@ -184,17 +297,30 @@ pub(super) async fn edit_model(
         enabled: input.enabled,
         upstream_override: None,
     };
-    state
-        .commit_configuration_update(|db| {
-            db.edit_contract_catalog_model(
-                &scope,
-                input.original_model_id.as_deref(),
-                model,
-                Utc::now(),
-            )
-        })
-        .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
-    crate::dashboard_v3::provider_contracts_response(&state)
+    receipt
+        .commit_recorded(
+            state,
+            crate::log_types::OperationMetadata {
+                changed_fields: vec![
+                    "public_model".to_string(),
+                    "upstream_model".to_string(),
+                    "protocols".to_string(),
+                    "enabled".to_string(),
+                ],
+                completed_count: Some(1),
+                ..crate::log_types::OperationMetadata::default()
+            },
+            |db| {
+                db.edit_contract_catalog_model(
+                    &scope,
+                    input.original_model_id.as_deref(),
+                    model,
+                    Utc::now(),
+                )
+            },
+        )
+        .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
+    crate::dashboard_v3::provider_contracts_response(state).map(|value| value.0)
 }
 
 #[cfg(test)]

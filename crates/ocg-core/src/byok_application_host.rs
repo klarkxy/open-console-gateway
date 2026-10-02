@@ -78,7 +78,7 @@ impl ByokNativeHost {
     /// Keys, request bodies, and credential-bearing URLs never reach here.
     fn report(&self, level: Level, message: impl std::fmt::Display) {
         match &self.console {
-            HostConsole::Stderr => crate::runtime_log::console(level, message),
+            HostConsole::Stderr => crate::process_log::event(level, "byok", message),
             #[cfg(test)]
             HostConsole::Recording(lines) => {
                 if let Ok(mut lines) = lines.lock() {

@@ -9,6 +9,55 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Barrier, Mutex as StdMutex};
 
+#[test]
+fn host_settings_publication_failure_retains_its_committed_effect() {
+    let dir = temp_data_dir("host-settings-publication");
+    let state = Arc::new(
+        CoreStateInner::new(
+            Database::open(dir.clone()).unwrap(),
+            dir.clone(),
+            Arc::new(StaticKeyCipher::new("state-test")),
+        )
+        .unwrap(),
+    );
+    crate::account_control::create_go_api_key(
+        &state,
+        "Publication fixture".into(),
+        "sk-test-ledger-9f3c".into(),
+        None,
+        None,
+    )
+    .unwrap();
+    let changed = state
+        .db
+        .lock()
+        .conn
+        .execute("UPDATE credentials SET credential_version = 0", [])
+        .unwrap();
+    assert!(changed > 0);
+    let previous = state.config();
+    let mut next = previous.clone();
+    next.non_stream_timeout_secs += 1;
+    let expected_timeout = next.non_stream_timeout_secs;
+    let failure = {
+        let _settings_update = state.settings_update.lock();
+        state
+            .apply_host_settings_recorded(&previous, next)
+            .unwrap_err()
+    };
+    assert_eq!(failure.effects, super::HostSettingsEffects::Partial);
+    assert!(matches!(
+        failure.error,
+        super::HostSettingsError::Persist(_)
+    ));
+    assert_eq!(state.config().non_stream_timeout_secs, expected_timeout);
+    let persisted: AppConfig =
+        serde_json::from_str(&state.db.lock().get_setting("config").unwrap().unwrap()).unwrap();
+    assert_eq!(persisted.non_stream_timeout_secs, expected_timeout);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
 fn temp_data_dir(label: &str) -> PathBuf {
     let mut dir = std::env::temp_dir();
     let nanos = std::time::SystemTime::now()
@@ -1292,4 +1341,122 @@ fn a_rebuilding_writer_publishes_one_self_consistent_aggregate() {
 
     drop(state);
     fs::remove_dir_all(dir).expect("test data directory should be removed");
+}
+
+#[test]
+fn desktop_update_completion_finishes_the_same_pending_receipt() {
+    use crate::log_types::{OperationLogQuery, OperationOutcome, OperationSource};
+    use crate::user_operation::UserOperation;
+
+    fn operations(state: &CoreStateInner) -> Vec<crate::log_types::OperationLog> {
+        state
+            .db
+            .lock()
+            .query_operation_logs(&OperationLogQuery::default())
+            .expect("operation logs should be readable")
+            .items
+    }
+
+    let dir = temp_data_dir("desktop-update-receipt");
+    let db = Database::open(dir.clone()).expect("test database should open");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+    let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).expect("state"));
+    state.set_desktop_update_starter(Arc::new(|_version| Ok(())));
+
+    state.set_desktop_update_completed();
+    assert!(
+        operations(&state).is_empty(),
+        "completing an empty slot must not insert a receipt"
+    );
+
+    state
+        .start_desktop_update_recorded(
+            "9.9.9".to_string(),
+            UserOperation::new(
+                &state,
+                OperationSource::Dashboard,
+                "app.update",
+                "app",
+                None,
+            ),
+        )
+        .expect("registered starter should accept the pending operation");
+    assert!(state.set_desktop_update_installing());
+    assert_eq!(
+        state.desktop_update_status().phase,
+        DesktopUpdatePhase::Installing
+    );
+    let pending = operations(&state);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].action, "app.update");
+    assert_eq!(pending[0].outcome, OperationOutcome::Pending);
+    assert!(pending[0].completed_at.is_none());
+    let operation_id = pending[0].operation_id.clone();
+
+    state.set_desktop_update_completed();
+    assert_eq!(
+        state.desktop_update_status().phase,
+        DesktopUpdatePhase::Installing,
+        "install success does not invent a succeeded phase"
+    );
+    let finished = operations(&state);
+    assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0].operation_id, operation_id);
+    assert_eq!(finished[0].source, OperationSource::Dashboard);
+    assert_eq!(finished[0].outcome, OperationOutcome::Success);
+    assert_eq!(finished[0].reason_code.as_deref(), Some("installed"));
+    assert!(finished[0].completed_at.is_some());
+
+    state.set_desktop_update_completed();
+    state.set_desktop_update_failed("https://updates.example/late-secret");
+    let unchanged = operations(&state);
+    assert_eq!(unchanged.len(), 1);
+    assert_eq!(unchanged[0].operation_id, operation_id);
+    assert_eq!(unchanged[0].outcome, OperationOutcome::Success);
+    assert_eq!(unchanged[0].reason_code.as_deref(), Some("installed"));
+    let encoded = serde_json::to_string(&unchanged[0]).expect("receipt should serialize");
+    assert!(!encoded.contains("updates.example"), "{encoded}");
+    assert!(!encoded.contains("https://"), "{encoded}");
+    assert_eq!(
+        state.desktop_update_status().error.as_deref(),
+        Some("https://updates.example/late-secret")
+    );
+
+    drop(state);
+    let _ = fs::remove_dir_all(dir);
+
+    let dir = temp_data_dir("desktop-update-failed");
+    let db = Database::open(dir.clone()).expect("test database should open");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+    let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).expect("state"));
+    state.set_desktop_update_starter(Arc::new(|_version| Ok(())));
+    state
+        .start_desktop_update_recorded(
+            "9.9.9".to_string(),
+            UserOperation::new(
+                &state,
+                OperationSource::Dashboard,
+                "app.update",
+                "app",
+                None,
+            ),
+        )
+        .expect("registered starter should accept the pending operation");
+    let pending_id = operations(&state)[0].operation_id.clone();
+    let secret = "signed update failed at https://updates.example/feed";
+    state.set_desktop_update_failed(secret);
+    let failed = operations(&state);
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].operation_id, pending_id);
+    assert_eq!(failed[0].outcome, OperationOutcome::Failed);
+    assert_eq!(failed[0].reason_code.as_deref(), Some("updateFailed"));
+    let status = state.desktop_update_status();
+    assert_eq!(status.phase, DesktopUpdatePhase::Failed);
+    assert_eq!(status.error.as_deref(), Some(secret));
+    let encoded = serde_json::to_string(&failed[0]).expect("receipt should serialize");
+    assert!(!encoded.contains("updates.example"), "{encoded}");
+    assert!(!encoded.contains(secret), "{encoded}");
+
+    drop(state);
+    let _ = fs::remove_dir_all(dir);
 }

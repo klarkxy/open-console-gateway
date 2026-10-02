@@ -529,6 +529,24 @@ async fn failed_native_write_keeps_one_usable_key_and_reports_new_revision() {
     let keys = state.db.lock().list_active_sub_gateway_keys().unwrap();
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].id, key.id);
+    let rows = super::super::applications::operation_receipts(&state);
+    let partial = rows
+        .iter()
+        .find(|row| row.outcome == crate::log_types::OperationOutcome::Partial)
+        .unwrap();
+    let success = rows
+        .iter()
+        .find(|row| row.outcome == crate::log_types::OperationOutcome::Success)
+        .unwrap();
+    assert_eq!(partial.action, "application.configure");
+    assert_eq!(partial.reason_code.as_deref(), Some("internal"));
+    assert_eq!(partial.metadata.related_ids, vec![key.id.clone()]);
+    assert_eq!(partial.metadata.revision, Some(revision + 1));
+    assert_eq!(success.action, "application.configure");
+    assert_eq!(success.metadata.related_ids, Vec::<String>::new());
+    let encoded = serde_json::to_string(&rows).unwrap();
+    assert!(!encoded.contains(&key.key));
+    assert!(!encoded.contains("sk-ocg-byok-test-upstream"));
     close_state(dir, state);
 }
 

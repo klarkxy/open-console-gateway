@@ -1,13 +1,15 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use ocg_core::account_control;
+use ocg_core::account_control::{self, AccountControlError};
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher, load_or_create_static_cipher};
 use ocg_core::db::Database;
-use ocg_core::gateway::{self, GatewayLifecycle};
+use ocg_core::gateway::{self, GatewayLifecycle, ListenerStopOutcome};
+use ocg_core::log_types::{OperationMetadata, OperationOutcome, OperationSource};
 use ocg_core::models::{Account, AppConfig};
 use ocg_core::provider::CredentialKind;
 use ocg_core::skill_install;
-use ocg_core::state::CoreStateInner;
+use ocg_core::state::{CoreState, CoreStateInner};
+use ocg_core::user_operation::UserOperation;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -161,6 +163,7 @@ enum KeyAction {
 }
 
 fn main() -> Result<()> {
+    ocg_core::process_log::init();
     ocg_core::cpa_runtime::host::run_internal_supervisor_if_requested();
     run_cli()
 }
@@ -171,13 +174,24 @@ async fn run_cli() -> Result<()> {
     if let Commands::Skill { action } = &cli.command {
         return match action {
             SkillAction::Sync => {
-                let result = skill_install::sync_user_skill()?;
+                let started_at = chrono::Utc::now();
+                let result = skill_install::sync_user_skill();
+                record_skill_sync(
+                    &resolve_data_dir(cli.data_dir.clone()),
+                    started_at,
+                    result.is_ok(),
+                );
+                let result = result?;
                 println!("Codex skill {:?}: {}", result.status, result.path.display());
                 Ok(())
             }
         };
     }
     let data_dir = resolve_data_dir(cli.data_dir);
+    // Skill handling returned above, and the internal supervisor never reaches
+    // this process. Docker omits program-log-file via --no-default-features.
+    #[cfg(feature = "program-log-file")]
+    ocg_core::process_log::activate_file_sink(&data_dir);
     let cipher = resolve_cipher(&data_dir, cli.encryption_key)?;
 
     match cli.command {
@@ -252,7 +266,7 @@ async fn serve(
         && !cfg!(debug_assertions)
         && let Err(error) = skill_install::sync_user_skill()
     {
-        eprintln!("warning: Codex skill synchronization failed: {error:#}");
+        tracing::warn!("Codex skill synchronization failed: {error:#}");
     }
     let state = start_serve(data_dir, cipher, host, port, dashboard_dir).await?;
     println!("press Ctrl+C to stop");
@@ -279,15 +293,69 @@ async fn start_serve(
     };
     state.set_dashboard_dir(resolve_dashboard_dir(dashboard_dir, executable.as_deref()));
 
+    let operation = UserOperation::new(
+        &state,
+        OperationSource::Cli,
+        "gateway.start",
+        "gateway",
+        None,
+    );
     let mut config = state.config();
-    if let Some(port) = port {
+    let mut saved_revision = None;
+    if let Some(port) = port
+        && config.gateway_port != port
+    {
         config.gateway_port = port;
-        state.set_config(config.clone())?;
+        if let Err(error) = state.set_config_recorded(config.clone(), |revision| {
+            saved_revision = Some(revision);
+        }) {
+            operation.complete(
+                if saved_revision.is_some() {
+                    OperationOutcome::Partial
+                } else {
+                    OperationOutcome::Failed
+                },
+                Some("persist.failed"),
+                OperationMetadata {
+                    revision: saved_revision,
+                    changed_fields: if saved_revision.is_some() {
+                        vec!["gateway_port".into()]
+                    } else {
+                        vec![]
+                    },
+                    ..Default::default()
+                },
+            );
+            return Err(error);
+        }
     }
 
     let handle =
-        gateway::start_gateway_on(state.clone(), SocketAddr::new(host, config.gateway_port))
-            .await?;
+        match gateway::start_gateway_on(state.clone(), SocketAddr::new(host, config.gateway_port))
+            .await
+        {
+            Ok(handle) => handle,
+            Err(error) => {
+                operation.complete(
+                    if saved_revision.is_some() {
+                        OperationOutcome::Partial
+                    } else {
+                        OperationOutcome::Failed
+                    },
+                    Some("bind.failed"),
+                    OperationMetadata {
+                        revision: saved_revision,
+                        changed_fields: if saved_revision.is_some() {
+                            vec!["gateway_port".into()]
+                        } else {
+                            vec![]
+                        },
+                        ..Default::default()
+                    },
+                );
+                return Err(error);
+            }
+        };
     println!("gateway started on http://{}:{}", host, handle.port);
     println!("gateway key: [hidden; use status --show-key in a private terminal]");
     println!("dashboard: http://{}:{}/dashboard/", host, handle.port);
@@ -306,7 +374,15 @@ async fn start_serve(
         restorer.restore_owned_cpa_runtime_on_startup().await;
     });
 
-    let _ = state.db.lock().log_gateway(
+    operation.complete(
+        OperationOutcome::Success,
+        None,
+        OperationMetadata {
+            completed_count: Some(1),
+            ..OperationMetadata::default()
+        },
+    );
+    state.log_runtime_event(
         "info",
         "gateway",
         &format!("cli gateway started on port {}", config.gateway_port),
@@ -314,16 +390,32 @@ async fn start_serve(
     Ok(state)
 }
 
-async fn stop_serve(state: &CoreStateInner) {
+async fn stop_serve(state: &CoreState) {
+    let operation =
+        UserOperation::new(state, OperationSource::Cli, "gateway.stop", "gateway", None);
     state.stop_owned_cpa_runtime();
     let handle = state.gateway.lock().take();
     if let Some(handle) = handle {
-        let _ = GatewayLifecycle::stop_and_wait(handle).await;
+        let stopped = GatewayLifecycle::stop_and_wait(handle).await;
+        if stopped == ListenerStopOutcome::Graceful {
+            state.clear_gateway_error();
+            operation.complete(
+                OperationOutcome::Success,
+                None,
+                OperationMetadata {
+                    completed_count: Some(1),
+                    ..OperationMetadata::default()
+                },
+            );
+        } else {
+            operation.complete(
+                OperationOutcome::Failed,
+                Some("stop.failed"),
+                OperationMetadata::default(),
+            );
+        }
     }
-    let _ = state
-        .db
-        .lock()
-        .log_gateway("info", "gateway", "cli gateway stopped");
+    state.log_runtime_event("info", "gateway", "cli gateway stopped");
 }
 
 fn resolve_dashboard_dir(explicit: Option<PathBuf>, executable: Option<&Path>) -> Option<PathBuf> {
@@ -369,19 +461,119 @@ async fn key_command(
             password,
         } => {
             drop(db);
-            let account =
-                account_control::create_go_api_key(&state, name, key, username, password)?;
-            println!("added key {} ({})", account.id, account.name);
+            let mut operation = UserOperation::new(
+                &state,
+                OperationSource::Cli,
+                "account.create",
+                "account",
+                None,
+            );
+            let mut committed = None;
+            let result = account_control::create_go_api_key_recorded(
+                &state,
+                name,
+                key,
+                username,
+                password,
+                |id, revision| {
+                    operation.subject(id.to_string());
+                    committed = Some(revision);
+                },
+            );
+            match result {
+                Ok(account) => {
+                    operation.subject(account.id.clone());
+                    operation.complete(
+                        OperationOutcome::Success,
+                        None,
+                        OperationMetadata {
+                            revision: committed,
+                            completed_count: Some(1),
+                            ..OperationMetadata::default()
+                        },
+                    );
+                    println!("added key {} ({})", account.id, account.name);
+                }
+                Err(error) => {
+                    finish_control_recorded(
+                        operation,
+                        &error,
+                        committed.map(|revision| OperationMetadata {
+                            revision: Some(revision),
+                            completed_count: Some(1),
+                            failed_count: Some(1),
+                            ..Default::default()
+                        }),
+                    );
+                    return Err(error.into());
+                }
+            }
         }
         KeyAction::Remove { id } => {
             drop(db);
-            let account = state
-                .db
-                .lock()
-                .get_account(&id)?
-                .ok_or_else(|| anyhow::anyhow!("key not found: {id}"))?;
-            account_control::delete_account(&state, &id, None).await?;
-            println!("removed key {} ({})", id, account.name);
+            let operation = UserOperation::new(
+                &state,
+                OperationSource::Cli,
+                "account.delete",
+                "account",
+                Some(id.clone()),
+            );
+            let loaded = state.db.lock().get_account(&id);
+            let account = match loaded {
+                Ok(Some(account)) => account,
+                Ok(None) => {
+                    operation.complete(
+                        OperationOutcome::Rejected,
+                        Some("notfound"),
+                        OperationMetadata::default(),
+                    );
+                    return Err(anyhow::anyhow!("key not found: {id}"));
+                }
+                Err(error) => {
+                    operation.complete(
+                        OperationOutcome::Failed,
+                        Some("internal"),
+                        OperationMetadata::default(),
+                    );
+                    return Err(error);
+                }
+            };
+            let mut committed = None;
+            match account_control::delete_account_recorded(&state, &id, None, |revision| {
+                committed = Some(revision)
+            })
+            .await
+            {
+                Ok(revision) => {
+                    operation.complete(
+                        OperationOutcome::Success,
+                        None,
+                        OperationMetadata {
+                            revision: Some(revision),
+                            completed_count: Some(1),
+                            ..OperationMetadata::default()
+                        },
+                    );
+                    println!("removed key {} ({})", id, account.name);
+                }
+                Err(error) => {
+                    if let Some(revision) = committed {
+                        operation.complete(
+                            OperationOutcome::Partial,
+                            Some("internal"),
+                            OperationMetadata {
+                                revision: Some(revision),
+                                completed_count: Some(1),
+                                failed_count: Some(1),
+                                ..OperationMetadata::default()
+                            },
+                        );
+                    } else {
+                        finish_control(operation, &error);
+                    }
+                    return Err(error.into());
+                }
+            }
         }
         KeyAction::Enable { id } => {
             drop(db);
@@ -405,21 +597,80 @@ async fn key_command(
 }
 
 fn toggle_account(state: &Arc<CoreStateInner>, id: &str, enabled: bool) -> Result<()> {
-    let account = account_control::set_account_enabled(state, id, enabled)?;
-    println!(
-        "{} key {} ({})",
-        if enabled { "enabled" } else { "disabled" },
-        id,
-        account.name
+    let action = if enabled {
+        "account.enable"
+    } else {
+        "account.disable"
+    };
+    let operation = UserOperation::new(
+        state,
+        OperationSource::Cli,
+        action,
+        "account",
+        Some(id.to_string()),
     );
-    Ok(())
+    let mut committed = None;
+    match account_control::set_account_enabled_recorded(state, id, enabled, |revision| {
+        committed = Some(revision);
+    }) {
+        Ok(account) => {
+            operation.complete(
+                OperationOutcome::Success,
+                None,
+                OperationMetadata {
+                    changed_fields: vec!["enabled".to_string()],
+                    revision: committed,
+                    completed_count: Some(1),
+                    ..OperationMetadata::default()
+                },
+            );
+            println!(
+                "{} key {} ({})",
+                if enabled { "enabled" } else { "disabled" },
+                id,
+                account.name
+            );
+            Ok(())
+        }
+        Err(error) => {
+            finish_control_recorded(
+                operation,
+                &error,
+                committed.map(|revision| OperationMetadata {
+                    changed_fields: vec!["enabled".into()],
+                    revision: Some(revision),
+                    completed_count: Some(1),
+                    failed_count: Some(1),
+                    ..Default::default()
+                }),
+            );
+            Err(error.into())
+        }
+    }
 }
 
-fn reject_zen_key_operation(account: &Account) -> Result<()> {
-    if account.is_zen_free() {
-        anyhow::bail!("Zen Free is provider-owned; use the dashboard provider-settings operation");
+fn finish_control(operation: UserOperation, error: &AccountControlError) {
+    finish_control_recorded(operation, error, None);
+}
+
+fn finish_control_recorded(
+    operation: UserOperation,
+    error: &AccountControlError,
+    committed: Option<OperationMetadata>,
+) {
+    let (outcome, reason) = match error {
+        AccountControlError::NotFound => (OperationOutcome::Rejected, "notfound"),
+        AccountControlError::Invalid(_) => (OperationOutcome::Rejected, "invalid"),
+        AccountControlError::Conflict(_) | AccountControlError::RevisionConflict => {
+            (OperationOutcome::Rejected, "conflict")
+        }
+        AccountControlError::Unavailable(_) => (OperationOutcome::Failed, "unavailable"),
+        AccountControlError::Internal(_) => (OperationOutcome::Failed, "internal"),
+    };
+    match committed {
+        Some(metadata) => operation.complete(OperationOutcome::Partial, Some(reason), metadata),
+        None => operation.complete(outcome, Some(reason), OperationMetadata::default()),
     }
-    Ok(())
 }
 
 async fn status_command(
@@ -524,37 +775,37 @@ async fn ping_keys(
     message: &str,
     max_tokens: u32,
 ) -> Result<()> {
-    let targets: Vec<Account> = {
-        let db = state.db.lock();
-        match id {
-            Some(i) => match db.get_account(i)? {
-                Some(a) => {
-                    reject_zen_key_operation(&a)?;
-                    if a.credential_kind == CredentialKind::ApiKey
-                        && a.provider_id == ocg_core::provider::OPENCODE_PROVIDER_ID
-                        && a.setup_step.is_ready()
-                        && !a.key_cipher.is_empty()
-                    {
-                        vec![a]
-                    } else {
-                        anyhow::bail!("account setup is not complete and cannot be pinged")
-                    }
-                }
-                None => anyhow::bail!("key not found: {i}"),
-            },
-            None => db
-                .list_accounts()?
-                .into_iter()
-                .filter(|a| {
-                    a.credential_kind == CredentialKind::ApiKey
-                        && a.provider_id == ocg_core::provider::OPENCODE_PROVIDER_ID
-                        && a.setup_step.is_ready()
-                        && !a.key_cipher.is_empty()
-                })
-                .collect(),
+    let operation = UserOperation::new(
+        state,
+        OperationSource::Cli,
+        "account.ping",
+        "account",
+        id.map(str::to_string),
+    );
+    let targets = match load_ping_targets(state, id) {
+        Ok(targets) => targets,
+        Err(error) => {
+            let (outcome, reason) = match &error {
+                PingLoadError::NotFound(_) => (OperationOutcome::Rejected, "notfound"),
+                PingLoadError::Forbidden => (OperationOutcome::Rejected, "forbidden"),
+                PingLoadError::NotReady => (OperationOutcome::Rejected, "notready"),
+                PingLoadError::Store(_) => (OperationOutcome::Failed, "internal"),
+            };
+            operation.complete(outcome, Some(reason), OperationMetadata::default());
+            return Err(error.into());
         }
     };
     if targets.is_empty() {
+        operation.complete(
+            OperationOutcome::Success,
+            None,
+            OperationMetadata {
+                requested_count: Some(0),
+                completed_count: Some(0),
+                failed_count: Some(0),
+                ..OperationMetadata::default()
+            },
+        );
         println!("no keys to ping");
         return Ok(());
     }
@@ -564,16 +815,137 @@ async fn ping_keys(
         model,
         message
     );
-    for account in targets {
-        let (status, body) = ping_one(state, &account, model, message, max_tokens).await;
+    let mut completed = 0_u32;
+    let mut failed = 0_u32;
+    for account in &targets {
+        let (status, body) = ping_one(state, account, model, message, max_tokens).await;
+        if status == 200 {
+            completed = completed.saturating_add(1);
+        } else {
+            failed = failed.saturating_add(1);
+        }
         let verdict = if status == 200 { "OK" } else { "FAIL" };
         println!(
             "[{}] {} ({}) status={} {}",
             verdict, account.id, account.name, status, body
         );
     }
+    let outcome = if failed == 0 {
+        OperationOutcome::Success
+    } else if completed == 0 {
+        OperationOutcome::Failed
+    } else {
+        OperationOutcome::Partial
+    };
+    let related_ids = if targets.len() <= ocg_core::log_types::MAX_RELATED_IDS {
+        targets
+            .iter()
+            .map(|account| account.id.clone())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    operation.complete(
+        outcome,
+        (outcome != OperationOutcome::Success).then_some("upstream"),
+        OperationMetadata {
+            requested_count: Some(u32::try_from(targets.len()).unwrap_or(u32::MAX)),
+            completed_count: Some(completed),
+            failed_count: Some(failed),
+            related_ids,
+            ..OperationMetadata::default()
+        },
+    );
     Ok(())
+}
+
+#[derive(Debug)]
+enum PingLoadError {
+    NotFound(String),
+    Forbidden,
+    NotReady,
+    Store(anyhow::Error),
+}
+
+impl std::fmt::Display for PingLoadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(id) => write!(formatter, "key not found: {id}"),
+            Self::Forbidden => formatter.write_str(
+                "Zen Free is provider-owned; use the dashboard provider-settings operation",
+            ),
+            Self::NotReady => {
+                formatter.write_str("account setup is not complete and cannot be pinged")
+            }
+            Self::Store(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for PingLoadError {}
+
+fn load_ping_targets(
+    state: &CoreStateInner,
+    id: Option<&str>,
+) -> std::result::Result<Vec<Account>, PingLoadError> {
+    let db = state.db.lock();
+    match id {
+        Some(id) => match db.get_account(id).map_err(PingLoadError::Store)? {
+            Some(account) => {
+                if account.is_zen_free() {
+                    return Err(PingLoadError::Forbidden);
+                }
+                if account.credential_kind == CredentialKind::ApiKey
+                    && account.provider_id == ocg_core::provider::OPENCODE_PROVIDER_ID
+                    && account.setup_step.is_ready()
+                    && !account.key_cipher.is_empty()
+                {
+                    Ok(vec![account])
+                } else {
+                    Err(PingLoadError::NotReady)
+                }
+            }
+            None => Err(PingLoadError::NotFound(id.to_string())),
+        },
+        None => Ok(db
+            .list_accounts()
+            .map_err(PingLoadError::Store)?
+            .into_iter()
+            .filter(|account| {
+                account.credential_kind == CredentialKind::ApiKey
+                    && account.provider_id == ocg_core::provider::OPENCODE_PROVIDER_ID
+                    && account.setup_step.is_ready()
+                    && !account.key_cipher.is_empty()
+            })
+            .collect()),
+    }
 }
 
 #[cfg(test)]
 mod tests;
+
+fn record_skill_sync(data_dir: &Path, started_at: chrono::DateTime<chrono::Utc>, success: bool) {
+    let operation = ocg_core::log_types::OperationLog {
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        started_at,
+        completed_at: Some(chrono::Utc::now()),
+        action: "skill.sync".into(),
+        source: OperationSource::Cli,
+        actor_id: None,
+        subject_type: Some("skill".into()),
+        subject_id: Some("ocg-manager".into()),
+        outcome: if success {
+            OperationOutcome::Success
+        } else {
+            OperationOutcome::Failed
+        },
+        reason_code: (!success).then(|| "sync.failed".into()),
+        metadata: Default::default(),
+    };
+    if Database::record_existing_operation(data_dir, &operation).is_err() {
+        tracing::warn!(
+            action = "skill.sync",
+            "operation receipt could not be stored"
+        );
+    }
+}

@@ -584,16 +584,84 @@ enum TransferError {
     Internal,
 }
 
+/// Honest transfer counters. Duplicates and excluded managed accounts are not
+/// failures. `skipped_invalid` is zero on the live success path; invalid rows
+/// reject the whole request. The classifier still accepts a non-zero value so
+/// a receipt test can show Partial/Failed without changing the API.
+pub(super) struct TransferOperationReceipt {
+    pub outcome: Option<(crate::log_types::OperationOutcome, &'static str)>,
+    pub requested: u32,
+    pub completed: u32,
+    pub failed: Option<u32>,
+}
+
+pub(super) fn transfer_import_receipt(
+    written: u64,
+    duplicates: u64,
+    skipped_invalid: u64,
+) -> TransferOperationReceipt {
+    use crate::log_types::OperationOutcome;
+    let requested = super::settings::count_u32(
+        written
+            .saturating_add(duplicates)
+            .saturating_add(skipped_invalid),
+    );
+    let completed = super::settings::count_u32(written);
+    if skipped_invalid == 0 {
+        TransferOperationReceipt {
+            outcome: None,
+            requested,
+            completed,
+            failed: None,
+        }
+    } else if written > 0 {
+        TransferOperationReceipt {
+            outcome: Some((OperationOutcome::Partial, "internal")),
+            requested,
+            completed,
+            failed: Some(super::settings::count_u32(skipped_invalid)),
+        }
+    } else {
+        TransferOperationReceipt {
+            outcome: Some((OperationOutcome::Failed, "internal")),
+            requested,
+            completed,
+            failed: Some(super::settings::count_u32(skipped_invalid)),
+        }
+    }
+}
+
+pub(super) fn transfer_exclusion_receipt(included: u64, excluded: u64) -> TransferOperationReceipt {
+    TransferOperationReceipt {
+        outcome: None,
+        requested: super::settings::count_u32(included.saturating_add(excluded)),
+        completed: super::settings::count_u32(included),
+        failed: None,
+    }
+}
+
 pub(super) async fn export_accounts(
     State(state): State<CoreState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    no_store(
-        export_accounts_inner(state, headers, body)
-            .await
-            .into_response(),
-    )
+    let op = super::settings::open_dashboard(&state, "account.transfer.export", "account", None);
+    let receipt_state = state.clone();
+    let result = export_accounts_inner(state, headers, body).await;
+    let counts = match &result {
+        Ok(Json(export)) => {
+            let receipt =
+                transfer_exclusion_receipt(export.exported_accounts, export.skipped_accounts);
+            (
+                Some(receipt.requested),
+                Some(receipt.completed),
+                receipt.failed,
+            )
+        }
+        Err(_) => (None, None, None),
+    };
+    let recorded = super::settings::record_after(op, &receipt_state, &[], counts, None, result);
+    no_store(recorded.into_response())
 }
 
 pub(super) async fn preview_import(
@@ -613,11 +681,28 @@ pub(super) async fn import_accounts(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    no_store(
-        import_accounts_inner(state, headers, body)
-            .await
-            .into_response(),
-    )
+    let op = super::settings::open_dashboard(&state, "account.transfer.import", "account", None);
+    let receipt_state = state.clone();
+    let mut effect = super::settings::CommittedEffect::Atomic;
+    let result = import_accounts_inner(state, headers, body, &mut effect).await;
+    let (ok_outcome, counts) = match &result {
+        Ok(Json(imported)) => {
+            let receipt =
+                transfer_import_receipt(imported.imported_accounts, imported.duplicate_accounts, 0);
+            (
+                receipt.outcome,
+                (
+                    Some(receipt.requested),
+                    Some(receipt.completed),
+                    receipt.failed,
+                ),
+            )
+        }
+        Err(_) => (None, (None, None, None)),
+    };
+    let recorded =
+        super::settings::record_effect(op, &receipt_state, &[], counts, ok_outcome, effect, result);
+    no_store(recorded.into_response())
 }
 
 async fn export_accounts_inner(
@@ -698,6 +783,7 @@ async fn import_accounts_inner(
     state: CoreState,
     headers: HeaderMap,
     body: Bytes,
+    effect: &mut super::settings::CommittedEffect,
 ) -> Result<Json<AccountImportResult>, V3ApiError> {
     ensure_transport(&state, &headers)?;
     ensure_body_bound(&state, &body)?;
@@ -945,10 +1031,12 @@ async fn import_accounts_inner(
     // request-preparation aggregate so the next request resolves against it
     // without re-entering the settings gate. This reuses the `db` guard already
     // held for the import: taking `state.db.lock()` again here would deadlock
-    // on the non-reentrant mutex.
-    state
-        .publish_gateway_preparation(&db)
-        .map_err(|error| V3ApiError::conflict_at(&state, error.to_string()))?;
+    // on the non-reentrant mutex. A publish failure leaves the committed import
+    // in place, so the receipt is partial rather than an atomic conflict.
+    if let Err(error) = state.publish_gateway_preparation(&db) {
+        *effect = super::settings::CommittedEffect::Partial { reason: "internal" };
+        return Err(V3ApiError::conflict_at(&state, error.to_string()));
+    }
     let revision = state.settings_revision();
 
     Ok(Json(AccountImportResult {

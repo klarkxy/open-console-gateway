@@ -91,6 +91,10 @@ pub struct CoreStateInner {
     /// `set_config` (primary refresh).
     pub credential_snapshot: RwLock<crate::gateway_keys::CredentialSnapshot>,
     pub gateway: Mutex<Option<GatewayHandle>>,
+    /// Current listener failure, independent of historical dashboard logs.
+    gateway_last_error: Mutex<Option<String>>,
+    /// The currently accepted desktop update owns one receipt through finish.
+    desktop_update_operation: Mutex<Option<crate::user_operation::UserOperation>>,
     /// Serializes complete listener replacement transitions. This async gate
     /// may span listener shutdown awaits; the synchronous `gateway` mutex may
     /// not.
@@ -385,6 +389,51 @@ pub enum HostSettingsError {
     GatewayBind(anyhow::Error),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostSettingsEffects {
+    None,
+    Partial,
+    Compensated,
+}
+
+#[derive(Debug)]
+pub(crate) struct HostSettingsFailure {
+    pub error: HostSettingsError,
+    pub effects: HostSettingsEffects,
+}
+
+impl From<HostSettingsError> for HostSettingsFailure {
+    fn from(error: HostSettingsError) -> Self {
+        Self {
+            error,
+            effects: HostSettingsEffects::None,
+        }
+    }
+}
+
+fn configuration_changes_restored(
+    previous: &AppConfig,
+    committed: &AppConfig,
+    current: &AppConfig,
+) -> bool {
+    let (
+        Ok(serde_json::Value::Object(previous)),
+        Ok(serde_json::Value::Object(committed)),
+        Ok(serde_json::Value::Object(current)),
+    ) = (
+        serde_json::to_value(previous),
+        serde_json::to_value(committed),
+        serde_json::to_value(current),
+    )
+    else {
+        return false;
+    };
+    committed
+        .iter()
+        .filter(|(field, value)| previous.get(*field) != Some(*value))
+        .all(|(field, _)| current.get(field) == previous.get(field))
+}
+
 impl HostSettingsError {
     pub const AUTO_START_UNAVAILABLE: &'static str = crate::desktop::AUTO_START_UNAVAILABLE;
     pub const DOCK_VISIBILITY_UNAVAILABLE: &'static str =
@@ -477,10 +526,10 @@ impl CoreStateInner {
             let level = if browser_recovery.issues.is_empty() {
                 "info"
             } else {
-                eprintln!("warning: {summary}: {}", browser_recovery.issues.join("; "));
+                tracing::warn!("{summary}: {}", browser_recovery.issues.join("; "));
                 "warn"
             };
-            let _ = db.log_gateway(level, "browser", &summary);
+            crate::process_log::diagnostic(level, "browser", &summary);
         }
         let (config, needs_persist) = load_config(&db)?;
         config.validate().map_err(anyhow::Error::msg)?;
@@ -543,6 +592,8 @@ impl CoreStateInner {
             process_generation: (uuid::Uuid::new_v4().as_u128() as u64) & 0x0000_FFFF_FFFF_FFFF,
             credential_snapshot: RwLock::new(credential_snapshot),
             gateway: Mutex::new(None),
+            gateway_last_error: Mutex::new(None),
+            desktop_update_operation: Mutex::new(None),
             gateway_lifecycle: tokio::sync::Mutex::new(()),
             dashboard_session_token: Mutex::new(uuid::Uuid::new_v4().simple().to_string()),
             dashboard_local_mode: AtomicBool::new(false),
@@ -978,11 +1029,13 @@ impl CoreStateInner {
         self.reload_provider_contracts_locked(&db)
     }
 
-    /// Caller holds settings_update. Build every fallible runtime view before
-    /// committing, then install while the DB lock still excludes new readers.
-    pub(crate) fn commit_configuration_update<T>(
+    /// Notify the action owner after its SQLite commit and revision install,
+    /// before fallible publication. The callback only captures receipt facts;
+    /// it must not reenter the database or configuration locks.
+    pub(crate) fn commit_configuration_update_recorded<T>(
         &self,
         mutation: impl FnOnce(&Database) -> crate::Result<T>,
+        on_committed: impl FnOnce(u64),
     ) -> crate::Result<T> {
         let db = self.db.lock();
         let tx = db.conn.unchecked_transaction()?;
@@ -991,6 +1044,7 @@ impl CoreStateInner {
         let runtime = self.prepare_imported_node_runtime(&db)?;
         tx.commit()?;
         self.install_imported_node_runtime(runtime);
+        on_committed(self.settings_revision());
         // One atomic swap publishes the whole generation: routing rows, config,
         // contracts-backed route set, and pricing can no longer disagree.
         self.publish_gateway_preparation(&db)?;
@@ -1112,8 +1166,8 @@ impl CoreStateInner {
         // aggregate in place and the revision drift makes the next reader
         // surface the same error the old gate-held read would have returned.
         if let Err(error) = self.publish_gateway_preparation(&self.db.lock()) {
-            eprintln!(
-                "warning: failed to republish the request preparation view after a catalog restriction: {error}"
+            tracing::warn!(
+                "failed to republish the request preparation view after a catalog restriction: {error}"
             );
         }
     }
@@ -1256,6 +1310,81 @@ impl CoreStateInner {
         self.desktop.start_desktop_update(expected_version)
     }
 
+    pub(crate) fn start_desktop_update_recorded(
+        self: &Arc<Self>,
+        expected_version: String,
+        mut operation: crate::user_operation::UserOperation,
+    ) -> Result<(), DesktopUpdateStartError> {
+        use crate::log_types::OperationOutcome;
+        let status = self.desktop_update_status();
+        let mut slot = self.desktop_update_operation.lock();
+        let rejection = if !status.install_supported {
+            Some(DesktopUpdateStartError::Unsupported)
+        } else if slot.is_some()
+            || matches!(
+                status.phase,
+                DesktopUpdatePhase::Checking
+                    | DesktopUpdatePhase::Downloading
+                    | DesktopUpdatePhase::Installing
+            )
+        {
+            Some(DesktopUpdateStartError::Busy)
+        } else {
+            None
+        };
+        if let Some(error) = rejection {
+            drop(slot);
+            operation.complete(
+                OperationOutcome::Rejected,
+                Some(match &error {
+                    DesktopUpdateStartError::Unsupported => "updateUnsupported",
+                    _ => "updateBusy",
+                }),
+                Default::default(),
+            );
+            return Err(error);
+        }
+        // Record and hand over before invoking the starter: its background
+        // job may finish immediately. The weak handle cannot retain CoreState
+        // through its own pending-operation slot.
+        operation.accepted(Default::default());
+        *slot = Some(operation);
+        drop(slot);
+        let result = self.start_desktop_update(expected_version);
+        if let Err(error) = &result {
+            let (outcome, reason) = match error {
+                DesktopUpdateStartError::Unsupported => {
+                    (OperationOutcome::Rejected, "updateUnsupported")
+                }
+                DesktopUpdateStartError::Busy => (OperationOutcome::Rejected, "updateBusy"),
+                DesktopUpdateStartError::Starter(_) => {
+                    (OperationOutcome::Failed, "updateStartFailed")
+                }
+            };
+            self.finish_desktop_update_operation(outcome, reason);
+        }
+        result
+    }
+
+    fn finish_desktop_update_operation(
+        &self,
+        outcome: crate::log_types::OperationOutcome,
+        reason: &'static str,
+    ) {
+        let operation = self.desktop_update_operation.lock().take();
+        if let Some(operation) = operation {
+            operation.complete(outcome, Some(reason), Default::default());
+        }
+    }
+
+    /// Called only after the native installer has actually returned success.
+    pub fn set_desktop_update_completed(&self) {
+        self.finish_desktop_update_operation(
+            crate::log_types::OperationOutcome::Success,
+            "installed",
+        );
+    }
+
     pub fn set_desktop_update_progress(&self, downloaded: u64, total: Option<u64>) -> bool {
         self.desktop.set_desktop_update_progress(downloaded, total)
     }
@@ -1266,10 +1395,18 @@ impl CoreStateInner {
 
     pub fn set_desktop_update_failed(&self, error: impl Into<String>) {
         self.desktop.set_desktop_update_failed(error);
+        self.finish_desktop_update_operation(
+            crate::log_types::OperationOutcome::Failed,
+            "updateFailed",
+        );
     }
 
     pub fn set_desktop_update_idle(&self) {
         self.desktop.set_desktop_update_idle();
+        self.finish_desktop_update_operation(
+            crate::log_types::OperationOutcome::Rejected,
+            "cancelled",
+        );
     }
 
     fn prepare_config(
@@ -1301,13 +1438,27 @@ impl CoreStateInner {
     }
 
     pub fn set_config(&self, config: AppConfig) -> crate::Result<()> {
+        self.set_config_recorded(config, |_| {})
+    }
+
+    /// Same persist and publish as [`set_config`]. `on_committed` runs after the
+    /// config row and in-memory generation are installed, before
+    /// `publish_gateway_preparation`. The callback holds no extra locks; it must
+    /// not reenter the database, settings, or configuration locks. The database
+    /// lock is still held.
+    pub fn set_config_recorded(
+        &self,
+        config: AppConfig,
+        on_committed: impl FnOnce(u64),
+    ) -> crate::Result<()> {
         let (config, http_client) = self.prepare_config(config)?;
         let config_json = serde_json::to_string(&config)?;
         let db = self.db.lock();
         db.set_config(&config_json)?;
         // Keep the DB lock across the install and the publish so a concurrent
         // reader cannot see the new config with a stale route set or aggregate.
-        self.apply_persisted_config(config, http_client);
+        let revision = self.apply_persisted_config(config, http_client);
+        on_committed(revision);
         self.publish_gateway_preparation(&db)?;
         drop(db);
         Ok(())
@@ -1326,18 +1477,37 @@ impl CoreStateInner {
         previous: &AppConfig,
         next: AppConfig,
     ) -> Result<(), HostSettingsError> {
+        self.apply_host_settings_recorded(previous, next)
+            .map_err(|failure| failure.error)
+    }
+
+    pub(crate) fn apply_host_settings_recorded(
+        &self,
+        previous: &AppConfig,
+        next: AppConfig,
+    ) -> Result<(), HostSettingsFailure> {
         let next_auto_start = next.auto_start;
         let next_show_dock_icon = next.show_dock_icon;
         let auto_start_supported = self.auto_start_supported();
         let dock_visibility_supported = self.dock_visibility_supported();
         if !auto_start_supported && next_auto_start != previous.auto_start {
-            return Err(HostSettingsError::AutoStartUnsupported);
+            return Err(HostSettingsError::AutoStartUnsupported.into());
         }
         if !dock_visibility_supported && next_show_dock_icon != previous.show_dock_icon {
-            return Err(HostSettingsError::DockVisibilityUnsupported);
+            return Err(HostSettingsError::DockVisibilityUnsupported.into());
         }
 
-        self.set_config(next).map_err(HostSettingsError::Persist)?;
+        let mut committed = false;
+        if let Err(error) = self.set_config_recorded(next, |_| committed = true) {
+            return Err(HostSettingsFailure {
+                error: HostSettingsError::Persist(error),
+                effects: if committed {
+                    HostSettingsEffects::Partial
+                } else {
+                    HostSettingsEffects::None
+                },
+            });
+        }
         let runtime_sync = (|| -> crate::Result<()> {
             if auto_start_supported {
                 self.sync_auto_start(next_auto_start)?;
@@ -1355,6 +1525,9 @@ impl CoreStateInner {
             let dock_rollback_error = dock_visibility_supported
                 .then(|| self.sync_dock_visibility(previous.show_dock_icon).err())
                 .flatten();
+            let restored = config_rollback_error.is_none()
+                && auto_start_rollback_error.is_none()
+                && dock_rollback_error.is_none();
             let mut message = format!("failed to synchronize desktop settings: {sync_error}");
             if let Some(error) = config_rollback_error {
                 message.push_str(&format!("; failed to restore settings: {error}"));
@@ -1365,7 +1538,14 @@ impl CoreStateInner {
             if let Some(error) = dock_rollback_error {
                 message.push_str(&format!("; failed to restore Dock visibility: {error}"));
             }
-            return Err(HostSettingsError::Sync(message));
+            return Err(HostSettingsFailure {
+                error: HostSettingsError::Sync(message),
+                effects: if restored {
+                    HostSettingsEffects::Compensated
+                } else {
+                    HostSettingsEffects::Partial
+                },
+            });
         }
         Ok(())
     }
@@ -1411,6 +1591,23 @@ impl CoreStateInner {
         committed_revision: u64,
         wait_for_previous: bool,
     ) -> Result<(), HostSettingsError> {
+        self.rebind_listener_after_settings_commit_recorded(
+            previous,
+            committed,
+            committed_revision,
+            wait_for_previous,
+        )
+        .await
+        .map_err(|failure| failure.error)
+    }
+
+    pub(crate) async fn rebind_listener_after_settings_commit_recorded(
+        self: &Arc<Self>,
+        previous: AppConfig,
+        committed: AppConfig,
+        committed_revision: u64,
+        wait_for_previous: bool,
+    ) -> Result<(), HostSettingsFailure> {
         if let Err(error) = self
             .rebind_gateway_listener_if_port_changed(
                 previous.gateway_port,
@@ -1419,14 +1616,31 @@ impl CoreStateInner {
             )
             .await
         {
-            if let Err(rollback_error) =
-                self.compensate_failed_listener_rebind(&committed, previous, committed_revision)
+            let restored = match self.compensate_failed_listener_rebind(
+                &committed,
+                previous.clone(),
+                committed_revision,
+            ) {
+                Ok(restored) => restored,
+                Err(rollback_error) => {
+                    return Err(HostSettingsFailure {
+                        error: HostSettingsError::GatewayBind(anyhow::anyhow!(
+                            "{error}; failed to restore the configured Gateway port: {rollback_error}"
+                        )),
+                        effects: HostSettingsEffects::Partial,
+                    });
+                }
+            };
+            // Compensation restores the port only. Other fields committed by
+            // this action may remain; unrelated later writes are excluded.
+            let effects = if restored
+                && configuration_changes_restored(&previous, &committed, &self.config())
             {
-                return Err(HostSettingsError::GatewayBind(anyhow::anyhow!(
-                    "{error}; failed to restore the configured Gateway port: {rollback_error}"
-                )));
-            }
-            return Err(error);
+                HostSettingsEffects::Compensated
+            } else {
+                HostSettingsEffects::Partial
+            };
+            return Err(HostSettingsFailure { error, effects });
         }
         Ok(())
     }
@@ -1498,7 +1712,7 @@ impl CoreStateInner {
         &self,
         config: AppConfig,
         http_client: crate::http_client::ForwardRouteSet,
-    ) {
+    ) -> u64 {
         let should_reset_routing = {
             let mut current_config = self.config.lock();
             let mut current_client = self.http_client.lock();
@@ -1535,10 +1749,10 @@ impl CoreStateInner {
             if let Some(existing) = snapshot.get(&config.gateway_key)
                 && existing.id != crate::gateway_keys::PRIMARY_KEY_ID
             {
-                eprintln!(
-                    "warning: primary key value collides with sub key `{}`; \
+                tracing::warn!(
+                    "primary key value collides with sub key `{}`; \
                          the API-layer gate should have rejected this write",
-                    existing.name
+                    existing.id
                 );
             }
             let stale_value = snapshot
@@ -1556,10 +1770,11 @@ impl CoreStateInner {
                 },
             );
         }
-        self.settings_revision.fetch_add(1, Ordering::AcqRel);
+        let revision = self.settings_revision.fetch_add(1, Ordering::AcqRel) + 1;
         if should_reset_routing {
             self.routing.reset();
         }
+        revision
     }
 
     /// Resolves an authenticating credential by presented value; used by the
@@ -1585,14 +1800,28 @@ impl CoreStateInner {
         self.data_dir.clone()
     }
 
-    /// Persist one low-frequency lifecycle/control-plane event without making
-    /// observability a prerequisite for the operation that already succeeded.
+    /// Emit a program diagnostic without writing dashboard history.
     /// Callers must pass an already-sanitized message: never include Keys,
     /// request bodies, authorization headers, or credential-bearing URLs.
     pub fn log_runtime_event(&self, level: &str, category: &str, message: &str) {
-        if let Err(error) = self.db.lock().log_gateway(level, category, message) {
-            eprintln!("warning: failed to persist runtime event category={category}: {error}");
-        }
+        crate::process_log::diagnostic(level, category, message);
+    }
+
+    pub fn gateway_last_error(&self) -> Option<String> {
+        self.gateway_last_error.lock().clone()
+    }
+
+    pub(crate) fn record_gateway_error(&self, error: &str) {
+        *self.gateway_last_error.lock() = Some(
+            crate::redaction::redact_text(error)
+                .chars()
+                .take(512)
+                .collect(),
+        );
+    }
+
+    pub fn clear_gateway_error(&self) {
+        *self.gateway_last_error.lock() = None;
     }
 
     pub fn recover_browser_profiles_for_account(
@@ -1835,8 +2064,9 @@ impl crate::account_control::AccountControlHost for CoreStateInner {
         self.db.lock().delete_account(id)
     }
 
-    fn log_gateway(&self, level: &str, category: &str, message: &str) -> anyhow::Result<()> {
-        Database::log_gateway(&self.db.lock(), level, category, message)
+    fn log_program_event(&self, level: &str, category: &str, message: &str) -> anyhow::Result<()> {
+        crate::process_log::diagnostic(level, category, message);
+        Ok(())
     }
 
     fn stop_browser_account(
@@ -1957,8 +2187,9 @@ impl crate::usage_sync::UsageSyncStore for Database {
             next_eligible_at,
         )
     }
-    fn log_gateway(&self, level: &str, category: &str, message: &str) -> anyhow::Result<()> {
-        Database::log_gateway(self, level, category, message)
+    fn log_program_event(&self, level: &str, category: &str, message: &str) -> anyhow::Result<()> {
+        crate::process_log::diagnostic(level, category, message);
+        Ok(())
     }
 }
 

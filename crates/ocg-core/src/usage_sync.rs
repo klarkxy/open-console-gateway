@@ -297,7 +297,7 @@ pub trait UsageSyncStore {
         failure_streak: i64,
         next_eligible_at: DateTime<Utc>,
     ) -> anyhow::Result<()>;
-    fn log_gateway(&self, level: &str, category: &str, message: &str) -> anyhow::Result<()>;
+    fn log_program_event(&self, level: &str, category: &str, message: &str) -> anyhow::Result<()>;
 }
 
 /// Process-level usage-sync host: database/config/proxy/fetch/clock/scheduler
@@ -656,7 +656,11 @@ impl ControlPlaneWorkers {
             return;
         }
         host.with_sync_store(|store| {
-            let _ = store.log_gateway("info", "usage_sync", "event=official_usage_worker_started");
+            let _ = store.log_program_event(
+                "info",
+                "usage_sync",
+                "event=official_usage_worker_started",
+            );
         });
         let weak = host.downgrade();
         tokio::spawn(async move {
@@ -666,7 +670,7 @@ impl ControlPlaneWorkers {
                 };
                 if let Err(error) = run_scheduler_once(&state).await {
                     state.with_sync_store(|store| {
-                        let _ = store.log_gateway(
+                        let _ = store.log_program_event(
                             "warn",
                             "usage_sync",
                             &format!("official usage scheduler tick failed: {error}"),
@@ -996,7 +1000,7 @@ fn audit_official_usage_result(
         }
     };
     state.with_sync_store(|store| {
-        let _ = store.log_gateway(level, "usage_sync", &message);
+        let _ = store.log_program_event(level, "usage_sync", &message);
     });
 }
 
@@ -1244,7 +1248,7 @@ fn record_attempt_failure_guarded(
             if let Err(error) =
                 store.record_account_usage_sync_failure(account_id, now, streak, next)
             {
-                let _ = store.log_gateway(
+                let _ = store.log_program_event(
                     "warn",
                     "usage_sync",
                     &format!("failed to persist usage-sync backoff for {account_id}: {error}"),
