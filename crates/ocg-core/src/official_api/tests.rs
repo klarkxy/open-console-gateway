@@ -58,23 +58,6 @@ fn official_api_financial_capability_requires_provenance_and_fixed_destination()
     ));
 }
 #[test]
-fn official_attempt_price_does_not_compute_an_amount() {
-    for (kind, model) in [
-        (OfficialApiKind::Deepseek, "deepseek-flash"),
-        (OfficialApiKind::Zhipu, "glm-5.3"),
-    ] {
-        let price = OfficialAttemptPrice {
-            provider_id: "fixture".into(),
-            sheet: pricing::seed(kind),
-            model: model.into(),
-            at: at(),
-        };
-        assert_eq!(price.amount(1_000_000, 100_000, 100_000, 0), None);
-        assert_eq!(price.amount(0, 0, 0, 0), None);
-        assert_eq!(price.amount(100, 100, 0, 0), None);
-    }
-}
-#[test]
 fn official_api_balances_keep_total_and_components_separate_and_missing_unknown() {
     let body = json!({"is_available":true,"balance_infos":[{"currency":"CNY","total_balance":"12.5","granted_balance":"2.5","topped_up_balance":"10"},{"currency":"USD","total_balance":"-0.1","granted_balance":"0","topped_up_balance":"-0.1"}]});
     let rows = balance::parse(&serde_json::to_vec(&body).unwrap(), at()).unwrap();

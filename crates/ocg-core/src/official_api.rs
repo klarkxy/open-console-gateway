@@ -1,9 +1,10 @@
 //! Official API financial evidence for matching saved presets, never arbitrary URLs.
 //!
-//! Inference stays on Configurable HTTP. Prices are reference estimates, not a
-//! bill, wallet, quota authority, or exchange-rate conversion. Explicit refresh
-//! is the only network path. Account balance failure never changes routing.
+//! Inference stays on Configurable HTTP. Stored price sheets remain historical
+//! values. Explicit balance refresh is the only network path. Account balance
+//! failure never changes routing.
 pub(crate) mod balance;
+#[cfg(test)]
 pub(crate) mod pricing;
 #[cfg(debug_assertions)]
 #[doc(hidden)]
@@ -12,7 +13,7 @@ pub use balance::{OfficialApiTestGuard, install_official_api_endpoint_for_test};
 use crate::dynamic::DynamicProviderRuntime;
 use crate::models::Account;
 use crate::provider::UpstreamProtocolKind;
-use chrono::{DateTime, Datelike, Timelike, Utc, Weekday};
+use chrono::{DateTime, Utc};
 use ocg_domain::dynamic::DynamicAuthKind;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -188,26 +189,6 @@ pub(crate) fn balance_source(account: &Account, runtime: &DynamicProviderRuntime
         hash.update(value.as_bytes());
     }
     format!("official-api-balance:{}", hex::encode(hash.finalize()))
-}
-
-pub(crate) fn peak_at(now: DateTime<Utc>) -> bool {
-    !matches!(now.weekday(), Weekday::Sat | Weekday::Sun)
-        && ((1..4).contains(&now.hour()) || (6..10).contains(&now.hour()))
-}
-
-/// Frozen per-attempt reference; a refresh cannot reprice a stream in flight.
-#[derive(Clone)]
-pub(crate) struct OfficialAttemptPrice {
-    pub provider_id: String,
-    pub sheet: OfficialPriceSheet,
-    pub model: String,
-    pub at: DateTime<Utc>,
-}
-
-impl OfficialAttemptPrice {
-    pub fn amount(&self, _prompt: i64, _output: i64, _cached: i64, _created: i64) -> Option<f64> {
-        None
-    }
 }
 
 #[cfg(test)]

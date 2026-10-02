@@ -6,7 +6,6 @@ use crate::gateway::attempt::{
     CredentialResolver, ProxyRoutingModel, TransportFailureKind, TransportSendFailure,
     UpstreamAuth,
 };
-use crate::gateway::attempt_pricing::apply_native_cost_attribution;
 use crate::gateway::classify::{
     PreflightKind, ProviderErrorClass, RateLimitFallback, StreamClassifyInput,
     TransportClassifyInput, classify_http, classify_preflight, classify_stream, classify_transport,
@@ -54,9 +53,7 @@ const MAX_UPSTREAM_ERROR_BODY_BYTES: usize = 64 * 1024;
 
 mod live_send;
 
-use crate::gateway::attempt_pricing::{
-    PlatformAttemptPrice, RequestPricingSnapshot, metadata_metrics, pricing_metrics,
-};
+use crate::gateway::attempt_pricing::{RequestPricingSnapshot, metadata_metrics, pricing_metrics};
 pub(crate) use live_send::{
     LiveSendAccountGate, LiveSendAuthError, LiveSendSelection, authorize_live_send_secret,
     confirm_live_send_secret, verify_execution_authorization,
@@ -333,11 +330,7 @@ struct ForwardAttemptContext {
     credential_account_id: Option<String>,
     client_key_id: Option<String>,
     client_key_name: Option<String>,
-    platform_price: Option<PlatformAttemptPrice>,
-    official_price: Option<crate::official_api::OfficialAttemptPrice>,
-    credit_attempt: Option<crate::billing::CreditAttempt>,
     credit_log_id: Option<i64>,
-    credit_token_pricing_supported: bool,
 }
 
 impl ForwardAttemptContext {
@@ -369,12 +362,8 @@ impl ForwardAttemptContext {
             credential_account_id: None,
             client_key_id: None,
             client_key_name: None,
-            platform_price: None,
-            official_price: None,
             restriction_details: None,
-            credit_attempt: None,
             credit_log_id: None,
-            credit_token_pricing_supported: true,
         }
     }
 
@@ -3848,7 +3837,6 @@ fn log_forward(
     let failure_value = failure
         .as_ref()
         .and_then(|failure| serde_json::from_str(&failure.diagnostic_json).ok());
-    let persist_metrics = metrics.clone();
     let id = db.log_forward(&ForwardLog {
         id: 0,
         timestamp: Utc::now(),
@@ -3889,39 +3877,17 @@ fn log_forward(
         duration_ms: failure.as_ref().map(|failure| failure.duration_ms),
         diagnostic: failure_value,
     })?;
-    persist_log_identity(db, id, context, &persist_metrics)?;
+    persist_log_identity(db, id, context)?;
     Ok(id)
 }
 
-fn settle_credit_log(
-    db: &Database,
-    id: i64,
-    context: &ForwardAttemptContext,
-    metrics: &ForwardMetrics,
-    status: &str,
-) -> Result<()> {
-    let _ = (db, id, context, metrics, status);
-    Ok(())
-}
-
-fn persist_log_identity(
-    db: &Database,
-    id: i64,
-    context: &ForwardAttemptContext,
-    metrics: &ForwardMetrics,
-) -> Result<()> {
+fn persist_log_identity(db: &Database, id: i64, context: &ForwardAttemptContext) -> Result<()> {
     let Some(mut attribution) = db.forward_log_native_attribution(id)? else {
         return Ok(());
     };
     attribution.requested_model = Some(context.requested_model.clone());
     attribution.resolved_alias = context.resolved_alias.clone();
     attribution.upstream_model = Some(context.upstream_model.clone());
-    apply_native_cost_attribution(
-        &mut attribution,
-        context.platform_price.as_ref(),
-        context.official_price.as_ref(),
-        metrics,
-    );
     db.set_forward_log_native_attribution(id, &attribution)?;
     Ok(())
 }
@@ -3945,8 +3911,8 @@ fn finalize_logged_forward(
         error_message,
         diagnostic,
     )?;
-    persist_log_identity(db, id, context, &metrics)?;
     log_attempt_outcome(db, context, status, http_status, diagnostic);
+    persist_log_identity(db, id, context)?;
     Ok(())
 }
 
@@ -4131,12 +4097,8 @@ mod stream_usage_tests {
             credential_account_id: None,
             client_key_id: None,
             client_key_name: None,
-            platform_price: None,
-            official_price: None,
             restriction_details: None,
-            credit_attempt: None,
             credit_log_id: None,
-            credit_token_pricing_supported: true,
         };
         let mut headers = HeaderMap::new();
         headers.insert("x-request-id", format!("request-{secret}").parse().unwrap());
@@ -4473,12 +4435,8 @@ mod stream_outcome_guard_tests {
             credential_account_id: Some("acct-1".into()),
             client_key_id: None,
             client_key_name: None,
-            platform_price: None,
-            official_price: None,
             restriction_details: None,
-            credit_attempt: None,
             credit_log_id: None,
-            credit_token_pricing_supported: true,
         }
     }
 

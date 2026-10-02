@@ -1,7 +1,5 @@
 use super::*;
-use crate::gateway::attempt_pricing::{
-    bind_official_execution_price, bind_platform_attempt_price, capture_execution_pricing,
-};
+use crate::gateway::attempt_pricing::capture_execution_pricing;
 use crate::kernel::pricing::PricingSnapshot;
 
 fn install_test_credits(state: &CoreState, account: &Account) {
@@ -60,7 +58,7 @@ fn credit_test_account(state: &CoreState, endpoint: &str) -> Account {
 }
 
 #[tokio::test]
-async fn credits_json_and_sse_settle_one_native_receipt_and_survive_reopen() {
+async fn credits_json_and_sse_preserve_balance_without_receipts_after_reopen() {
     for stream in [false, true] {
         let app = axum::Router::new().fallback(axum::routing::post(move || async move {
             let usage = json!({"prompt_tokens":1_000_000,"completion_tokens":100_000,
@@ -144,7 +142,7 @@ async fn credits_json_and_sse_settle_one_native_receipt_and_survive_reopen() {
 }
 
 #[tokio::test]
-async fn credits_cancelled_before_headers_keeps_uncertainty_and_releases_calibration() {
+async fn credits_cancelled_before_headers_keep_balance_and_allow_calibration() {
     let received = Arc::new(tokio::sync::Notify::new());
     let signal = received.clone();
     let app = axum::Router::new().fallback(axum::routing::post(move || {
@@ -187,26 +185,21 @@ async fn credits_cancelled_before_headers_keeps_uncertainty_and_releases_calibra
 }
 
 #[test]
-fn credits_startup_recovers_an_abandoned_pre_send_receipt_once() {
+fn credits_startup_preserves_an_abandoned_receipt_byte_exact() {
     let (dir, state) = test_state("credit-restart-pending");
     let endpoint = "https://example.test/v1/chat/completions";
     let account = credit_test_account(&state, endpoint);
-    let mut context = attempt_context("local-custom");
-    context.credit_attempt = crate::db::billing::capture_on(
+    let context = attempt_context("local-custom");
+    let attempt = crate::db::billing::capture_on(
         &state.db.lock().conn,
         ACCOUNT,
         endpoint,
         "local-custom",
         Utc::now(),
     )
+    .unwrap()
     .unwrap();
-    let attempt = context.credit_attempt.clone().unwrap();
-    let pricing = RequestPricingSnapshot::Credits {
-        attempt: attempt.clone(),
-        provider_id: CUSTOM_PROVIDER_ID.into(),
-        revision: "credit-estimate:fixture".into(),
-        token_pricing_supported: true,
-    };
+    let pricing = RequestPricingSnapshot::Unpriced;
     let db = state.db.lock();
     let log_id = DbAttemptSink::new(&db)
         .insert(
@@ -221,6 +214,14 @@ fn credits_startup_recovers_an_abandoned_pre_send_receipt_once() {
         )
         .unwrap();
     crate::db::billing::attach_attempt_on(&db.conn, log_id, &attempt).unwrap();
+    let historical_receipt: String = db
+        .conn
+        .query_row(
+            "SELECT credit_receipt_json FROM forward_logs WHERE id=?1",
+            [log_id],
+            |row| row.get(0),
+        )
+        .unwrap();
     drop(db);
     assert_eq!(test_credit_view(&state).pending_requests, 0);
     drop(state);
@@ -232,6 +233,15 @@ fn credits_startup_recovers_an_abandoned_pre_send_receipt_once() {
         assert_eq!(view.pending_requests, 0);
         assert_eq!(view.unpriced_requests, 0);
         assert_eq!(view.remaining, 100_000_000.0);
+        let receipt: String = db
+            .conn
+            .query_row(
+                "SELECT credit_receipt_json FROM forward_logs WHERE id=?1",
+                [log_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(receipt, historical_receipt);
         drop(db);
     }
     let _ = fs::remove_dir_all(dir);
@@ -497,12 +507,8 @@ fn attempt_context(upstream: &str) -> ForwardAttemptContext {
         credential_account_id: Some(ACCOUNT.into()),
         client_key_id: None,
         client_key_name: None,
-        platform_price: None,
-        official_price: None,
         restriction_details: None,
-        credit_attempt: None,
         credit_log_id: None,
-        credit_token_pricing_supported: true,
     }
 }
 
@@ -511,20 +517,14 @@ fn bind_for(
     account: &Account,
     upstream: &str,
 ) -> (RequestPricingSnapshot, ForwardAttemptContext) {
-    let mut context = attempt_context(upstream);
-    let pricing = bind_platform_attempt_price(
+    let context = attempt_context(upstream);
+    let plan = chat_plan(upstream, None);
+    let pricing = capture_execution_pricing(
         state,
-        &(account).into(),
-        upstream,
-        RequestPricingSnapshot::for_account(
-            state,
-            &(account).into(),
-            crate::routing_runtime::adapter_for_account(account, None),
-            state.pricing_snapshot(),
-        ),
-        None,
+        &account.into(),
+        crate::routing_runtime::adapter_for_account(account, None),
+        &plan,
     );
-    context.attach_pricing(&pricing);
     (pricing, context)
 }
 
@@ -536,9 +536,9 @@ fn assert_usd_and_quota_null(metrics: &ForwardMetrics) {
     assert_ne!(metrics.cost_state, "priced");
 }
 
-/// Priced forward-log row needs the live token counts for the insert.
+/// Persist real usage without consuming a stored price snapshot.
 #[allow(clippy::too_many_arguments)]
-fn persist_priced_row(
+fn persist_unpriced_row(
     state: &CoreState,
     account: &Account,
     pricing: &RequestPricingSnapshot,
@@ -548,7 +548,7 @@ fn persist_priced_row(
     cached: i64,
     cache_creation: i64,
 ) -> i64 {
-    let mut metrics = pricing_metrics(
+    let metrics = pricing_metrics(
         pricing,
         UPSTREAM,
         prompt,
@@ -557,7 +557,6 @@ fn persist_priced_row(
         cache_creation,
         None,
     );
-    metrics.scope_to_provider(Some(account.provider_id.as_str()), true);
     DbAttemptSink::new(&state.db.lock())
         .insert(
             &(account).into(),
@@ -589,7 +588,7 @@ fn explicit_opencode_identity_is_copied_from_the_original_client_map() {
 }
 
 #[test]
-fn frozen_exact_model_and_group_writes_native_cost_without_usd() {
+fn stored_platform_prices_do_not_price_new_log_rows() {
     let (dir, state) = test_state("frozen");
     let account = custom_account(&state);
     persist_custom(&state, &account);
@@ -599,13 +598,12 @@ fn frozen_exact_model_and_group_writes_native_cost_without_usd() {
         snapshot(vec![billable_price()], false),
     );
     let (pricing, context) = bind_for(&state, &account, UPSTREAM);
-    let mut metrics = pricing_metrics(&pricing, "ignored-alias", 10, 5, 0, 0, None);
-    metrics.scope_to_provider(Some(CUSTOM_PROVIDER_ID), true);
+    let metrics = pricing_metrics(&pricing, "ignored-alias", 10, 5, 0, 0, None);
     assert_eq!(metrics.cost_state, "unknown");
     assert_usd_and_quota_null(&metrics);
     assert_eq!(metrics.pricing_revision_id, None);
 
-    let id = persist_priced_row(&state, &account, &pricing, &context, 10, 5, 0, 0);
+    let id = persist_unpriced_row(&state, &account, &pricing, &context, 10, 5, 0, 0);
     let log = state.db.lock().list_forward_logs(1).unwrap().remove(0);
     assert_eq!(log.cost_state, "unknown");
     assert_eq!(log.raw_cost_usd, None);
@@ -626,7 +624,7 @@ fn frozen_exact_model_and_group_writes_native_cost_without_usd() {
 }
 
 #[test]
-fn cache_arithmetic_applies_only_when_rates_are_known() {
+fn stored_cache_rates_do_not_price_new_log_rows() {
     let (dir, state) = test_state("cache-known");
     let account = custom_account(&state);
     persist_custom(&state, &account);
@@ -636,7 +634,7 @@ fn cache_arithmetic_applies_only_when_rates_are_known() {
         snapshot(vec![billable_price()], false),
     );
     let (pricing, context) = bind_for(&state, &account, UPSTREAM);
-    let id = persist_priced_row(&state, &account, &pricing, &context, 10, 2, 4, 1);
+    let id = persist_unpriced_row(&state, &account, &pricing, &context, 10, 2, 4, 1);
     let native = state
         .db
         .lock()
@@ -658,11 +656,10 @@ fn cache_tokens_without_known_rate_stay_unknown_and_do_not_use_input() {
     price.cache_write = None;
     link_with_snapshot(&state, pinned_group(), snapshot(vec![price], false));
     let (pricing, context) = bind_for(&state, &account, UPSTREAM);
-    let mut metrics = pricing_metrics(&pricing, UPSTREAM, 10, 2, 4, 0, None);
-    metrics.scope_to_provider(Some(CUSTOM_PROVIDER_ID), true);
+    let metrics = pricing_metrics(&pricing, UPSTREAM, 10, 2, 4, 0, None);
     assert_eq!(metrics.cost_state, "unknown");
     assert_usd_and_quota_null(&metrics);
-    let id = persist_priced_row(&state, &account, &pricing, &context, 10, 2, 4, 0);
+    let id = persist_unpriced_row(&state, &account, &pricing, &context, 10, 2, 4, 0);
     let native = state
         .db
         .lock()
@@ -699,11 +696,10 @@ fn auto_group_stale_expired_incomplete_unavailable_and_official_are_unknown() {
         persist_custom(&state, &account);
         link_with_snapshot(&state, group.clone(), snap.clone());
         let (pricing, context) = bind_for(&state, &account, UPSTREAM);
-        let mut metrics = pricing_metrics(&pricing, UPSTREAM, 10, 5, 0, 0, None);
-        metrics.scope_to_provider(Some(CUSTOM_PROVIDER_ID), true);
+        let metrics = pricing_metrics(&pricing, UPSTREAM, 10, 5, 0, 0, None);
         assert_eq!(metrics.cost_state, "unknown", "{label}");
         assert_usd_and_quota_null(&metrics);
-        let id = persist_priced_row(&state, &account, &pricing, &context, 10, 5, 0, 0);
+        let id = persist_unpriced_row(&state, &account, &pricing, &context, 10, 5, 0, 0);
         let native = state
             .db
             .lock()
@@ -742,12 +738,11 @@ fn auto_group_stale_expired_incomplete_unavailable_and_official_are_unknown() {
         link_with_snapshot(&state, pinned_group(), snapshot(vec![price], false));
         let (pricing, context) = bind_for(&state, &account, UPSTREAM);
         if label == "expired" {
-            let mut metrics = pricing_metrics(&pricing, UPSTREAM, 10, 5, 0, 0, None);
-            metrics.scope_to_provider(Some(CUSTOM_PROVIDER_ID), true);
+            let metrics = pricing_metrics(&pricing, UPSTREAM, 10, 5, 0, 0, None);
             assert_eq!(metrics.cost_state, "unknown", "{label} estimate");
             assert_usd_and_quota_null(&metrics);
         }
-        let id = persist_priced_row(&state, &account, &pricing, &context, 10, 5, 0, 0);
+        let id = persist_unpriced_row(&state, &account, &pricing, &context, 10, 5, 0, 0);
         let native = state
             .db
             .lock()
@@ -773,8 +768,7 @@ fn linked_unknown_does_not_inherit_go_provider_prices() {
     link_with_snapshot(&state, pinned_group(), snapshot(vec![official], false));
     let (pricing, _) = bind_for(&state, &account, UPSTREAM);
     assert!(matches!(pricing, RequestPricingSnapshot::Unpriced));
-    let mut metrics = pricing_metrics(&pricing, "gpt-5", 1_000_000, 1_000_000, 0, 0, None);
-    metrics.scope_to_provider(Some(CUSTOM_PROVIDER_ID), true);
+    let metrics = pricing_metrics(&pricing, "gpt-5", 1_000_000, 1_000_000, 0, 0, None);
     assert_eq!(metrics.cost_state, "unknown");
     assert_usd_and_quota_null(&metrics);
     drop(state);
@@ -782,7 +776,7 @@ fn linked_unknown_does_not_inherit_go_provider_prices() {
 }
 
 #[test]
-fn streaming_finalize_retains_the_attempt_frozen_price() {
+fn stream_finalization_keeps_cost_unknown_after_snapshot_refresh() {
     let (dir, state) = test_state("stream-retain");
     let account = custom_account(&state);
     persist_custom(&state, &account);
@@ -858,7 +852,7 @@ fn streaming_finalize_retains_the_attempt_frozen_price() {
 }
 
 #[test]
-fn fallback_attempt_rebinds_from_the_live_link_snapshot() {
+fn fallback_attempts_stay_unpriced_after_snapshot_refresh() {
     let (dir, state) = test_state("fallback-rebind");
     let account = custom_account(&state);
     persist_custom(&state, &account);
@@ -868,7 +862,7 @@ fn fallback_attempt_rebinds_from_the_live_link_snapshot() {
         snapshot(vec![billable_price()], false),
     );
     let (first, first_ctx) = bind_for(&state, &account, UPSTREAM);
-    let first_id = persist_priced_row(&state, &account, &first, &first_ctx, 10, 0, 0, 0);
+    let first_id = persist_unpriced_row(&state, &account, &first, &first_ctx, 10, 0, 0, 0);
 
     let mut next = billable_price();
     next.input = Some(0.05);
@@ -887,7 +881,7 @@ fn fallback_attempt_rebinds_from_the_live_link_snapshot() {
     );
 
     let (second, second_ctx) = bind_for(&state, &account, UPSTREAM);
-    let second_id = persist_priced_row(&state, &account, &second, &second_ctx, 10, 0, 0, 0);
+    let second_id = persist_unpriced_row(&state, &account, &second, &second_ctx, 10, 0, 0, 0);
     let first_native = state
         .db
         .lock()
@@ -907,7 +901,7 @@ fn fallback_attempt_rebinds_from_the_live_link_snapshot() {
 }
 
 #[test]
-fn o05_fallback_from_a_to_b_keeps_each_attempts_native_rate() {
+fn fallback_between_linked_accounts_keeps_both_attempts_unpriced() {
     let (dir, state) = test_state("o05-ab");
     let mut account_a = custom_account(&state);
     account_a.id = "custom-a".into();
@@ -983,8 +977,8 @@ fn o05_fallback_from_a_to_b_keeps_each_attempts_native_rate() {
     ctx_b.route_account_id = Some("custom-b".into());
     ctx_b.credential_account_id = Some("custom-b".into());
 
-    let id_a = persist_priced_row(&state, &account_a, &pricing_a, &ctx_a, 10, 5, 0, 0);
-    let id_b = persist_priced_row(&state, &account_b, &pricing_b, &ctx_b, 10, 5, 0, 0);
+    let id_a = persist_unpriced_row(&state, &account_a, &pricing_a, &ctx_a, 10, 5, 0, 0);
+    let id_b = persist_unpriced_row(&state, &account_b, &pricing_b, &ctx_b, 10, 5, 0, 0);
     let native_a = state
         .db
         .lock()
@@ -2397,173 +2391,82 @@ async fn r06_persisted_draft_does_not_send_from_captured_configured_snapshot() {
 }
 
 #[test]
-fn official_api_attempt_pricing_is_native_frozen_and_never_attaches_to_foreign_routes() {
+fn official_price_history_survives_unpriced_insert_and_stream_finalization() {
     use crate::official_api::{OfficialApiKind, pricing};
-    let (dir, state) = test_state("official-api-cost");
-    for (kind, model, amount, currency) in [
-        (OfficialApiKind::Deepseek, "deepseek-flash", 0.0015, "USD"),
-        (OfficialApiKind::Zhipu, "glm-5.3", 0.036, "CNY"),
+    for (kind, model) in [
+        (OfficialApiKind::Deepseek, "deepseek-flash"),
+        (OfficialApiKind::Zhipu, "glm-5.3"),
     ] {
+        let (dir, state) = test_state("official-api-history");
         let runtime = crate::official_api::tests::runtime(kind);
         let mut account = custom_account(&state);
         account.provider_id = runtime.id.clone();
-        let body = Bytes::from(
-            serde_json::to_vec(
-                &json!({"model":model,"messages":[{"role":"user","content":"hello"}]}),
-            )
-            .unwrap(),
+        let sheet = pricing::seed(kind);
+        let historical_json = serde_json::to_string(&sheet).unwrap();
+        state.db.lock().conn.execute(
+            "INSERT INTO provider_pricing_snapshots (provider_id,revision,activated_at,document_updated_at,source_url,content_hash,snapshot_json)
+             VALUES (?1,?2,?3,?3,?4,?5,?6)",
+            rusqlite::params![runtime.id, sheet.revision, sheet.observed_at.to_rfc3339(), sheet.source_url,
+                sheet.revision.rsplit(':').next().unwrap(), historical_json],
+        ).unwrap();
+        let plan = chat_plan(model, Some(&runtime.endpoint_url));
+        let price = capture_execution_pricing(
+            &state,
+            &(&account).into(),
+            ProviderAdapterKind::ConfigurableHttp,
+            &plan,
         );
-        let parsed =
-            crate::gateway::protocol::parse_client_request(ApiFormat::ChatCompletions, body)
-                .unwrap();
-        let mut plan = crate::gateway::protocol::materialize_parsed_request(
-            &parsed,
-            &crate::gateway::protocol::MaterializeSpec {
-                client_model: model.into(),
-                upstream_model: model.into(),
-                resolved_alias: None,
-                channel: UpstreamChannel::Go,
-                upstream_base_override: None,
-                original_model: None,
-                forced_upstream: Some(ApiFormat::ChatCompletions),
-                effort_aliases: &[],
-                custom_route: Some(CustomRouteSpec {
-                    endpoint_url: runtime.endpoint_url.clone(),
-                    auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
-                }),
-            },
-        )
-        .unwrap();
-        let now = chrono::DateTime::parse_from_rfc3339("2026-09-17T01:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        // Exercise the shared estimator and real log-finalization path at a
-        // deterministic observation time, rather than relying on CI wall time.
-        let frozen = crate::official_api::OfficialAttemptPrice {
-            provider_id: runtime.id.clone(),
-            sheet: pricing::seed(kind),
-            model: model.into(),
-            at: now,
-        };
-        let price = RequestPricingSnapshot::OfficialApi(frozen.clone());
+        assert!(matches!(price, RequestPricingSnapshot::Unpriced));
         let metrics = pricing_metrics(&price, model, 1000, 1000, 0, 0, None);
-        assert_eq!(metrics.quota_debit, None);
-        assert_eq!(metrics.effective_paid_cost_usd, None);
-        assert_eq!(metrics.raw_cost_usd, None);
+        assert_usd_and_quota_null(&metrics);
         assert_eq!(metrics.cost_state, "unknown");
-        let _ = (currency, amount);
         let mut context = attempt_context(model);
         context.provider_id = Some(runtime.id.clone());
-        context.official_price = Some(frozen.clone());
         let id = DbAttemptSink::new(&state.db.lock())
             .insert(
                 &(&account).into(),
                 model,
-                "success",
+                "streaming",
                 Some(200),
-                metrics.clone(),
+                metadata_metrics(&price, None, "not_applicable"),
                 None,
                 &context,
                 None,
             )
             .unwrap();
-        let native = state
-            .db
-            .lock()
-            .forward_log_native_attribution(id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(native.native_cost_value, None);
-        assert_eq!(native.native_cost_currency, None);
-        // Finalizing a stream keeps the captured prices, not a later sheet.
         DbAttemptSink::new(&state.db.lock())
             .finalize(id, "success", Some(200), metrics, None, None, &context)
             .unwrap();
+        let db = state.db.lock();
+        let native = db.forward_log_native_attribution(id).unwrap().unwrap();
+        assert_eq!(native.native_cost_value, None);
+        assert_eq!(native.native_cost_currency, None);
+        assert_eq!(native.native_cost_unit, None);
+        let log = db.list_forward_logs(1).unwrap().remove(0);
+        assert_eq!(log.cost_state, "unknown");
+        assert_eq!(log.cost, None);
+        assert_eq!(log.pricing_revision_id, None);
         assert_eq!(
-            state
-                .db
-                .lock()
-                .forward_log_native_attribution(id)
+            db.latest_provider_pricing_snapshot(&runtime.id)
                 .unwrap()
                 .unwrap()
-                .native_cost_value,
-            None
+                .snapshot_json,
+            historical_json
         );
-        let mut positive = attempt_context(model);
-        let bound = bind_official_attempt_price(
-            &state,
-            &(&account).into(),
-            &plan,
-            std::slice::from_ref(&runtime),
-            RequestPricingSnapshot::Unpriced,
-        );
-        assert!(matches!(bound, RequestPricingSnapshot::Unpriced));
-        positive.attach_pricing(&bound);
-        assert!(positive.official_price.is_none());
-        for endpoint in [
-            "https://attacker.test/chat/completions",
-            "http://127.0.0.1:9/chat/completions",
-        ] {
-            plan.custom_route = Some(CustomRouteSpec {
-                endpoint_url: endpoint.into(),
-                auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
-            });
-            let context = attempt_context(model);
-            assert!(matches!(
-                bind_official_attempt_price(
-                    &state,
-                    &(&account).into(),
-                    &plan,
-                    std::slice::from_ref(&runtime),
-                    RequestPricingSnapshot::Unpriced
-                ),
-                RequestPricingSnapshot::Unpriced
-            ));
-            assert!(context.official_price.is_none());
-        }
-        plan.custom_route = Some(CustomRouteSpec {
-            endpoint_url: runtime.endpoint_url.clone(),
-            auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
-        });
-        plan.body = Bytes::from_static(br#"{"tools":[{"type":"web_search"}]}"#);
-        let mut context = attempt_context(model);
-        assert!(matches!(
-            bind_official_attempt_price(
-                &state,
-                &(&account).into(),
-                &plan,
-                std::slice::from_ref(&runtime),
-                RequestPricingSnapshot::Unpriced
-            ),
-            RequestPricingSnapshot::Unpriced
-        ));
-        context.official_price = Some(frozen.clone());
-        let missing = metadata_metrics(&price, None, "usage_missing");
-        let id = DbAttemptSink::new(&state.db.lock())
-            .insert(
-                &(&account).into(),
-                model,
-                "success_no_usage",
-                Some(200),
-                missing,
-                None,
-                &context,
-                None,
-            )
-            .unwrap();
-        assert!(
-            state
-                .db
-                .lock()
-                .forward_log_native_attribution(id)
+        drop(db);
+        drop(state);
+        let reopened = Database::open(dir.clone()).unwrap();
+        assert_eq!(
+            reopened
+                .latest_provider_pricing_snapshot(&runtime.id)
                 .unwrap()
                 .unwrap()
-                .native_cost_value
-                .is_none()
+                .snapshot_json,
+            historical_json
         );
+        drop(reopened);
+        let _ = fs::remove_dir_all(dir);
     }
-    drop(state);
-    let _ = fs::remove_dir_all(dir);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2580,7 +2483,7 @@ async fn forward_request(
     attempt: u32,
     retry: bool,
     headers: HeaderMap,
-    pricing: Arc<PricingSnapshot>,
+    _pricing: Arc<PricingSnapshot>,
     key: Option<&str>,
     _dynamics: &[crate::dynamic::DynamicProviderRuntime],
     selection: &LiveSendSelection,
@@ -2619,21 +2522,6 @@ async fn forward_request(
         selection,
     )
     .await
-}
-
-fn bind_official_attempt_price(
-    state: &CoreState,
-    account: &ExecutionCredential,
-    plan: &RequestPlan,
-    dynamics: &[crate::dynamic::DynamicProviderRuntime],
-    original: RequestPricingSnapshot,
-) -> RequestPricingSnapshot {
-    let mut account = account.clone();
-    account.official_pricing_kind = dynamics
-        .iter()
-        .find(|d| d.id == account.provider_id)
-        .and_then(crate::official_api::kind_for_runtime);
-    bind_official_execution_price(state, &account, plan, original)
 }
 
 fn frozen_test_plan(

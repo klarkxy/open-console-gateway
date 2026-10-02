@@ -64,35 +64,16 @@ pub(crate) fn load(
         );
         let version = version.context("missing credential version")?;
         ensure!(version > 0, "invalid credential version");
-        let destination = projection
+        projection
             .destinations
             .iter()
             .find(|d| d.id == destination_id)
             .context("missing execution destination")?;
-        let (preset, offering, draft): (Option<String>, Option<String>, bool) = db.conn.query_row(
-            "SELECT preset_id, offering, COALESCE(onboarding_draft, 0) FROM destinations WHERE id = ?1", [&destination_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
-        let official_pricing_kind = if destination.adapter
-            == ocg_domain::destination::AdapterKind::Http
-            && destination.auth_scheme == ocg_domain::destination::AuthScheme::Bearer
-            && offering.as_deref() == Some("api")
-        {
-            let kind = match preset.as_deref() {
-                Some("deepseek") => Some(crate::official_api::OfficialApiKind::Deepseek),
-                Some("zhipu") => Some(crate::official_api::OfficialApiKind::Zhipu),
-                _ => None,
-            };
-            kind.filter(|kind| {
-                destination
-                    .base_url
-                    .as_deref()
-                    .zip(destination.protocols.first())
-                    .is_some_and(|(url, protocol)| {
-                        crate::official_api::route_is_official(*kind, url, *protocol)
-                    })
-            })
-        } else {
-            None
-        };
+        let draft: bool = db.conn.query_row(
+            "SELECT COALESCE(onboarding_draft, 0) FROM destinations WHERE id = ?1",
+            [&destination_id],
+            |row| row.get(0),
+        )?;
         let setup: crate::models::AccountSetupStep =
             serde_json::from_value(serde_json::json!(step))
                 .context("invalid persisted credential readiness")?;
@@ -101,7 +82,6 @@ pub(crate) fn load(
             credential_id,
             destination_id,
             provider_id,
-            official_pricing_kind,
             name,
             key_cipher,
             enabled,

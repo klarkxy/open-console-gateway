@@ -1,53 +1,8 @@
 //! Typed financial evidence in the existing price and balance tables.
 use super::*;
-use crate::official_api::{
-    self, OfficialApiKind, OfficialBalance, OfficialPriceSheet, OfficialSpend,
-};
+use crate::official_api::{self, OfficialBalance, OfficialSpend};
 
 impl Database {
-    pub(crate) fn official_api_prices(
-        &self,
-        provider: &str,
-        kind: OfficialApiKind,
-    ) -> Result<OfficialPriceSheet> {
-        match self.latest_provider_pricing_snapshot(provider)? {
-            None => anyhow::bail!("official pricing is retired"),
-            Some(row) => {
-                let sheet: OfficialPriceSheet = serde_json::from_str(&row.snapshot_json)?;
-                anyhow::ensure!(
-                    sheet.kind == kind
-                        && row.source_url == sheet.source_url
-                        && row.revision == sheet.revision,
-                    "official price identity mismatch"
-                );
-                official_api::pricing::validate(&sheet)?;
-                Ok(sheet)
-            }
-        }
-    }
-
-    pub(crate) fn store_official_api_prices(
-        &self,
-        runtime: &DynamicProviderRuntime,
-        sheet: &OfficialPriceSheet,
-    ) -> Result<()> {
-        anyhow::ensure!(
-            official_api::kind_for_runtime(runtime) == Some(sheet.kind),
-            "official price provider mismatch"
-        );
-        official_api::pricing::validate(sheet)?;
-        let tx = self.conn.unchecked_transaction()?;
-        let current = get_dynamic_provider_on(&tx, &runtime.id)?
-            .ok_or_else(|| anyhow::anyhow!("provider removed"))?;
-        anyhow::ensure!(current == *runtime, "provider changed");
-        tx.execute("INSERT OR IGNORE INTO provider_pricing_snapshots
-            (provider_id,revision,activated_at,document_updated_at,source_url,content_hash,snapshot_json)
-            VALUES (?1,?2,?3,?3,?4,?5,?6)", params![runtime.id, sheet.revision, sheet.observed_at.to_rfc3339(), sheet.source_url,
-                sheet.revision.rsplit(':').next().unwrap_or_default(), serde_json::to_string(sheet)?])?;
-        tx.commit()?;
-        Ok(())
-    }
-
     pub(crate) fn official_api_balances(
         &self,
         account: &Account,

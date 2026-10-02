@@ -1,14 +1,20 @@
-//! Pure per-credential credit meter. Persistence, HTTP, and settlement live elsewhere.
+//! Manual per-credential credit meter. Persistence and HTTP live elsewhere.
+//! Historical receipt and debit fixtures compile only in tests.
 
+#[cfg(test)]
+use crate::billing_types::CreditRate;
 use crate::billing_types::{
     CreditBalanceCorrection, CreditBucket, CreditBucketKind, CreditConfiguration,
-    CreditConfigurationWrite, CreditMeterView, CreditPreset, CreditRate, MonthlyCredits,
+    CreditConfigurationWrite, CreditMeterView, CreditPreset, MonthlyCredits,
 };
 use anyhow::{Result, anyhow, bail, ensure};
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, TimeZone, Utc};
-use ocg_domain::billing::{BillingModel, BillingTokens};
+use ocg_domain::billing::BillingModel;
+#[cfg(test)]
+use ocg_domain::billing::BillingTokens;
 use ocg_domain::destination::AdapterKind;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
@@ -42,7 +48,8 @@ pub(crate) struct CreditMeterState {
     pub monthly_cursor: Option<DateTime<Utc>>,
 }
 
-/// Frozen attempt snapshot. Root stores this exact type; it carries no balances.
+/// Historical receipt fixture. Production preserves receipts as stored JSON.
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CreditAttempt {
@@ -258,6 +265,7 @@ impl CreditMeterState {
         self.validate()
     }
 
+    #[cfg(test)]
     pub(crate) fn deduct(&mut self, amount: f64, now: DateTime<Utc>) -> Result<()> {
         finite_amount(amount, "debit")?;
         self.advance(now)?;
@@ -393,6 +401,7 @@ impl CreditMeterState {
         self.validate()
     }
 
+    #[cfg(test)]
     pub(crate) fn capture_attempt(
         &self,
         account_id: String,
@@ -413,6 +422,7 @@ impl CreditMeterState {
         }
     }
 
+    #[cfg(test)]
     fn active_indices_by_expiry(&self, now: DateTime<Utc>) -> Vec<usize> {
         let mut indices: Vec<usize> = self
             .buckets
@@ -526,6 +536,7 @@ impl CreditMeterState {
     }
 }
 
+#[cfg(test)]
 impl CreditAttempt {
     /// Token total includes cache groups. Missing cache-write prices stay unknown.
     pub(crate) fn charge(&self, tokens: BillingTokens) -> Option<f64> {
@@ -534,6 +545,7 @@ impl CreditAttempt {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn credit_rate_for_model<'a>(
     rates: &'a [CreditRate],
     model: &str,

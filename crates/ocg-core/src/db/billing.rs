@@ -1,12 +1,17 @@
-//! Personal-account balances and idempotent request receipts. Callers own transactions.
+//! Personal-account balances. Callers own transactions.
+//! Legacy receipt creation/settlement exists only as a historical test fixture.
 
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Utc};
+#[cfg(test)]
 use ocg_domain::billing::BillingTokens;
 use rusqlite::{Connection, OptionalExtension, params};
+#[cfg(test)]
 use serde::{Deserialize, Serialize};
 
-use crate::billing::{CreditAttempt, CreditMeterState};
+#[cfg(test)]
+use crate::billing::CreditAttempt;
+use crate::billing::CreditMeterState;
 use crate::billing_types::{
     CreditBalanceCorrection, CreditBucket, CreditConfiguration, CreditConfigurationWrite,
     CreditMeterView, PortableCreditMeter,
@@ -168,6 +173,7 @@ pub(crate) fn read_view_on(
     Ok(Some(state.project(now, 0)))
 }
 
+#[cfg(test)]
 pub(crate) fn capture_on(
     conn: &Connection,
     account_id: &str,
@@ -188,6 +194,7 @@ pub(crate) fn capture_on(
     )))
 }
 
+#[cfg(test)]
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Receipt {
@@ -198,6 +205,7 @@ struct Receipt {
     finished_at: Option<DateTime<Utc>>,
 }
 
+#[cfg(test)]
 pub(crate) fn attach_attempt_on(
     conn: &Connection,
     log_id: i64,
@@ -215,6 +223,7 @@ pub(crate) fn attach_attempt_on(
     Ok(())
 }
 
+#[cfg(test)]
 fn receipt_on(conn: &Connection, log_id: i64) -> Result<Option<(String, Receipt)>> {
     let row: Option<(String, String)> = conn.query_row(
         "SELECT account_id, credit_receipt_json FROM forward_logs WHERE id=?1 AND credit_receipt_json IS NOT NULL",
@@ -224,10 +233,12 @@ fn receipt_on(conn: &Connection, log_id: i64) -> Result<Option<(String, Receipt)
         .transpose()
 }
 
+#[cfg(test)]
 pub(crate) fn settlement_finished_on(conn: &Connection, log_id: i64) -> Result<bool> {
     Ok(receipt_on(conn, log_id)?.is_none_or(|(_, receipt)| receipt.phase != "pending"))
 }
 
+#[cfg(test)]
 pub(crate) fn settle_on(
     conn: &Connection,
     log_id: i64,
@@ -286,6 +297,7 @@ pub(crate) fn settle_on(
 /// Cold startup only, under the directory's exclusive lifetime lock and a
 /// transaction: interrupted requests become explicit uncertainty exactly once.
 /// Startup recovery no longer settles or rewrites historic credit receipts.
+#[cfg(test)]
 pub(crate) fn recover_pending_on(conn: &Connection, now: DateTime<Utc>) -> Result<()> {
     let _ = (conn, now);
     Ok(())

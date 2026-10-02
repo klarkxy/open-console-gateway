@@ -6,7 +6,7 @@
 //! the v22 OpenCode Go snapshot JSON, and does not write that row back.
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{DateTime, Utc};
+use chrono::DateTime;
 use futures_util::StreamExt;
 use reqwest::redirect::{Attempt, Policy};
 use serde::{Deserialize, Serialize};

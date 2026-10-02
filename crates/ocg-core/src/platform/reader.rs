@@ -35,9 +35,6 @@ use std::time::Duration;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_BODY_BYTES: usize = 256 * 1024;
-const SNAPSHOT_TTL_SECS: i64 = 24 * 60 * 60;
-// New API 71c1fd7 sets this only after establishing dashboard user context.
-const NEW_API_AUTH_VERSION: &str = "864b7076dbcd0a3c01b5520316720ebf";
 
 const ERR_BASE_URL_INVALID: &str = "base_url.invalid";
 const ERR_AUTH_MISSING: &str = "auth.missing";
@@ -129,7 +126,6 @@ fn same_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
 
 pub(crate) struct Fetched {
     pub value: Value,
-    new_api_user_authenticated: bool,
 }
 
 async fn get_json(
@@ -236,12 +232,6 @@ async fn request_json(
         return Err(component_error(component, CODE_REDIRECT));
     }
     let status = response.status();
-    let new_api_user_authenticated = auth.is_some()
-        && response
-            .headers()
-            .get("Auth-Version")
-            .is_some_and(|value| value == NEW_API_AUTH_VERSION);
-
     let mut body = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
@@ -269,10 +259,7 @@ async fn request_json(
 
     let value: Value =
         serde_json::from_slice(&body).map_err(|_| component_error(component, CODE_PARSE))?;
-    Ok(Fetched {
-        value,
-        new_api_user_authenticated,
-    })
+    Ok(Fetched { value })
 }
 
 fn strip_bearer_prefix(value: &str) -> &str {
@@ -397,10 +384,6 @@ fn json_str(value: Option<&Value>) -> Option<&str> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
-}
-
-fn snapshot_expiry(now: i64) -> i64 {
-    now.saturating_add(SNAPSHOT_TTL_SECS)
 }
 
 fn leaks_secret(text: &str, secrets: &[&str]) -> bool {

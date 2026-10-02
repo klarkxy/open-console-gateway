@@ -784,11 +784,6 @@ async fn sub2_user_subscriptions_do_not_zero_missing_windows() {
 }
 
 #[test]
-fn snapshot_expiry_is_capped_at_24h() {
-    assert_eq!(snapshot_expiry(now()), now() + SNAPSHOT_TTL_SECS);
-}
-
-#[test]
 fn json_helpers_do_not_invent_zero_for_missing_values() {
     let value = json!({"used": 0, "limit": null});
     assert_eq!(json_f64(value.get("used")), Some(0.0));

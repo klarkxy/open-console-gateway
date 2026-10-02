@@ -333,22 +333,6 @@ pub struct PricingEstimate {
     pub cost_state: &'static str,
 }
 
-impl PricingEstimate {
-    /// No money, revision, or multiplier. New attempts use this instead of priced or free.
-    pub(crate) fn unknown() -> Self {
-        Self {
-            raw_cost_usd: None,
-            quota_debit: None,
-            effective_paid_cost_usd: None,
-            cost: None,
-            pricing_revision_id: None,
-            quota_multiplier: None,
-            local_adjustment_multiplier: None,
-            cost_state: "unknown",
-        }
-    }
-}
-
 /// Historical OpenCode Go usage limits. v13 and v22 read these only when
 /// a database has no stored pricing snapshot.
 pub const SEED_LIMITS: PricingLimits = PricingLimits {

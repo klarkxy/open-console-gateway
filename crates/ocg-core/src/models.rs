@@ -594,31 +594,6 @@ impl Default for ForwardMetrics {
     }
 }
 
-impl ForwardMetrics {
-    /// Constrain generic token-derived metrics to the selected provider's
-    /// verified pricing contract. Legacy rows without provider attribution are
-    /// intentionally left alone, while an explicitly attributed provider can
-    /// never inherit OpenCode Go pricing by accident.
-    pub(crate) fn scope_to_provider(&mut self, provider_id: Option<&str>, successful: bool) {
-        let Some(_provider_id) = provider_id else {
-            return;
-        };
-        self.cost = 0.0;
-        self.raw_cost_usd = None;
-        self.quota_debit = None;
-        self.effective_paid_cost_usd = None;
-        self.pricing_revision_id = None;
-        self.quota_multiplier = None;
-        self.local_adjustment_multiplier = None;
-        self.pricing_provider_id = None;
-        match self.cost_state {
-            "usage_missing" | "outcome_unknown" => {}
-            "not_applicable" if !successful => {}
-            _ => self.cost_state = "unknown",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForwardLogSummary {
     pub total_requests: i64,

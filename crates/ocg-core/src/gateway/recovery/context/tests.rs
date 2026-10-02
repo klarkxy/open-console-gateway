@@ -109,7 +109,6 @@ fn execution_row(destination: &Destination, version: u64, cipher: &str) -> Execu
         credential_id: "cred-retry".into(),
         destination_id: destination.id.clone(),
         provider_id: "custom".into(),
-        official_pricing_kind: None,
         name: "Lab".into(),
         key_cipher: cipher.into(),
         enabled: true,
