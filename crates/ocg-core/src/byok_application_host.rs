@@ -47,6 +47,7 @@ pub fn register(core: &crate::state::CoreState) {
 enum HostConsole {
     #[default]
     Stderr,
+    #[cfg(test)]
     Recording(Arc<Mutex<Vec<(Level, String)>>>),
 }
 
@@ -78,6 +79,7 @@ impl ByokNativeHost {
     fn report(&self, level: Level, message: impl std::fmt::Display) {
         match &self.console {
             HostConsole::Stderr => crate::runtime_log::console(level, message),
+            #[cfg(test)]
             HostConsole::Recording(lines) => {
                 if let Ok(mut lines) = lines.lock() {
                     lines.push((level, message.to_string()));
@@ -255,6 +257,7 @@ impl ByokNativeHost {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn configure(
         &self,
         client: ByokClient,
@@ -268,12 +271,12 @@ impl ByokNativeHost {
     ) -> ByokResult<ByokInspection> {
         require_closed(client, client_closed)?;
         validate_models(client, models)?;
-        if let Some(id) = default_model_id {
-            if !models.iter().any(|model| model.id == id) {
-                return Err(ByokError::invalid(
-                    "defaultModelId must be one of the selected models",
-                ));
-            }
+        if let Some(id) = default_model_id
+            && !models.iter().any(|model| model.id == id)
+        {
+            return Err(ByokError::invalid(
+                "defaultModelId must be one of the selected models",
+            ));
         }
         if gateway_v1_url.trim().is_empty() {
             return Err(ByokError::invalid("gatewayV1Url is required"));
@@ -498,6 +501,7 @@ impl ByokNativeHost {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn view(
         &self,
         client: ByokClient,

@@ -53,12 +53,13 @@ fn harness(name: &str) -> Harness {
         minimax: target(ByokClient::Minimax, &[".minimax", "config.yaml"]),
         zcode: target(ByokClient::Zcode, &[".zcode", "v2", "provider_config.json"]),
     };
-    let mut policy = LockPolicy::default();
-    policy.minimax_max_wait = Duration::from_millis(120);
-    policy.minimax_retry = Duration::from_millis(10);
-    policy.minimax_heartbeat = Duration::from_millis(40);
-    policy.zcode_max_wait = Duration::from_millis(120);
-    policy.zcode_retry_delays_ms = vec![10];
+    let policy = LockPolicy {
+        minimax_max_wait: Duration::from_millis(120),
+        minimax_retry: Duration::from_millis(10),
+        minimax_heartbeat: Duration::from_millis(40),
+        zcode_max_wait: Duration::from_millis(120),
+        zcode_retry_delays_ms: vec![10],
+    };
     Harness {
         root,
         host: ByokNativeHost::new(data_dir, paths, policy),
@@ -761,10 +762,9 @@ fn concurrent_configure_second_caller_sees_stale_fingerprint() {
     let ok = ra.is_ok() as u8 + rb.is_ok() as u8;
     assert_eq!(ok, 1);
     assert!(ra.is_err() || rb.is_err());
-    let err = if ra.is_err() {
-        ra.unwrap_err()
-    } else {
-        rb.unwrap_err()
+    let err = match (ra, rb) {
+        (Err(err), _) | (_, Err(err)) => err,
+        (Ok(_), Ok(_)) => unreachable!("one concurrent operation must fail"),
     };
     assert_eq!(err.kind, crate::byok_application::ByokErrorKind::Conflict);
 }
@@ -1109,13 +1109,13 @@ fn codex_catalog_omits_invented_reasoning_and_keeps_efforts() {
 }
 
 fn lock_policy_fast() -> LockPolicy {
-    let mut policy = LockPolicy::default();
-    policy.minimax_max_wait = Duration::from_millis(80);
-    policy.minimax_retry = Duration::from_millis(5);
-    policy.minimax_heartbeat = Duration::from_millis(20);
-    policy.zcode_max_wait = Duration::from_millis(80);
-    policy.zcode_retry_delays_ms = vec![5];
-    policy
+    LockPolicy {
+        minimax_max_wait: Duration::from_millis(80),
+        minimax_retry: Duration::from_millis(5),
+        minimax_heartbeat: Duration::from_millis(20),
+        zcode_retry_delays_ms: vec![5],
+        zcode_max_wait: Duration::from_millis(80),
+    }
 }
 
 fn dead_pid() -> u32 {
@@ -1842,7 +1842,7 @@ fn host_console_reports_a_stale_fingerprint_as_an_abandoned_operation() {
     let refreshed = inspect(&h.host, ByokClient::Codex);
     let written = read_text(&target_file(&h.host, ByokClient::Codex));
     fs::write(
-        &target_file(&h.host, ByokClient::Codex),
+        target_file(&h.host, ByokClient::Codex),
         format!("{written}# edited\n"),
     )
     .unwrap();

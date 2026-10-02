@@ -460,6 +460,7 @@ fn reclaim_dead_ocg_zcode(lock_dir: &Path) -> ByokResult<bool> {
     Ok(!lock_dir.exists())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_mtime_heartbeat(
     handle: File,
     identity: DirId,

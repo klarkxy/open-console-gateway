@@ -171,12 +171,12 @@ pub fn ensure_default_selected(
     default_model_id: Option<&str>,
     models: &[ByokModel],
 ) -> ByokResult<()> {
-    if let Some(id) = default_model_id {
-        if !models.iter().any(|model| model.id == id) {
-            return Err(ByokError::invalid(
-                "defaultModelId must be one of the selected models",
-            ));
-        }
+    if let Some(id) = default_model_id
+        && !models.iter().any(|model| model.id == id)
+    {
+        return Err(ByokError::invalid(
+            "defaultModelId must be one of the selected models",
+        ));
     }
     Ok(())
 }

@@ -398,12 +398,12 @@ fn same_catalog(configured: &str, catalog_path: &Path) -> bool {
     }
     let raw = PathBuf::from(configured);
     let mut candidates = vec![raw.clone()];
-    if raw.is_relative() {
-        if let Some(catalog_dir) = catalog_path.parent() {
-            candidates.push(catalog_dir.join(&raw));
-            if let Some(config_dir) = catalog_dir.parent() {
-                candidates.push(config_dir.join(&raw));
-            }
+    if raw.is_relative()
+        && let Some(catalog_dir) = catalog_path.parent()
+    {
+        candidates.push(catalog_dir.join(&raw));
+        if let Some(config_dir) = catalog_dir.parent() {
+            candidates.push(config_dir.join(&raw));
         }
     }
     candidates

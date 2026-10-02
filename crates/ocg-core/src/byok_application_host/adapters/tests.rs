@@ -1825,7 +1825,7 @@ fn adapters_export_more_than_one_hundred_models_without_truncation() {
     assert_eq!(mini_models.len(), expected.len());
     for id in &expected {
         assert!(
-            mini_models.contains_key(&serde_yaml_ng::Value::String(id.clone())),
+            mini_models.contains_key(serde_yaml_ng::Value::String(id.clone())),
             "MiniMax catalog omitted {id}"
         );
     }
@@ -1927,7 +1927,7 @@ fn adapters_preserve_exact_full_model_ids() {
         mini_root["custom_provider"]["ocg"]["models"]
             .as_mapping()
             .unwrap()
-            .contains_key(&serde_yaml_ng::Value::String(id.into()))
+            .contains_key(serde_yaml_ng::Value::String(id.into()))
     );
     assert_eq!(
         mini_root["defaultModel"].as_str(),

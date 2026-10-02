@@ -47,6 +47,8 @@ pub(crate) mod official_service;
 pub(crate) mod plan_usage;
 pub mod platform;
 pub mod pricing;
+#[cfg(windows)]
+pub mod private_file;
 pub(crate) mod protocol_probe;
 pub mod provider;
 pub mod provider_contracts;
