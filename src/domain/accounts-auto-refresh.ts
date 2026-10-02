@@ -1,4 +1,5 @@
 import type { BillingStatus } from "../api/billing.ts";
+import { ACCOUNT_REFRESH_CONCURRENCY } from "./account-refresh-scheduler.ts";
 
 export const ACCOUNT_AUTO_REFRESH_MS = 5 * 60_000;
 
@@ -31,7 +32,6 @@ export interface AccountRefreshTargets {
   current(id: string): AccountRefreshTarget | undefined;
 }
 
-/** One serial, lazy pass over all eligible accounts, independent of filters. */
 function normalizeTargets(
   source: AccountRefreshTarget[] | AccountRefreshTargets,
 ): AccountRefreshTargets {
@@ -42,62 +42,72 @@ function normalizeTargets(
   };
 }
 
+/** Lazy, bounded refreshes; each account publishes independently of its peers. */
 export function createAccountsAutoRefresh(options: {
   allowed: () => boolean;
   targets: () => AccountRefreshTarget[] | AccountRefreshTargets;
   now?: () => number;
   afterRefresh?: () => Promise<void>;
+  concurrency?: number;
 }) {
   const now = options.now ?? Date.now;
+  const concurrency = options.concurrency ?? ACCOUNT_REFRESH_CONCURRENCY;
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    throw new RangeError("refresh concurrency must be a positive integer");
+  }
   const attempts = new Map<string, { binding: string; at: number }>();
   let generation = 0;
-  let running = false;
+  let running: symbol | undefined;
 
   async function run(): Promise<void> {
     if (running || !options.allowed()) return;
-    running = true;
+    const operation = Symbol();
+    running = operation;
     const captured = generation;
     const current = () => captured === generation && options.allowed();
+    let attempted = false;
     try {
-      let targets = normalizeTargets(options.targets());
-      const ids = targets.ids();
+      const ids = [...new Set(normalizeTargets(options.targets()).ids())];
       const retained = new Set(ids);
       for (const id of attempts.keys()) if (!retained.has(id)) attempts.delete(id);
-      for (const id of ids) {
-        if (!current()) break;
-        // Previous I/O may have deleted, rebound, disabled, or refreshed this row.
-        targets = normalizeTargets(options.targets());
-        const target = targets.current(id);
-        if (!target || target.busy) continue;
-        const attempt = attempts.get(id);
-        const lastAttempt = attempt?.binding === target.binding ? attempt.at : 0;
-        const at = now();
-        if (target.nextAllowedAt > at) continue;
-        if (Math.max(target.observedAt, lastAttempt) + ACCOUNT_AUTO_REFRESH_MS > at) continue;
-        attempts.set(id, { binding: target.binding, at });
-        const isCurrent = () => {
-          const currentTarget = normalizeTargets(options.targets()).current(id);
-          return current() && currentTarget?.binding === target.binding;
-        };
-        try {
-          await target.refresh(isCurrent);
-        } catch {
-          // Keep last-good evidence; one failed provider must not stop the pass.
-        } finally {
-          if (captured === generation) {
-            attempts.set(id, { binding: target.binding, at: now() });
-            await options.afterRefresh?.().catch(() => undefined);
+      let cursor = 0;
+      async function worker(): Promise<void> {
+        while (cursor < ids.length && current()) {
+          const id = ids[cursor++]!;
+          // Resolve immediately before starting, not when the pass was queued.
+          const target = normalizeTargets(options.targets()).current(id);
+          if (!target || target.busy) continue;
+          const attempt = attempts.get(id);
+          const lastAttempt = attempt?.binding === target.binding ? attempt.at : 0;
+          const at = now();
+          if (target.nextAllowedAt > at) continue;
+          if (Math.max(target.observedAt, lastAttempt) + ACCOUNT_AUTO_REFRESH_MS > at) continue;
+          const binding = target.binding;
+          attempts.set(id, { binding, at });
+          attempted = true;
+          const isCurrent = () => current()
+            && normalizeTargets(options.targets()).current(id)?.binding === binding;
+          try {
+            await target.refresh(isCurrent);
+          } catch {
+            // Keep last-good evidence; one failed provider must not stop peers.
+          } finally {
+            if (captured === generation) attempts.set(id, { binding, at: now() });
           }
         }
       }
+      await Promise.all(Array.from({ length: Math.min(concurrency, ids.length) }, () => worker()));
+      // Reconcile shared projections once per pass, outside every account's
+      // refresh slot. A slow destination read must not hold up the next quota.
+      if (attempted && current()) await options.afterRefresh?.().catch(() => undefined);
     } finally {
-      running = false;
+      if (running === operation) running = undefined;
     }
   }
 
   return {
     run,
-    pause() { generation++; },
-    reset() { generation++; attempts.clear(); },
+    pause() { generation++; running = undefined; },
+    reset() { generation++; running = undefined; attempts.clear(); },
   };
 }
