@@ -5,10 +5,10 @@
 use crate::alias;
 use crate::gateway::classify::{ProviderErrorClass, classify_http};
 use crate::gateway::diagnostics::{
-    ErrorDiagnostic, RequestTrace, emit_failure, log_request_failure, serialize_diagnostic,
+    ErrorDiagnostic, RequestTrace, emit_failure, serialize_diagnostic,
 };
 use crate::gateway::forwarder::{
-    ForwardAction, LiveSendSelection, forward_request_with_deadline, log_unsent_admission_skip,
+    AttemptRequest, AttemptSender, ForwardAction, LiveSendSelection, log_unsent_admission_skip,
     rate_limited_response,
 };
 use crate::gateway::materialize::materialize_execution_routes;
@@ -44,6 +44,26 @@ fn request_budget_duration(config: &AppConfig, stream: bool) -> Duration {
     )
 }
 
+/// Catalog, route, and pricing identities frozen once at request entry.
+pub(crate) enum RequestEntryError {
+    Resolve(crate::alias::ResolveError),
+    Capture(anyhow::Error),
+}
+
+pub(crate) struct RequestEntry {
+    pub(crate) snapshots: RequestSnapshots,
+}
+
+/// One selection decision's live view. The host reads these together so the
+/// executor does not touch the database, probe map, or recovery gate itself.
+pub(crate) struct SelectionView {
+    pub(crate) live: crate::routing_snapshot::RoutingSnapshot,
+    pub(crate) decision_wall: chrono::DateTime<chrono::Utc>,
+    pub(crate) decision_mono: std::time::Instant,
+    pub(crate) free_cooldown: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) free_egress_wait: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// Process-state values frozen at request entry. Live credential availability
 /// and authorization are reread before every dispatch.
 pub(crate) struct RequestSnapshots {
@@ -56,8 +76,8 @@ pub(crate) struct RequestSnapshots {
 }
 
 impl RequestSnapshots {
-    fn capture(
-        state: &CoreState,
+    pub(crate) fn capture(
+        state: &crate::state::CoreStateInner,
         config: AppConfig,
         resolved: alias::ResolvedModel,
         routing: crate::routing_snapshot::RoutingSnapshot,
@@ -117,27 +137,11 @@ impl GatewayExecutor {
         client_key_id: Option<String>,
     ) -> Response {
         let (snapshots, facts, route_set, prices) = {
-            // Publish settings, catalog, credentials, route and pricing identities
-            // as one preparation phase. No guard crosses upstream I/O.
-            let _settings_update = state.settings_update.lock();
-            let routing = match crate::routing_snapshot::RoutingSnapshot::load(&state.db.lock()) {
-                Ok(routing) => routing,
-                Err(error) => {
-                    return protocol_error_response(
-                        client_format,
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &format!("failed to capture routing state: {error}"),
-                        None,
-                    );
-                }
-            };
-            let catalog = crate::gateway::handler::RuntimeCatalogSnapshot::from_routing(
-                routing,
-                state.sample_gateway_clock().0,
-            );
-            let resolved = match catalog.resolve(&routing_model) {
-                Ok(resolved) => resolved,
-                Err(error) => {
+            // The host freezes catalog, route and pricing identities. No guard
+            // crosses upstream I/O.
+            let snapshots = match state.capture_request_entry(&routing_model) {
+                Ok(entry) => entry.snapshots,
+                Err(RequestEntryError::Resolve(error)) => {
                     return local_protocol_failure(
                         &state,
                         &trace,
@@ -147,19 +151,11 @@ impl GatewayExecutor {
                         Some(&client_body),
                     );
                 }
-            };
-            let snapshots = match RequestSnapshots::capture(
-                &state,
-                state.config(),
-                resolved,
-                catalog.routing,
-            ) {
-                Ok(snapshots) => snapshots,
-                Err(error) => {
+                Err(RequestEntryError::Capture(error)) => {
                     return protocol_error_response(
                         client_format,
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        &format!("failed to capture route configuration: {error}"),
+                        &format!("failed to capture routing state: {error}"),
                         None,
                     );
                 }
@@ -282,16 +278,14 @@ impl GatewayExecutor {
                     None,
                 );
             }
-            let (decision_wall, decision_mono) = state.sample_gateway_clock();
-            let live = {
-                let db = state.db.lock();
-                crate::routing_snapshot::RoutingSnapshot::load(&db).and_then(|routing| {
-                    db.free_channel_cooldown_until_at(decision_wall)
-                        .map(|cooldown| (routing, cooldown))
-                })
-            };
-            let (mut live, free_cooldown) = match live {
-                Ok(live) => live,
+            let SelectionView {
+                live,
+                decision_wall,
+                decision_mono,
+                free_cooldown,
+                free_egress_wait,
+            } = match state.capture_selection_view() {
+                Ok(view) => view,
                 Err(error) => {
                     return protocol_error_response(
                         client_format,
@@ -301,9 +295,6 @@ impl GatewayExecutor {
                     );
                 }
             };
-            let free_egress_wait = state
-                .recovery
-                .free_egress_retry_until(decision_wall, decision_mono);
             let free_available = free_cooldown.is_none()
                 && free_egress_wait.is_none()
                 && !crate::destination_projection::free_channel_exhausted(
@@ -315,10 +306,6 @@ impl GatewayExecutor {
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>();
-            {
-                let probes = state.quota_probes.lock();
-                live.apply_quota_probes(&probes);
-            }
             let mut live_authorization_error = None;
             let routing_candidates = route_set
                 .routes
@@ -351,7 +338,7 @@ impl GatewayExecutor {
                     candidate
                 })
                 .collect::<Vec<_>>();
-            let selected_index = match state.routing.try_select_candidate_index_at(
+            let selected_index = match state.select_candidate_index(
                 &routing_candidates,
                 snapshots.config.routing_mode,
                 snapshots.config.conversation_sticky,
@@ -409,12 +396,10 @@ impl GatewayExecutor {
                             )
                             .ok()
                             .and_then(|resources| {
-                                state
-                                    .recovery
-                                    .credential_retry_until(&resources, decision_wall)
+                                state.credential_retry_until(&resources, decision_wall)
                             });
                             if let Ok(resources) = capture_route_resources(&live, route, &snapshots)
-                                && let Err(wait) = state.recovery.inspect_admission(
+                                && let Err(wait) = state.inspect_route_admission(
                                     &resources,
                                     decision_wall,
                                     decision_mono,
@@ -637,26 +622,26 @@ impl GatewayExecutor {
                 };
                 // The attempt owns timeout finalization so a known HTTP status
                 // and the selected account cannot be lost to outer cancellation.
-                let forwarded = forward_request_with_deadline(
-                    client,
-                    route,
-                    &state,
-                    &account,
-                    adapter,
-                    &snapshots.config,
-                    &active_plan,
-                    &trace,
-                    &client_body,
-                    loop_state.attempt,
-                    !retried_same_account,
-                    headers.clone(),
-                    prices[selected_index].clone(),
-                    client_key_id.as_deref(),
-                    &frozen_spec,
-                    &selection,
-                    Some(request_deadline),
-                )
-                .await;
+                let forwarded = state
+                    .send_attempt(AttemptRequest {
+                        client,
+                        route,
+                        account: &account,
+                        adapter,
+                        config: &snapshots.config,
+                        plan: &active_plan,
+                        trace: &trace,
+                        client_body: &client_body,
+                        attempt: loop_state.attempt,
+                        allow_same_account_retry: !retried_same_account,
+                        headers: headers.clone(),
+                        pricing_snapshot: prices[selected_index].clone(),
+                        client_key_id: client_key_id.as_deref(),
+                        attempt_spec: &frozen_spec,
+                        selection: &selection,
+                        deadline: Some(request_deadline),
+                    })
+                    .await;
                 match forwarded {
                     Ok(result) => {
                         if result.sent {
@@ -728,7 +713,7 @@ fn record_request_failure(
     diagnostic.stream = Some(facts.stream);
     diagnostic.downstream_status = Some(status.as_u16());
     let encoded = serialize_diagnostic(diagnostic.clone());
-    log_request_failure(&state.db.lock(), trace, &diagnostic, &encoded, message);
+    state.record_request_failure(trace, &diagnostic, &encoded, message);
     emit_failure(&encoded);
 }
 
@@ -766,7 +751,7 @@ fn record_plan_failure(
         );
     }
     let encoded = serialize_diagnostic(diagnostic.clone());
-    log_request_failure(&state.db.lock(), trace, &diagnostic, &encoded, message);
+    state.record_request_failure(trace, &diagnostic, &encoded, message);
     emit_failure(&encoded);
 }
 

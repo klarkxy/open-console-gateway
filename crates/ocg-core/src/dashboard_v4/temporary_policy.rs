@@ -11,8 +11,7 @@ use crate::dashboard_v3::{ControlRevision, V3ApiError, check_expectation, parse_
 use crate::gateway::policy::{
     ConfiguredRule, CustomMatch, DEFAULT_INITIAL_SECS, DEFAULT_MAX_SECS,
     GOAT_CREDITS_REJECTION_RULE, PolicyBackoff, PolicyDocumentError, RestrictionScope,
-    compile_from_previous, destination_ids, load_configured_rules, persist_configured_rules,
-    validate_configured,
+    load_configured_rules,
 };
 use crate::gateway::recovery::RestrictionRecord;
 use crate::state::CoreState;
@@ -36,26 +35,17 @@ pub(super) async fn put_configuration(
     body: Bytes,
 ) -> Result<Json<TemporaryPolicyConfiguration>, V3ApiError> {
     let input = parse_mutation_json::<TemporaryPolicyUpdate>(&body)?;
-    let _settings_update = state.settings_update.lock();
-    check_expectation(&state, &input.expectation)?;
     let rules = input
         .rules
         .iter()
         .map(rule_from_dto)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
-    {
-        let db = state.db.lock();
-        let destinations = destination_ids(&db).map_err(V3ApiError::internal)?;
-        validate_configured(&rules, &destinations)
-            .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
-        persist_configured_rules(&db, &rules)
-            .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
-        let previous = state.recovery.policy_snapshot();
-        let compiled = compile_from_previous(&rules, &previous);
-        state.recovery.install_snapshot(compiled);
-    }
-    state.bump_settings_revision();
+    let _settings_update = state.settings_update.lock();
+    check_expectation(&state, &input.expectation)?;
+    state
+        .replace_temporary_policy_locked(&rules)
+        .map_err(|error| map_policy_error(&state, error))?;
     configuration_locked(&state)
 }
 
@@ -74,9 +64,19 @@ pub(super) async fn clear_restriction(
     let input = parse_mutation_json::<TemporaryPolicyClearRequest>(&body)?;
     let _settings_update = state.settings_update.lock();
     check_expectation(&state, &input.expectation)?;
-    state.recovery.clear_restriction(&id);
-    state.bump_settings_revision();
+    state
+        .clear_temporary_restriction_locked(&id)
+        .map_err(|error| map_policy_error(&state, error))?;
     Ok(Json(restrictions_locked(&state)))
+}
+
+fn map_policy_error(state: &CoreState, error: crate::state::TemporaryPolicyError) -> V3ApiError {
+    use crate::state::TemporaryPolicyError;
+    match error {
+        TemporaryPolicyError::RevisionConflict => V3ApiError::revision_conflict(state),
+        TemporaryPolicyError::Invalid(message) => V3ApiError::invalid_request_at(state, message),
+        TemporaryPolicyError::Internal(error) => V3ApiError::internal(error),
+    }
 }
 
 fn configuration_locked(

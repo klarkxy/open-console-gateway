@@ -8,7 +8,7 @@ use axum::body::Bytes;
 use axum::extract::State;
 
 use crate::alias_publication::normalize_public_model_key;
-use crate::dashboard_v3::{ControlRevision, V3ApiError, check_expectation, parse_mutation_json};
+use crate::dashboard_v3::{ControlRevision, V3ApiError, parse_mutation_json};
 use crate::state::CoreState;
 
 use super::types::{AliasPublication, AliasPublicationUpdate};
@@ -27,12 +27,23 @@ pub(super) async fn patch_publication(
     let input = parse_mutation_json::<AliasPublicationUpdate>(&body)?;
     let key = normalize_public_model_key(&input.public_model)
         .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
-    let _settings_update = state.settings_update.lock();
-    check_expectation(&state, &input.expectation)?;
-    let unpublished = state
-        .set_public_model_published(&key, input.published)
-        .map_err(V3ApiError::internal)?;
-    state.bump_settings_revision();
+    let _settings = state.settings_update.lock();
+    if input.expectation.expected_revision != state.settings_revision()
+        || input.expectation.process_generation != state.process_generation()
+    {
+        return Err(V3ApiError::revision_conflict(&state));
+    }
+    let unpublished =
+        crate::account_control::set_public_model_publication_locked(&state, &key, input.published)
+            .map_err(|error| match error {
+                crate::account_control::AccountControlError::Internal(error) => {
+                    V3ApiError::internal(error)
+                }
+                crate::account_control::AccountControlError::RevisionConflict => {
+                    V3ApiError::revision_conflict(&state)
+                }
+                other => V3ApiError::invalid_request_at(&state, other.to_string()),
+            })?;
     Ok(Json(AliasPublication {
         revision: ControlRevision::from_state(&state),
         unpublished,
@@ -45,3 +56,6 @@ fn publication_payload(state: &CoreState) -> AliasPublication {
         unpublished: state.unpublished_public_model_list(),
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -225,13 +225,12 @@ async fn projection_failure_rolls_back_the_uncommitted_meter_without_a_revision_
     .unwrap();
     let revision = state.settings_revision();
 
-    let failed = mutate(&state, "credits", &expectation(&state), |conn| {
-        conn.execute(
-            "UPDATE credentials SET credit_meter_json = '{' WHERE legacy_account_id = ?1",
-            ["credits"],
-        )?;
-        Ok(())
-    })
+    let failed = mutate(
+        &state,
+        "credits",
+        &expectation(&state),
+        CreditMutation::Corrupt,
+    )
     .unwrap_err();
     assert_eq!(
         failed.into_response().status(),

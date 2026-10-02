@@ -38,35 +38,15 @@ pub(super) async fn import_keys(
             "invalid import page",
         ));
     }
-    let (base_url, credential, captured_version) = {
-        let _lock = state.settings_update.lock();
-        check_expectation(&state, &input.expectation)?;
-        let db = state.db.lock();
-        let parent = db
-            .platform_account(&id)
-            .map_err(V3ApiError::internal)?
-            .ok_or_else(|| V3ApiError::not_found_at(&state, "platform account not found"))?;
-        if parent.kind != PlatformKind::NewApi {
-            return Err(V3ApiError::invalid_request_at(
-                &state,
-                "key import is only available for New API",
-            ));
-        }
-        let credential = db
-            .platform_credential_cipher(&id)
-            .map_err(V3ApiError::internal)?
-            .map(|cipher| state.decrypt_key(&cipher))
-            .transpose()
-            .map_err(V3ApiError::internal)?
-            .filter(|value| !value.trim().is_empty());
-        let Some(credential) = credential else {
-            return Err(V3ApiError::invalid_request_at(
-                &state,
-                "user credential required",
-            ));
-        };
-        (parent.base_url, credential, parent.version)
-    };
+    let prepared = state
+        .prepare_platform_key_import(
+            &id,
+            input.expectation.expected_revision,
+            input.expectation.process_generation,
+        )
+        .map_err(|error| map_platform_import_error(&state, error))?;
+    let (base_url, credential, captured_version) =
+        (prepared.base_url, prepared.credential, prepared.version);
 
     let hosted = hosted_endpoint(&base_url)
         .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
@@ -262,4 +242,19 @@ fn local_custom_keys(state: &CoreState, parent_id: &str) -> Result<HashSet<Strin
         }
     }
     Ok(keys)
+}
+
+fn map_platform_import_error(
+    state: &CoreState,
+    error: crate::state::PlatformImportError,
+) -> V3ApiError {
+    use crate::state::PlatformImportError;
+    match error {
+        PlatformImportError::RevisionConflict => V3ApiError::revision_conflict(state),
+        PlatformImportError::NotFound => {
+            V3ApiError::not_found_at(state, "platform account not found")
+        }
+        PlatformImportError::Invalid(message) => V3ApiError::invalid_request_at(state, message),
+        PlatformImportError::Internal(error) => V3ApiError::internal(error),
+    }
 }

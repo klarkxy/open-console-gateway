@@ -5,7 +5,7 @@ use axum::body::Bytes;
 use axum::extract::State;
 
 use super::destinations::{DestinationsError, projection_refused};
-use crate::dashboard_v3::{ControlRevision, V3ApiError, check_expectation, parse_mutation_json};
+use crate::dashboard_v3::{ControlRevision, V3ApiError, parse_mutation_json};
 use crate::db::routing_cards;
 use crate::destination_projection::read_v4_projection;
 use crate::state::CoreState;
@@ -24,25 +24,29 @@ pub(super) async fn replace(
     body: Bytes,
 ) -> Result<Json<RoutingCardList>, DestinationsError> {
     let input = parse_mutation_json::<RoutingCardUpdate>(&body)?;
+    // One settings lock covers the projection gate, the rank write, and the
+    // receipt. Membership changes do not replace credentials or transport.
     let _settings_update = state.settings_update.lock();
-    check_expectation(&state, &input.expectation)?;
-    // Preserve the destination read gate before changing any saved ranks.
-    snapshot(&state)?;
+    if input.expectation.expected_revision != state.settings_revision()
+        || input.expectation.process_generation != state.process_generation()
     {
-        let db = state.db.lock();
-        let tx = db
-            .conn
-            .unchecked_transaction()
-            .map_err(V3ApiError::internal)?;
-        routing_cards::save_on(&tx, &input.cards)
-            .and_then(|()| routing_cards::reconcile_on(&tx))
-            .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
-        tx.commit().map_err(V3ApiError::internal)?;
-        // Membership/rank changes do not replace credentials or transport.
-        // Preserve conversation bindings and selector progress, as the legacy
-        // account-order writer does; each new request loads the saved ranks.
-        state.bump_settings_revision();
+        return Err(V3ApiError::revision_conflict(&state).into());
     }
+    snapshot(&state)?;
+    crate::account_control::replace_routing_cards_locked(&state, &input.cards).map_err(
+        |error| match error {
+            crate::account_control::AccountControlError::Invalid(message) => {
+                V3ApiError::invalid_request_at(&state, message)
+            }
+            crate::account_control::AccountControlError::Internal(error) => {
+                V3ApiError::internal(error)
+            }
+            crate::account_control::AccountControlError::RevisionConflict => {
+                V3ApiError::revision_conflict(&state)
+            }
+            other => V3ApiError::invalid_request_at(&state, other.to_string()),
+        },
+    )?;
     snapshot(&state).map(Json)
 }
 

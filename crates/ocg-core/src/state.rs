@@ -53,6 +53,344 @@ const CLIENT_ROOT_URL_ENV: &str = "OCG_CLIENT_ROOT_URL";
 // compensation) is acquired before `gateway_lifecycle` when a settings write
 // also rebinds. Never hold a parking_lot lock across those awaits.
 // Account, key, and usage-sync writers take `settings_update` only.
+pub(crate) struct OfficialBalanceRefresh {
+    pub account: crate::models::Account,
+    pub provider: crate::dynamic::DynamicProviderRuntime,
+    pub config: crate::models::AppConfig,
+    pub key: String,
+}
+
+pub(crate) struct OfficialPriceRefresh {
+    pub provider: crate::dynamic::DynamicProviderRuntime,
+    pub kind: crate::official_api::OfficialApiKind,
+    pub config: crate::models::AppConfig,
+}
+
+pub(crate) enum CatalogRemovalError {
+    RevisionConflict,
+    Invalid(&'static str),
+    Unavailable(&'static str),
+    Internal(anyhow::Error),
+}
+
+/// Catalog removal receipt captured under the settings lock that committed it.
+pub(crate) struct RemovedBuiltinCatalog {
+    pub row: crate::provider_contracts::PersistedScopeRow,
+    pub revision: u64,
+    pub process_generation: u64,
+    pub pricing_revision: String,
+}
+
+pub(crate) enum TemporaryPolicyError {
+    RevisionConflict,
+    Invalid(String),
+    Internal(anyhow::Error),
+}
+
+pub(crate) enum OfficialRefreshError {
+    RevisionConflict,
+    NotFound(&'static str),
+    Invalid(&'static str),
+    Conflict(&'static str),
+    Outbound(&'static str),
+    Throttled(&'static str),
+    Internal(anyhow::Error),
+}
+
+impl CoreStateInner {
+    pub(crate) fn prepare_official_balance_refresh(
+        &self,
+        account_id: &str,
+        expected_revision: u64,
+        process_generation: u64,
+    ) -> Result<OfficialBalanceRefresh, OfficialRefreshError> {
+        let _settings = self.settings_update.lock();
+        if expected_revision != self.settings_revision()
+            || process_generation != self.process_generation()
+        {
+            return Err(OfficialRefreshError::RevisionConflict);
+        }
+        let db = self.db.lock();
+        let account = db
+            .get_account(account_id)
+            .map_err(OfficialRefreshError::Internal)?
+            .ok_or(OfficialRefreshError::NotFound("account not found"))?;
+        let provider = db
+            .list_dynamic_providers()
+            .map_err(OfficialRefreshError::Internal)?
+            .into_iter()
+            .find(|runtime| runtime.id == account.provider_id)
+            .ok_or(OfficialRefreshError::NotFound(
+                "configured provider not found",
+            ))?;
+        let kind = crate::official_api::kind_for_runtime(&provider).ok_or(
+            OfficialRefreshError::Invalid(
+                "official financial evidence is unavailable for this preset or destination",
+            ),
+        )?;
+        if !kind.balance_available() {
+            return Err(OfficialRefreshError::Invalid(
+                "no supported public balance API is configured for this provider",
+            ));
+        }
+        if account.setup_step != crate::models::AccountSetupStep::Ready
+            || account.key_cipher.is_empty()
+        {
+            return Err(OfficialRefreshError::Invalid(
+                "a ready account with a stored Key is required",
+            ));
+        }
+        // A destination that is already revoked must not reach the network at
+        // all. The same grant is re-checked on commit to catch a revocation that
+        // lands while the lock-free fetch is in flight.
+        official_balance_grant_current(&db, &account, &provider)?;
+        if crate::usage_sync::manual_next_allowed_at(
+            db.account_usage_sync_state(account_id)
+                .map_err(OfficialRefreshError::Internal)?
+                .and_then(|state| state.last_attempt_at),
+            self.usage_sync.now(),
+        )
+        .is_some()
+        {
+            return Err(OfficialRefreshError::Throttled(
+                "official balance refresh is limited to once per 15 seconds",
+            ));
+        }
+        let key = self
+            .decrypt_key(&account.key_cipher)
+            .map_err(OfficialRefreshError::Internal)?;
+        Ok(OfficialBalanceRefresh {
+            account,
+            provider,
+            config: self.config(),
+            key,
+        })
+    }
+
+    pub(crate) fn prepare_official_price_refresh(
+        &self,
+        provider_id: &str,
+        expected_revision: u64,
+        process_generation: u64,
+    ) -> Result<OfficialPriceRefresh, OfficialRefreshError> {
+        let _settings = self.settings_update.lock();
+        if expected_revision != self.settings_revision()
+            || process_generation != self.process_generation()
+        {
+            return Err(OfficialRefreshError::RevisionConflict);
+        }
+        let db = self.db.lock();
+        let provider = db
+            .list_dynamic_providers()
+            .map_err(OfficialRefreshError::Internal)?
+            .into_iter()
+            .find(|runtime| runtime.id == provider_id)
+            .ok_or(OfficialRefreshError::NotFound(
+                "configured provider not found",
+            ))?;
+        let kind = crate::official_api::kind_for_runtime(&provider).ok_or(
+            OfficialRefreshError::Invalid(
+                "official financial evidence is unavailable for this preset or destination",
+            ),
+        )?;
+        Ok(OfficialPriceRefresh {
+            provider,
+            kind,
+            config: self.config(),
+        })
+    }
+
+    pub(crate) fn commit_official_price_refresh(
+        &self,
+        provider_id: &str,
+        expected_revision: u64,
+        process_generation: u64,
+        prepared: &crate::dynamic::DynamicProviderRuntime,
+        fetched: Result<crate::official_api::OfficialPriceSheet, ()>,
+    ) -> Result<(), OfficialRefreshError> {
+        let _settings = self.settings_update.lock();
+        if expected_revision != self.settings_revision()
+            || process_generation != self.process_generation()
+        {
+            return Err(OfficialRefreshError::RevisionConflict);
+        }
+        let db = self.db.lock();
+        let current = db
+            .list_dynamic_providers()
+            .map_err(OfficialRefreshError::Internal)?
+            .into_iter()
+            .find(|runtime| runtime.id == provider_id)
+            .ok_or(OfficialRefreshError::NotFound(
+                "configured provider not found",
+            ))?;
+        if current != *prepared {
+            return Err(OfficialRefreshError::Conflict(
+                "provider changed during official pricing refresh",
+            ));
+        }
+        let sheet = fetched.map_err(|_| {
+            OfficialRefreshError::Outbound(
+                "official pricing refresh failed; previous evidence retained",
+            )
+        })?;
+        db.store_official_api_prices(&current, &sheet)
+            .map_err(OfficialRefreshError::Internal)
+    }
+
+    /// Re-check the account, provider, and credential grant after the lock-free
+    /// balance fetch, then persist. An outbound failure still records the
+    /// usage-sync attempt so the manual throttle advances.
+    pub(crate) fn commit_official_balance_refresh(
+        &self,
+        account_id: &str,
+        expected_revision: u64,
+        process_generation: u64,
+        prepared_account: &crate::models::Account,
+        prepared_provider: &crate::dynamic::DynamicProviderRuntime,
+        fetched: Result<Vec<crate::official_api::OfficialBalance>, ()>,
+    ) -> Result<(), OfficialRefreshError> {
+        let _settings = self.settings_update.lock();
+        if expected_revision != self.settings_revision()
+            || process_generation != self.process_generation()
+        {
+            return Err(OfficialRefreshError::RevisionConflict);
+        }
+        let db = self.db.lock();
+        let current = db
+            .get_account(account_id)
+            .map_err(OfficialRefreshError::Internal)?
+            .ok_or(OfficialRefreshError::NotFound("account not found"))?;
+        let current_provider = db
+            .list_dynamic_providers()
+            .map_err(OfficialRefreshError::Internal)?
+            .into_iter()
+            .find(|runtime| runtime.id == prepared_provider.id)
+            .ok_or(OfficialRefreshError::NotFound(
+                "configured provider not found",
+            ))?;
+        if current.key_cipher != prepared_account.key_cipher
+            || current.updated_at != prepared_account.updated_at
+            || current.provider_id != prepared_account.provider_id
+            || current_provider != *prepared_provider
+        {
+            return Err(OfficialRefreshError::Conflict(
+                "account or provider changed during official balance refresh",
+            ));
+        }
+        official_balance_grant_current(&db, &current, &current_provider)?;
+        let now = self.usage_sync.now();
+        match fetched {
+            Ok(balances) => db
+                .store_official_api_balances(&current, &current_provider, &balances, now)
+                .map_err(OfficialRefreshError::Internal),
+            Err(()) => {
+                db.touch_account_usage_sync_attempt(account_id, now)
+                    .map_err(OfficialRefreshError::Internal)?;
+                Err(OfficialRefreshError::Outbound(
+                    "official balance refresh failed; previous evidence retained",
+                ))
+            }
+        }
+    }
+}
+
+/// The saved default endpoint and its origin must both still be granted.
+/// A balance refresh never grants a new billing destination on its own.
+fn official_balance_grant_current(
+    db: &crate::db::Database,
+    account: &crate::models::Account,
+    runtime: &crate::dynamic::DynamicProviderRuntime,
+) -> Result<(), OfficialRefreshError> {
+    use ocg_domain::connection::{
+        EndpointOperation, LegacyConnectionKind, connection_id_for_legacy, endpoint_id_for,
+    };
+    let binding = db
+        .list_inference_bindings()
+        .map_err(OfficialRefreshError::Internal)?
+        .into_iter()
+        .find(|binding| binding.account_id == account.id)
+        .ok_or(OfficialRefreshError::Invalid(
+            "selected credential binding is unavailable",
+        ))?;
+    let endpoint = endpoint_id_for(
+        &connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, &runtime.id),
+        EndpointOperation::from(runtime.upstream_protocol),
+    )
+    .to_string();
+    if !binding.enabled
+        || !binding.allowed_endpoint_ids.contains(&endpoint)
+        || crate::custom_http::ensure_secret_origin_granted(
+            crate::official_api::BALANCE_URL,
+            &binding.allowed_origins,
+        )
+        .is_err()
+    {
+        return Err(OfficialRefreshError::Invalid(
+            "the official destination is not authorized for this Key",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) struct PlatformImportSource {
+    pub base_url: String,
+    pub credential: String,
+    pub version: u64,
+}
+
+pub(crate) enum PlatformImportError {
+    RevisionConflict,
+    NotFound,
+    Invalid(&'static str),
+    Internal(anyhow::Error),
+}
+
+impl CoreStateInner {
+    pub(crate) fn prepare_platform_key_import(
+        &self,
+        platform_id: &str,
+        expected_revision: u64,
+        process_generation: u64,
+    ) -> Result<PlatformImportSource, PlatformImportError> {
+        let _settings = self.settings_update.lock();
+        if expected_revision != self.settings_revision()
+            || process_generation != self.process_generation()
+        {
+            return Err(PlatformImportError::RevisionConflict);
+        }
+        let db = self.db.lock();
+        let parent = db
+            .platform_account(platform_id)
+            .map_err(PlatformImportError::Internal)?
+            .ok_or(PlatformImportError::NotFound)?;
+        if parent.kind != crate::platform::PlatformKind::NewApi {
+            return Err(PlatformImportError::Invalid(
+                "key import is only available for New API",
+            ));
+        }
+        let credential = db
+            .platform_credential_cipher(platform_id)
+            .map_err(PlatformImportError::Internal)?
+            .map(|cipher| self.decrypt_key(&cipher))
+            .transpose()
+            .map_err(PlatformImportError::Internal)?
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(PlatformImportError::Invalid("user credential required"))?;
+        Ok(PlatformImportSource {
+            base_url: parent.base_url,
+            credential,
+            version: parent.version,
+        })
+    }
+}
+
+pub(crate) enum CpaSelectionError {
+    RevisionConflict,
+    Invalid(String),
+    Unavailable(String),
+    Internal(anyhow::Error),
+}
+
 pub struct CoreStateInner {
     pub(crate) debug_capture: crate::gateway::debug_capture::DebugCapture,
     pub db: Mutex<Database>,
@@ -490,6 +828,204 @@ impl CoreStateInner {
         })
     }
 
+    /// Persist temporary-unavailability rules and install the compiled snapshot
+    /// before the settings revision advances. Validation failures write nothing.
+    #[expect(dead_code)]
+    pub(crate) fn replace_temporary_policy(
+        &self,
+        expected_revision: u64,
+        process_generation: u64,
+        rules: &[crate::gateway::policy::ConfiguredRule],
+    ) -> Result<(), TemporaryPolicyError> {
+        let _settings = self.settings_update.lock();
+        if expected_revision != self.settings_revision()
+            || process_generation != self.process_generation()
+        {
+            return Err(TemporaryPolicyError::RevisionConflict);
+        }
+        self.replace_temporary_policy_locked(rules)
+    }
+
+    /// Caller holds `settings_update` and has already checked CAS.
+    pub(crate) fn replace_temporary_policy_locked(
+        &self,
+        rules: &[crate::gateway::policy::ConfiguredRule],
+    ) -> Result<(), TemporaryPolicyError> {
+        let db = self.db.lock();
+        let destinations =
+            crate::gateway::policy::destination_ids(&db).map_err(TemporaryPolicyError::Internal)?;
+        crate::gateway::policy::validate_configured(rules, &destinations)
+            .map_err(|error| TemporaryPolicyError::Invalid(error.to_string()))?;
+        crate::gateway::policy::persist_configured_rules(&db, rules)
+            .map_err(TemporaryPolicyError::Internal)?;
+        let previous = self.recovery.policy_snapshot();
+        let compiled = crate::gateway::policy::compile_from_previous(rules, &previous);
+        self.recovery.install_snapshot(compiled);
+        drop(db);
+        self.bump_settings_revision();
+        Ok(())
+    }
+
+    /// Drop one process-local restriction. The settings lock and CAS stay with
+    /// the write so a stale caller cannot clear a restriction it did not see.
+    #[expect(dead_code)]
+    pub(crate) fn clear_temporary_restriction(
+        &self,
+        expected_revision: u64,
+        process_generation: u64,
+        restriction_id: &str,
+    ) -> Result<(), TemporaryPolicyError> {
+        let _settings = self.settings_update.lock();
+        if expected_revision != self.settings_revision()
+            || process_generation != self.process_generation()
+        {
+            return Err(TemporaryPolicyError::RevisionConflict);
+        }
+        self.clear_temporary_restriction_locked(restriction_id)
+    }
+
+    /// Caller holds `settings_update` and has already checked CAS.
+    pub(crate) fn clear_temporary_restriction_locked(
+        &self,
+        restriction_id: &str,
+    ) -> Result<(), TemporaryPolicyError> {
+        self.recovery.clear_restriction(restriction_id);
+        self.bump_settings_revision();
+        Ok(())
+    }
+
+    /// Freeze the request-entry views under the settings lock.
+    ///
+    /// The executor consumes this value and does not reach into the database
+    /// for the initial catalog, route, or pricing identities.
+    pub(crate) fn capture_request_entry(
+        &self,
+        routing_model: &str,
+    ) -> Result<crate::gateway::executor::RequestEntry, crate::gateway::executor::RequestEntryError>
+    {
+        use crate::gateway::executor::RequestEntryError;
+        let _settings_update = self.settings_update.lock();
+        let routing = self
+            .capture_routing_snapshot()
+            .map_err(RequestEntryError::Capture)?;
+        let catalog = crate::gateway::handler::RuntimeCatalogSnapshot::from_routing(
+            routing,
+            self.sample_gateway_clock().0,
+        );
+        let resolved = catalog
+            .resolve(routing_model)
+            .map_err(RequestEntryError::Resolve)?;
+        let snapshots = crate::gateway::executor::RequestSnapshots::capture(
+            self,
+            self.config(),
+            resolved,
+            catalog.routing,
+        )
+        .map_err(RequestEntryError::Capture)?;
+        Ok(crate::gateway::executor::RequestEntry { snapshots })
+    }
+
+    pub(crate) fn capture_routing_snapshot(
+        &self,
+    ) -> anyhow::Result<crate::routing_snapshot::RoutingSnapshot> {
+        crate::routing_snapshot::RoutingSnapshot::load(&self.db.lock())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn select_candidate_index(
+        &self,
+        candidates: &[crate::routing_runtime::RoutingCandidate<
+            crate::routing_snapshot::ExecutionCredential,
+        >],
+        mode: crate::models::RoutingMode,
+        sticky: bool,
+        conversation_key: Option<&str>,
+        excluded: &[&str],
+        free_available: bool,
+        decision_wall: chrono::DateTime<chrono::Utc>,
+        decision_mono: std::time::Instant,
+    ) -> Result<Option<usize>, ocg_gateway::selector::SelectionError> {
+        self.routing.try_select_candidate_index_at(
+            candidates,
+            mode,
+            sticky,
+            conversation_key,
+            excluded,
+            free_available,
+            decision_wall,
+            decision_mono,
+        )
+    }
+
+    pub(crate) fn inspect_route_admission(
+        &self,
+        resources: &crate::gateway::recovery::ResourceSet,
+        decision_wall: chrono::DateTime<chrono::Utc>,
+        decision_mono: std::time::Instant,
+    ) -> Result<(), crate::gateway::recovery::WaitState> {
+        self.recovery
+            .inspect_admission(resources, decision_wall, decision_mono)
+    }
+
+    pub(crate) fn credential_retry_until(
+        &self,
+        resources: &crate::gateway::recovery::ResourceSet,
+        decision_wall: chrono::DateTime<chrono::Utc>,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.recovery
+            .credential_retry_until(resources, decision_wall)
+    }
+
+    pub(crate) fn capture_selection_view(
+        &self,
+    ) -> anyhow::Result<crate::gateway::executor::SelectionView> {
+        let (decision_wall, decision_mono) = self.sample_gateway_clock();
+        let (mut live, free_cooldown) = self.capture_live_routing(decision_wall)?;
+        let free_egress_wait = self
+            .recovery
+            .free_egress_retry_until(decision_wall, decision_mono);
+        {
+            let probes = self.quota_probes.lock();
+            live.apply_quota_probes(&probes);
+        }
+        Ok(crate::gateway::executor::SelectionView {
+            live,
+            decision_wall,
+            decision_mono,
+            free_cooldown,
+            free_egress_wait,
+        })
+    }
+
+    pub(crate) fn capture_live_routing(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<(
+        crate::routing_snapshot::RoutingSnapshot,
+        Option<chrono::DateTime<chrono::Utc>>,
+    )> {
+        let db = self.db.lock();
+        let routing = crate::routing_snapshot::RoutingSnapshot::load(&db)?;
+        let cooldown = db.free_channel_cooldown_until_at(now)?;
+        Ok((routing, cooldown))
+    }
+
+    pub(crate) fn record_request_failure(
+        &self,
+        trace: &crate::gateway::diagnostics::RequestTrace,
+        diagnostic: &crate::gateway::diagnostics::ErrorDiagnostic,
+        encoded: &str,
+        message: &str,
+    ) {
+        crate::gateway::diagnostics::log_request_failure(
+            &self.db.lock(),
+            trace,
+            diagnostic,
+            encoded,
+            message,
+        );
+    }
+
     /// One wall+mono pair for a Gateway outer-fallback decision. Production
     /// clocks are `Utc::now` / `Instant::now`; tests inject sources at
     /// construction.
@@ -657,6 +1193,59 @@ impl CoreStateInner {
 
     /// Replace the routed CPA catalog subset. Unknown IDs are rejected; an
     /// empty selection publishes no CPA models.
+    #[expect(dead_code)]
+    pub(crate) fn replace_cpa_model_selection(
+        &self,
+        expected_revision: u64,
+        process_generation: u64,
+        enabled_ids: &[String],
+    ) -> Result<(), CpaSelectionError> {
+        let _settings = self.settings_update.lock();
+        if expected_revision != self.settings_revision()
+            || process_generation != self.process_generation()
+        {
+            return Err(CpaSelectionError::RevisionConflict);
+        }
+        self.replace_cpa_model_selection_locked(enabled_ids)
+    }
+
+    /// Caller holds `settings_update` and has already checked CAS.
+    pub(crate) fn replace_cpa_model_selection_locked(
+        &self,
+        enabled_ids: &[String],
+    ) -> Result<(), CpaSelectionError> {
+        let catalog = {
+            let db = self.db.lock();
+            db.cpa_model_catalog()
+                .map_err(CpaSelectionError::Internal)?
+        };
+        let Some(catalog) = catalog else {
+            return Err(CpaSelectionError::Unavailable(
+                "CPA model catalog has not been refreshed".into(),
+            ));
+        };
+        let known: std::collections::HashSet<&str> = catalog
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        let mut selected = Vec::new();
+        for id in enabled_ids {
+            let id = id.trim();
+            if id.is_empty() || !known.contains(id) || !seen.insert(id) {
+                return Err(CpaSelectionError::Invalid(
+                    "enabledIds must be distinct models from the saved CPA catalog".into(),
+                ));
+            }
+            selected.push(id.to_string());
+        }
+        self.set_cpa_model_routing(&selected)
+            .map_err(CpaSelectionError::Internal)?;
+        self.bump_settings_revision();
+        Ok(())
+    }
+
     pub fn set_cpa_model_routing(&self, enabled_ids: &[String]) -> crate::Result<()> {
         let catalog = {
             let db = self.db.lock();
@@ -866,6 +1455,63 @@ impl CoreStateInner {
         self.routing.reset();
         self.settings_revision.fetch_add(1, Ordering::AcqRel);
         Ok(())
+    }
+
+    /// Remove saved built-in catalog models and advance the revision before the
+    /// fallible reload, so a reload failure cannot hide the durable removal
+    /// behind the caller's CAS token.
+    pub(crate) fn remove_builtin_catalog_models(
+        &self,
+        expected_revision: u64,
+        process_generation: u64,
+        scope: &crate::provider_contracts::ContractScope,
+        model_ids: &[String],
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<RemovedBuiltinCatalog, CatalogRemovalError> {
+        let _settings = self.settings_update.lock();
+        if expected_revision != self.settings_revision()
+            || process_generation != self.process_generation()
+        {
+            return Err(CatalogRemovalError::RevisionConflict);
+        }
+        let (row, reload) = {
+            let db = self.db.lock();
+            let Some(current) = db
+                .load_persisted_scope(scope)
+                .map_err(CatalogRemovalError::Internal)?
+            else {
+                return Err(CatalogRemovalError::Unavailable(
+                    "provider model catalog has not been refreshed",
+                ));
+            };
+            let known: std::collections::HashSet<&str> =
+                current.catalog_models.iter().map(String::as_str).collect();
+            if model_ids
+                .iter()
+                .any(|model_id| !known.contains(model_id.as_str()))
+            {
+                return Err(CatalogRemovalError::Invalid(
+                    "modelIds must be distinct models from the saved catalog",
+                ));
+            }
+            let row = db
+                .remove_contract_catalog_models(scope, model_ids, now)
+                .map_err(CatalogRemovalError::Internal)?;
+            let _revision = self.bump_settings_revision();
+            let reload = self.reload_provider_contracts_locked(&db);
+            (row, reload)
+        };
+        if reload.is_err() {
+            self.restrict_provider_catalog_after_reload_failure(&row);
+        }
+        self.routing.reset();
+        reload.map_err(CatalogRemovalError::Internal)?;
+        Ok(RemovedBuiltinCatalog {
+            row,
+            revision: self.settings_revision(),
+            process_generation: self.process_generation(),
+            pricing_revision: self.pricing_snapshot().revision.clone(),
+        })
     }
 
     /// A committed catalog removal must restrict admission even if unrelated
@@ -1553,6 +2199,12 @@ impl crate::gateway_keys::KeyHost for CoreStateInner {
     }
 }
 
+impl crate::account_control::CatalogRefreshHost for CoreStateInner {
+    fn load_routing_snapshot(&self) -> anyhow::Result<crate::routing_snapshot::RoutingSnapshot> {
+        crate::routing_snapshot::RoutingSnapshot::load(&self.db.lock())
+    }
+}
+
 impl crate::account_control::AccountControlHost for CoreStateInner {
     fn with_settings_update<R>(&self, f: impl FnOnce() -> R) -> R {
         let _guard = self.settings_update.lock();
@@ -1633,6 +2285,88 @@ impl crate::account_control::AccountControlHost for CoreStateInner {
             .lock()
             .account_verification_state(account_id)?
             .map(|state| state.status))
+    }
+
+    fn list_identity_model(&self) -> anyhow::Result<crate::db::identity::IdentityModelSnapshot> {
+        self.db.lock().list_identity_model()
+    }
+
+    fn dynamic_auth_kind(&self, provider_id: &str) -> Option<ocg_domain::dynamic::DynamicAuthKind> {
+        self.dynamic_providers()
+            .iter()
+            .find(|runtime| runtime.id == provider_id)
+            .map(|runtime| runtime.auth_kind)
+    }
+
+    fn load_destination_runtime(
+        &self,
+    ) -> anyhow::Result<crate::destination_projection::DestinationProjection> {
+        crate::destination_projection::load_runtime(&self.db.lock())
+    }
+
+    fn decrypt_key(&self, ciphertext: &str) -> anyhow::Result<String> {
+        CoreStateInner::decrypt_key(self, ciphertext)
+    }
+
+    fn app_config(&self) -> crate::models::AppConfig {
+        CoreStateInner::config(self)
+    }
+
+    fn replace_http_catalog(
+        &self,
+        destination: &ocg_domain::destination::Destination,
+        catalog: &[ocg_domain::destination::CatalogModel],
+        metadata: Option<&std::collections::BTreeMap<String, crate::model_metadata::ModelMetadata>>,
+    ) -> anyhow::Result<()> {
+        self.commit_configuration_update(|db| {
+            crate::db::destination_commands::replace_http_catalog_on(
+                &db.conn,
+                destination,
+                catalog,
+            )?;
+            if let Some(metadata) = metadata {
+                let mut updated = destination.clone();
+                updated.catalog = catalog.to_vec();
+                crate::model_metadata::observe(db, &updated, metadata)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn set_public_model_published(
+        &self,
+        key: &str,
+        published: bool,
+    ) -> anyhow::Result<Vec<String>> {
+        self.set_public_model_published(key, published)
+    }
+
+    fn commit_database<T>(
+        &self,
+        mutation: impl FnOnce(&crate::db::Database) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let db = self.db.lock();
+        let tx = db.conn.unchecked_transaction()?;
+        let result = mutation(&db)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    fn commit_configuration<T>(
+        &self,
+        mutation: impl FnOnce(&crate::db::Database) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        self.commit_configuration_update(mutation)
+    }
+
+    fn rotate_account_credential(
+        &self,
+        account_id: &str,
+        key_cipher: &str,
+    ) -> anyhow::Result<crate::db::identity::RotatedCredential> {
+        self.db
+            .lock()
+            .rotate_account_credential(account_id, key_cipher)
     }
 
     fn delete_account_row(&self, id: &str) -> anyhow::Result<()> {

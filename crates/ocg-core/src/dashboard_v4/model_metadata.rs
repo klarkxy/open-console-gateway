@@ -1,7 +1,5 @@
 //! Explicit per-route model declarations for directories that only return IDs.
-use crate::dashboard_v3::{
-    ControlRevision, MutationExpectation, V3ApiError, check_expectation, parse_mutation_json,
-};
+use crate::dashboard_v3::{ControlRevision, MutationExpectation, V3ApiError, parse_mutation_json};
 use crate::model_metadata::{self, ModelMetadata};
 use crate::state::CoreState;
 use axum::{
@@ -67,7 +65,11 @@ pub(super) async fn put(
             .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
     }
     let _settings = state.settings_update.lock();
-    check_expectation(&state, &input.expectation)?;
+    if input.expectation.expected_revision != state.settings_revision()
+        || input.expectation.process_generation != state.process_generation()
+    {
+        return Err(V3ApiError::revision_conflict(&state));
+    }
     let snapshot = crate::routing_snapshot::RoutingSnapshot::load(&state.db.lock())
         .map_err(V3ApiError::internal)?;
     let destination = snapshot
@@ -75,17 +77,24 @@ pub(super) async fn put(
         .destinations
         .iter()
         .find(|d| d.id == id)
-        .ok_or_else(|| V3ApiError::not_found_at(&state, "destination not found"))?;
+        .ok_or_else(|| V3ApiError::not_found_at(&state, "destination not found"))?
+        .clone();
     let model = destination
         .catalog
         .iter()
         .find(|m| m.public_model == input.public_model)
-        .ok_or_else(|| V3ApiError::not_found_at(&state, "exact public model not found"))?;
-    state
-        .commit_configuration_update(|db| {
-            model_metadata::declare(db, destination, model, input.metadata)
-        })
-        .map_err(V3ApiError::internal)?;
+        .ok_or_else(|| V3ApiError::not_found_at(&state, "exact public model not found"))?
+        .clone();
+    crate::account_control::declare_model_metadata_locked(
+        &state,
+        &destination,
+        &model,
+        input.metadata,
+    )
+    .map_err(|error| match error {
+        crate::account_control::AccountControlError::Internal(error) => V3ApiError::internal(error),
+        other => V3ApiError::invalid_request_at(&state, other.to_string()),
+    })?;
     payload(&state, &id).map(Json)
 }
 

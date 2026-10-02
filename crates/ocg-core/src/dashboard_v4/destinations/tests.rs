@@ -77,7 +77,7 @@ fn expectation(state: &CoreState) -> MutationExpectation {
 fn expect_ok<T>(result: Result<T, DestinationsError>) -> T {
     match result {
         Ok(value) => value,
-        Err(_) => panic!("destination mutation unexpectedly failed"),
+        Err(error) => panic!("destination mutation unexpectedly failed: {error:?}"),
     }
 }
 
@@ -195,11 +195,40 @@ fn metadata_edit_keeps_disabled_default_protocol_and_explicit_routes() {
     );
     request.expectation = expectation(&state);
     request.endpoint_url = "https://changed.example/v1".into();
-    assert!(patch_destination_locked(&state, &id, request).is_err());
+    assert!(patch_destination_locked(&state, &id, request.clone()).is_err());
+    request.expectation = expectation(&state);
+    request.endpoint_url = "https://before.example/v1".into();
+    request.protocol_routes = Some(vec![
+        HttpProtocolRouteDto {
+            protocol: ProtocolDto::ChatCompletions,
+            endpoint_url: "https://before.example/v1".into(),
+            auth_scheme: AuthSchemeDto::Bearer,
+        },
+        HttpProtocolRouteDto {
+            protocol: ProtocolDto::Messages,
+            endpoint_url: "https://before.example/anthropic/v1/messages".into(),
+            auth_scheme: AuthSchemeDto::XApiKey,
+        },
+        HttpProtocolRouteDto {
+            protocol: ProtocolDto::Responses,
+            endpoint_url: "https://before.example/v1/responses".into(),
+            auth_scheme: AuthSchemeDto::Bearer,
+        },
+    ]);
+    request.models[0].public_model = " public-before ".into();
+    request.models[0].protocols = Some(vec![ProtocolDto::Messages, ProtocolDto::Responses]);
+    let expanded = expect_ok(patch_destination_locked(&state, &id, request));
+    assert_eq!(expanded.destination.protocol_routes.len(), 3);
     assert_eq!(
-        expect_ok(load_destination(&state, &id)).base_url.as_deref(),
+        expanded.destination.catalog[0].protocols,
+        [ProtocolDto::Messages, ProtocolDto::Responses]
+    );
+    let stored = expect_ok(load_destination(&state, &id));
+    assert_eq!(
+        stored.base_url.as_deref(),
         Some("https://before.example/v1")
     );
+    assert_eq!(stored.catalog[0].public_model, "public-before");
 }
 
 #[test]

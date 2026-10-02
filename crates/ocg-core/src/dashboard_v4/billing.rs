@@ -1,13 +1,12 @@
 //! One account billing view; provider observers retain their existing adapters.
 
+use crate::account_control::{AccountControlError, CreditMutation, MutationCas};
 use crate::billing::{billing_model_for_destination, stepfun_plan_credits};
 use crate::billing_types::{
     BillingModel, BillingSource, BillingStatus, CreditCalibrationRequest, CreditConfigureRequest,
     CreditGrantRequest,
 };
-use crate::dashboard_v3::{
-    MutationExpectation, V3ApiError, check_expectation, parse_mutation_json,
-};
+use crate::dashboard_v3::{MutationExpectation, V3ApiError, parse_mutation_json};
 use crate::db::billing as storage;
 use crate::provider::ProviderRegistry;
 use crate::state::CoreState;
@@ -202,81 +201,51 @@ fn mutate(
     state: &CoreState,
     id: &str,
     expectation: &MutationExpectation,
-    apply: impl FnOnce(&Connection) -> anyhow::Result<()>,
+    mutation: CreditMutation<'_>,
 ) -> Result<BillingStatus, V3ApiError> {
-    let _settings = state.settings_update.lock();
-    check_expectation(state, expectation)?;
-    let db = state.db.lock();
-    let (adapter, endpoint, legacy) = destination(&db.conn, id)
-        .map_err(V3ApiError::internal)?
-        .ok_or_else(|| V3ApiError::not_found_at(state, "account not found"))?;
-    if adapter != AdapterKind::Http || !matches!(legacy.as_str(), "dynamic" | "custom_account") {
-        return Err(V3ApiError::invalid_request_at(
-            state,
-            "this account uses its provider billing contract",
-        ));
-    }
-    let account = db
-        .get_account(id)
-        .map_err(V3ApiError::internal)?
-        .ok_or_else(|| V3ApiError::not_found_at(state, "account not found"))?;
-    let configurable = true;
-    let official_cash = db
-        .get_dynamic_provider(&account.provider_id)
-        .map_err(V3ApiError::internal)?
-        .as_ref()
-        .and_then(crate::official_api::kind_for_runtime)
-        .is_some();
-    // Usage does not depend on the credit write. Failure here persists nothing.
-    let usage = crate::dashboard_v3::usage::provider_usage_from_db(state, &db, id)?;
-    let transaction = db
-        .conn
-        .unchecked_transaction()
-        .map_err(V3ApiError::internal)?;
-    apply(&transaction).map_err(|error| {
-        if error.downcast_ref::<rusqlite::Error>().is_some() {
-            V3ApiError::internal(error)
-        } else {
-            V3ApiError::invalid_request_at(state, error.to_string())
-        }
-    })?;
-    // Clock must be after apply so a grant bucket that starts at `now` is active.
-    let credits =
-        storage::read_view_on(&transaction, id, Utc::now()).map_err(V3ApiError::internal)?;
-    let model = if credits.is_some() {
-        BillingModel::Credits
-    } else {
-        billing_model_for_destination(adapter, &endpoint)
-    };
-    // GET reads official cash only when that model is selected. Keep the read
-    // inside this transaction so a cash failure rolls the credit write back.
-    let cash = if official_cash && model == BillingModel::Cash {
-        Some(super::official_api::status_locked(state, &db, id)?)
-    } else {
-        None
-    };
+    let applied = crate::account_control::apply_credit_mutation(
+        state,
+        id,
+        MutationCas {
+            expected_revision: expectation.expected_revision,
+            process_generation: expectation.process_generation,
+        },
+        mutation,
+    )
+    .map_err(|error| map_credit_error(state, error))?;
     let mut projected = project_billing(
         state,
         id,
-        state.settings_revision(),
-        &account.provider_id,
-        adapter,
-        &endpoint,
-        configurable,
-        credits,
-        usage,
-        cash,
+        applied.revision,
+        &applied.provider_id,
+        applied.adapter,
+        &applied.endpoint,
+        true,
+        applied.credits,
+        applied.usage,
+        applied.cash,
     );
-    transaction.commit().map_err(V3ApiError::internal)?;
-    let revision = state.bump_settings_revision();
-    projected.revision = revision;
+    projected.revision = applied.revision;
     if let Some(usage) = projected.usage.as_mut() {
-        usage.revision = revision;
+        usage.revision = applied.revision;
     }
     if let Some(cash) = projected.cash.as_mut() {
-        cash.revision = revision;
+        cash.revision = applied.revision;
     }
     Ok(projected)
+}
+
+fn map_credit_error(state: &CoreState, error: AccountControlError) -> V3ApiError {
+    match error {
+        AccountControlError::NotFound => V3ApiError::not_found_at(state, "account not found"),
+        AccountControlError::Invalid(message) => V3ApiError::invalid_request_at(state, message),
+        AccountControlError::RevisionConflict => V3ApiError::revision_conflict(state),
+        AccountControlError::Conflict(message) => V3ApiError::conflict_at(state, message),
+        AccountControlError::Unavailable(message) => {
+            V3ApiError::precondition_failed_at(state, message)
+        }
+        AccountControlError::Internal(error) => V3ApiError::internal(error),
+    }
 }
 
 pub(super) async fn configure(
@@ -285,15 +254,15 @@ pub(super) async fn configure(
     body: Bytes,
 ) -> Result<Json<BillingStatus>, V3ApiError> {
     let input = parse_mutation_json::<CreditConfigureRequest>(&body)?;
-    mutate(&state, &id, &input.expectation, |conn| {
-        storage::configure_on(
-            conn,
-            &id,
-            input.configuration,
-            input.initial_buckets,
-            Utc::now(),
-        )
-    })
+    mutate(
+        &state,
+        &id,
+        &input.expectation,
+        CreditMutation::Configure {
+            configuration: input.configuration,
+            initial_buckets: input.initial_buckets,
+        },
+    )
     .map(Json)
 }
 
@@ -303,9 +272,14 @@ pub(super) async fn calibrate(
     body: Bytes,
 ) -> Result<Json<BillingStatus>, V3ApiError> {
     let input = parse_mutation_json::<CreditCalibrationRequest>(&body)?;
-    mutate(&state, &id, &input.expectation, |conn| {
-        storage::calibrate_on(conn, &id, &input.balances, Utc::now())
-    })
+    mutate(
+        &state,
+        &id,
+        &input.expectation,
+        CreditMutation::Calibrate {
+            balances: &input.balances,
+        },
+    )
     .map(Json)
 }
 
@@ -315,16 +289,16 @@ pub(super) async fn grant(
     body: Bytes,
 ) -> Result<Json<BillingStatus>, V3ApiError> {
     let input = parse_mutation_json::<CreditGrantRequest>(&body)?;
-    mutate(&state, &id, &input.expectation, |conn| {
-        storage::grant_on(
-            conn,
-            &id,
-            input.label,
-            input.amount,
-            input.expires_at,
-            Utc::now(),
-        )
-    })
+    mutate(
+        &state,
+        &id,
+        &input.expectation,
+        CreditMutation::Grant {
+            label: input.label,
+            amount: input.amount,
+            expires_at: input.expires_at,
+        },
+    )
     .map(Json)
 }
 
@@ -334,10 +308,7 @@ pub(super) async fn disable(
     body: Bytes,
 ) -> Result<Json<BillingStatus>, V3ApiError> {
     let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
-    mutate(&state, &id, &expectation, |conn| {
-        storage::disable_on(conn, &id, Utc::now())
-    })
-    .map(Json)
+    mutate(&state, &id, &expectation, CreditMutation::Disable).map(Json)
 }
 
 #[cfg(test)]

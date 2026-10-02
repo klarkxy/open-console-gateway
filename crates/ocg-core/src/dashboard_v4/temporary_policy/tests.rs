@@ -2,7 +2,7 @@ use super::*;
 use crate::crypto::{KeyCipher, StaticKeyCipher};
 use crate::dashboard_v3::MutationExpectation;
 use crate::db::Database;
-use crate::gateway::policy::{SETTING_KEY, persist_configured_rules};
+use crate::gateway::policy::{SETTING_KEY, destination_ids, persist_configured_rules};
 use crate::state::CoreStateInner;
 use axum::Json;
 use axum::body::Bytes;

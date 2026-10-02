@@ -296,12 +296,7 @@ pub(crate) fn replace_http_destination_with_routes_on(
             )?;
         }
     }
-    let mut configured = existing.clone();
-    configured.base_url = Some(endpoint_url.clone());
-    configured.auth_scheme = next_auth;
-    configured.protocols = protocols;
-    configured.protocol_routes = protocol_routes;
-    configured.catalog = catalog;
+    let configured = load_http_destination(db, destination_id)?;
     remap_http_grants_on(&db.conn, &existing, &configured)?;
     union_authorized_grants(
         &db.conn,

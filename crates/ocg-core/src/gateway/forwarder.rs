@@ -163,6 +163,61 @@ pub(crate) async fn forward_request(
     .await
 }
 
+/// Production send boundary used by the executor. The concrete state remains
+/// inside the forwarder; the executor names only this operation.
+pub(crate) trait AttemptSender {
+    fn send_attempt<'a>(
+        &'a self,
+        request: AttemptRequest<'a>,
+    ) -> impl std::future::Future<Output = Result<ForwardResult>> + Send + 'a;
+}
+
+pub(crate) struct AttemptRequest<'a> {
+    pub client: &'a Client,
+    pub route: RouteLabel,
+    pub account: &'a ExecutionCredential,
+    pub adapter: ProviderAdapterKind,
+    pub config: &'a AppConfig,
+    pub plan: &'a RequestPlan,
+    pub trace: &'a RequestTrace,
+    pub client_body: &'a [u8],
+    pub attempt: u32,
+    pub allow_same_account_retry: bool,
+    pub headers: HeaderMap,
+    pub pricing_snapshot: RequestPricingSnapshot,
+    pub client_key_id: Option<&'a str>,
+    pub attempt_spec: &'a AttemptSpec,
+    pub selection: &'a LiveSendSelection,
+    pub deadline: Option<tokio::time::Instant>,
+}
+
+impl AttemptSender for CoreState {
+    fn send_attempt<'a>(
+        &'a self,
+        request: AttemptRequest<'a>,
+    ) -> impl std::future::Future<Output = Result<ForwardResult>> + Send + 'a {
+        forward_request_with_deadline(
+            request.client,
+            request.route,
+            self,
+            request.account,
+            request.adapter,
+            request.config,
+            request.plan,
+            request.trace,
+            request.client_body,
+            request.attempt,
+            request.allow_same_account_retry,
+            request.headers,
+            request.pricing_snapshot,
+            request.client_key_id,
+            request.attempt_spec,
+            request.selection,
+            request.deadline,
+        )
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn forward_request_with_deadline(
     client: &Client,

@@ -3,14 +3,11 @@
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use ocg_domain::catalog::CredentialKind;
-use ocg_domain::credential::observer_credential_id_for_platform_account;
 
-use crate::dashboard_v3::dynamic_providers::first_account_key;
+use crate::account_control::{AccountControlError, rotate_upstream_credential_locked};
 use crate::dashboard_v3::{
     ControlRevision, MutationExpectation, V3ApiError, check_expectation, parse_mutation_json,
 };
-use crate::provider::{CPA_ACCOUNT_ID, builtin_provider, validate_plan_key};
 use crate::state::CoreState;
 
 use super::destinations::{DestinationsError, overlay_one_credential_dto, projection_refused};
@@ -37,75 +34,10 @@ fn rotate_locked(
     credential_id: &str,
     input: CredentialRotateRequest,
 ) -> Result<CredentialRotateResult, V3ApiError> {
-    let _settings_update = state.settings_update.lock();
+    let _settings = state.settings_update.lock();
     check_expectation(state, &input.expectation)?;
-
-    let secret = input.secret_input.trim();
-    if secret.is_empty() {
-        return Err(V3ApiError::invalid_request_at(
-            state,
-            "secretInput is required",
-        ));
-    }
-
-    let snapshot = {
-        let db = state.db.lock();
-        db.list_identity_model().map_err(V3ApiError::internal)?
-    };
-    if snapshot.platform_parents.iter().any(|parent| {
-        observer_credential_id_for_platform_account(&parent.platform_id).as_str() == credential_id
-    }) {
-        return Err(V3ApiError::invalid_request_at(
-            state,
-            "platform observer credentials cannot be rotated here",
-        ));
-    }
-    let record = snapshot
-        .accounts
-        .iter()
-        .find(|record| record.credential_id == credential_id)
-        .ok_or_else(|| V3ApiError::not_found_at(state, "credential not found"))?;
-    let account = &record.account;
-    if account.id == CPA_ACCOUNT_ID {
-        return Err(V3ApiError::invalid_request_at(
-            state,
-            "CPA Subscription Pool settings must use the external-integration endpoint",
-        ));
-    }
-    if account.is_zen_free() {
-        return Err(V3ApiError::invalid_request_at(
-            state,
-            "Zen Free settings must use the dedicated provider-settings endpoint",
-        ));
-    }
-    if account.credential_kind == CredentialKind::None {
-        return Err(V3ApiError::invalid_request_at(
-            state,
-            "anonymous and no-auth credentials cannot be rotated",
-        ));
-    }
-
-    let key_cipher = match state
-        .dynamic_providers()
-        .iter()
-        .find(|runtime| runtime.id == account.provider_id)
-    {
-        Some(runtime) => first_account_key(state, runtime.auth_kind, Some(secret))?,
-        None => {
-            if let Some(plan) = builtin_provider(&account.provider_id) {
-                validate_plan_key(plan, secret)
-                    .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
-            }
-            state.encrypt_key(secret).map_err(V3ApiError::internal)?
-        }
-    };
-
-    let rotated = {
-        let db = state.db.lock();
-        db.rotate_account_credential(&account.id, &key_cipher)
-            .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?
-    };
-    state.bump_settings_revision();
+    let rotated = rotate_upstream_credential_locked(state, credential_id, &input.secret_input)
+        .map_err(|error| map_rotation_error(state, error))?;
     Ok(CredentialRotateResult {
         revision: ControlRevision::from_state(state),
         credential_id: rotated.credential_id,
@@ -113,6 +45,19 @@ fn rotate_locked(
         auth_state_version: rotated.auth_state_version,
         replayed: false,
     })
+}
+
+fn map_rotation_error(state: &CoreState, error: AccountControlError) -> V3ApiError {
+    match error {
+        AccountControlError::NotFound => V3ApiError::not_found_at(state, "credential not found"),
+        AccountControlError::Invalid(message) => V3ApiError::invalid_request_at(state, message),
+        AccountControlError::Conflict(message) => V3ApiError::conflict_at(state, message),
+        AccountControlError::RevisionConflict => V3ApiError::revision_conflict(state),
+        AccountControlError::Unavailable(message) => {
+            V3ApiError::precondition_failed_at(state, message)
+        }
+        AccountControlError::Internal(error) => V3ApiError::internal(error),
+    }
 }
 
 /// Permit one next normal selection for a confirmed exhausted Key.

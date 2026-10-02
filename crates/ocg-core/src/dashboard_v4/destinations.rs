@@ -12,15 +12,10 @@ use ocg_domain::destination::{
     ExpiryCadence, Grants, LegacyDestinationRef, MappingError, ModelResolution, OnboardingTaskRef,
     Plan, PlanWindow, PlanWindowKind, PricingSource, RedirectPolicy, UsageSource,
 };
-use ocg_domain::dynamic::{
-    DynamicAuthKind, DynamicModelMapping, DynamicModelUpstreamOverride, DynamicProviderDefinition,
-};
+use ocg_domain::dynamic::{DynamicAuthKind, DynamicModelMapping, DynamicModelUpstreamOverride};
 
-use crate::dashboard_v3::{
-    ControlRevision, MutationExpectation, V3ApiError, check_expectation, parse_mutation_json,
-};
+use crate::dashboard_v3::{ControlRevision, MutationExpectation, V3ApiError, parse_mutation_json};
 use crate::destination_projection::{ProjectionRefusal, RefusedRow, read_v4_projection};
-use crate::dynamic::validate_definition;
 use crate::quota_recovery::{
     PersistedQuotaReason, PersistedQuotaRecovery, PersistedQuotaWindow, QuotaEpisode,
     QuotaPresentationStatus, QuotaRecoveryView,
@@ -30,14 +25,14 @@ use crate::state::CoreState;
 use super::types::{
     AccountConfigurationOwnerDto, AccountConsoleLinkDto, AccountControlsDto, AccountToggleWriteDto,
     AdapterKindDto, AuthSchemeDto, CapabilitiesDto, CatalogModelDto, CredentialCooldownsDto,
-    CredentialGrantsDto, CredentialList, DestinationCatalogModelUpdate,
-    DestinationCredentialDto as CredentialDto, DestinationDeleteResult, DestinationDto,
-    DestinationList, DestinationModelPatch, DestinationOnboardingTaskDto, DestinationPatchRequest,
-    DestinationPatchResult, DestinationProjectionRefusalDto, DestinationProjectionRefusedError,
-    ExpiryCadenceDto, HttpProtocolRouteDto, LegacyDestinationKindDto, LegacyDestinationRefDto,
-    MappingErrorCodeDto, ModelResolutionDto, PlanDto, PlanWindowDto, PlanWindowKindDto,
-    PricingSourceDto, ProtocolDto, QuotaRecoveryDto, QuotaRecoveryReason, QuotaRecoveryStatus,
-    QuotaRecoveryWindow, RedirectPolicyDto, RefusedRowDto, RefusedRowKindDto, UsageSourceDto,
+    CredentialGrantsDto, CredentialList, DestinationCredentialDto as CredentialDto,
+    DestinationDeleteResult, DestinationDto, DestinationList, DestinationModelPatch,
+    DestinationOnboardingTaskDto, DestinationPatchRequest, DestinationPatchResult,
+    DestinationProjectionRefusalDto, DestinationProjectionRefusedError, ExpiryCadenceDto,
+    HttpProtocolRouteDto, LegacyDestinationKindDto, LegacyDestinationRefDto, MappingErrorCodeDto,
+    ModelResolutionDto, PlanDto, PlanWindowDto, PlanWindowKindDto, PricingSourceDto, ProtocolDto,
+    QuotaRecoveryDto, QuotaRecoveryReason, QuotaRecoveryStatus, QuotaRecoveryWindow,
+    RedirectPolicyDto, RefusedRowDto, RefusedRowKindDto, UsageSourceDto,
 };
 
 /// Stable 409 code when the stage-4a projection cannot map every live row.
@@ -111,58 +106,48 @@ fn patch_destination_locked(
     destination_id: &str,
     input: DestinationPatchRequest,
 ) -> Result<DestinationPatchResult, DestinationsError> {
-    let _settings_update = state.settings_update.lock();
-    check_expectation(state, &input.expectation)?;
-    let destination = load_destination(state, destination_id)?;
-    let definition = destination_definition(&destination, &input)
-        .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
-    state
-        .commit_configuration_update(|db| {
-            let routes = input.protocol_routes.as_ref().map(|routes| {
-                routes
-                    .iter()
-                    .map(ocg_domain::destination::HttpProtocolRoute::from)
-                    .collect::<Vec<_>>()
-            });
-            crate::db::destination_commands::replace_http_destination_with_routes_on(
-                db,
-                destination_id,
-                &definition,
-                &input.authorize_credential_ids,
-                routes.as_deref(),
-            )?;
-            if let Some(enabled) = input.enabled {
-                db.conn.execute(
-                    "UPDATE destinations SET enabled = ?2 WHERE id = ?1",
-                    rusqlite::params![destination_id, enabled],
-                )?;
-            }
-            let configured = crate::destination_projection::load_runtime(db)?
-                .destinations
-                .into_iter()
-                .find(|row| row.id == destination_id)
-                .ok_or_else(|| anyhow::anyhow!("destination not found"))?;
-            let updates: Vec<_> = input
-                .models
-                .iter()
-                .map(|model| DestinationCatalogModelUpdate {
-                    public_model: model.public_model.clone(),
-                    enabled: model.enabled,
-                    protocols: model.protocols.clone(),
-                    preferred: model.preferred,
-                })
-                .collect();
-            let catalog = super::destination_catalog::apply_updates(&configured, &updates, &[])
-                .map_err(anyhow::Error::msg)?;
-            crate::db::destination_store::replace_destination_catalog(
-                &db.conn,
-                destination_id,
-                &catalog,
-            )?;
-            Ok(())
+    let catalog_updates = input
+        .models
+        .iter()
+        .map(|model| crate::account_control::CatalogModelEdit {
+            public_model: model.public_model.clone(),
+            enabled: model.enabled,
+            protocols: model
+                .protocols
+                .as_ref()
+                .map(|protocols| protocols.iter().copied().map(Into::into).collect()),
+            preferred: model.preferred.map(Into::into),
         })
-        .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
-
+        .collect();
+    let update = crate::account_control::HttpDestinationUpdate {
+        name: input.name,
+        endpoint_url: input.endpoint_url,
+        upstream_protocol: input.upstream_protocol.into(),
+        auth_kind: match input.auth_scheme {
+            AuthSchemeDto::Bearer => DynamicAuthKind::Bearer,
+            AuthSchemeDto::XApiKey => DynamicAuthKind::XApiKey,
+            AuthSchemeDto::ApiKey => DynamicAuthKind::ApiKey,
+            AuthSchemeDto::None => DynamicAuthKind::None,
+        },
+        mappings: input.models.into_iter().map(model_patch).collect(),
+        authorize_credential_ids: input.authorize_credential_ids,
+        protocol_routes: input.protocol_routes.map(|routes| {
+            routes
+                .into_iter()
+                .map(|route| ocg_domain::destination::HttpProtocolRoute::from(&route))
+                .collect()
+        }),
+        enabled: input.enabled,
+        catalog_updates,
+    };
+    let _settings_update = state.settings_update.lock();
+    if input.expectation.expected_revision != state.settings_revision()
+        || input.expectation.process_generation != state.process_generation()
+    {
+        return Err(V3ApiError::revision_conflict(state).into());
+    }
+    crate::account_control::update_http_destination_locked(state, destination_id, update)
+        .map_err(|error| map_destination_control_error(state, error))?;
     mutation_result_locked(state, destination_id)
 }
 
@@ -200,17 +185,43 @@ fn delete_destination_locked(
     expectation: MutationExpectation,
 ) -> Result<DestinationDeleteResult, DestinationsError> {
     let _settings_update = state.settings_update.lock();
-    check_expectation(state, &expectation)?;
-    state
-        .commit_configuration_update(|db| {
-            crate::db::destination_commands::delete_http_destination_on(db, destination_id)
-        })
-        .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
+    if expectation.expected_revision != state.settings_revision()
+        || expectation.process_generation != state.process_generation()
+    {
+        return Err(V3ApiError::revision_conflict(state).into());
+    }
+    crate::account_control::delete_http_destination_locked(state, destination_id)
+        .map_err(|error| map_destination_control_error(state, error))?;
     Ok(DestinationDeleteResult {
         revision: ControlRevision::from_state(state),
     })
 }
 
+fn map_destination_control_error(
+    state: &CoreState,
+    error: crate::account_control::AccountControlError,
+) -> DestinationsError {
+    match error {
+        crate::account_control::AccountControlError::NotFound => {
+            V3ApiError::not_found_at(state, "destination not found").into()
+        }
+        crate::account_control::AccountControlError::Invalid(message)
+        | crate::account_control::AccountControlError::Conflict(message) => {
+            V3ApiError::invalid_request_at(state, message).into()
+        }
+        crate::account_control::AccountControlError::RevisionConflict => {
+            V3ApiError::revision_conflict(state).into()
+        }
+        crate::account_control::AccountControlError::Unavailable(message) => {
+            V3ApiError::precondition_failed_at(state, message).into()
+        }
+        crate::account_control::AccountControlError::Internal(error) => {
+            V3ApiError::internal(error).into()
+        }
+    }
+}
+
+#[cfg(test)]
 fn load_destination(state: &CoreState, id: &str) -> Result<Destination, DestinationsError> {
     let projection = {
         let db = state.db.lock();
@@ -223,37 +234,6 @@ fn load_destination(state: &CoreState, id: &str) -> Result<Destination, Destinat
         .into_iter()
         .find(|destination| destination.id == id)
         .ok_or_else(|| V3ApiError::not_found_at(state, "destination not found").into())
-}
-
-fn destination_definition(
-    destination: &Destination,
-    input: &DestinationPatchRequest,
-) -> Result<DynamicProviderDefinition, String> {
-    if destination.adapter != AdapterKind::Http {
-        return Err("sealed destination adapters are immutable".to_string());
-    }
-    let endpoint_url = crate::custom::validate_custom_endpoint_url(&input.endpoint_url)
-        .map_err(|error| error.to_string())?;
-    let auth_kind = match input.auth_scheme {
-        AuthSchemeDto::Bearer => DynamicAuthKind::Bearer,
-        AuthSchemeDto::XApiKey => DynamicAuthKind::XApiKey,
-        AuthSchemeDto::ApiKey => DynamicAuthKind::ApiKey,
-        AuthSchemeDto::None => DynamicAuthKind::None,
-    };
-    if destination.capabilities.observer {
-        return Err("platform-managed destinations are immutable".to_string());
-    }
-    let id = destination.id.clone();
-    let definition = DynamicProviderDefinition {
-        preset_id: None,
-        id,
-        name: input.name.clone(),
-        endpoint_url,
-        upstream_protocol: input.upstream_protocol.into(),
-        auth_kind,
-        mappings: input.models.iter().cloned().map(model_patch).collect(),
-    };
-    validate_definition(definition).map_err(|error| error.to_string())
 }
 
 fn model_patch(model: DestinationModelPatch) -> DynamicModelMapping {

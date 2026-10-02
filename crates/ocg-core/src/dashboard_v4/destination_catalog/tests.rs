@@ -886,3 +886,80 @@ async fn refresh_rechecks_cas_and_credential_identity_after_awaiting_upstream() 
     );
     task.abort();
 }
+
+#[test]
+fn refresh_receipt_stays_with_its_commit_when_a_later_mutation_advances_revision() {
+    let fixture = fixture(
+        "receipt",
+        "https://catalog.invalid/v1/chat/completions",
+        DynamicAuthKind::Bearer,
+        true,
+        false,
+    );
+    let state = fixture.state.as_ref().unwrap().clone();
+    let id = fixture.destination_id();
+    let cas = crate::account_control::MutationCas {
+        expected_revision: state.settings_revision(),
+        process_generation: state.process_generation(),
+    };
+    let stale_prepared = crate::account_control::prepare_catalog_refresh(&state, &id, cas).unwrap();
+    let prepared = crate::account_control::prepare_catalog_refresh(&state, &id, cas).unwrap();
+    let metadata = std::collections::BTreeMap::new();
+    let models = vec!["fresh-model".to_string()];
+    arm_catalog_refresh_snapshot_interpose();
+    let receipt =
+        finish_catalog_refresh(&state, &id, cas, prepared, &models, &metadata, false).unwrap();
+    assert_eq!(receipt.revision.revision + 1, state.settings_revision());
+    assert_eq!(
+        receipt.revision.process_generation,
+        state.process_generation()
+    );
+    assert!(
+        receipt
+            .destination
+            .catalog
+            .iter()
+            .any(|model| model.public_model == "fresh-model")
+    );
+    assert_eq!(
+        stored_catalog(&fixture)
+            .iter()
+            .map(|model| model.public_model.clone())
+            .collect::<Vec<_>>(),
+        receipt
+            .destination
+            .catalog
+            .iter()
+            .map(|model| model.public_model.clone())
+            .collect::<Vec<_>>()
+    );
+    let stale = crate::account_control::commit_catalog_refresh(
+        &state,
+        &id,
+        cas,
+        stale_prepared,
+        &models,
+        &metadata,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            stale,
+            crate::account_control::CatalogRefreshError::Conflict(message)
+                if message == "revision conflict"
+        ),
+        "stale CAS must reject the second commit"
+    );
+    assert_eq!(
+        stored_catalog(&fixture)
+            .iter()
+            .map(|model| model.public_model.clone())
+            .collect::<Vec<_>>(),
+        receipt
+            .destination
+            .catalog
+            .iter()
+            .map(|model| model.public_model.clone())
+            .collect::<Vec<_>>()
+    );
+}

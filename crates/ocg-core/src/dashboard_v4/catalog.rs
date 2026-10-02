@@ -55,54 +55,39 @@ pub(super) async fn remove_models(
         ));
     }
 
-    let now = Utc::now();
-    let snapshot = {
-        let _settings_update = state.settings_update.lock();
-        check_expectation(&state, &input.expectation)?;
-        let (row, reload) = {
-            let db = state.db.lock();
-            let Some(current) = db
-                .load_persisted_scope(&scope)
-                .map_err(V3ApiError::internal)?
-            else {
-                return Err(V3ApiError::precondition_failed_at(
-                    &state,
-                    "provider model catalog has not been refreshed",
-                ));
-            };
-            let known: HashSet<&str> = current.catalog_models.iter().map(String::as_str).collect();
-            if model_ids
-                .iter()
-                .any(|model_id| !known.contains(model_id.as_str()))
-            {
-                return Err(V3ApiError::invalid_request_at(
-                    &state,
-                    "modelIds must be distinct models from the saved catalog",
-                ));
-            }
-            let row = db
-                .remove_contract_catalog_models(&scope, &model_ids, now)
-                .map_err(V3ApiError::internal)?;
-            // The catalog write is already durable. Advance CAS before the
-            // fallible reload so persisted state cannot hide behind the
-            // caller's token, including when reload fails.
-            let _revision = state.bump_settings_revision();
-            let reload = state.reload_provider_contracts_locked(&db);
-            (row, reload)
-        };
-        if reload.is_err() {
-            state.restrict_provider_catalog_after_reload_failure(&row);
+    let removed = state
+        .remove_builtin_catalog_models(
+            input.expectation.expected_revision,
+            input.expectation.process_generation,
+            &scope,
+            &model_ids,
+            Utc::now(),
+        )
+        .map_err(|error| map_catalog_removal_error(&state, error))?;
+    Ok(Json(CatalogModelsRemoveResult {
+        revision: ControlRevision {
+            revision: removed.revision,
+            process_generation: removed.process_generation,
+            pricing_revision: removed.pricing_revision,
+        },
+        removed_ids: model_ids,
+        catalog_models: removed.row.catalog_models,
+    }))
+}
+
+fn map_catalog_removal_error(
+    state: &CoreState,
+    error: crate::state::CatalogRemovalError,
+) -> V3ApiError {
+    use crate::state::CatalogRemovalError;
+    match error {
+        CatalogRemovalError::RevisionConflict => V3ApiError::revision_conflict(state),
+        CatalogRemovalError::Invalid(message) => V3ApiError::invalid_request_at(state, message),
+        CatalogRemovalError::Unavailable(message) => {
+            V3ApiError::precondition_failed_at(state, message)
         }
-        state.routing.reset();
-        let snapshot = CatalogModelsRemoveResult {
-            revision: ControlRevision::from_state(&state),
-            removed_ids: model_ids,
-            catalog_models: row.catalog_models,
-        };
-        reload.map_err(V3ApiError::internal)?;
-        snapshot
-    };
-    Ok(Json(snapshot))
+        CatalogRemovalError::Internal(error) => V3ApiError::internal(error),
+    }
 }
 
 pub(super) async fn add_models(
@@ -128,11 +113,16 @@ pub(super) async fn add_models(
         .ok_or_else(|| V3ApiError::not_found_at(&state, "provider scope not found"))?;
     let model_ids = validate_additions(&current.catalog.models, &input.model_ids)
         .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
-    state
-        .commit_configuration_update(|db| {
-            db.add_contract_catalog_models(&scope, &model_ids, Utc::now())
-        })
-        .map_err(V3ApiError::internal)?;
+    crate::account_control::add_builtin_catalog_models_locked(&state, &scope_id, &model_ids)
+        .map_err(|error| match error {
+            crate::account_control::AccountControlError::RevisionConflict => {
+                V3ApiError::revision_conflict(&state)
+            }
+            crate::account_control::AccountControlError::Internal(error) => {
+                V3ApiError::internal(error)
+            }
+            other => V3ApiError::invalid_request_at(&state, other.to_string()),
+        })?;
     crate::dashboard_v3::provider_contracts_response(&state)
 }
 
@@ -173,9 +163,6 @@ pub(super) async fn edit_model(
             "unknown built-in provider",
         ));
     }
-    let scope = ContractScope::provider(&scope_id);
-    let _settings = state.settings_update.lock();
-    check_expectation(&state, &input.expectation)?;
     let model = ocg_domain::destination::CatalogModel {
         public_model: input.public_model.trim().to_string(),
         upstream_model: input.upstream_model.trim().to_string(),
@@ -184,16 +171,20 @@ pub(super) async fn edit_model(
         enabled: input.enabled,
         upstream_override: None,
     };
-    state
-        .commit_configuration_update(|db| {
-            db.edit_contract_catalog_model(
-                &scope,
-                input.original_model_id.as_deref(),
-                model,
-                Utc::now(),
-            )
-        })
-        .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
+    let _settings = state.settings_update.lock();
+    check_expectation(&state, &input.expectation)?;
+    crate::account_control::edit_builtin_catalog_model_locked(
+        &state,
+        &scope_id,
+        input.original_model_id.as_deref(),
+        model,
+    )
+    .map_err(|error| match error {
+        crate::account_control::AccountControlError::RevisionConflict => {
+            V3ApiError::revision_conflict(&state)
+        }
+        other => V3ApiError::invalid_request_at(&state, other.to_string()),
+    })?;
     crate::dashboard_v3::provider_contracts_response(&state)
 }
 

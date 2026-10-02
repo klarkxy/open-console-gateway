@@ -392,7 +392,7 @@ pub(crate) fn authorize_live_send_secret(
                 return Err(LiveSendAuthError::unauthorized(UNAUTHORIZED_ATTEMPT));
             }
             let db = state.db.lock();
-            verify_live_send(&db, selection, plan, spec, account_gate)?;
+            authorize_prepared_attempt(&db, selection, plan, spec, account_gate)?;
             state
                 .decrypt_key(&selection.key_cipher)
                 .map(Some)
@@ -418,7 +418,7 @@ pub(crate) fn confirm_live_send_secret(
                 return Err(LiveSendAuthError::unauthorized(UNAUTHORIZED_ATTEMPT));
             }
             let db = state.db.lock();
-            verify_live_send(&db, selection, plan, spec, account_gate)
+            authorize_prepared_attempt(&db, selection, plan, spec, account_gate)
         }
     }
 }
@@ -432,6 +432,16 @@ fn live_key_cipher(
         Ok(None) => Ok(account.key_cipher.clone()),
         Err(error) => Err(LiveSendAuthError::unauthorized(error.to_string())),
     }
+}
+
+pub(crate) fn authorize_prepared_attempt(
+    db: &crate::db::Database,
+    selection: &LiveSendSelection,
+    plan: &RequestPlan,
+    spec: &AttemptSpec,
+    account_gate: LiveSendAccountGate,
+) -> Result<(), LiveSendAuthError> {
+    verify_live_send(db, selection, plan, spec, account_gate)
 }
 
 pub(super) fn verify_live_send(
