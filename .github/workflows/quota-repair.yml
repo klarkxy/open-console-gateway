@@ -3,7 +3,7 @@ name: Quota repair workspace
 on:
   push:
     branches: [fix/account-quota-refresh-latency]
-    paths: [.github/workflows/quota-repair.yml, scripts/quota-repair.py, scripts/quota-repair-followup.py]
+    paths: [.github/workflows/quota-repair.yml, 'scripts/quota-repair*.py']
 
 permissions:
   contents: read
@@ -46,6 +46,7 @@ jobs:
             python3 scripts/quota-repair.py
           fi
           python3 scripts/quota-repair-followup.py
+          python3 scripts/quota-repair-validation.py
           cargo fmt --all
       - run: pnpm install --frozen-lockfile
       - name: Generate contracts
@@ -57,6 +58,7 @@ jobs:
           cargo test -p ocg-core --lib --locked singleflight 2>&1 | tee -a "$RUNNER_TEMP/quota-check.log"
           cargo test -p ocg-core --lib --locked billing 2>&1 | tee -a "$RUNNER_TEMP/quota-check.log"
           cargo test -p ocg-core --test dashboard_v3_ollama_usage --test dashboard_v4_official_api --locked --features ollama-cloud-loopback-test 2>&1 | tee -a "$RUNNER_TEMP/quota-check.log"
+          cargo clippy -p ocg-core --all-targets --locked --features ollama-cloud-loopback-test -- -D warnings 2>&1 | tee -a "$RUNNER_TEMP/quota-check.log"
       - name: Focused Web verification
         run: |
           set -o pipefail
