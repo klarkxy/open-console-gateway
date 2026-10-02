@@ -113,5 +113,8 @@ jobs:
       - name: Compile and test Windows-only desktop behavior
         run: cargo test -p ocg-manager --lib --locked
 
+      - name: Test Windows CPA file-sharing failure receipts
+        run: cargo test -p ocg-core --lib --locked --features dsh-local-host removal_
+
       - name: Lint Windows desktop crate
         run: cargo clippy -p ocg-manager --all-targets --locked -- -D warnings

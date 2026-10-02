@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import vue from "@vitejs/plugin-vue";
 import { build, type Plugin } from "vite";
 import type { Component } from "vue";
+import type { useBillingStore } from "../stores/billing.ts";
 
 /**
  * Vite bundles of the real quota and billing panels for the custom Vue host.
@@ -28,6 +29,7 @@ export interface ControlPlaneStore {
 
 export interface BillingStore {
   load(accountId: string, binding: string): Promise<void>;
+  $onAction: ReturnType<typeof useBillingStore>["$onAction"];
 }
 
 export interface RetirementBundle {

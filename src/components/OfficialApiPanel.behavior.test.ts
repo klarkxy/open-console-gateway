@@ -41,6 +41,20 @@ function serial(run: () => Promise<void>): Promise<void> {
   return next;
 }
 
+function cashRefreshCompletion(store: ReturnType<RetirementBundle["useBillingStore"]>): Promise<void> {
+  return new Promise((resolve) => {
+    const stop = store.$onAction(({ name, after, onError }) => {
+      if (name !== "refreshCash") return;
+      const complete = () => {
+        stop();
+        resolve();
+      };
+      after(complete);
+      onError(complete);
+    });
+  });
+}
+
 function account(): Account {
   return {
     id: "acc-1",
@@ -205,7 +219,9 @@ test("account balance renders and refresh posts the status CAS", () => serial(as
     }), false);
     control.sync({ revision: 9, processGeneration: 100 });
     assert.deepEqual(control.expectation(), { expectedRevision: 9, processGeneration: 100 });
+    const refreshed = cashRefreshCompletion(store);
     await Promise.resolve((circleButton(mounted.root).props.onClick as () => unknown)());
+    await refreshed;
     await settle();
     assert.match(text(mounted.root), /18\.00/);
     const posts = calls.filter((call) => call.method === "POST");
@@ -238,7 +254,9 @@ test("a failed balance refresh keeps the cached amount", () => serial(async () =
     await settle();
     assert.match(text(mounted.root), /12\.50/);
     control.sync({ revision: 9, processGeneration: 100 });
+    const refreshed = cashRefreshCompletion(store);
     await Promise.resolve((circleButton(mounted.root).props.onClick as () => unknown)());
+    await refreshed;
     await settle();
     assert.match(text(mounted.root), /12\.50/);
     assert.equal(calls.filter((call) => call.method === "POST").length, 1);

@@ -2616,6 +2616,7 @@ mod tests {
     }
 
     /// Lets the removal read `managed.json` and makes the later delete fail.
+    #[cfg(windows)]
     pub(super) fn hold_readable_no_delete(path: &std::path::Path) -> std::fs::File {
         let mut options = std::fs::OpenOptions::new();
         options.read(true);
@@ -2630,6 +2631,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(windows)]
     async fn late_removal_keeps_the_original_http_error_and_partial_receipt() {
         let (dir, state) = test_state("remove-partial-http");
         let root = cpa_runtime::runtime_dir(&dir);

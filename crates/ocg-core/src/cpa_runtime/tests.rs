@@ -2451,6 +2451,7 @@ fn already_running_start_commit_after_shutdown_does_not_publish_idle() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[cfg(windows)]
 fn hold_exclusive(path: &std::path::Path) -> std::fs::File {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
@@ -2463,6 +2464,7 @@ fn hold_exclusive(path: &std::path::Path) -> std::fs::File {
 }
 
 /// Lets `load_managed` read the file and makes `DeleteFile` fail.
+#[cfg(windows)]
 fn hold_readable_no_delete(path: &std::path::Path) -> std::fs::File {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
@@ -2903,6 +2905,7 @@ async fn update_stop_after_launched_candidate_is_partial() {
 }
 
 #[tokio::test]
+#[cfg(windows)]
 async fn removal_before_any_owned_delete_stays_none() {
     let dir = temp_dir("remove-before-effect");
     let root = runtime_dir(&dir);
@@ -2948,6 +2951,7 @@ async fn removal_before_any_owned_delete_stays_none() {
 }
 
 #[tokio::test]
+#[cfg(windows)]
 async fn removal_after_an_owned_delete_is_partial() {
     let dir = temp_dir("remove-after-delete");
     let root = runtime_dir(&dir);
@@ -3001,6 +3005,7 @@ async fn removal_after_an_owned_delete_is_partial() {
 }
 
 #[tokio::test]
+#[cfg(windows)]
 async fn removal_manifest_failure_after_deletes_stays_partial() {
     let dir = temp_dir("remove-manifest-partial");
     let root = runtime_dir(&dir);

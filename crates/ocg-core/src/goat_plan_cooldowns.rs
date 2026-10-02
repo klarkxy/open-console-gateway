@@ -211,6 +211,8 @@ pub(crate) fn overlay_wire(
     }
 }
 
+// Keep the identity fence explicit so late replies cannot mutate a replaced Key.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn record_window_on(
     conn: &Connection,
     credential_id: &str,
@@ -254,6 +256,7 @@ pub(crate) fn record_window_on(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_window_locked(
     conn: &Connection,
     credential_id: &str,
