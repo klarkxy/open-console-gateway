@@ -230,7 +230,9 @@ async fn ollama_paid_tier_requires_purchase_date_and_publishes_month_credits() {
         .lock()
         .log_forward(&ForwardLog {
             id: 0,
-            timestamp: Utc::now(),
+            timestamp: chrono::DateTime::parse_from_rfc3339("2026-09-15T12:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
             model: "glm-5.3-flash".into(),
             account_id: "ollama-pro-1".into(),
             account_name: "ollama-pro-1".into(),
@@ -285,7 +287,9 @@ async fn ollama_paid_tier_requires_purchase_date_and_publishes_month_credits() {
         .lock()
         .log_forward(&ForwardLog {
             id: 0,
-            timestamp: Utc::now(),
+            timestamp: chrono::DateTime::parse_from_rfc3339("2026-09-15T12:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
             model: "glm-5.3-flash".into(),
             account_id: "ollama-pro-1".into(),
             account_name: "ollama-pro-1".into(),

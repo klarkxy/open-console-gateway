@@ -222,16 +222,107 @@ async fn refresh_plan_usage(
     Ok(Json(usage))
 }
 
+/// Both balance APIs share this gate. The shared result is a commit receipt,
+/// never a cached HTTP envelope. Each caller rechecks its own identity/CAS.
+pub(crate) async fn coalesce_balance<F, Fut>(
+    state: &CoreState,
+    id: &str,
+    expectation: &MutationExpectation,
+    operation: &str,
+    work: F,
+) -> Result<(), V3ApiError>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), V3ApiError>> + Send + 'static,
+{
+    let (identity, key) = {
+        let _settings = state.settings_update.lock();
+        check_expectation(state, expectation)?;
+        let db = state.db.lock();
+        let identity = crate::usage_sync::UsageRefreshIdentity::capture(&db, id)
+            .map_err(V3ApiError::internal)?
+            .ok_or_else(|| V3ApiError::not_found_at(state, "account credential not found"))?;
+        let key = format!(
+            "{}:{}:{}",
+            identity.flight_key(operation),
+            expectation.expected_revision,
+            expectation.process_generation
+        );
+        (identity, key)
+    };
+    let captured = identity.clone();
+    let worker_state = state.clone();
+    let worker_id = id.to_string();
+    let expected = expectation.clone();
+    state
+        .balance_refresh
+        .run(key, move || async move {
+            let _permit = worker_state
+                .provider_usage_refresh
+                .exclusive(ProviderUsageRefreshGate::balance_key(&worker_id))
+                .await;
+            {
+                let _settings = worker_state.settings_update.lock();
+                check_expectation(&worker_state, &expected)?;
+                if !captured
+                    .is_current(&worker_state.db.lock())
+                    .map_err(V3ApiError::internal)?
+                {
+                    return Err(V3ApiError::conflict_at(
+                        &worker_state,
+                        "balance credential changed before refresh",
+                    ));
+                }
+            }
+            work().await
+        })
+        .await?;
+    let _settings = state.settings_update.lock();
+    check_expectation(state, expectation)?;
+    if !identity
+        .is_current(&state.db.lock())
+        .map_err(V3ApiError::internal)?
+    {
+        return Err(V3ApiError::conflict_at(
+            state,
+            "balance credential changed during refresh",
+        ));
+    }
+    Ok(())
+}
+
 async fn refresh_official_balance(
     state: &CoreState,
     id: &str,
     expectation: &MutationExpectation,
     endpoint_url: String,
 ) -> Result<Json<ProviderUsage>, RefreshApiError> {
-    let _refresh = state
-        .provider_usage_refresh
-        .exclusive(ProviderUsageRefreshGate::balance_key(id))
-        .await;
+    let worker_state = state.clone();
+    let worker_id = id.to_string();
+    let expected = expectation.clone();
+    coalesce_balance(
+        state,
+        id,
+        expectation,
+        "provider-balance",
+        move || async move {
+            refresh_official_balance_inner(&worker_state, &worker_id, &expected, endpoint_url).await
+        },
+    )
+    .await?;
+    let _settings = state.settings_update.lock();
+    check_expectation(state, expectation)?;
+    provider_usage_from_db(state, &state.db.lock(), id)
+        .map(Json)
+        .map_err(RefreshApiError::from)
+}
+
+async fn refresh_official_balance_inner(
+    state: &CoreState,
+    id: &str,
+    expectation: &MutationExpectation,
+    endpoint_url: String,
+) -> Result<(), V3ApiError> {
     let (account_snapshot, config, key) = {
         let _settings_update = state.settings_update.lock();
         check_expectation(state, expectation)?;
@@ -241,18 +332,31 @@ async fn refresh_official_balance(
             return Err(V3ApiError::conflict_at(
                 state,
                 "the destination changed before balance refresh",
-            )
-            .into());
+            ));
         }
         if account.key_cipher.trim().is_empty() {
             return Err(V3ApiError::invalid_request_at(
                 state,
                 "the selected account has no stored Key",
-            )
-            .into());
+            ));
+        }
+        if crate::usage_sync::manual_next_allowed_at(
+            db.account_usage_sync_state(id)
+                .map_err(V3ApiError::internal)?
+                .and_then(|row| row.last_attempt_at),
+            state.usage_sync.now(),
+        )
+        .is_some()
+        {
+            return Err(V3ApiError::throttled_at(
+                state,
+                "balance refresh is limited to once per 15 seconds",
+            ));
         }
         let key = state
             .decrypt_key(&account.key_cipher)
+            .map_err(V3ApiError::internal)?;
+        db.touch_account_usage_sync_attempt(id, state.usage_sync.now())
             .map_err(V3ApiError::internal)?;
         (account, state.config(), key)
     };
@@ -267,7 +371,7 @@ async fn refresh_official_balance(
                     account_snapshot.provider_id
                 ),
             );
-            return Err(V3ApiError::outbound_failed(state, message).into());
+            return Err(V3ApiError::outbound_failed(state, message));
         }
     };
     let source = rows.first().map(|row| row.source.clone()).ok_or_else(|| {
@@ -287,8 +391,7 @@ async fn refresh_official_balance(
             return Err(V3ApiError::conflict_at(
                 state,
                 "the account changed while provider usage was being refreshed",
-            )
-            .into());
+            ));
         }
         db.replace_credit_balances_by_source(id, &source, &rows)
             .map_err(V3ApiError::internal)?;
@@ -301,9 +404,7 @@ async fn refresh_official_balance(
             account_snapshot.provider_id
         ),
     );
-    load_provider_usage(state, id)
-        .map(Json)
-        .map_err(RefreshApiError::from)
+    Ok(())
 }
 
 async fn refresh_go_provider_usage(

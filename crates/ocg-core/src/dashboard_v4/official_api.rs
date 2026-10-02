@@ -154,12 +154,27 @@ pub(super) async fn refresh_balance(
     body: Bytes,
 ) -> Result<Json<OfficialApiStatus>, V3ApiError> {
     let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
-    let _refresh = state
-        .provider_usage_refresh
-        .exclusive(crate::usage_sync::ProviderUsageRefreshGate::balance_key(
-            &id,
-        ))
-        .await;
+    let worker_state = state.clone();
+    let worker_id = id.clone();
+    let expected = expectation.clone();
+    crate::dashboard_v3::usage::coalesce_balance(
+        &state,
+        &id,
+        &expectation,
+        "official-api-balance",
+        move || async move { refresh_balance_inner(worker_state, worker_id, expected).await },
+    )
+    .await?;
+    let _settings = state.settings_update.lock();
+    check_expectation(&state, &expectation)?;
+    status_locked(&state, &state.db.lock(), &id).map(Json)
+}
+
+async fn refresh_balance_inner(
+    state: CoreState,
+    id: String,
+    expectation: MutationExpectation,
+) -> Result<(), V3ApiError> {
     let (snapshot, provider, config, key) = {
         let _settings = state.settings_update.lock();
         check_expectation(&state, &expectation)?;
@@ -194,6 +209,8 @@ pub(super) async fn refresh_balance(
         }
         let key = state
             .decrypt_key(&account.key_cipher)
+            .map_err(V3ApiError::internal)?;
+        db.touch_account_usage_sync_attempt(&id, state.usage_sync.now())
             .map_err(V3ApiError::internal)?;
         (account, runtime, state.config(), key)
     };
@@ -234,7 +251,7 @@ pub(super) async fn refresh_balance(
             }
         }
     }
-    status(&state, &id).map(Json)
+    Ok(())
 }
 
 pub(super) async fn refresh_prices(

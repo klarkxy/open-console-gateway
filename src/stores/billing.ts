@@ -227,6 +227,34 @@ export const useBillingStore = defineStore("billing", () => {
     }
   }
 
+  async function loadMany(accounts: { accountId: string; binding: string }[]): Promise<void> {
+    const unique = [...new Map(accounts.map(account => [account.accountId, account])).values()];
+    const tokens = unique.filter(({ accountId, binding }) => {
+      const slot = slots.get(accountId)?.value;
+      return !(slot?.boundVersion === binding && (slot.loading || slot.mutating));
+    }).map(({ accountId, binding }) => begin(accountId, binding, {
+      loading: true, mutating: false, clearError: false,
+    }));
+    for (let offset = 0; offset < tokens.length; offset += 32) {
+      const batch = tokens.slice(offset, offset + 32).filter(owns);
+      if (batch.length === 0) continue;
+      try {
+        const result = await billingApi.snapshots(batch.map(token => token.accountId));
+        const statuses = new Map(result.statuses.map(status => [status.accountId, status]));
+        for (const token of batch) {
+          if (!owns(token)) continue;
+          const status = statuses.get(token.accountId);
+          if (status && !result.errors[token.accountId]) applyStatus(token.accountId, status);
+          else write(token.accountId, { error: "load_failed" });
+        }
+      } catch (error) {
+        for (const token of batch) if (owns(token)) write(token.accountId, { error: clientErrorFrom(error) });
+      } finally {
+        for (const token of batch) if (owns(token)) write(token.accountId, { loading: false });
+      }
+    }
+  }
+
   async function refreshUsage(accountId: string, binding: string): Promise<BillingStatus | null> {
     const token = begin(accountId, binding, { loading: false, mutating: true, clearError: true });
     try {
@@ -572,6 +600,7 @@ export const useBillingStore = defineStore("billing", () => {
     slotFor,
     priceSlotFor,
     load,
+    loadMany,
     refreshUsage,
     refreshCash,
     configureCredits,

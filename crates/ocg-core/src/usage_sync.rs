@@ -6,6 +6,8 @@
 
 pub mod provider_adapter;
 mod provider_refresh;
+mod singleflight;
+pub(crate) use singleflight::SingleFlight;
 mod reactive;
 
 pub(crate) use provider_refresh::{
@@ -188,6 +190,13 @@ pub struct UsageRefreshIdentity {
     updated_at: String,
 }
 impl UsageRefreshIdentity {
+    pub(crate) fn flight_key(&self, operation: &str) -> String {
+        format!(
+            "{operation}:{}:{}:{}",
+            self.credential.credential_id, self.credential.credential_version, self.updated_at
+        )
+    }
+
     pub(crate) fn capture(
         db: &crate::db::Database,
         account_id: &str,
