@@ -67,10 +67,11 @@ impl IntoResponse for DestinationsError {
 pub(super) async fn list_destinations(
     State(state): State<CoreState>,
 ) -> Result<Json<DestinationList>, DestinationsError> {
-    let (projection, _, _, revision) = load_projection(&state)?;
+    let loaded = load_projection(&state)?;
     Ok(Json(DestinationList {
-        revision,
-        destinations: projection
+        revision: loaded.revision,
+        destinations: loaded
+            .projection
             .destinations
             .iter()
             .map(DestinationDto::from)
@@ -81,10 +82,17 @@ pub(super) async fn list_destinations(
 pub(super) async fn list_credentials(
     State(state): State<CoreState>,
 ) -> Result<Json<CredentialList>, DestinationsError> {
-    let (projection, recoveries, probes, revision) = load_projection(&state)?;
+    let loaded = load_projection(&state)?;
+    let now = state.sample_gateway_clock().0;
     Ok(Json(CredentialList {
-        revision,
-        credentials: overlay_credential_dtos(&state, &projection.credentials, &recoveries, &probes),
+        revision: loaded.revision,
+        credentials: overlay_credential_dtos(
+            now,
+            &loaded.projection.credentials,
+            &loaded.recoveries,
+            &loaded.probes,
+            &loaded.goat_plans,
+        ),
     }))
 }
 
@@ -172,13 +180,15 @@ pub(super) fn mutation_result_locked(
 ) -> Result<DestinationPatchResult, DestinationsError> {
     // The caller already owns `settings_update`; do not call
     // `load_projection`, which would try to acquire the non-reentrant lock.
-    let (projection, recoveries, probes) = {
+    let (projection, recoveries, probes, goat_plans) = {
         let db = state.db.lock();
         let projection = read_v4_projection(&db).map_err(V3ApiError::internal)?;
         let recoveries = crate::db::quota_recovery::load_all_identified_on(&db.conn)
             .map_err(V3ApiError::internal)?;
+        let goat_plans =
+            crate::goat_plan_cooldowns::load_all_on(&db.conn).map_err(V3ApiError::internal)?;
         let probes = state.quota_probes.lock().clone();
-        (projection, recoveries, probes)
+        (projection, recoveries, probes, goat_plans)
     };
     let projection = projection
         .map_err(|refusals| DestinationsError::Refused(projection_refused(state, &refusals)))?;
@@ -187,10 +197,17 @@ pub(super) fn mutation_result_locked(
         .iter()
         .find(|destination| destination.id == destination_id)
         .ok_or_else(|| V3ApiError::not_found_at(state, "destination not found"))?;
+    let now = state.sample_gateway_clock().0;
     Ok(DestinationPatchResult {
         revision: ControlRevision::from_state(state),
         destination: DestinationDto::from(updated),
-        credentials: overlay_credential_dtos(state, &projection.credentials, &recoveries, &probes),
+        credentials: overlay_credential_dtos(
+            now,
+            &projection.credentials,
+            &recoveries,
+            &probes,
+            &goat_plans,
+        ),
     })
 }
 
@@ -269,27 +286,33 @@ fn model_patch(model: DestinationModelPatch) -> DynamicModelMapping {
     }
 }
 
-#[allow(clippy::type_complexity)]
-fn load_projection(
-    state: &CoreState,
-) -> Result<
-    (
-        crate::destination_projection::DestinationProjection,
-        std::collections::HashMap<String, crate::db::quota_recovery::QuotaRecoveryRow>,
-        std::collections::HashMap<String, QuotaEpisode>,
-        ControlRevision,
-    ),
-    DestinationsError,
-> {
+struct LoadedProjection {
+    projection: crate::destination_projection::DestinationProjection,
+    recoveries: std::collections::HashMap<String, crate::db::quota_recovery::QuotaRecoveryRow>,
+    probes: std::collections::HashMap<String, QuotaEpisode>,
+    revision: ControlRevision,
+    /// Captured under the same database lock as `projection`.
+    goat_plans: std::collections::HashMap<String, crate::goat_plan_cooldowns::GoatPlanCooldowns>,
+}
+
+fn load_projection(state: &CoreState) -> Result<LoadedProjection, DestinationsError> {
     let _settings_update = state.settings_update.lock();
     let db = state.db.lock();
     let projection = read_v4_projection(&db).map_err(V3ApiError::internal)?;
     let recoveries = crate::db::quota_recovery::load_all_identified_on(&db.conn)
         .map_err(V3ApiError::internal)?;
+    let goat_plans =
+        crate::goat_plan_cooldowns::load_all_on(&db.conn).map_err(V3ApiError::internal)?;
     let probes = state.quota_probes.lock().clone();
     let revision = ControlRevision::from_state(state);
     match projection {
-        Ok(projection) => Ok((projection, recoveries, probes, revision)),
+        Ok(projection) => Ok(LoadedProjection {
+            projection,
+            recoveries,
+            probes,
+            revision,
+            goat_plans,
+        }),
         Err(refusals) => Err(DestinationsError::Refused(projection_refused(
             state, &refusals,
         ))),
@@ -297,12 +320,12 @@ fn load_projection(
 }
 
 pub(super) fn overlay_credential_dtos(
-    state: &CoreState,
+    now: chrono::DateTime<chrono::Utc>,
     credentials: &[Credential],
     recoveries: &std::collections::HashMap<String, crate::db::quota_recovery::QuotaRecoveryRow>,
     probes: &std::collections::HashMap<String, QuotaEpisode>,
+    goat_plans: &std::collections::HashMap<String, crate::goat_plan_cooldowns::GoatPlanCooldowns>,
 ) -> Vec<CredentialDto> {
-    let now = state.sample_gateway_clock().0;
     credentials
         .iter()
         .map(|credential| {
@@ -319,21 +342,39 @@ pub(super) fn overlay_credential_dtos(
                 });
                 quota_recovery_dto(row.recovery.present(now, probing))
             });
+            overlay_goat_windows(&mut dto, goat_plans.get(&credential.id));
             dto
         })
         .collect()
 }
 
 pub(super) fn overlay_one_credential_dto(
-    state: &CoreState,
+    now: chrono::DateTime<chrono::Utc>,
     credential: &Credential,
     recovery: Option<&PersistedQuotaRecovery>,
     probing: bool,
+    goat_plan: Option<&crate::goat_plan_cooldowns::GoatPlanCooldowns>,
 ) -> CredentialDto {
-    let now = state.sample_gateway_clock().0;
     let mut dto = CredentialDto::from(credential);
     dto.quota_recovery = recovery.map(|row| quota_recovery_dto(row.present(now, probing)));
+    overlay_goat_windows(&mut dto, goat_plan);
     dto
+}
+
+fn overlay_goat_windows(
+    dto: &mut CredentialDto,
+    map: Option<&crate::goat_plan_cooldowns::GoatPlanCooldowns>,
+) {
+    let Some(map) = map else {
+        return;
+    };
+    let cooldowns = &mut dto.cooldowns;
+    cooldowns.five_hour_until =
+        crate::goat_plan_cooldowns::overlay_wire(cooldowns.five_hour_until.take(), map.five_hours);
+    cooldowns.week_until =
+        crate::goat_plan_cooldowns::overlay_wire(cooldowns.week_until.take(), map.week);
+    cooldowns.month_until =
+        crate::goat_plan_cooldowns::overlay_wire(cooldowns.month_until.take(), map.month);
 }
 
 fn quota_recovery_dto(view: QuotaRecoveryView) -> QuotaRecoveryDto {

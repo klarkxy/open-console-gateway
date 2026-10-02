@@ -313,6 +313,142 @@ fn persistent_quota_retry_hint_is_per_key_and_does_not_claim_a_second_probe() {
 }
 
 #[test]
+fn credential_retry_hint_survives_catalog_refresh_before_observation() {
+    let runtime = Arc::new(RecoveryRuntime::default());
+    let (wall, mono) = clock();
+    let original = ResourceSet::fixture(4, 1, 1, &["goat-a"], false);
+    let refreshed = original.clone().with_catalog_generation(9);
+    assert_eq!(
+        original.key(ResourceKind::CredentialRetry),
+        refreshed.key(ResourceKind::CredentialRetry)
+    );
+    assert_ne!(
+        original.key(ResourceKind::PolicyCredential),
+        refreshed.key(ResourceKind::PolicyCredential)
+    );
+    assert_ne!(
+        original.key(ResourceKind::PolicyCredentialModel),
+        refreshed.key(ResourceKind::PolicyCredentialModel)
+    );
+    assert_eq!(
+        original.key(ResourceKind::FiveHours),
+        refreshed.key(ResourceKind::FiveHours)
+    );
+    assert!(!original.same_generation(&refreshed));
+    let mut permit = runtime.acquire(original.clone(), wall, mono).unwrap();
+    let acquired = runtime.tracked_slot_count();
+    let hint = RetryHint::Until(wall + chrono::Duration::seconds(300));
+    permit.observe_credential_retry(Some(hint), mono);
+    assert_eq!(runtime.tracked_slot_count(), acquired);
+    drop(permit);
+    assert_eq!(
+        runtime.credential_retry_until(&refreshed, wall),
+        Some(wall + chrono::Duration::seconds(300))
+    );
+    assert!(runtime.acquire(refreshed, wall, mono).is_err());
+}
+
+#[test]
+fn credential_retry_hint_survives_catalog_refresh_after_observation() {
+    let runtime = Arc::new(RecoveryRuntime::default());
+    let (wall, mono) = clock();
+    let original = ResourceSet::fixture(4, 1, 1, &["goat-a"], false);
+    let mut permit = runtime.acquire(original.clone(), wall, mono).unwrap();
+    let hint = RetryHint::Until(wall + chrono::Duration::seconds(300));
+    permit.observe_credential_retry(Some(hint), mono);
+    drop(permit);
+    let refreshed = original.clone().with_catalog_generation(9);
+    assert_eq!(
+        original.key(ResourceKind::CredentialRetry),
+        refreshed.key(ResourceKind::CredentialRetry)
+    );
+    assert!(!original.same_generation(&refreshed));
+    assert_eq!(
+        runtime.credential_retry_until(&original, wall),
+        Some(wall + chrono::Duration::seconds(300))
+    );
+    assert_eq!(
+        runtime.credential_retry_until(&refreshed, wall),
+        Some(wall + chrono::Duration::seconds(300))
+    );
+    assert!(runtime.acquire(refreshed, wall, mono).is_err());
+    assert!(runtime.acquire(original, wall, mono).is_err());
+}
+
+#[test]
+fn credential_retry_keeps_the_longer_hint_across_concurrent_permits() {
+    let runtime = Arc::new(RecoveryRuntime::default());
+    let (wall, mono) = clock();
+    let resources = ResourceSet::fixture(4, 1, 1, &["goat-a"], false);
+    let mut first = runtime.acquire(resources.clone(), wall, mono).unwrap();
+    let mut second = runtime.acquire(resources.clone(), wall, mono).unwrap();
+    let short = RetryHint::Until(wall + chrono::Duration::seconds(30));
+    let long = wall + chrono::Duration::seconds(300);
+    first.observe_credential_retry(Some(short), mono);
+    second.observe_credential_retry(Some(RetryHint::Until(long)), mono);
+    first.observe_credential_retry(
+        Some(RetryHint::Until(wall + chrono::Duration::seconds(10))),
+        mono,
+    );
+    assert!(runtime.acquire(resources.clone(), wall, mono).is_err());
+    drop((first, second));
+    assert_eq!(runtime.credential_retry_until(&resources, wall), Some(long));
+    assert!(runtime.acquire(resources, wall, mono).is_err());
+}
+
+#[test]
+fn credential_retry_manual_reset_fences_the_original_permit() {
+    let runtime = Arc::new(RecoveryRuntime::default());
+    let (wall, mono) = clock();
+    let original = ResourceSet::fixture(4, 1, 1, &["goat-a"], false);
+    let refreshed = original.clone().with_catalog_generation(9);
+    let mut permit = runtime.acquire(original.clone(), wall, mono).unwrap();
+    runtime.reset_account("goat-a");
+    permit.observe_credential_retry(
+        Some(RetryHint::Until(wall + chrono::Duration::seconds(300))),
+        mono,
+    );
+    drop(permit);
+    assert!(runtime.credential_retry_until(&original, wall).is_none());
+    assert!(runtime.credential_retry_until(&refreshed, wall).is_none());
+    assert!(runtime.acquire(refreshed, wall, mono).is_ok());
+    assert!(runtime.acquire(original, wall, mono).is_ok());
+}
+
+#[test]
+fn credential_retry_isolates_different_key_and_version() {
+    let runtime = Arc::new(RecoveryRuntime::default());
+    let (wall, mono) = clock();
+    let selected = ResourceSet::fixture(4, 1, 1, &["goat-a"], false);
+    let refreshed = selected.clone().with_catalog_generation(9);
+    let other = selected.clone().with_credential(7, "goat-b");
+    assert_eq!(
+        selected.key(ResourceKind::CredentialRetry),
+        refreshed.key(ResourceKind::CredentialRetry)
+    );
+    assert_ne!(
+        selected.key(ResourceKind::CredentialRetry),
+        other.key(ResourceKind::CredentialRetry)
+    );
+    assert_ne!(
+        selected.key(ResourceKind::PolicyCredential),
+        other.key(ResourceKind::PolicyCredential)
+    );
+    let mut permit = runtime.acquire(selected.clone(), wall, mono).unwrap();
+    let until = wall + chrono::Duration::seconds(300);
+    permit.observe_credential_retry(Some(RetryHint::Until(until)), mono);
+    drop(permit);
+    assert_eq!(runtime.credential_retry_until(&selected, wall), Some(until));
+    assert_eq!(
+        runtime.credential_retry_until(&refreshed, wall),
+        Some(until)
+    );
+    assert!(runtime.credential_retry_until(&other, wall).is_none());
+    assert!(runtime.acquire(other, wall, mono).is_ok());
+    assert!(runtime.acquire(selected, wall, mono).is_err());
+}
+
+#[test]
 fn quota_observation_fence_is_owned_by_the_selected_key() {
     let runtime = Arc::new(RecoveryRuntime::default());
     let (wall, mono) = clock();

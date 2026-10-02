@@ -14,7 +14,7 @@ A classified GOAT insufficient-credits response already failovers this request t
 
 Other and unknown 400s (context, model, reasoning validation, and similar) stay request-local: this page does not add a first fallback for them. A custom rule can still install a wait that later requests skip; the current unknown-400 request fails as it did before.
 
-GOAT error text still does not create persistent quota or a reset clock. Ordinary `429` handling, Zen Free, and OpenRouter Free stay on their existing paths. See [Routing](routing.md).
+The credits matcher does not create persistent quota or a saved plan deadline. That wait stays the existing in-memory Key-and-model rule, 30 to 300 seconds by default. The only GOAT body that records a plan deadline is the exact HTTP 429 sentence in [Routing](routing.md); it is not a rule on this page and it is not quota recovery. Other GOAT error text stays opaque and does not create persistent quota or a reset clock. Ordinary unrecognized `429` handling, Zen Free, and OpenRouter Free stay on their existing paths.
 
 ## Custom rules
 

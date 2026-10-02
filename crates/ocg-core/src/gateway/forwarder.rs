@@ -18,7 +18,8 @@ use crate::gateway::diagnostics::{
     sanitize_upstream_error_value_with_known_secret, serialize_diagnostic,
 };
 use crate::gateway::failure::decode::{
-    decode as decode_failure, openrouter_free_rejection, parse_retry_after, temporary_429_deadline,
+    decode as decode_failure, openrouter_free_rejection, parse_retry_after, plan_window_admission,
+    temporary_429_deadline,
 };
 use crate::gateway::materialize::native_log_identity;
 use crate::gateway::protocol::{
@@ -1509,26 +1510,56 @@ pub(crate) async fn forward_request_with_deadline(
             // fallback remains allowed.
             let recorded = {
                 let db = state.db.lock();
-                let same_generation = live_send::selection_identity_is_current(&db, selection)?
-                    && recovery_permit.permits_observation(&facts)
-                    && recovery_permit.same_generation(&ResourceSet::capture(
-                        &db,
-                        account,
-                        &restriction_endpoint,
-                        &plan.model,
-                        free_contract,
-                    )?);
-                if same_generation {
-                    if rate_limited && !free_contract {
-                        recovery_permit.observe_credential_retry(
-                            Some(temporary_429_deadline(retry_after, observed_at)),
-                            observed_mono,
-                        );
+                if facts.scope == crate::gateway::failure::Scope::Credential
+                    && let Some((window, reset)) = decision.persist_reset
+                {
+                    // The receiving Key's own fence. A sibling rotation does
+                    // not belong in this check.
+                    let allowed = live_send::selection_identity_is_current(&db, selection)?
+                        && recovery_permit.permits_observation(&facts)
+                        && live_send::selection_allows_observation(&db, selection)?;
+                    if !allowed {
+                        false
+                    } else if crate::goat_plan_cooldowns::record_window_on(
+                        &db.conn,
+                        selection.credential_id.as_deref().unwrap_or(""),
+                        &selection.account_id,
+                        &selection.binding_id,
+                        selection.credential_version,
+                        &selection.key_cipher,
+                        window,
+                        reset,
+                    )? {
+                        let hint = plan_window_admission(reset, retry_after, observed_at);
+                        // CredentialRetry excludes catalog contents, so this
+                        // permit already names the slot after a refresh.
+                        recovery_permit.observe_credential_retry(hint, observed_mono);
+                        true
                     } else {
-                        recovery_permit.observe_failure(&facts, decision, observed_mono);
+                        false
                     }
+                } else {
+                    let same_generation = live_send::selection_identity_is_current(&db, selection)?
+                        && recovery_permit.permits_observation(&facts)
+                        && recovery_permit.same_generation(&ResourceSet::capture(
+                            &db,
+                            account,
+                            &restriction_endpoint,
+                            &plan.model,
+                            free_contract,
+                        )?);
+                    if same_generation {
+                        if rate_limited && !free_contract {
+                            recovery_permit.observe_credential_retry(
+                                Some(temporary_429_deadline(retry_after, observed_at)),
+                                observed_mono,
+                            );
+                        } else {
+                            recovery_permit.observe_failure(&facts, decision, observed_mono);
+                        }
+                    }
+                    same_generation
                 }
-                same_generation
             };
             attempt_context.restriction_details = Some(serde_json::json!({
                 "facts": facts, "recorded_for_current_generation": recorded,

@@ -866,7 +866,7 @@ fn future_payload_version_is_rejected_as_unsupported_not_wrong_password() {
     use std::fs;
     use std::sync::Arc;
 
-    assert_eq!(PAYLOAD_VERSION, 11);
+    assert_eq!(PAYLOAD_VERSION, 12);
     let future = PAYLOAD_VERSION + 1;
     let mut payload = sample_payload();
     payload.version = future;
@@ -1999,6 +1999,7 @@ fn v8_http_controls_and_no_key_credentials_survive_encrypted_validation() {
             verification_status: imported.verification_status,
             connection_verified_at: imported.connection_verified_at,
             ollama_billing_tier: None,
+            goat_plan: imported.goat_plan.clone(),
         });
         record.dynamic_providers = validated.unified.dynamic_providers.clone();
         record.custom_destinations = validated.unified.custom_destinations.clone();
@@ -2275,6 +2276,7 @@ fn import_validated_node(
             verification_status: account.verification_status,
             connection_verified_at: account.connection_verified_at,
             ollama_billing_tier: account.ollama_billing_tier,
+            goat_plan: account.goat_plan.clone(),
         });
     }
     let imported = validated.unified.routing_cards.clone();
@@ -2999,4 +3001,789 @@ fn explicit_protocol_close_survives_import_and_pre_v6_radio_shape_is_repaired() 
             .iter()
             .any(|row| row.state == ProtocolOverrideState::ForceOn)
     );
+}
+
+const BUNDLE_PASSWORD: &str = "correct horse battery";
+const GOAT_OWNER_ID: &str = "00000000-0000-4000-8000-000000000081";
+const GOAT_SIBLING_ID: &str = "00000000-0000-4000-8000-000000000082";
+const GOAT_MERGE_ID: &str = "00000000-0000-4000-8000-000000000091";
+const GOAT_OWNER_KEY: &str = "goat-owner-plaintext";
+const GOAT_SIBLING_KEY: &str = "goat-sibling-plaintext";
+const GOAT_HOST_KEY: &str = "goat-host-plaintext";
+const GOAT_REPLACED_KEY: &str = "goat-replaced-plaintext";
+const GOAT_INCOMING_KEY: &str = "goat-incoming-plaintext";
+const ORDINARY_GENERIC: &str = "2027-01-03T03:00:00Z";
+const ORDINARY_FIVE_HOURS: &str = "2027-01-02T01:00:00Z";
+const ORDINARY_WEEK: &str = "2027-02-01T00:00:00Z";
+const LOCAL_FIVE_HOURS: &str = "2027-01-02T08:00:00Z";
+const LOCAL_WEEK: &str = "2027-01-15T00:00:00Z";
+const LOCAL_MONTH: &str = "2027-04-01T00:00:00Z";
+
+fn at(stamp: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(stamp)
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+}
+
+fn goat_map(
+    five_hours: Option<&str>,
+    week: Option<&str>,
+    month: Option<&str>,
+) -> crate::goat_plan_cooldowns::GoatPlanCooldowns {
+    crate::goat_plan_cooldowns::GoatPlanCooldowns {
+        five_hours: five_hours.map(at),
+        week: week.map(at),
+        month: month.map(at),
+    }
+}
+
+fn goat_model(id: &str, name: &str, key_cipher: String) -> crate::models::Account {
+    let now = chrono::Utc::now();
+    crate::models::Account {
+        id: id.to_string(),
+        provider_id: crate::provider::COMMAND_CODE_PROVIDER_ID.to_string(),
+        credential_kind: crate::provider::CredentialKind::ApiKey,
+        quota_scope: crate::provider::QuotaScope::Key,
+        name: name.to_string(),
+        username: None,
+        password_cipher: None,
+        key_cipher,
+        enabled: true,
+        account_type: crate::models::AccountType::Key,
+        setup_step: crate::models::AccountSetupStep::Ready,
+        referral_code: None,
+        purchase_date: String::new(),
+        expires_on: String::new(),
+        cooldown_until: None,
+        cooldown_generic_until: None,
+        cooldown_5h_until: None,
+        cooldown_week_until: None,
+        cooldown_month_until: None,
+        cooldown_free_until: None,
+        last_error: None,
+        auth_error: None,
+        notes: None,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+fn share_owner_pool(state: &crate::state::CoreState, owner: &str, sibling: &str) {
+    let db = state.db.lock();
+    let updated = db
+        .conn
+        .execute(
+            "UPDATE quota_pool_members
+             SET pool_id = (SELECT pool_id FROM quota_pool_members WHERE account_id = ?1)
+             WHERE account_id = ?2",
+            [owner, sibling],
+        )
+        .unwrap();
+    assert_eq!(updated, 1);
+}
+
+fn write_goat_map(
+    state: &crate::state::CoreState,
+    account_id: &str,
+    map: &crate::goat_plan_cooldowns::GoatPlanCooldowns,
+) {
+    use crate::models::UsageWindowKind;
+
+    let db = state.db.lock();
+    let (credential_id, binding_id, version, key_cipher): (String, String, i64, String) = db
+        .conn
+        .query_row(
+            "SELECT id, binding_id, credential_version, key_cipher
+             FROM credentials WHERE legacy_account_id = ?1",
+            [account_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    for (window, reset) in [
+        (UsageWindowKind::FiveHours, map.five_hours),
+        (UsageWindowKind::Week, map.week),
+        (UsageWindowKind::Month, map.month),
+    ] {
+        let Some(reset) = reset else {
+            continue;
+        };
+        let stored = crate::goat_plan_cooldowns::record_window_on(
+            &db.conn,
+            &credential_id,
+            account_id,
+            &binding_id,
+            version as u64,
+            &key_cipher,
+            window,
+            reset,
+        )
+        .unwrap();
+        assert!(stored);
+    }
+}
+
+fn load_goat_map(
+    state: &crate::state::CoreState,
+    account_id: &str,
+) -> Option<crate::goat_plan_cooldowns::GoatPlanCooldowns> {
+    crate::goat_plan_cooldowns::load_for_legacy_on(&state.db.lock().conn, account_id).unwrap()
+}
+
+fn stored_account(state: &crate::state::CoreState, account_id: &str) -> crate::models::Account {
+    state.db.lock().get_account(account_id).unwrap().unwrap()
+}
+
+fn duplicate_payload(payload: &PortablePayload) -> PortablePayload {
+    serde_json::from_value(serde_json::to_value(payload).unwrap()).unwrap()
+}
+
+fn credential<'a>(payload: &'a PortablePayload, account_id: &str) -> &'a PortableCredential {
+    payload
+        .credentials
+        .iter()
+        .find(|credential| credential.legacy_account_id == account_id)
+        .unwrap()
+}
+
+fn json_instant(value: &serde_json::Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    value
+        .as_str()
+        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+        .map(|stamp| stamp.with_timezone(&chrono::Utc))
+}
+
+fn encrypt_raw_payload(value: &serde_json::Value, password: &str) -> String {
+    let mut salt = [0_u8; SALT_LEN];
+    let mut nonce_bytes = [0_u8; NONCE_LEN];
+    getrandom::fill(&mut salt).unwrap();
+    getrandom::fill(&mut nonce_bytes).unwrap();
+    let plaintext = serde_json::to_vec(value).unwrap();
+    let key = derive_key(password, &salt).unwrap();
+    let cipher = Aes256Gcm::new_from_slice(key.as_ref()).unwrap();
+    let ciphertext = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce_bytes),
+            Payload {
+                msg: &plaintext,
+                aad: AAD,
+            },
+        )
+        .unwrap();
+    serde_json::to_string(&EncryptedEnvelope {
+        format: ENVELOPE_FORMAT.to_string(),
+        version: ENVELOPE_VERSION,
+        salt: STANDARD.encode(salt),
+        nonce: STANDARD.encode(nonce_bytes),
+        ciphertext: STANDARD.encode(ciphertext),
+    })
+    .unwrap()
+}
+
+fn http_payload_at(version: u32) -> PortablePayload {
+    let mut payload = v11_http_transfer_payload();
+    payload.version = version;
+    if version < V11_PAYLOAD_VERSION {
+        strip_protocol_routes(&mut payload);
+    }
+    if version < V9_PAYLOAD_VERSION {
+        payload.routing_cards = None;
+    }
+    payload
+}
+
+fn clear_goat_maps(payload: &mut PortablePayload) {
+    for credential in &mut payload.credentials {
+        credential.goat_plan_cooldowns = None;
+    }
+}
+
+fn set_plain_key(payload: &mut PortablePayload, account_id: &str, key: &str) {
+    credential_mut(payload, account_id).key = key.to_string();
+}
+
+fn credential_mut<'a>(
+    payload: &'a mut PortablePayload,
+    account_id: &str,
+) -> &'a mut PortableCredential {
+    payload
+        .credentials
+        .iter_mut()
+        .find(|credential| credential.legacy_account_id == account_id)
+        .unwrap()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct StoredAccountFacts {
+    id: String,
+    key_cipher: String,
+    goat_plan_json: Option<String>,
+    generic_until: Option<String>,
+    five_hour_until: Option<String>,
+    week_until: Option<String>,
+    month_until: Option<String>,
+    cooldown_until: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct StoredTransferFacts {
+    rows: Vec<StoredAccountFacts>,
+    revision: u64,
+}
+
+fn stored_transfer_facts(state: &crate::state::CoreState) -> StoredTransferFacts {
+    let db = state.db.lock();
+    let mut rows = Vec::new();
+    for account in db.list_accounts().unwrap() {
+        let goat_plan_json: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT goat_plan_cooldowns_json FROM credentials WHERE legacy_account_id = ?1",
+                [&account.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        rows.push(StoredAccountFacts {
+            id: account.id,
+            key_cipher: account.key_cipher,
+            goat_plan_json,
+            generic_until: account
+                .cooldown_generic_until
+                .map(|value| value.to_rfc3339()),
+            five_hour_until: account.cooldown_5h_until.map(|value| value.to_rfc3339()),
+            week_until: account.cooldown_week_until.map(|value| value.to_rfc3339()),
+            month_until: account.cooldown_month_until.map(|value| value.to_rfc3339()),
+            cooldown_until: account.cooldown_until.map(|value| value.to_rfc3339()),
+        });
+    }
+    rows.sort_by(|left, right| left.id.cmp(&right.id));
+    let revision = state.settings_revision();
+    StoredTransferFacts { rows, revision }
+}
+
+fn assert_rejected_transfer_leaves_rows(
+    state: &crate::state::CoreState,
+    before: &StoredTransferFacts,
+    bundle: &str,
+    expected: impl Fn(&TransferError) -> bool,
+) {
+    let error = decrypt_and_validate(bundle, BUNDLE_PASSWORD).unwrap_err();
+    assert!(expected(&error), "{error:?}");
+    assert!(local_import(state, BUNDLE_PASSWORD, bundle).is_err());
+    assert_eq!(&stored_transfer_facts(state), before);
+}
+
+fn remove_transfer_state(state: crate::state::CoreState, dir: std::path::PathBuf) {
+    drop(state);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+fn assert_owner_export_keeps_raw_ordinary_deadlines(payload: &PortablePayload) {
+    let owner = credential(payload, GOAT_OWNER_ID);
+    let sibling = credential(payload, GOAT_SIBLING_ID);
+    let local = owner.goat_plan_cooldowns.clone().unwrap();
+    let encoded = serde_json::to_value(owner).unwrap();
+    let ordinary = &encoded["cooldowns"];
+    let encoded_local = &encoded["goatPlanCooldowns"];
+
+    assert_eq!(payload.version, PAYLOAD_VERSION);
+    assert_eq!(
+        local,
+        goat_map(Some(LOCAL_FIVE_HOURS), Some(LOCAL_WEEK), Some(LOCAL_MONTH))
+    );
+    assert!(local.five_hours.unwrap() > at(ORDINARY_FIVE_HOURS));
+    assert!(local.week.unwrap() < at(ORDINARY_WEEK));
+    assert!(local.month.unwrap() > at(ORDINARY_WEEK));
+    assert_eq!(
+        json_instant(&ordinary["fiveHourUntil"]),
+        Some(at(ORDINARY_FIVE_HOURS))
+    );
+    assert_eq!(
+        json_instant(&ordinary["weekUntil"]),
+        Some(at(ORDINARY_WEEK))
+    );
+    assert_eq!(
+        json_instant(&ordinary["genericUntil"]),
+        Some(at(ORDINARY_GENERIC))
+    );
+    assert!(ordinary["monthUntil"].is_null());
+    assert_eq!(
+        json_instant(&encoded_local["five_hours"]),
+        Some(at(LOCAL_FIVE_HOURS))
+    );
+    assert_eq!(json_instant(&encoded_local["week"]), Some(at(LOCAL_WEEK)));
+    assert_eq!(json_instant(&encoded_local["month"]), Some(at(LOCAL_MONTH)));
+    assert_ne!(json_instant(&ordinary["fiveHourUntil"]), local.five_hours);
+    assert_ne!(json_instant(&ordinary["weekUntil"]), local.week);
+
+    let sibling_json = serde_json::to_value(sibling).unwrap();
+    assert!(sibling.goat_plan_cooldowns.is_none());
+    assert!(sibling_json.get("goatPlanCooldowns").is_none());
+    assert_eq!(
+        json_instant(&sibling_json["cooldowns"]["genericUntil"]),
+        Some(at(ORDINARY_GENERIC))
+    );
+    assert_eq!(
+        json_instant(&sibling_json["cooldowns"]["fiveHourUntil"]),
+        Some(at(ORDINARY_FIVE_HOURS))
+    );
+    assert_eq!(
+        json_instant(&sibling_json["cooldowns"]["weekUntil"]),
+        Some(at(ORDINARY_WEEK))
+    );
+    assert!(sibling_json["cooldowns"]["monthUntil"].is_null());
+    assert!(payload.quota_pools.iter().any(|pool| {
+        let members: HashSet<&str> = pool.member_account_ids.iter().map(String::as_str).collect();
+        members.contains(GOAT_OWNER_ID) && members.contains(GOAT_SIBLING_ID)
+    }));
+}
+
+fn assert_stored_ordinary_is_not_the_local_union(
+    state: &crate::state::CoreState,
+    account_id: &str,
+) {
+    let account = stored_account(state, account_id);
+    assert_eq!(account.cooldown_generic_until, Some(at(ORDINARY_GENERIC)));
+    assert_eq!(account.cooldown_5h_until, Some(at(ORDINARY_FIVE_HOURS)));
+    assert_eq!(account.cooldown_week_until, Some(at(ORDINARY_WEEK)));
+    assert_eq!(account.cooldown_month_until, None);
+    assert_eq!(account.cooldown_until, Some(at(ORDINARY_WEEK)));
+    assert!(account.cooldown_until.unwrap() < at(LOCAL_MONTH));
+}
+
+#[test]
+fn v12_export_validate_import_keeps_local_goat_deadlines_apart_from_ordinary_shared_deadlines() {
+    let (source_dir, source) = transfer_state("goat-v12-export");
+    let owner_cipher = source.encrypt_key(GOAT_OWNER_KEY).unwrap();
+    let sibling_cipher = source.encrypt_key(GOAT_SIBLING_KEY).unwrap();
+    {
+        let db = source.db.lock();
+        db.create_account(&goat_model(GOAT_OWNER_ID, "GOAT owner", owner_cipher))
+            .unwrap();
+        db.create_account(&goat_model(GOAT_SIBLING_ID, "GOAT sibling", sibling_cipher))
+            .unwrap();
+    }
+    share_owner_pool(&source, GOAT_OWNER_ID, GOAT_SIBLING_ID);
+    {
+        let db = source.db.lock();
+        db.set_account_rate_limit(GOAT_OWNER_ID, at(ORDINARY_GENERIC), "generic", None)
+            .unwrap();
+        db.set_account_rate_limit(
+            GOAT_OWNER_ID,
+            at(ORDINARY_FIVE_HOURS),
+            "five",
+            Some(crate::models::UsageWindowKind::FiveHours),
+        )
+        .unwrap();
+        db.set_account_rate_limit(
+            GOAT_OWNER_ID,
+            at(ORDINARY_WEEK),
+            "week",
+            Some(crate::models::UsageWindowKind::Week),
+        )
+        .unwrap();
+    }
+    let local = goat_map(Some(LOCAL_FIVE_HOURS), Some(LOCAL_WEEK), Some(LOCAL_MONTH));
+    write_goat_map(&source, GOAT_OWNER_ID, &local);
+    assert_eq!(load_goat_map(&source, GOAT_OWNER_ID), Some(local.clone()));
+    assert_eq!(load_goat_map(&source, GOAT_SIBLING_ID), None);
+    assert_stored_ordinary_is_not_the_local_union(&source, GOAT_OWNER_ID);
+    assert_stored_ordinary_is_not_the_local_union(&source, GOAT_SIBLING_ID);
+
+    let (payload, _, _) = export_payload(&source).unwrap();
+    assert_owner_export_keeps_raw_ordinary_deadlines(&payload);
+    let bundle = encrypt_payload(&payload, BUNDLE_PASSWORD).unwrap();
+    let envelope: serde_json::Value = serde_json::from_str(&bundle).unwrap();
+    assert_eq!(envelope["format"], ENVELOPE_FORMAT);
+    assert_eq!(envelope["version"], ENVELOPE_VERSION);
+    assert!(!bundle.contains(GOAT_OWNER_KEY));
+    assert!(!bundle.contains(GOAT_SIBLING_KEY));
+
+    let validated = decrypt_and_validate(&bundle, BUNDLE_PASSWORD).unwrap();
+    let validated_owner = validated
+        .accounts
+        .iter()
+        .find(|account| account.id.as_deref() == Some(GOAT_OWNER_ID))
+        .unwrap();
+    let validated_sibling = validated
+        .accounts
+        .iter()
+        .find(|account| account.id.as_deref() == Some(GOAT_SIBLING_ID))
+        .unwrap();
+    assert_eq!(validated_owner.goat_plan, Some(local.clone()));
+    assert_eq!(
+        validated_owner.cooldowns.five_hours,
+        Some(at(ORDINARY_FIVE_HOURS))
+    );
+    assert_eq!(validated_owner.cooldowns.week, Some(at(ORDINARY_WEEK)));
+    assert_eq!(
+        validated_owner.cooldowns.generic,
+        Some(at(ORDINARY_GENERIC))
+    );
+    assert_eq!(validated_owner.cooldowns.month, None);
+    assert_eq!(validated_sibling.goat_plan, None);
+    assert_eq!(validated_sibling.cooldowns.week, Some(at(ORDINARY_WEEK)));
+    assert_eq!(validated_sibling.key.as_str(), GOAT_SIBLING_KEY);
+
+    let (target_dir, target) = transfer_state("goat-v12-import");
+    local_import(&target, BUNDLE_PASSWORD, &bundle).unwrap();
+    assert_eq!(load_goat_map(&target, GOAT_OWNER_ID), Some(local.clone()));
+    assert_eq!(load_goat_map(&target, GOAT_SIBLING_ID), None);
+    assert_stored_ordinary_is_not_the_local_union(&target, GOAT_OWNER_ID);
+    assert_stored_ordinary_is_not_the_local_union(&target, GOAT_SIBLING_ID);
+    let owner_cipher = stored_account(&target, GOAT_OWNER_ID).key_cipher;
+    let sibling_cipher = stored_account(&target, GOAT_SIBLING_ID).key_cipher;
+    assert_ne!(owner_cipher, target.encrypt_key(GOAT_OWNER_KEY).unwrap());
+    assert_eq!(target.decrypt_key(&owner_cipher).unwrap(), GOAT_OWNER_KEY);
+    assert_eq!(
+        target.decrypt_key(&sibling_cipher).unwrap(),
+        GOAT_SIBLING_KEY
+    );
+
+    local_import(&target, BUNDLE_PASSWORD, &bundle).unwrap();
+    assert_eq!(
+        stored_account(&target, GOAT_OWNER_ID).key_cipher,
+        owner_cipher
+    );
+    assert_eq!(
+        stored_account(&target, GOAT_SIBLING_ID).key_cipher,
+        sibling_cipher
+    );
+    assert_eq!(load_goat_map(&target, GOAT_OWNER_ID), Some(local));
+    assert_eq!(load_goat_map(&target, GOAT_SIBLING_ID), None);
+    assert_stored_ordinary_is_not_the_local_union(&target, GOAT_OWNER_ID);
+    assert_stored_ordinary_is_not_the_local_union(&target, GOAT_SIBLING_ID);
+    let (exported_again, _, _) = export_payload(&target).unwrap();
+    assert_owner_export_keeps_raw_ordinary_deadlines(&exported_again);
+
+    remove_transfer_state(source, source_dir);
+    remove_transfer_state(target, target_dir);
+}
+
+#[test]
+fn same_key_v11_preserves_host_goat_map_and_v12_merges_maxima_or_replaces_on_key_change() {
+    let (dir, state) = transfer_state("goat-v11-v12-merge");
+    let host_map = goat_map(
+        Some("2027-03-05T00:00:00Z"),
+        Some("2027-03-12T00:00:00Z"),
+        Some("2027-03-20T00:00:00Z"),
+    );
+    {
+        let db = state.db.lock();
+        db.create_account(&goat_model(
+            GOAT_MERGE_ID,
+            "GOAT merge",
+            state.encrypt_key(GOAT_HOST_KEY).unwrap(),
+        ))
+        .unwrap();
+    }
+    write_goat_map(&state, GOAT_MERGE_ID, &host_map);
+    let cipher_before = stored_account(&state, GOAT_MERGE_ID).key_cipher;
+    assert_ne!(cipher_before, state.encrypt_key(GOAT_HOST_KEY).unwrap());
+
+    let (payload, _, _) = export_payload(&state).unwrap();
+    assert_eq!(
+        credential(&payload, GOAT_MERGE_ID).goat_plan_cooldowns,
+        Some(host_map.clone())
+    );
+    let mut smuggled = duplicate_payload(&payload);
+    smuggled.version = V11_PAYLOAD_VERSION;
+    assert!(matches!(
+        validate_payload(smuggled).unwrap_err(),
+        TransferError::Invalid(_)
+    ));
+
+    let mut same_v11 = duplicate_payload(&payload);
+    same_v11.version = V11_PAYLOAD_VERSION;
+    clear_goat_maps(&mut same_v11);
+    let same_v11_bundle = encrypt_payload(&same_v11, BUNDLE_PASSWORD).unwrap();
+    let validated = decrypt_and_validate(&same_v11_bundle, BUNDLE_PASSWORD).unwrap();
+    assert!(
+        validated
+            .accounts
+            .iter()
+            .all(|account| account.goat_plan.is_none())
+    );
+    local_import(&state, BUNDLE_PASSWORD, &same_v11_bundle).unwrap();
+    assert_eq!(
+        stored_account(&state, GOAT_MERGE_ID).key_cipher,
+        cipher_before
+    );
+    assert_eq!(state.decrypt_key(&cipher_before).unwrap(), GOAT_HOST_KEY);
+    assert_eq!(load_goat_map(&state, GOAT_MERGE_ID), Some(host_map));
+
+    let mut changed_v11 = duplicate_payload(&payload);
+    changed_v11.version = V11_PAYLOAD_VERSION;
+    clear_goat_maps(&mut changed_v11);
+    set_plain_key(&mut changed_v11, GOAT_MERGE_ID, GOAT_REPLACED_KEY);
+    let changed_v11_bundle = encrypt_payload(&changed_v11, BUNDLE_PASSWORD).unwrap();
+    local_import(&state, BUNDLE_PASSWORD, &changed_v11_bundle).unwrap();
+    assert_eq!(load_goat_map(&state, GOAT_MERGE_ID), None);
+    let replaced_cipher = stored_account(&state, GOAT_MERGE_ID).key_cipher;
+    assert_ne!(replaced_cipher, cipher_before);
+    assert_eq!(
+        state.decrypt_key(&replaced_cipher).unwrap(),
+        GOAT_REPLACED_KEY
+    );
+
+    let reseeded = goat_map(
+        Some("2027-05-10T00:00:00Z"),
+        Some("2027-05-01T00:00:00Z"),
+        Some("2027-05-15T00:00:00Z"),
+    );
+    write_goat_map(&state, GOAT_MERGE_ID, &reseeded);
+    let (refreshed, _, _) = export_payload(&state).unwrap();
+    let incoming = goat_map(
+        Some("2027-05-01T00:00:00Z"),
+        Some("2027-06-01T00:00:00Z"),
+        Some("2027-05-20T00:00:00Z"),
+    );
+    let mut same_v12 = duplicate_payload(&refreshed);
+    credential_mut(&mut same_v12, GOAT_MERGE_ID).goat_plan_cooldowns = Some(incoming.clone());
+    let same_v12_bundle = encrypt_payload(&same_v12, BUNDLE_PASSWORD).unwrap();
+    let validated = decrypt_and_validate(&same_v12_bundle, BUNDLE_PASSWORD).unwrap();
+    assert_eq!(
+        validated
+            .accounts
+            .iter()
+            .find(|account| account.id.as_deref() == Some(GOAT_MERGE_ID))
+            .unwrap()
+            .goat_plan,
+        Some(incoming.clone())
+    );
+    local_import(&state, BUNDLE_PASSWORD, &same_v12_bundle).unwrap();
+    assert_eq!(
+        stored_account(&state, GOAT_MERGE_ID).key_cipher,
+        replaced_cipher
+    );
+    assert_eq!(
+        load_goat_map(&state, GOAT_MERGE_ID),
+        Some(goat_map(
+            Some("2027-05-10T00:00:00Z"),
+            Some("2027-06-01T00:00:00Z"),
+            Some("2027-05-20T00:00:00Z"),
+        ))
+    );
+
+    let incoming_only = goat_map(None, Some("2027-07-01T00:00:00Z"), None);
+    let mut changed_v12 = duplicate_payload(&refreshed);
+    set_plain_key(&mut changed_v12, GOAT_MERGE_ID, GOAT_INCOMING_KEY);
+    credential_mut(&mut changed_v12, GOAT_MERGE_ID).goat_plan_cooldowns =
+        Some(incoming_only.clone());
+    let changed_v12_bundle = encrypt_payload(&changed_v12, BUNDLE_PASSWORD).unwrap();
+    local_import(&state, BUNDLE_PASSWORD, &changed_v12_bundle).unwrap();
+    assert_eq!(load_goat_map(&state, GOAT_MERGE_ID), Some(incoming_only));
+    assert_eq!(
+        state
+            .decrypt_key(&stored_account(&state, GOAT_MERGE_ID).key_cipher)
+            .unwrap(),
+        GOAT_INCOMING_KEY
+    );
+    assert_ne!(
+        stored_account(&state, GOAT_MERGE_ID).key_cipher,
+        replaced_cipher
+    );
+
+    remove_transfer_state(state, dir);
+}
+
+#[test]
+fn payloads_before_v12_reject_a_local_goat_map_and_older_fixtures_still_validate() {
+    let local = goat_map(Some(LOCAL_FIVE_HOURS), Some(LOCAL_WEEK), Some(LOCAL_MONTH));
+    for version in [4, V5_PAYLOAD_VERSION] {
+        let payload = sample_legacy_payload(version);
+        validate_payload(duplicate_payload(&payload)).unwrap();
+        let mut value = serde_json::to_value(&payload).unwrap();
+        value["accounts"][0]["goatPlanCooldowns"] = serde_json::json!({
+            "five_hours": LOCAL_FIVE_HOURS,
+            "week": LOCAL_WEEK,
+            "month": LOCAL_MONTH
+        });
+        assert!(serde_json::from_value::<PortablePayload>(value).is_err());
+    }
+    let v6 = sample_v6_payload();
+    validate_payload(duplicate_payload(&v6)).unwrap();
+    let mut value = serde_json::to_value(&v6).unwrap();
+    value["accounts"][0]["goatPlanCooldowns"] = serde_json::json!({
+        "five_hours": LOCAL_FIVE_HOURS
+    });
+    assert!(serde_json::from_value::<PortablePayload>(value).is_err());
+
+    for version in [
+        V7_PAYLOAD_VERSION,
+        V8_PAYLOAD_VERSION,
+        V9_PAYLOAD_VERSION,
+        V10_PAYLOAD_VERSION,
+        V11_PAYLOAD_VERSION,
+    ] {
+        let payload = http_payload_at(version);
+        validate_payload(duplicate_payload(&payload)).unwrap();
+        let mut smuggled = payload;
+        smuggled.credentials[0].goat_plan_cooldowns = Some(local.clone());
+        assert!(matches!(
+            validate_payload(smuggled).unwrap_err(),
+            TransferError::Invalid(_)
+        ));
+    }
+}
+
+#[test]
+fn non_goat_and_observer_credentials_reject_a_local_goat_map() {
+    use super::portable::{PURPOSE_CPA_OBSERVER, PURPOSE_PLATFORM_OBSERVER};
+
+    let local = goat_map(Some(LOCAL_FIVE_HOURS), Some(LOCAL_WEEK), Some(LOCAL_MONTH));
+    let mut opencode = sample_payload();
+    opencode.credentials[0].goat_plan_cooldowns = Some(local.clone());
+    assert!(matches!(
+        validate_payload(opencode).unwrap_err(),
+        TransferError::Invalid(_)
+    ));
+
+    let (dir, state) = transfer_state("goat-observer-map");
+    let parent_id = "00000000-0000-4000-8000-0000000000aa";
+    let pat_cipher = state.encrypt_key("123:platform-pat-secret").unwrap();
+    state
+        .db
+        .lock()
+        .create_platform_account(
+            parent_id,
+            crate::platform::PlatformKind::NewApi,
+            "Site",
+            "https://newapi.example",
+            Some(&pat_cipher),
+        )
+        .unwrap();
+    let cpa_cipher = state.encrypt_key("cpa-management-secret").unwrap();
+    state
+        .db
+        .lock()
+        .upsert_cpa_integration(&cpa_account(), "http://127.0.0.1:8317", &cpa_cipher)
+        .unwrap();
+    let (payload, _, _) = export_payload(&state).unwrap();
+    validate_payload(duplicate_payload(&payload)).unwrap();
+    for purpose in [PURPOSE_PLATFORM_OBSERVER, PURPOSE_CPA_OBSERVER] {
+        let mut smuggled = duplicate_payload(&payload);
+        let credential = smuggled
+            .credentials
+            .iter_mut()
+            .find(|credential| credential_purpose(credential) == purpose)
+            .unwrap();
+        credential.goat_plan_cooldowns = Some(local.clone());
+        assert!(matches!(
+            validate_payload(smuggled).unwrap_err(),
+            TransferError::Invalid(_)
+        ));
+    }
+    let before = stored_transfer_facts(&state);
+    let mut platform_smuggle = duplicate_payload(&payload);
+    platform_smuggle
+        .credentials
+        .iter_mut()
+        .find(|credential| credential_purpose(credential) == PURPOSE_PLATFORM_OBSERVER)
+        .unwrap()
+        .goat_plan_cooldowns = Some(local);
+    let bundle = encrypt_payload(&platform_smuggle, BUNDLE_PASSWORD).unwrap();
+    assert_rejected_transfer_leaves_rows(&state, &before, &bundle, |error| {
+        matches!(error, TransferError::Invalid(_))
+    });
+    remove_transfer_state(state, dir);
+}
+
+#[test]
+fn malformed_goat_map_and_unsupported_transfer_write_no_rows() {
+    assert_eq!(PAYLOAD_VERSION, 12);
+    let (dir, state) = transfer_state("goat-reject-no-write");
+    {
+        let db = state.db.lock();
+        db.create_account(&goat_model(
+            GOAT_MERGE_ID,
+            "GOAT reject",
+            state.encrypt_key(GOAT_HOST_KEY).unwrap(),
+        ))
+        .unwrap();
+    }
+    write_goat_map(
+        &state,
+        GOAT_MERGE_ID,
+        &goat_map(Some(LOCAL_FIVE_HOURS), Some(LOCAL_WEEK), Some(LOCAL_MONTH)),
+    );
+    {
+        let db = state.db.lock();
+        db.set_account_rate_limit(
+            GOAT_MERGE_ID,
+            at(ORDINARY_WEEK),
+            "week",
+            Some(crate::models::UsageWindowKind::Week),
+        )
+        .unwrap();
+    }
+    let before = stored_transfer_facts(&state);
+    assert!(before.rows.iter().any(|row| {
+        row.id == GOAT_MERGE_ID && row.goat_plan_json.is_some() && row.week_until.is_some()
+    }));
+
+    assert_rejected_transfer_leaves_rows(&state, &before, "not-an-envelope", |error| {
+        matches!(error, TransferError::InvalidBundle)
+    });
+
+    let mut future = sample_payload();
+    future.version = 13;
+    let future_bundle = encrypt_payload(&future, BUNDLE_PASSWORD).unwrap();
+    assert_rejected_transfer_leaves_rows(&state, &before, &future_bundle, |error| {
+        matches!(error, TransferError::UnsupportedVersion(13))
+    });
+
+    let labeled = sample_legacy_payload(4);
+    let mut labeled_json = serde_json::to_value(&labeled).unwrap();
+    labeled_json["accounts"][0]["goatPlanCooldowns"] = serde_json::json!({
+        "five_hours": LOCAL_FIVE_HOURS,
+        "week": LOCAL_WEEK,
+        "month": LOCAL_MONTH
+    });
+    let labeled_bundle = encrypt_raw_payload(&labeled_json, BUNDLE_PASSWORD);
+    assert_rejected_transfer_leaves_rows(&state, &before, &labeled_bundle, |error| {
+        matches!(error, TransferError::InvalidBundle)
+    });
+
+    let (exported, _, _) = export_payload(&state).unwrap();
+    let mut old_package = duplicate_payload(&exported);
+    old_package.version = V11_PAYLOAD_VERSION;
+    let old_bundle = encrypt_payload(&old_package, BUNDLE_PASSWORD).unwrap();
+    assert_rejected_transfer_leaves_rows(&state, &before, &old_bundle, |error| {
+        matches!(error, TransferError::Invalid(_))
+    });
+
+    let mut carrier = sample_payload();
+    carrier.credentials[0].goat_plan_cooldowns = Some(goat_map(
+        Some(LOCAL_FIVE_HOURS),
+        Some(LOCAL_WEEK),
+        Some(LOCAL_MONTH),
+    ));
+    let mut raw = serde_json::to_value(&carrier).unwrap();
+    let encoded_map = raw["credentials"][0]["goatPlanCooldowns"]
+        .as_object()
+        .unwrap();
+    assert!(encoded_map.contains_key("five_hours"));
+    assert!(encoded_map.contains_key("week"));
+    assert!(encoded_map.contains_key("month"));
+    let mut unknown_window = raw.clone();
+    unknown_window["credentials"][0]["goatPlanCooldowns"]["day"] =
+        serde_json::json!("2027-08-01T00:00:00Z");
+    let unknown_bundle = encrypt_raw_payload(&unknown_window, BUNDLE_PASSWORD);
+    assert_rejected_transfer_leaves_rows(&state, &before, &unknown_bundle, |error| {
+        matches!(error, TransferError::InvalidBundle)
+    });
+    raw["credentials"][0]["goatPlanCooldowns"]["five_hours"] = serde_json::json!("not-a-time");
+    let bad_instant_bundle = encrypt_raw_payload(&raw, BUNDLE_PASSWORD);
+    assert_rejected_transfer_leaves_rows(&state, &before, &bad_instant_bundle, |error| {
+        matches!(error, TransferError::InvalidBundle)
+    });
+
+    let mut non_goat = sample_payload();
+    non_goat.credentials[0].goat_plan_cooldowns = Some(goat_map(Some(LOCAL_MONTH), None, None));
+    let non_goat_bundle = encrypt_payload(&non_goat, BUNDLE_PASSWORD).unwrap();
+    assert_rejected_transfer_leaves_rows(&state, &before, &non_goat_bundle, |error| {
+        matches!(error, TransferError::Invalid(_))
+    });
+
+    remove_transfer_state(state, dir);
 }

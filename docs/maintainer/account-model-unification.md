@@ -497,17 +497,19 @@ reserved account UUIDs. `/dashboard/api/v3` is a 410 tombstone.
 
 ### Deprecation rules started in stage 7
 
-New node backups export payload V11. The encrypted envelope stays v1. V9
+New node backups export payload V12. The encrypted envelope stays v1. V9
 carries `destinations` and `credentials` (including plaintext secrets,
 platform and CPA observer management credentials, and identity / grant /
 cooldown extras inside that envelope), plus `quotaPools` and `node`. A merge
 import that omits a CPA observer key keeps the destination's existing
 management key. Latest export does not emit `accounts`, platform rows, dynamic
-provider definitions, or a separate identities array. V4–V11 remain
+provider definitions, or a separate identities array. V4–V12 remain
 importable, with V4–V6 going through an old-graph decoder that maps into the
 same new-model import object. A V7 package that still carries leftover old fields must
-match dest/cred or is rejected. V12 and newer are an unsupported-version
-error. Remounted `/accounts*` handlers are I/O adapters; V4
+match dest/cred or is rejected. Payloads newer than V12 are an unsupported-version
+error. V12 stores each GOAT Key's plan-window map separately from ordinary
+cooldowns; the map is Key-local and is not an ordinary shared cooldown.
+Remounted `/accounts*` handlers are I/O adapters; V4
 destinations/credentials are the read model.
 
 ### UI rules started in stage 6

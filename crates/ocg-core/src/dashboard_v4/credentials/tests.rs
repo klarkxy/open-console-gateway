@@ -306,3 +306,229 @@ fn quota_retry_stale_ready_receipt_cannot_overwrite_newer_state() {
     drop(state);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+const GOAT_SAME_KEY: &str = "goat-plan-same-key";
+const GOAT_NEXT_KEY: &str = "goat-plan-next-key";
+
+fn insert_keyed(state: &crate::state::CoreState, id: &str, provider_id: &str, secret: &str) {
+    let now = Utc::now();
+    state
+        .db
+        .lock()
+        .create_account(&Account {
+            id: id.into(),
+            provider_id: provider_id.into(),
+            credential_kind: CredentialKind::ApiKey,
+            quota_scope: QuotaScope::Key,
+            name: id.into(),
+            username: None,
+            password_cipher: None,
+            key_cipher: state.encrypt_key(secret).unwrap(),
+            enabled: true,
+            account_type: AccountType::Key,
+            setup_step: AccountSetupStep::Ready,
+            referral_code: None,
+            purchase_date: String::new(),
+            expires_on: String::new(),
+            cooldown_until: None,
+            cooldown_generic_until: None,
+            cooldown_5h_until: None,
+            cooldown_week_until: None,
+            cooldown_month_until: None,
+            cooldown_free_until: None,
+            last_error: None,
+            auth_error: None,
+            notes: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+}
+
+fn goat_instant(hour: u32) -> chrono::DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 10, 3, hour, 0, 0).unwrap()
+}
+
+fn seeded_windows() -> crate::goat_plan_cooldowns::GoatPlanCooldowns {
+    crate::goat_plan_cooldowns::GoatPlanCooldowns {
+        five_hours: Some(goat_instant(1)),
+        week: Some(goat_instant(2)),
+        month: Some(goat_instant(3)),
+    }
+}
+
+struct StoredKey {
+    credential_id: String,
+    binding_id: String,
+    version: u64,
+    auth_state_version: u64,
+    key_cipher: String,
+}
+
+fn stored_key(state: &crate::state::CoreState, account_id: &str) -> StoredKey {
+    state
+        .db
+        .lock()
+        .conn
+        .query_row(
+            "SELECT id, binding_id, COALESCE(credential_version, 1),
+                    COALESCE(auth_state_version, 1), key_cipher
+             FROM credentials WHERE legacy_account_id = ?1",
+            [account_id],
+            |row| {
+                Ok(StoredKey {
+                    credential_id: row.get(0)?,
+                    binding_id: row.get(1)?,
+                    version: row.get::<_, i64>(2)? as u64,
+                    auth_state_version: row.get::<_, i64>(3)? as u64,
+                    key_cipher: row.get(4)?,
+                })
+            },
+        )
+        .unwrap()
+}
+
+fn seed_windows(
+    state: &crate::state::CoreState,
+    account_id: &str,
+) -> crate::goat_plan_cooldowns::GoatPlanCooldowns {
+    let stored = stored_key(state, account_id);
+    let windows = seeded_windows();
+    let db = state.db.lock();
+    for (window, reset) in [
+        (
+            crate::models::UsageWindowKind::FiveHours,
+            windows.five_hours.unwrap(),
+        ),
+        (crate::models::UsageWindowKind::Week, windows.week.unwrap()),
+        (
+            crate::models::UsageWindowKind::Month,
+            windows.month.unwrap(),
+        ),
+    ] {
+        assert!(
+            crate::goat_plan_cooldowns::record_window_on(
+                &db.conn,
+                &stored.credential_id,
+                account_id,
+                &stored.binding_id,
+                stored.version,
+                &stored.key_cipher,
+                window,
+                reset,
+            )
+            .unwrap()
+        );
+    }
+    windows
+}
+
+fn plan(
+    state: &crate::state::CoreState,
+    account_id: &str,
+) -> Option<crate::goat_plan_cooldowns::GoatPlanCooldowns> {
+    crate::goat_plan_cooldowns::load_for_legacy_on(&state.db.lock().conn, account_id).unwrap()
+}
+
+fn rotate_secret(
+    state: &crate::state::CoreState,
+    account_id: &str,
+    secret: &str,
+) -> CredentialRotateResult {
+    let credential_id = credential_id_for_legacy_account(account_id).to_string();
+    rotate_locked(
+        state,
+        &credential_id,
+        CredentialRotateRequest {
+            expectation: MutationExpectation {
+                expected_revision: state.settings_revision(),
+                process_generation: state.process_generation(),
+            },
+            secret_input: secret.into(),
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn same_goat_key_rotate_keeps_every_plan_window_and_bumps_versions() {
+    let (dir, state) = state("goat-same");
+    insert_keyed(
+        &state,
+        "goat-same",
+        crate::provider::COMMAND_CODE_PROVIDER_ID,
+        GOAT_SAME_KEY,
+    );
+    let windows = seed_windows(&state, "goat-same");
+    let before = stored_key(&state, "goat-same");
+
+    let rotated = rotate_secret(&state, "goat-same", &format!("  {GOAT_SAME_KEY}  "));
+
+    let after = stored_key(&state, "goat-same");
+    assert_eq!(after.key_cipher, before.key_cipher);
+    assert_eq!(state.decrypt_key(&after.key_cipher).unwrap(), GOAT_SAME_KEY);
+    assert_eq!(plan(&state, "goat-same"), Some(windows.clone()));
+    assert_eq!(rotated.version, before.version + 1);
+    assert_eq!(rotated.auth_state_version, before.auth_state_version + 1);
+    assert_eq!(after.version, rotated.version);
+    assert_eq!(after.auth_state_version, rotated.auth_state_version);
+    assert_eq!(rotated.credential_id, before.credential_id);
+    let stale = crate::goat_plan_cooldowns::record_window_on(
+        &state.db.lock().conn,
+        &before.credential_id,
+        "goat-same",
+        &before.binding_id,
+        before.version,
+        &before.key_cipher,
+        crate::models::UsageWindowKind::Week,
+        goat_instant(4),
+    )
+    .unwrap();
+    assert!(!stale);
+    assert_eq!(plan(&state, "goat-same"), Some(windows));
+    drop(state);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn changed_goat_key_rotate_clears_every_plan_window_and_bumps_versions() {
+    let (dir, state) = state("goat-next");
+    insert_keyed(
+        &state,
+        "goat-next",
+        crate::provider::COMMAND_CODE_PROVIDER_ID,
+        GOAT_SAME_KEY,
+    );
+    seed_windows(&state, "goat-next");
+    let before = stored_key(&state, "goat-next");
+
+    let rotated = rotate_secret(&state, "goat-next", GOAT_NEXT_KEY);
+
+    let after = stored_key(&state, "goat-next");
+    assert_ne!(after.key_cipher, before.key_cipher);
+    assert_eq!(state.decrypt_key(&after.key_cipher).unwrap(), GOAT_NEXT_KEY);
+    assert_eq!(plan(&state, "goat-next"), None);
+    assert_eq!(rotated.version, before.version + 1);
+    assert_eq!(rotated.auth_state_version, before.auth_state_version + 1);
+    assert_eq!(after.version, rotated.version);
+    assert_eq!(after.auth_state_version, rotated.auth_state_version);
+    drop(state);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn same_non_goat_key_rotate_still_reencrypts_and_clears_a_plan_map() {
+    let (dir, state) = state("goat-other");
+    insert_keyed(&state, "go-same", OPENCODE_PROVIDER_ID, GOAT_SAME_KEY);
+    seed_windows(&state, "go-same");
+    let before = stored_key(&state, "go-same");
+
+    rotate_secret(&state, "go-same", GOAT_SAME_KEY);
+
+    let after = stored_key(&state, "go-same");
+    assert_ne!(after.key_cipher, before.key_cipher);
+    assert_eq!(state.decrypt_key(&after.key_cipher).unwrap(), GOAT_SAME_KEY);
+    assert_eq!(plan(&state, "go-same"), None);
+    drop(state);
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -757,6 +757,8 @@ impl RecoveryPermit {
     /// Persistent quota recovery owns the episode and probe. Preserve a separate
     /// upstream Retry-After for this Key without imposing a second probe or
     /// extending that credential's restriction to its declared quota pool.
+    /// CredentialRetry generation is the stable Key identity, so a catalog
+    /// refresh does not move the slot. An existing longer hint stays.
     pub(crate) fn observe_credential_retry(&mut self, hint: Option<RetryHint>, mono: Instant) {
         self.observe_key(
             self.resources.key(ResourceKind::CredentialRetry),
@@ -964,6 +966,7 @@ fn kind_for(facts: &FailureFacts) -> ResourceKind {
     match facts.scope {
         Scope::Unspecified => ResourceKind::EndpointModel,
         Scope::SharedFreeEgress => ResourceKind::FreeEgress,
+        Scope::Credential => ResourceKind::CredentialRetry,
         Scope::QuotaPool => match facts.window {
             Some(UsageWindowKind::FiveHours) => ResourceKind::FiveHours,
             Some(UsageWindowKind::Week) => ResourceKind::Week,

@@ -38,9 +38,19 @@ Protect the data directory: there is no remote recovery if it is lost.
   shortens a later destination cooldown. From V10 the payload also carries each
   account's credit configuration, and V11 adds explicit HTTP protocol routes —
   a pre-V11 package carrying nonempty explicit routes is rejected rather than
-  losing them. Browser profiles, login passwords, logs,
+  losing them. V12 carries each GOAT Key's plan-window map inside the encrypted
+  envelope, separately from ordinary cooldowns. The same Key merges the later
+  deadline in each window and keeps the host map when an older package omits
+  the field; a changed Key drops the old host map, then applies a valid incoming
+  map. Same-Key preservation keeps or merges that map only while the incoming
+  credential is still GOAT; moving the same id and the same plaintext to a
+  non-GOAT provider, including Custom HTTP, remains a supported remap and
+  discards only the GOAT map while ordinary cooldowns stay. Schema 65 and
+  payload V12 are internal storage versions, not the product release version.
+  Browser profiles, login passwords, logs,
   usage, and machine-local host settings are not included. For a rollback,
-  restore a complete data-directory backup, including its encryption key.
+  restore a complete data-directory backup, including its encryption key, and
+  open it with the earlier binary. See [Upgrade and backup](upgrade-backup.md).
 - **Plain HTTP warning.** A non-loopback `http://` root URL exposes the Key
   and request contents to the network. Use HTTPS or a trusted LAN only.
 - **Administrator password.** The single administrator password is stored as

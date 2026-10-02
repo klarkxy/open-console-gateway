@@ -58,7 +58,7 @@ pub(super) async fn list_accounts(
 ) -> Result<Json<IdentityList>, V3ApiError> {
     let _settings_update = state.settings_update.lock();
     let now = Utc::now();
-    let (snapshot, custom_runtimes, dynamic_providers, routing) = {
+    let (snapshot, custom_runtimes, dynamic_providers, routing, goat_plans) = {
         let db = state.db.lock();
         let snapshot = db.list_identity_model().map_err(V3ApiError::internal)?;
         let custom_runtimes = db
@@ -68,7 +68,15 @@ pub(super) async fn list_accounts(
             .list_control_plane_dynamic_providers()
             .map_err(V3ApiError::internal)?;
         let routing = CurrentHttpRoutingFacts::load(&db)?;
-        (snapshot, custom_runtimes, dynamic_providers, routing)
+        let goat_plans =
+            crate::goat_plan_cooldowns::load_all_on(&db.conn).map_err(V3ApiError::internal)?;
+        (
+            snapshot,
+            custom_runtimes,
+            dynamic_providers,
+            routing,
+            goat_plans,
+        )
     };
 
     let identities = project_identities(
@@ -77,6 +85,7 @@ pub(super) async fn list_accounts(
         &dynamic_providers,
         &custom_runtimes,
         &routing,
+        &goat_plans,
         now,
     )?;
     Ok(Json(IdentityList {
@@ -451,6 +460,7 @@ fn project_identities(
     dynamic_providers: &[DynamicProviderRuntime],
     custom_runtimes: &[crate::custom::CustomAccountRuntime],
     routing: &CurrentHttpRoutingFacts,
+    goat_plans: &HashMap<String, crate::goat_plan_cooldowns::GoatPlanCooldowns>,
     now: chrono::DateTime<Utc>,
 ) -> Result<Vec<IdentitySummary>, V3ApiError> {
     let custom_by_id: HashMap<&str, &crate::custom::CustomAccountRuntime> = custom_runtimes
@@ -482,6 +492,7 @@ fn project_identities(
             &dynamic_by_id,
             &custom_by_id,
             routing,
+            goat_plans,
             now,
         )?);
     }
@@ -500,6 +511,7 @@ fn project_account_identity(
     dynamic_by_id: &HashMap<&str, &DynamicProviderRuntime>,
     custom_by_id: &HashMap<&str, &crate::custom::CustomAccountRuntime>,
     routing: &CurrentHttpRoutingFacts,
+    goat_plans: &HashMap<String, crate::goat_plan_cooldowns::GoatPlanCooldowns>,
     now: chrono::DateTime<Utc>,
 ) -> Result<IdentitySummary, V3ApiError> {
     let primary = records
@@ -516,6 +528,7 @@ fn project_account_identity(
             dynamic_by_id,
             custom_by_id,
             routing,
+            goat_plans,
             now,
         )?);
         if let Some(relation) = &record.declared_relation {
@@ -570,6 +583,7 @@ fn project_credential(
     dynamic_by_id: &HashMap<&str, &DynamicProviderRuntime>,
     custom_by_id: &HashMap<&str, &crate::custom::CustomAccountRuntime>,
     routing: &CurrentHttpRoutingFacts,
+    goat_plans: &HashMap<String, crate::goat_plan_cooldowns::GoatPlanCooldowns>,
     now: chrono::DateTime<Utc>,
 ) -> Result<CredentialSummary, V3ApiError> {
     let account = &record.account;
@@ -610,7 +624,14 @@ fn project_credential(
             "observe_only" => Some(QuotaPolicyMode::ObserveOnly),
             _ => None,
         });
-    let quota_windows = cooldown_windows(&cooldown_facts_for(account, &record.credential_id), now)
+    let mut cooldown = cooldown_facts_for(account, &record.credential_id);
+    if let Some(map) = goat_plans.get(&record.credential_id) {
+        cooldown.five_hours =
+            crate::goat_plan_cooldowns::overlay_instant(cooldown.five_hours, map.five_hours);
+        cooldown.week = crate::goat_plan_cooldowns::overlay_instant(cooldown.week, map.week);
+        cooldown.month = crate::goat_plan_cooldowns::overlay_instant(cooldown.month, map.month);
+    }
+    let quota_windows = cooldown_windows(&cooldown, now)
         .into_iter()
         .map(|window| {
             let (relation_confidence, policy_mode) =

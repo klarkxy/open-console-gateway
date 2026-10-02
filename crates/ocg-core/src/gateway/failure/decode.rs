@@ -3,7 +3,9 @@
 //! Quota exhaustion is not inferred from upstream error prose. A 429 carries
 //! Retry-After and a short temporary backoff; official usage is the Go quota
 //! authority. Zen Free keeps its declared shared-egress scope without a window
-//! parsed from the body.
+//! parsed from the body. The one exception is a GOAT 429 whose code, type, and
+//! full plan sentence name a future absolute reset. That deadline is credential
+//! local. A missing or inexact sentence stays a temporary 429.
 use super::{Cause, FailureFacts, RetryHint, Scope};
 use crate::models::UsageWindowKind;
 use chrono::{DateTime, Datelike, Duration, NaiveDateTime, Utc};
@@ -14,7 +16,7 @@ pub(crate) const TEMPORARY_429_SECS: i64 = 30;
 
 pub(crate) fn decode(
     class: ProviderErrorClass,
-    _body: &str,
+    body: &str,
     retry_after: Option<&str>,
     observed_at: DateTime<Utc>,
 ) -> Option<FailureFacts> {
@@ -29,8 +31,24 @@ pub(crate) fn decode(
     };
     match class {
         ProviderErrorClass::RateLimited {
-            profile:
-                ErrorProfile::OpenCodeGo | ErrorProfile::GenericHttp | ErrorProfile::CommandCodeGoat,
+            profile: ErrorProfile::CommandCodeGoat,
+        } => {
+            if let Some((window, reset)) =
+                crate::goat_plan_cooldowns::declared_plan_window(body, observed_at)
+            {
+                facts.cause = Cause::QuotaExhausted;
+                facts.scope = Scope::Credential;
+                facts.window = Some(window);
+                facts.upstream_reset_at = Some(reset);
+                facts.rule_id = "goat.plan_window";
+                facts.rule_version = 1;
+            } else {
+                facts.cause = Cause::Transient;
+                facts.rule_id = "http.429.temporary";
+            }
+        }
+        ProviderErrorClass::RateLimited {
+            profile: ErrorProfile::OpenCodeGo | ErrorProfile::GenericHttp,
         } => {
             facts.cause = Cause::Transient;
             facts.rule_id = "http.429.temporary";
@@ -76,6 +94,21 @@ pub(crate) fn openrouter_free_rejection(
         retry_not_before: Some(temporary_429_deadline(retry_after, observed_at)),
         rule_id: "openrouter.free_model_retry",
         rule_version: 1,
+    }
+}
+
+/// In-memory admission for a recognized plan window. A longer valid
+/// Retry-After remains a separate blocker. A shorter or missing header does
+/// not invent the 30-second temporary fallback.
+pub(crate) fn plan_window_admission(
+    reset: DateTime<Utc>,
+    retry_after: Option<&str>,
+    now: DateTime<Utc>,
+) -> Option<RetryHint> {
+    match retry_after.and_then(|value| parse_retry_after(value, now)) {
+        Some(RetryHint::Unbounded) => Some(RetryHint::Unbounded),
+        Some(RetryHint::Until(at)) if at > reset => Some(RetryHint::Until(at)),
+        _ => Some(RetryHint::Until(reset)),
     }
 }
 

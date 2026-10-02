@@ -153,6 +153,10 @@ pub(super) struct PortableCredential {
     pub link_group: Option<PlatformGroup>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credit_meter: Option<crate::billing_types::PortableCreditMeter>,
+    /// Receiving-Key GOAT plan deadlines. Absent on V4–V11 packages.
+    /// Ordinary `cooldowns` stay ordinary and are not a mirror of this map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goat_plan_cooldowns: Option<crate::goat_plan_cooldowns::GoatPlanCooldowns>,
 }
 
 impl Zeroize for PortableDestination {
@@ -310,6 +314,7 @@ impl From<&Credential> for PortableCredential {
             ollama_billing_tier: None,
             link_group: None,
             credit_meter: None,
+            goat_plan_cooldowns: None,
         }
     }
 }

@@ -34,6 +34,7 @@ pub mod gateway_keys;
 pub(crate) mod gateway_runtime;
 pub mod go_usage;
 pub mod goat;
+pub(crate) mod goat_plan_cooldowns;
 pub(crate) mod host_gateway;
 pub mod host_router;
 pub(crate) mod http_client;

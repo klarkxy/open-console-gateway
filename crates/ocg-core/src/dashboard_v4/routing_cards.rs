@@ -48,15 +48,23 @@ pub(super) async fn replace(
 
 /// Caller holds settings_update so revision, layout and rows describe one state.
 fn snapshot(state: &CoreState) -> Result<RoutingCardList, DestinationsError> {
-    let db = state.db.lock();
-    let projection = read_v4_projection(&db)
-        .map_err(V3ApiError::internal)?
-        .map_err(|refusals| DestinationsError::Refused(projection_refused(state, &refusals)))?;
-    let cards = routing_cards::load_on(&db.conn).map_err(V3ApiError::internal)?;
-    let recoveries = crate::db::quota_recovery::load_all_identified_on(&db.conn)
-        .map_err(V3ApiError::internal)?;
-    let probes = state.quota_probes.lock().clone();
-    let revision = ControlRevision::from_state(state);
+    // Capture the plan map with the projection. The overlay is pure and must
+    // not take the database lock again; this mutex is not reentrant.
+    let (projection, cards, recoveries, probes, goat_plans, revision) = {
+        let db = state.db.lock();
+        let projection = read_v4_projection(&db)
+            .map_err(V3ApiError::internal)?
+            .map_err(|refusals| DestinationsError::Refused(projection_refused(state, &refusals)))?;
+        let cards = routing_cards::load_on(&db.conn).map_err(V3ApiError::internal)?;
+        let recoveries = crate::db::quota_recovery::load_all_identified_on(&db.conn)
+            .map_err(V3ApiError::internal)?;
+        let goat_plans =
+            crate::goat_plan_cooldowns::load_all_on(&db.conn).map_err(V3ApiError::internal)?;
+        let probes = state.quota_probes.lock().clone();
+        let revision = ControlRevision::from_state(state);
+        (projection, cards, recoveries, probes, goat_plans, revision)
+    };
+    let now = state.sample_gateway_clock().0;
     Ok(RoutingCardList {
         revision,
         cards,
@@ -66,10 +74,11 @@ fn snapshot(state: &CoreState) -> Result<RoutingCardList, DestinationsError> {
             .map(DestinationDto::from)
             .collect(),
         credentials: super::destinations::overlay_credential_dtos(
-            state,
+            now,
             &projection.credentials,
             &recoveries,
             &probes,
+            &goat_plans,
         ),
     })
 }

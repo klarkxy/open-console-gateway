@@ -1,5 +1,6 @@
 //! Persisted facts captured once for a logical inference request.
 use crate::destination_projection::DestinationProjection;
+use crate::goat_plan_cooldowns::GoatPlanCooldowns;
 use crate::models::UpstreamChannel;
 use crate::quota_recovery::{PersistedQuotaRecovery, QuotaEpisode};
 use chrono::{DateTime, Utc};
@@ -31,6 +32,8 @@ pub(crate) struct ExecutionCredential {
     pub quota_recovery: Option<PersistedQuotaRecovery>,
     /// Process-local probing overlay. Not persisted.
     pub quota_probe: bool,
+    /// GOAT plan deadlines for this credential. Not an ordinary cooldown column.
+    pub goat_plan: GoatPlanCooldowns,
 }
 
 impl ExecutionCredential {
@@ -44,7 +47,7 @@ impl ExecutionCredential {
         now: DateTime<Utc>,
     ) -> Option<DateTime<Utc>> {
         let c = &self.cooldowns;
-        let windows = match channel {
+        let ordinary = match channel {
             UpstreamChannel::Go => [
                 c.generic_until,
                 c.five_hour_until,
@@ -53,11 +56,28 @@ impl ExecutionCredential {
             ],
             UpstreamChannel::Free => [c.generic_until, c.free_until, None, None],
         };
-        windows
+        let local = if channel == UpstreamChannel::Go {
+            [
+                self.goat_plan.five_hours,
+                self.goat_plan.week,
+                self.goat_plan.month,
+                None,
+            ]
+        } else {
+            [None, None, None, None]
+        };
+        ordinary
             .into_iter()
+            .chain(local)
             .flatten()
             .filter(|until| *until > now)
             .max()
+    }
+
+    /// True when the ordinary week column was not replaced by the local map.
+    #[cfg(test)]
+    pub(crate) fn cooldown_week_until_is_ordinary(&self) -> bool {
+        self.cooldowns.week_until.is_none() || self.cooldowns.week_until != self.goat_plan.week
     }
 
     pub(crate) fn matches_quota_episode(&self, episode: &QuotaEpisode) -> bool {
@@ -147,6 +167,7 @@ impl From<&crate::models::Account> for ExecutionCredential {
             },
             quota_recovery: None,
             quota_probe: false,
+            goat_plan: GoatPlanCooldowns::default(),
         }
     }
 }

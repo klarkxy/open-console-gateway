@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::dashboard_v3::{AccountUpstreamProtocol, ControlRevision, V3ApiError};
 use crate::dynamic::DynamicProviderRuntime;
+use crate::goat_plan_cooldowns::GoatPlanCooldowns;
 use crate::models::Account;
 use crate::provider::{
     BUILTIN_PROVIDERS, ConnectionVerificationStatus, ProviderAdapterKind, builtin_offering,
@@ -47,7 +48,7 @@ fn list_connections_locked(state: &CoreState) -> Result<ConnectionList, V3ApiErr
     let _settings_update = state.settings_update.lock();
     let now = Utc::now();
     let contracts = state.provider_contracts();
-    let (accounts, custom_runtimes, dynamic_providers, draft_ids, projection) = {
+    let (accounts, custom_runtimes, dynamic_providers, draft_ids, projection, goat_plans) = {
         let db = state.db.lock();
         let accounts = db.list_accounts().map_err(V3ApiError::internal)?;
         let custom_runtimes = db
@@ -62,6 +63,8 @@ fn list_connections_locked(state: &CoreState) -> Result<ConnectionList, V3ApiErr
         let projection = crate::destination_projection::read_v4_projection(&db)
             .map_err(V3ApiError::internal)?
             .map_err(|_| V3ApiError::conflict_at(state, "destination projection refused"))?;
+        let goat_plans = crate::goat_plan_cooldowns::load_by_legacy_on(&db.conn)
+            .map_err(V3ApiError::internal)?;
         let mut verification = HashMap::new();
         for account in &accounts {
             if let Some(row) = db
@@ -86,6 +89,7 @@ fn list_connections_locked(state: &CoreState) -> Result<ConnectionList, V3ApiErr
             dynamic_providers,
             draft_ids,
             projection,
+            goat_plans,
         )
     };
 
@@ -115,7 +119,7 @@ fn list_connections_locked(state: &CoreState) -> Result<ConnectionList, V3ApiErr
             .iter()
             .map(|index| (&accounts[*index].0, accounts[*index].1))
             .collect();
-        connections.push(project_builtin(&plan, &group, &contracts, now));
+        connections.push(project_builtin(&plan, &group, &contracts, &goat_plans, now));
     }
 
     let destination_by_dynamic: HashMap<&str, &Destination> = projection
@@ -133,7 +137,13 @@ fn list_connections_locked(state: &CoreState) -> Result<ConnectionList, V3ApiErr
             .iter()
             .map(|index| (&accounts[*index].0, accounts[*index].1))
             .collect();
-        let mut summary = project_dynamic(runtime, &group, now, draft_ids.contains(&runtime.id));
+        let mut summary = project_dynamic(
+            runtime,
+            &group,
+            &goat_plans,
+            now,
+            draft_ids.contains(&runtime.id),
+        );
         if let Some(destination) = destination_by_dynamic.get(runtime.id.as_str()) {
             let connection_id =
                 connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, &runtime.id);
@@ -186,7 +196,12 @@ fn list_connections_locked(state: &CoreState) -> Result<ConnectionList, V3ApiErr
             .map(|index| (&accounts[*index].0, accounts[*index].1))
             .collect();
         projected_custom_accounts.extend(group.iter().map(|(account, _)| account.id.as_str()));
-        connections.push(project_custom_destination(destination, &group, now));
+        connections.push(project_custom_destination(
+            destination,
+            &group,
+            &goat_plans,
+            now,
+        ));
     }
     // Platform-linked Custom Keys retain their pre-unification projection;
     // their service definition is owned by the platform parent, not editable
@@ -198,7 +213,7 @@ fn list_connections_locked(state: &CoreState) -> Result<ConnectionList, V3ApiErr
         let Some((account, status)) = accounts_by_id.get(runtime.account_id.as_str()) else {
             continue;
         };
-        connections.push(project_custom(account, *status, &runtime, now));
+        connections.push(project_custom(account, *status, &runtime, &goat_plans, now));
     }
 
     Ok(ConnectionList {
@@ -275,6 +290,7 @@ fn http_connection_members(
 fn project_custom_destination(
     destination: &Destination,
     accounts: &[(&Account, ConnectionVerificationStatus)],
+    goat_plans: &HashMap<String, GoatPlanCooldowns>,
     now: chrono::DateTime<Utc>,
 ) -> ConnectionSummary {
     let LegacyDestinationRef::CustomAccount(legacy_id) = &destination.legacy else {
@@ -282,7 +298,7 @@ fn project_custom_destination(
     };
     let connection_id = connection_id_for_legacy(LegacyConnectionKind::CustomAccount, legacy_id);
     let (endpoints, targets) = http_connection_members(destination, &connection_id);
-    let facts = credential_facts(accounts, now);
+    let facts = credential_facts(accounts, goat_plans, now);
     finish_summary(SummaryDraft {
         connection_id,
         name: destination.name.clone(),
@@ -312,6 +328,7 @@ fn project_builtin(
     plan: &crate::provider::BuiltinProvider,
     accounts: &[(&Account, ConnectionVerificationStatus)],
     contracts: &EffectiveContractSet,
+    goat_plans: &HashMap<String, GoatPlanCooldowns>,
     now: chrono::DateTime<Utc>,
 ) -> ConnectionSummary {
     let connection_id =
@@ -338,7 +355,7 @@ fn project_builtin(
         .map(|endpoint| endpoint.id.clone())
         .collect();
     let targets = builtin_targets(&connection_id, plan.provider_id, contracts, &endpoint_ids);
-    let facts = credential_facts(accounts, now);
+    let facts = credential_facts(accounts, goat_plans, now);
     finish_summary(SummaryDraft {
         connection_id,
         name: plan.display_name.to_string(),
@@ -370,13 +387,14 @@ fn project_builtin(
 fn project_dynamic(
     runtime: &DynamicProviderRuntime,
     accounts: &[(&Account, ConnectionVerificationStatus)],
+    goat_plans: &HashMap<String, GoatPlanCooldowns>,
     now: chrono::DateTime<Utc>,
     onboarding_draft: bool,
 ) -> ConnectionSummary {
     let connection_id =
         connection_id_for_legacy(LegacyConnectionKind::DynamicProvider, &runtime.id);
     let (endpoints, targets) = dynamic_routes(&connection_id, runtime);
-    let facts = credential_facts(accounts, now);
+    let facts = credential_facts(accounts, goat_plans, now);
     let origin = match provider_origin_from_preset(runtime.preset_id.as_deref()) {
         ocg_domain::provider::ProviderOrigin::Preset => ConnectionOrigin::Preset,
         _ => ConnectionOrigin::Custom,
@@ -418,6 +436,7 @@ fn project_custom(
     account: &Account,
     verification: ConnectionVerificationStatus,
     runtime: &crate::custom::CustomAccountRuntime,
+    goat_plans: &HashMap<String, GoatPlanCooldowns>,
     now: chrono::DateTime<Utc>,
 ) -> ConnectionSummary {
     let connection_id = connection_id_for_legacy(LegacyConnectionKind::CustomAccount, &account.id);
@@ -452,7 +471,7 @@ fn project_custom(
             }
         })
         .collect();
-    let facts = credential_facts(&[(account, verification)], now);
+    let facts = credential_facts(&[(account, verification)], goat_plans, now);
     finish_summary(SummaryDraft {
         connection_id,
         name: account.name.clone(),
@@ -593,15 +612,21 @@ fn builtin_targets(
 
 fn credential_facts(
     accounts: &[(&Account, ConnectionVerificationStatus)],
+    goat_plans: &HashMap<String, GoatPlanCooldowns>,
     now: chrono::DateTime<Utc>,
 ) -> Vec<CredentialFacts> {
     accounts
         .iter()
-        .map(|(account, status)| CredentialFacts {
-            enabled: account.enabled,
-            has_auth_error: account.auth_error.is_some(),
-            verified: *status == ConnectionVerificationStatus::Verified,
-            cooling: account.is_cooling_at(now),
+        .map(|(account, status)| {
+            let local = goat_plans.get(&account.id).and_then(|map| map.latest());
+            let effective =
+                crate::goat_plan_cooldowns::overlay_instant(account.cooldown_ends_at(now), local);
+            CredentialFacts {
+                enabled: account.enabled,
+                has_auth_error: account.auth_error.is_some(),
+                verified: *status == ConnectionVerificationStatus::Verified,
+                cooling: effective.is_some_and(|until| until > now),
+            }
         })
         .collect()
 }

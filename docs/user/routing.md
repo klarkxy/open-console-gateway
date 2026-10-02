@@ -12,14 +12,16 @@ Refresh the model catalog on Providers. Newly discovered models are enabled auto
 
 ### 429 cooldowns and official observation
 
-Every upstream `429` starts a temporary cooldown for the exact Key that
+An unrecognized upstream `429` starts a temporary cooldown for the exact Key that
 received it: 30 seconds when there is no usable constraint. A valid
 `Retry-After` delay or HTTP date can extend that wait and never shortens an
-already longer wait. The cooldown is not a displayed quota-reset time and does
+already longer wait. That temporary cooldown is not a displayed quota-reset time and does
 not spread through a declared quota pool. Zen Free retains its existing anonymous egress-IP recovery scope instead of a Key scope.
 
-The gateway never infers persistent quota or balance exhaustion from an HTTP
-status, an error body, or text in that body. A `403` is request-local and does
+Command Code GOAT has one exception. It is an HTTP 429 whose `error.code` is `RATE_LIMITED`, whose `error.type` is `rate_limit_error`, and whose `error.message` is the complete sentence `You've reached your weekly usage limit for your plan. Your limit resets at <RFC3339>. Please wait for the window to reset or upgrade your plan to continue.` Only `5-hour`, `weekly`, and `monthly` may stand in the window position, and the reset must be strictly in the future. That deadline is saved only on the Key that received it. Each window keeps the later time. Accounts show the later of that Key-local deadline and any ordinary cooldown. The gateway does not invent a balance, a usage figure, or a quota-recovery episode from it, and it does not change sign-in state or the enable switch. It does not fan out through a shared pool and is not written into the ordinary cooldown columns. A pool join, a shared ordinary cooldown, or resetting a sibling Key does not copy or clear it. Replacing the Key — rotation, a bulk replace, managed verification, or an import of a different Key — clears only that map, then applies a valid map from the incoming file. Saving the same Key keeps it, and an older backup that omits the field leaves the deadlines already on this node in place. A move to another routing card keeps it. A manual cooldown reset clears it and fences a response that was already in flight. A longer `Retry-After` stays an in-memory wait on that Key. An unrelated catalog refresh does not drop it. It is not saved as the plan reset, is not part of a node export, and does not survive a restart. A declared reset shorter than 30 seconds is not raised to 30 seconds. When the latest active deadline passes, the Key is eligible again, and sticky routing is not reset. A wrong profile, an incomplete sentence, an unknown window, a non-future reset, or a `429` missing the exact code or type stays on the temporary cooldown. A GOAT insufficient-credits `400` is the existing in-memory wait on that Key and model, 30 to 300 seconds by default. It does not write the map.
+
+Aside from that exact sentence, the gateway never infers persistent quota or balance exhaustion from an HTTP
+status, an error body, or text in that body. Unknown bodies stay opaque. A `403` is request-local and does
 not persist `auth_error`. MiniMax still validates its structured error envelope,
 including an error envelope delivered with HTTP 200, but its codes and message
 do not create persistent quota or balance state.
@@ -42,7 +44,7 @@ from the Accounts view. The selector skips:
 
 - Disabled accounts.
 - Accounts that are cooling down.
-- Keys with an active temporary `429` wait, a local-policy wait (for example a GOAT insufficient-credits wait on that Key and model), or a quota-recovery deadline that has not elapsed.
+- Keys with an active temporary `429` wait, a GOAT plan-window deadline, a longer in-memory `Retry-After`, a local-policy wait (for example a GOAT insufficient-credits wait on that Key and model), or a quota-recovery deadline that has not elapsed.
 - Accounts that have already failed during the current request (e.g. with a
   `429`).
 - Accounts whose saved provider contract has no effective enabled upstream
@@ -59,7 +61,7 @@ from the Accounts view. The selector skips:
   authorized. The pre-send check still re-reads the current grants.
 
 Keys that share a **declared quota pool** can share stored ordinary cooldowns.
-The temporary cooldown created by a `429` remains on the receiving Key.
+The temporary cooldown created by a `429` remains on the receiving Key. A declared GOAT plan window is also stored only on the receiving Key.
 Matching names do not create a shared pool. Switching Keys on the same identity
 does not invent a fresh pool.
 
@@ -93,7 +95,7 @@ once on the same account within the original deadline. After output starts,
 there is no replay or cross-account splicing. All attempts share a 32-attempt
 budget and one pre-output deadline. Unresolved outcomes are reported as
 `upstream_outcome_unknown` because the upstream may already have charged.
-If every account is cooling or has persisted quota-recovery state, the gateway returns
+If every account is cooling, waiting on a GOAT plan-window deadline, waiting on a longer in-memory `Retry-After`, or has persisted quota-recovery state, the gateway returns
 `429` with the next known eligibility time. Purely process-local resource waits
 without a known eligibility time, including local-policy waits, return `503`.
 
@@ -146,11 +148,10 @@ account. Calibration changes the display baseline, not routing eligibility.
 
 An upstream `429` uses the temporary cooldown above. Existing ordinary
 cooldowns remain effective until their stored deadline or an explicit reset.
-Resetting an ordinary cooldown does not rewrite persisted quota-recovery state.
+Resetting an ordinary cooldown on the selected Key also clears that Key's saved GOAT plan deadlines and leaves a sibling Key's deadlines in place. It does not rewrite persisted quota-recovery state.
 
 No background or synthetic inference is sent to clear a temporary cooldown.
-The same holds for local-policy waits. Restart clears process-local waits while retained persisted quota episodes
-remain available for authoritative Go usage to reconcile.
+The same holds for local-policy waits. Restart clears process-local waits, including a longer in-memory `Retry-After`, while the saved GOAT plan map and retained persisted quota episodes remain available for authoritative Go usage to reconcile.
 
 ## Zen Free models
 
@@ -212,10 +213,11 @@ streaming output begins, the gateway cannot change providers mid-response.
 A classified GOAT insufficient-credits response is an upstream error on that
 send. The current request may still fall over to the next eligible Key (the
 existing first fallback). The Key that reported insufficient credits, plus the
-actual upstream model, starts a process-local wait, so later requests skip it
+actual upstream model, starts the existing process-local wait (30 to 300
+seconds by default), so later requests skip it
 until a real client request on that same route is due. The same Key is not
 retried on this request. The body
-does not create persistent quota or balance state, change enablement, or
+does not create persistent quota, a saved plan deadline, or balance state, change enablement, or
 record `auth_error`.
 
 Other 400s (context, model, reasoning validation), unknown 400s, 413s, and
@@ -224,8 +226,11 @@ fallback for them. A custom matcher on Settings can still install a later
 skip; the current unknown-400 request fails as it did before. Configure
 global and per-connection rules in [Temporary unavailability](temporary-unavailability.md).
 
-Only a `429` starts the Retry-After temporary cooldown and
-optional asynchronous official refresh described above.
+An unrecognized `429` starts the Retry-After temporary cooldown described
+above. The exact GOAT plan-limit `429` uses that Key's declared deadline
+instead. Either may queue the supported optional asynchronous official
+refresh described above. That refresh never clears or rewrites inference
+cooldown or the plan-window map.
 
 MiniMax reports cache counters unchanged through JSON, SSE, and request
 accounting. The gateway does not rewrite those counters from a model prefix.

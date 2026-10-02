@@ -245,6 +245,8 @@ pub struct AccountImportRecord {
     pub verification_status: ConnectionVerificationStatus,
     pub connection_verified_at: Option<DateTime<Utc>>,
     pub ollama_billing_tier: Option<OllamaBillingTier>,
+    /// `None` means the portable package did not carry a GOAT plan map.
+    pub(crate) goat_plan: Option<crate::goat_plan_cooldowns::GoatPlanCooldowns>,
 }
 
 /// One validated V8 Custom HTTP connection definition. Credentials attach by
@@ -342,7 +344,7 @@ pub const PRE_V48_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v48.";
 pub const PRE_V58_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v58.";
 pub const PRE_V59_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v59.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
-pub const CURRENT_SCHEMA_VERSION: i32 = 64;
+pub const CURRENT_SCHEMA_VERSION: i32 = 65;
 pub const V57_SCHEMA_VERSION: i32 = 57;
 /// Canonical source schema for the v48 inert-column / empty-table cleanup.
 pub const V47_SCHEMA_VERSION: i32 = 47;
@@ -3535,6 +3537,19 @@ fn migrate_to_v64(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_to_v65(conn: &Connection) -> Result<()> {
+    let version = schema_version_on(conn)?;
+    if version >= 65 {
+        return Ok(());
+    }
+    anyhow::ensure!(version == 64, "v65 requires schema v64");
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    ensure_column(&tx, "credentials", "goat_plan_cooldowns_json", "TEXT")?;
+    tx.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (65);")?;
+    tx.commit()?;
+    Ok(())
+}
+
 fn migrate_v42_body(tx: &Transaction<'_>) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     let v41_dynamic_providers_exists = table_exists(tx, "dynamic_providers")?;
@@ -4142,6 +4157,11 @@ fn validate_import_account_on(
         account.id != ZEN_FREE_ACCOUNT_ID,
         "Zen Free is database-owned and cannot be imported"
     );
+    anyhow::ensure!(
+        record.goat_plan.is_none() || is_command_code_goat(&account.provider_id),
+        "imported account `{}` cannot carry GOAT plan windows",
+        account.id
+    );
     if let Some(plan) = builtin_provider(&account.provider_id) {
         if is_custom_api(&account.provider_id)
             && let Some(destination_override) = destination_override
@@ -4294,9 +4314,21 @@ fn merge_import_account_on(
             )?;
             restore_import_verification_on(conn, record)?;
             persist_ollama_billing_on(conn, record)?;
+            crate::goat_plan_cooldowns::apply_import_on(
+                conn,
+                &account.id,
+                false,
+                record.goat_plan.as_ref(),
+            )?;
             return Ok(());
         }
-        return insert_import_account_on(conn, record, platform_contract_authoritative);
+        insert_import_account_on(conn, record, platform_contract_authoritative)?;
+        return crate::goat_plan_cooldowns::apply_import_on(
+            conn,
+            &record.account.id,
+            false,
+            record.goat_plan.as_ref(),
+        );
     }
     validate_import_account_on(
         conn,
@@ -4356,6 +4388,18 @@ fn merge_import_account_on(
             Utc::now().to_rfc3339(),
         ],
     )?;
+    if is_command_code_goat(&account.provider_id) {
+        crate::goat_plan_cooldowns::apply_import_on(
+            conn,
+            &account.id,
+            same_key,
+            record.goat_plan.as_ref(),
+        )?;
+    } else {
+        // A remap off Command Code GOAT drops the host-local plan map even when
+        // the actual Key is unchanged. Incoming GOAT still uses the merge above.
+        crate::goat_plan_cooldowns::clear_for_legacy_on(conn, &account.id)?;
+    }
     if let Some(destination_id) = destination_override {
         conn.execute(
             "UPDATE credentials SET destination_id = ?2 WHERE legacy_account_id = ?1",
@@ -4882,6 +4926,7 @@ impl Database {
         migrate_to_v62(&db.conn)?;
         migrate_to_v63(&db.conn)?;
         migrate_to_v64(&db.conn)?;
+        migrate_to_v65(&db.conn)?;
         if db.open_guard.can_recover_pending() {
             let tx = db.conn.unchecked_transaction()?;
             billing::recover_pending_on(&tx, Utc::now())?;
@@ -7475,7 +7520,7 @@ impl Database {
             ids.len() == 1,
             "replacement Key requires exactly one credential"
         );
-        self.conn.execute("UPDATE credentials SET key_cipher = ?2, credential_version = COALESCE(credential_version, 1) + 1, auth_state_version = COALESCE(auth_state_version, 1) + 1, auth_error = NULL, verification_status = 'pending', connection_verified_at = NULL, verification_error = NULL, quota_recovery_json = NULL WHERE destination_id = ?1",
+        self.conn.execute("UPDATE credentials SET key_cipher = ?2, credential_version = COALESCE(credential_version, 1) + 1, auth_state_version = COALESCE(auth_state_version, 1) + 1, auth_error = NULL, verification_status = 'pending', connection_verified_at = NULL, verification_error = NULL, quota_recovery_json = NULL, goat_plan_cooldowns_json = CASE WHEN key_cipher = ?2 THEN goat_plan_cooldowns_json ELSE NULL END WHERE destination_id = ?1",
             params![destination_id, cipher])?;
         account_store::sync_inference_credential_projection_on(&self.conn, &ids[0])
     }
@@ -8115,6 +8160,7 @@ impl Database {
             None => existing.notes.clone(),
         };
         let key = key_cipher.unwrap_or(&existing.key_cipher);
+        let key_changed = key_cipher.is_some_and(|next| next != existing.key_cipher.as_str());
         let password = match password_cipher {
             Some("") => None,
             Some(s) => Some(s.to_string()),
@@ -8148,6 +8194,9 @@ impl Database {
         }
 
         let tx = self.conn.unchecked_transaction()?;
+        if key_changed {
+            crate::goat_plan_cooldowns::clear_for_legacy_on(&tx, id)?;
+        }
         tx.execute(
             "UPDATE credentials SET name = ?1, username = ?2, password_cipher = ?3, key_cipher = ?4,
              enabled = CASE WHEN ?10 AND ?14 THEN 0 ELSE ?5 END, referral_code = ?6, purchase_date = ?7, notes = ?8,
@@ -9409,7 +9458,9 @@ impl Database {
         let changed = tx.execute(
             "UPDATE credentials
              SET key_cipher = ?1, enabled = 0, auth_error = NULL, last_error = NULL,
-                 quota_recovery_json = NULL, updated_at = ?2
+                 quota_recovery_json = NULL,
+                 goat_plan_cooldowns_json = CASE WHEN key_cipher = ?1 THEN goat_plan_cooldowns_json ELSE NULL END,
+                 updated_at = ?2
              WHERE legacy_account_id = ?3 AND account_type = 'managed' AND setup_step = 'key_verification'",
             params![key_cipher, Utc::now().to_rfc3339(), id],
         )?;
@@ -9440,7 +9491,9 @@ impl Database {
         let changed = tx.execute(
             "UPDATE credentials
              SET key_cipher = ?1, enabled = 0, auth_error = NULL, last_error = NULL,
-                 quota_recovery_json = NULL, updated_at = ?2
+                 quota_recovery_json = NULL,
+                 goat_plan_cooldowns_json = CASE WHEN key_cipher = ?1 THEN goat_plan_cooldowns_json ELSE NULL END,
+                 updated_at = ?2
              WHERE legacy_account_id = ?3 AND key_cipher = ?4 AND updated_at = ?5
                AND provider_id = ?6
                AND account_type = ?7 AND setup_step = ?8",
@@ -9592,6 +9645,7 @@ impl Database {
                  auth_error = NULL, last_error = NULL, cooldown_until = NULL,
                  cooldown_generic_until = NULL, cooldown_5h_until = NULL,
                  cooldown_week_until = NULL, cooldown_month_until = NULL, cooldown_free_until = NULL,
+                 goat_plan_cooldowns_json = NULL,
                  updated_at = ?1
              WHERE legacy_account_id = ?2 AND account_type = 'managed' AND setup_step <> 'ready'",
             params![Utc::now().to_rfc3339(), id],
@@ -10388,6 +10442,7 @@ impl Database {
                      cooldown_week_until = NULL,
                      cooldown_month_until = NULL,
                      cooldown_free_until = NULL,
+                     goat_plan_cooldowns_json = NULL,
                      last_error = NULL,
                      updated_at = ?2
                  WHERE legacy_account_id = ?1",

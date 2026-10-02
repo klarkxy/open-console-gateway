@@ -160,10 +160,25 @@ and profile are removed.
 
 `crates/ocg-core/src/db.rs` defines the SQLite schema, migrations, and
 queries. The current schema version and its history live in
-[storage-migration.md](storage-migration.md). v60 additively stores the
+[storage-migration.md](storage-migration.md). The current schema is v65.
+v60 additively stores the
 local per-Key recovery runtime column `credentials.quota_recovery_json`;
 portable export excludes it. Restart retains wait and backoff, not the
-probe lease. `provider_contracts.rs` owns
+probe lease. v65 additively stores nullable
+`credentials.goat_plan_cooldowns_json`: a closed `five_hours` / `week` /
+`month` map of absolute UTC deadlines for the receiving GOAT Key. Existing
+rows backfill NULL. Ordinary cooldown columns stay ordinary. Each window
+keeps the later deadline. When every active deadline has passed, the Key
+is eligible again; expiry does not force a sticky reset. The column
+survives restart. A longer `Retry-After` on that response stays
+process-local: it is not in the column and is not exported. Portable
+payload V12 carries the map separately from ordinary cooldowns; the
+envelope stays version 1. Schema 65 and payload V12 are internal versions,
+not the product release version. Pool joins, shared ordinary cooldown
+writes, and a sibling reset do not copy or clear the map. Manual cooldown
+reset of the selected Key clears that Key's map and fences an older
+in-flight reply; replacing the Key clears it; the same Key and a card move
+keep it. `provider_contracts.rs` owns
 provider contract scopes, per-model/per-protocol overrides, effective
 contract derivation, and model-protocol evidence. `models.rs` defines
 shared serde types and `AppConfig`. Local Key storage is

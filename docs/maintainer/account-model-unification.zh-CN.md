@@ -291,12 +291,13 @@ V4 GET 列表仍不含秘密。Key
 
 ### 阶段 7 已开始的弃用规则
 
-新节点备份导出 payload V11。加密 envelope 仍为 v1。V9 携带 `destinations` 与
+新节点备份导出 payload V12。加密 envelope 仍为 v1。V9 携带 `destinations` 与
 `credentials`（明文密钥、平台与 CPA observer 管理凭据，以及 identity / grant /
 cooldown 等 extras 只存在该信封内），以及 `quotaPools` 与 `node`。合并导入时，若包中没有
 CPA observer key，会保留目标已有 management key。最新导出不再生成 `accounts`、平台行、动态供应商定义
-或单独的 identities 数组。V4–V11 均可导入，其中 V4–V6 经旧图解码器转入同一套新模型导入对象。
-若 V7 包仍带旧字段，必须与 dest/cred 一致，否则拒绝。V12 及更新是不支持版本错误。
+或单独的 identities 数组。V4–V12 均可导入，其中 V4–V6 经旧图解码器转入同一套新模型导入对象。
+若 V7 包仍带旧字段，必须与 dest/cred 一致，否则拒绝。新于 V12 的 payload 是不支持版本错误。
+V12 把每把 GOAT Key 的计划窗口映射与普通冷却分开存放；该映射只属于对应 Key，不是普通共享冷却。
 重挂的 `/accounts*` 是输入输出适配器；新客户端的读模型是 V4 目的地/凭据。
 
 ### 阶段 6 已开始的界面规则

@@ -30,7 +30,7 @@ A ready Key row can **Rotate Key**, **Add Key**, and **Edit binding** from the o
 
 Edit binding changes that credential's enabled state, model scope (all models, or only the exact names you list), and — when you change it — destination consent: which configured endpoint this Key may be sent to (protocol and URL). The current endpoint is resolved from this exact credential's saved grants; a sibling Key never lends an Origin. If a provider URL later changes, the saved Origin is shown and that endpoint stays unchecked until you explicitly allow the new destination. Changing only scope or enabled leaves destinations unchanged. Clearing both destination lists revokes access. Sealed official endpoints with no URL stay locked destinations and do not invent Origin strings. A disabled binding is shown on that card and does not flip the account enable switch. Zen Free, CPA, no-auth, and observer credentials do not expose rotate or binding. An identity can hold more than one Key; each account row uses the credential whose legacy account id matches that row.
 
-Accounts are arranged in supplier cards. A card can contain several accounts / Keys, and one supplier can have several cards sharing its address, protocols and models. Moving an account preserves its credential, grants, usage, quota pool, cooldown, and local state. Provider and Plan remain one product identity (`provider_id` only). OpenCode Go counts usage by account **Key**, Zen Free shares free cooldown by egress IP, and Custom API keeps no provider-side quota. Card order, then row order inside each card, defines the persisted routing priority used by strict priority, global sticky and round-robin after eligibility filtering. There is no per-model quota pool. Ordinary cooldown can fan out through a **declared quota pool**; a `429` cooldown remains on its receiving Key.
+Accounts are arranged in supplier cards. A card can contain several accounts / Keys, and one supplier can have several cards sharing its address, protocols and models. Moving an account preserves its credential, grants, usage, quota pool, cooldown, saved GOAT plan deadlines, and local state. Provider and Plan remain one product identity (`provider_id` only). OpenCode Go counts usage by account **Key**, Zen Free shares free cooldown by egress IP, and Custom API keeps no provider-side quota. Card order, then row order inside each card, defines the persisted routing priority used by strict priority, global sticky and round-robin after eligibility filtering. There is no per-model quota pool. Ordinary cooldown can fan out through a **declared quota pool**; a `429` cooldown remains on its receiving Key.
 
 **Accounts** owns identity, the account **Key**, verification, enabled state,
 card order, managed registration, and available usage / cooldown / quota-recovery state.
@@ -138,7 +138,7 @@ account fields replace the stored credential.
 Machine-local listener/root URL, auto-start, and Dock settings also stay with
 the destination. Ready managed accounts keep their Key, but their browser login
 does not move; unfinished managed drafts are skipped. Import accepts payload
-V4 through the current export version. Pre-V11 packages remain compatible when they omit protocol routes; a pre-V11 package carrying nonempty explicit routes is rejected rather than losing those routes. V4/V5 packages rebuild one identity, credential, All-scope
+V4 through the current export version. Pre-V11 packages remain compatible when they omit protocol routes; a pre-V11 package carrying nonempty explicit routes is rejected rather than losing those routes. The current export stores each GOAT Key's plan-window map separately from ordinary cooldowns. A V4–V11 import is ordinary-only: the same Key keeps deadlines already on this node, and a changed Key drops them. A current export of the same Key merges the later deadline in each window; a changed Key drops the old deadlines, then applies a valid incoming map. Same-Key preservation keeps or merges that map only while the incoming credential is still GOAT; moving the same id and the same plaintext to a non-GOAT provider, including Custom HTTP, remains a supported remap and discards only the GOAT map while ordinary cooldowns stay. A pre-V12 file that carries the field is rejected. V4/V5 packages rebuild one identity, credential, All-scope
 binding, and identity quota pool per account. Payloads older than V4 or newer than the current export version are rejected with an
 explicit unsupported-version error. A V4/V5 file
 that already contains V6 identity fields, or a V6 file that already contains
@@ -312,13 +312,26 @@ than a key quota.
   account's Key only after an explicit click. OCG validates the GOAT 5-hour,
   weekly, and monthly caps before atomically replacing all three baselines.
   This path has the same 15-second per-account throttle and global proxy, but
-  no automatic schedule; its result never writes inference cooldown or changes
-  routing. There is no separate manual calibration editor.
-- **GOAT inference restrictions.** Each `429` starts the same 30-second
+  no automatic schedule; its result never writes inference cooldown or the saved plan deadlines, and it does not change routing. There is no separate manual calibration editor.
+- **GOAT inference restrictions.** An unrecognized `429` starts the same 30-second
   temporary Key cooldown, extended but never shortened by valid `Retry-After`.
-  An insufficient-credits response starts a process-local wait on that Key and
-  model route. GOAT error text, caps, and displayed usage do not create or clear
-  permanent quota state. See [Routing](routing.md).
+  The exact plan-limit sentence — HTTP 429, `error.code` `RATE_LIMITED`,
+  `error.type` `rate_limit_error`, and the complete sentence in
+  [Routing](routing.md) — stores the declared 5-hour, weekly, or monthly reset
+  on the receiving Key only. Each window keeps the later time. That deadline
+  is not a pool cooldown and is not quota recovery. A longer `Retry-After`
+  waits in memory on that Key, is not saved as the plan reset, is not part of
+  a node export, and an unrelated catalog refresh does not drop it. A shorter
+  declared reset is not raised to 30 seconds. The Key is eligible again when
+  the latest active deadline passes. Saving the same Key keeps the deadlines.
+  Replacing the Key clears them, then applies a valid map from an incoming
+  file. Moving the Key to another card of the same supplier keeps them. A
+  manual cooldown reset clears them and fences a response already in flight.
+  The quota-recovery **Retry** action only marks that recovery eligible and
+  leaves the deadlines in place. An insufficient-credits `400` stays the existing in-memory wait
+  on that Key and model, 30 to 300 seconds by default, and does not write the
+  deadlines. Other GOAT error text, caps, and displayed usage do not create
+  or clear permanent quota state.
 - **Identity and credentials.** The name is the account's required primary
   display label. The login account field is optional; on Key-account creation,
   entering it first copies it into the name until you edit the name yourself.
@@ -337,10 +350,10 @@ than a key quota.
   Custom API have no purchase-cycle expiry and show no expiry tag or alert.
 - **Priority order.** Reorder cards and the accounts inside them directly. Move a whole card, reorder its rows, or move a Key to another card of the same supplier. To arrange `A1 → B1 → A2`, create another A card and move A2 into it. Pointer and keyboard controls save the same order. Sorting is disabled while filters are active so hidden accounts keep their positions. Empty cards and adjacent cards of the same supplier remain separate.
 - **Card folding and sort mode.** Each card header chevron folds the card to a one-line summary (Key count and enabled count); folding is view-only state saved in this browser across page reloads. A card's overflow menu also offers **Move up**, **Move down**, **Move to top**, and **Move to bottom**, saved through the same full-layout write as dragging. The toolbar **Reorder** toggle switches the list to a compact sort mode: the filters are bypassed and disabled so every card and Key stays visible as a single draggable line, and **Done** exits, restoring the previous filters and folded cards.
-- **Cooldown reset.** You can reset an ordinary cooldown manually from this view. The bar
+- **Cooldown reset.** You can reset an ordinary cooldown manually from this view. On the selected Key this also clears that Key's saved GOAT plan deadlines and fences a response already in flight. A sibling Key's deadlines stay. The bar
   snaps back to its local estimate as soon as the cooldown is cleared.
-- **429 cooldown.** A `429` cools its exact Key for 30 seconds unless a valid
-  `Retry-After` produces a later deadline. It does not spread to a quota-pool
+- **429 cooldown.** An unrecognized `429` cools its exact Key for 30 seconds unless a valid
+  `Retry-After` produces a later deadline. The exact GOAT plan-limit sentence uses that Key's declared reset instead; see the GOAT bullet above. It does not spread to a quota-pool
   sibling, and no background probe is sent when it becomes eligible. Retained
   historical quota state is not bulk-purged; fetched authoritative Go usage is
   the path that can reconcile Go state.

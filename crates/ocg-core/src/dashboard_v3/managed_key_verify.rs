@@ -639,7 +639,7 @@ fn account_mutation_at(
 }
 
 fn account_from_state(state: &CoreState, account: ModelAccount) -> Result<Account, V3ApiError> {
-    let ((usage_sync_last_success_at, usage_sync_next_allowed_at), contract) = {
+    let ((usage_sync_last_success_at, usage_sync_next_allowed_at), contract, goat_plan) = {
         let db = state.db.lock();
         let sync = db
             .account_usage_sync_state(&account.id)
@@ -647,9 +647,12 @@ fn account_from_state(state: &CoreState, account: ModelAccount) -> Result<Accoun
         let contract = db
             .load_account_contract(&account.id)
             .map_err(V3ApiError::internal)?;
+        let goat_plan = crate::goat_plan_cooldowns::load_for_legacy_on(&db.conn, &account.id)
+            .map_err(V3ApiError::internal)?;
         (
             crate::usage_sync::dashboard_sync_fields(sync.as_ref(), state.usage_sync.now()),
             contract,
+            goat_plan,
         )
     };
     let known_secret = if account.last_error.is_some()
@@ -672,6 +675,14 @@ fn account_from_state(state: &CoreState, account: ModelAccount) -> Result<Accoun
         })
     };
     let plan = provider::builtin_provider(&account.provider_id);
+    let (cooldown_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until) =
+        crate::goat_plan_cooldowns::overlay_account_deadlines(
+            account.cooldown_until,
+            account.cooldown_5h_until,
+            account.cooldown_week_until,
+            account.cooldown_month_until,
+            goat_plan.as_ref(),
+        );
     Ok(Account {
         id: account.id.clone(),
         provider_id: account.provider_id.clone(),
@@ -685,11 +696,11 @@ fn account_from_state(state: &CoreState, account: ModelAccount) -> Result<Accoun
         setup_step: account.setup_step.into(),
         purchase_date: account.purchase_date,
         expires_on: account.expires_on,
-        cooldown_until: account.cooldown_until.map(|t| t.to_rfc3339()),
+        cooldown_until,
         cooldown_generic_until: account.cooldown_generic_until.map(|t| t.to_rfc3339()),
-        cooldown_5h_until: account.cooldown_5h_until.map(|t| t.to_rfc3339()),
-        cooldown_week_until: account.cooldown_week_until.map(|t| t.to_rfc3339()),
-        cooldown_month_until: account.cooldown_month_until.map(|t| t.to_rfc3339()),
+        cooldown_5h_until,
+        cooldown_week_until,
+        cooldown_month_until,
         cooldown_free_until: account.cooldown_free_until.map(|t| t.to_rfc3339()),
         last_error: sanitize_persisted_error(account.last_error),
         auth_error: sanitize_persisted_error(account.auth_error),

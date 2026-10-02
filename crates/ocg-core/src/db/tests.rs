@@ -5465,6 +5465,7 @@ fn custom_platform_import_record(
         verification_status: ConnectionVerificationStatus::NotRequired,
         connection_verified_at: None,
         ollama_billing_tier: None,
+        goat_plan: None,
     }
 }
 
@@ -5822,6 +5823,7 @@ fn go_import_record(id: &str) -> AccountImportRecord {
         verification_status: ConnectionVerificationStatus::NotRequired,
         connection_verified_at: None,
         ollama_billing_tier: None,
+        goat_plan: None,
     }
 }
 
@@ -6137,9 +6139,13 @@ fn test_host_cipher() -> Arc<dyn KeyCipher + Send + Sync> {
 }
 
 fn fixture_account_key_cipher() -> String {
+    fixture_cipher_for(FIXTURE_ACCOUNT_PLAINTEXT)
+}
+
+fn fixture_cipher_for(secret: &str) -> String {
     test_host_cipher()
-        .encrypt(FIXTURE_ACCOUNT_PLAINTEXT)
-        .expect("test host cipher should encrypt fixture account keys")
+        .encrypt(secret)
+        .expect("test host cipher should encrypt a synthetic secret")
 }
 
 fn open_with_host_cipher(dir: PathBuf) -> Result<Database> {
@@ -11352,6 +11358,7 @@ fn account_migration_batch_is_atomic_and_preserves_order() {
             verification_status: ConnectionVerificationStatus::NotRequired,
             connection_verified_at: None,
             ollama_billing_tier: None,
+            goat_plan: None,
         },
         AccountImportRecord {
             account: custom,
@@ -11368,6 +11375,7 @@ fn account_migration_batch_is_atomic_and_preserves_order() {
             verification_status: ConnectionVerificationStatus::Pending,
             connection_verified_at: None,
             ollama_billing_tier: None,
+            goat_plan: None,
         },
     ];
     db.conn
@@ -15730,6 +15738,7 @@ fn imported_http_routes_remap_old_grants_by_operation_and_url_without_new_routes
             verification_status: ConnectionVerificationStatus::NotRequired,
             connection_verified_at: None,
             ollama_billing_tier: None,
+            goat_plan: None,
         }],
         Vec::new(),
         Vec::new(),
@@ -16032,6 +16041,861 @@ fn daily_tokens_by_model_includes_midnight_of_the_earliest_utc_day() {
         .sum();
     assert_eq!(early_tokens, 60);
     assert!(db.daily_tokens_by_model(0).is_err());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn goat_instant(text: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(text)
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+}
+
+fn goat_identity(db: &Database, account_id: &str) -> (String, String, u64, String) {
+    db.conn
+        .query_row(
+            "SELECT id, binding_id, credential_version, key_cipher
+             FROM credentials WHERE legacy_account_id = ?1",
+            [account_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)? as u64,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .unwrap()
+}
+
+fn goat_json(db: &Database, account_id: &str) -> Option<String> {
+    db.conn
+        .query_row(
+            "SELECT goat_plan_cooldowns_json FROM credentials WHERE legacy_account_id = ?1",
+            [account_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn goat_account(id: &str) -> Account {
+    let mut draft = account(id);
+    draft.provider_id = COMMAND_CODE_PROVIDER_ID.into();
+    draft.key_cipher = fixture_account_key_cipher();
+    draft
+}
+
+#[test]
+fn goat_declared_window_stays_on_the_receiving_key() {
+    use crate::destination_projection;
+    use crate::goat_plan_cooldowns::{self, GoatPlanCooldowns};
+    use crate::models::{UpstreamChannel, local_today};
+    use crate::provider::ConnectionVerificationStatus;
+    use crate::routing_snapshot::RoutingSnapshot;
+    use ocg_domain::credential::{credential_id_for_legacy_account, quota_pool_id_for_identity};
+
+    let dir = temp_data_dir("goat-plan-window");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    db.create_account(&goat_account("goat-a")).unwrap();
+    let ordinary = goat_instant("2026-10-03T00:00:00Z");
+    let local_week = goat_instant("2026-10-02T12:25:45.241Z");
+    let later_week = goat_instant("2026-10-09T00:00:00Z");
+    let five_hours = goat_instant("2026-10-01T05:00:00Z");
+    db.set_account_rate_limit(
+        "goat-a",
+        ordinary,
+        "ordinary week",
+        Some(UsageWindowKind::Week),
+    )
+    .unwrap();
+    db.conn
+        .execute_batch(
+            "ALTER TABLE credentials DROP COLUMN goat_plan_cooldowns_json;
+             DELETE FROM schema_version;
+             INSERT INTO schema_version(version) VALUES (64);",
+        )
+        .unwrap();
+    migrate_to_v65(&db.conn).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 65);
+    assert!(table_has_column(&db.conn, "credentials", "goat_plan_cooldowns_json").unwrap());
+    assert!(goat_json(&db, "goat-a").is_none());
+    assert_eq!(
+        db.get_account("goat-a")
+            .unwrap()
+            .unwrap()
+            .cooldown_week_until,
+        Some(ordinary)
+    );
+    drop(db);
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    assert_eq!(schema_version_on(&db.conn).unwrap(), 65);
+    assert_eq!(
+        db.get_account("goat-a")
+            .unwrap()
+            .unwrap()
+            .cooldown_week_until,
+        Some(ordinary)
+    );
+
+    let (credential_id, binding, version, cipher) = goat_identity(&db, "goat-a");
+    assert!(
+        goat_plan_cooldowns::record_window_on(
+            &db.conn,
+            &credential_id,
+            "goat-a",
+            &binding,
+            version,
+            &cipher,
+            UsageWindowKind::Week,
+            later_week,
+        )
+        .unwrap()
+    );
+    assert!(
+        goat_plan_cooldowns::record_window_on(
+            &db.conn,
+            &credential_id,
+            "goat-a",
+            &binding,
+            version,
+            &cipher,
+            UsageWindowKind::Week,
+            local_week,
+        )
+        .unwrap()
+    );
+    let stored: GoatPlanCooldowns =
+        serde_json::from_str(goat_json(&db, "goat-a").unwrap().as_str()).unwrap();
+    assert_eq!(stored.week, Some(later_week));
+    assert!(
+        goat_plan_cooldowns::record_window_on(
+            &db.conn,
+            &credential_id,
+            "goat-a",
+            &binding,
+            version,
+            &cipher,
+            UsageWindowKind::FiveHours,
+            five_hours,
+        )
+        .unwrap()
+    );
+    let stored: GoatPlanCooldowns =
+        serde_json::from_str(&goat_json(&db, "goat-a").unwrap()).unwrap();
+    assert_eq!(stored.week, Some(later_week));
+    assert_eq!(stored.five_hours, Some(five_hours));
+    let raw = db.get_account("goat-a").unwrap().unwrap();
+    assert_eq!(raw.cooldown_week_until, Some(ordinary));
+    assert!(raw.cooldown_5h_until.is_none());
+    assert!(raw.auth_error.is_none());
+    assert!(raw.last_error.as_deref().unwrap().contains("ordinary"));
+    let quota: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT quota_recovery_json FROM credentials WHERE legacy_account_id = 'goat-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(quota.is_none());
+    assert!(
+        !goat_plan_cooldowns::record_window_on(
+            &db.conn,
+            &credential_id,
+            "goat-a",
+            &binding,
+            version,
+            "stale-cipher",
+            UsageWindowKind::Week,
+            later_week,
+        )
+        .unwrap()
+    );
+
+    let before = goat_instant("2026-10-04T00:00:00Z");
+    let snapshot = RoutingSnapshot::load(&db).unwrap();
+    let routed = snapshot
+        .credentials
+        .iter()
+        .find(|row| row.id == "goat-a")
+        .unwrap();
+    assert_eq!(
+        routed.cooldown_ends_at_for(UpstreamChannel::Go, before),
+        Some(later_week)
+    );
+    assert!(raw.cooldown_until.unwrap() < later_week);
+
+    db.create_account(&goat_account("goat-b")).unwrap();
+    let identity_id: String = db
+        .conn
+        .query_row(
+            "SELECT identity_id FROM credentials WHERE legacy_account_id = 'goat-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    db.create_account_for_identity(
+        &identity_id,
+        &goat_account("goat-c"),
+        &local_today(),
+        ConnectionVerificationStatus::NotRequired,
+        crate::db::identity::QuotaSharingJoin::Shared {
+            source_credential_id: credential_id_for_legacy_account("goat-a").to_string(),
+        },
+        None,
+    )
+    .unwrap();
+    assert!(goat_json(&db, "goat-c").is_none());
+    assert_eq!(
+        db.get_account("goat-c")
+            .unwrap()
+            .unwrap()
+            .cooldown_week_until,
+        Some(ordinary)
+    );
+    assert_eq!(stored.week, Some(later_week));
+    let (b_id, b_binding, b_version, b_cipher) = goat_identity(&db, "goat-b");
+    goat_plan_cooldowns::record_window_on(
+        &db.conn,
+        &b_id,
+        "goat-b",
+        &b_binding,
+        b_version,
+        &b_cipher,
+        UsageWindowKind::Month,
+        later_week,
+    )
+    .unwrap();
+    db.set_account_cooldown(
+        "goat-a",
+        Some(five_hours),
+        Some("generic after declaration"),
+    )
+    .unwrap();
+    let after_generic: GoatPlanCooldowns =
+        serde_json::from_str(&goat_json(&db, "goat-a").unwrap()).unwrap();
+    assert_eq!(after_generic.week, Some(later_week));
+    assert!(goat_json(&db, "goat-b").is_some());
+    assert_eq!(
+        db.get_account("goat-c")
+            .unwrap()
+            .unwrap()
+            .cooldown_generic_until,
+        Some(five_hours)
+    );
+    assert!(goat_json(&db, "goat-c").is_none());
+    db.clear_account_cooldown("goat-b").unwrap();
+    assert!(goat_json(&db, "goat-a").is_some());
+    assert!(goat_json(&db, "goat-b").is_none());
+    db.clear_account_cooldown("goat-a").unwrap();
+    assert!(goat_json(&db, "goat-a").is_none());
+    assert!(goat_json(&db, "goat-b").is_none());
+    let _ = quota_pool_id_for_identity(&identity_id);
+
+    goat_plan_cooldowns::record_window_on(
+        &db.conn,
+        &credential_id,
+        "goat-a",
+        &binding,
+        version,
+        &cipher,
+        UsageWindowKind::Week,
+        local_week,
+    )
+    .unwrap();
+    db.rotate_account_credential("goat-a", &cipher).unwrap();
+    assert!(goat_json(&db, "goat-a").is_some());
+    let rotated = fixture_cipher_for("sk-fixture-rotated");
+    db.rotate_account_credential("goat-a", &rotated).unwrap();
+    assert!(goat_json(&db, "goat-a").is_none());
+    assert!(
+        !goat_plan_cooldowns::record_window_on(
+            &db.conn,
+            &credential_id,
+            "goat-a",
+            &binding,
+            version,
+            &cipher,
+            UsageWindowKind::Week,
+            local_week,
+        )
+        .unwrap()
+    );
+    let (credential_id, binding, version, cipher) = goat_identity(&db, "goat-a");
+    goat_plan_cooldowns::record_window_on(
+        &db.conn,
+        &credential_id,
+        "goat-a",
+        &binding,
+        version,
+        &cipher,
+        UsageWindowKind::Week,
+        local_week,
+    )
+    .unwrap();
+    db.update_account(
+        "goat-a",
+        &AccountUpdate {
+            name: Some("renamed".into()),
+            username: None,
+            password: None,
+            key: None,
+            enabled: None,
+            referral_code: None,
+            purchase_date: None,
+            notes: Some("metadata".into()),
+        },
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(goat_json(&db, "goat-a").is_some());
+    let replacement = fixture_cipher_for("sk-fixture-replaced");
+    db.update_account(
+        "goat-a",
+        &AccountUpdate {
+            name: None,
+            username: None,
+            password: None,
+            key: None,
+            enabled: None,
+            referral_code: None,
+            purchase_date: None,
+            notes: None,
+        },
+        Some(&replacement),
+        None,
+    )
+    .unwrap();
+    assert!(goat_json(&db, "goat-a").is_none());
+
+    let mut managed = goat_account("goat-managed");
+    db.create_account(&managed).unwrap();
+    db.conn
+        .execute(
+            "UPDATE credentials SET account_type = 'managed', setup_step = 'key_verification'
+             WHERE legacy_account_id = 'goat-managed'",
+            [],
+        )
+        .unwrap();
+    let (m_id, m_binding, m_version, m_cipher) = goat_identity(&db, "goat-managed");
+    goat_plan_cooldowns::record_window_on(
+        &db.conn,
+        &m_id,
+        "goat-managed",
+        &m_binding,
+        m_version,
+        &m_cipher,
+        UsageWindowKind::Week,
+        local_week,
+    )
+    .unwrap();
+    assert!(
+        db.save_managed_key_for_verification("goat-managed", &m_cipher)
+            .unwrap()
+    );
+    assert!(goat_json(&db, "goat-managed").is_some());
+    let managed_replacement = fixture_cipher_for("sk-fixture-managed");
+    assert!(
+        db.save_managed_key_for_verification("goat-managed", &managed_replacement)
+            .unwrap()
+    );
+    assert!(goat_json(&db, "goat-managed").is_none());
+    let (m_id, m_binding, m_version, m_cipher) = goat_identity(&db, "goat-managed");
+    goat_plan_cooldowns::record_window_on(
+        &db.conn,
+        &m_id,
+        "goat-managed",
+        &m_binding,
+        m_version,
+        &m_cipher,
+        UsageWindowKind::Week,
+        local_week,
+    )
+    .unwrap();
+    assert!(db.reset_pending_managed_setup("goat-managed").unwrap());
+    assert!(goat_json(&db, "goat-managed").is_none());
+    managed.id = "unused".into();
+
+    db.create_account(&goat_account("goat-single")).unwrap();
+    let (s_id, s_binding, s_version, s_cipher) = goat_identity(&db, "goat-single");
+    goat_plan_cooldowns::record_window_on(
+        &db.conn,
+        &s_id,
+        "goat-single",
+        &s_binding,
+        s_version,
+        &s_cipher,
+        UsageWindowKind::Month,
+        later_week,
+    )
+    .unwrap();
+    let destination_id: String = db
+        .conn
+        .query_row(
+            "SELECT destination_id FROM credentials WHERE legacy_account_id = 'goat-single'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let others: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM credentials
+             WHERE destination_id = ?1 AND legacy_account_id <> 'goat-single'
+               AND COALESCE(credential_purpose, 'inference') = 'inference'",
+            [&destination_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    if others == 0 {
+        db.replace_destination_singleton_key_on(&destination_id, &s_cipher)
+            .unwrap();
+        assert!(goat_json(&db, "goat-single").is_some());
+        let bulk_replacement = fixture_cipher_for("sk-fixture-bulk");
+        db.replace_destination_singleton_key_on(&destination_id, &bulk_replacement)
+            .unwrap();
+        assert!(goat_json(&db, "goat-single").is_none());
+    }
+
+    goat_plan_cooldowns::record_window_on(
+        &db.conn,
+        &credential_id,
+        "goat-a",
+        &binding,
+        version,
+        &cipher,
+        UsageWindowKind::Week,
+        local_week,
+    )
+    .unwrap();
+    // The cipher above was replaced by update_account. Re-read and record, then rewrite.
+    let (credential_id, binding, version, cipher) = goat_identity(&db, "goat-a");
+    let valid_a_cipher = cipher.clone();
+    goat_plan_cooldowns::record_window_on(
+        &db.conn,
+        &credential_id,
+        "goat-a",
+        &binding,
+        version,
+        &cipher,
+        UsageWindowKind::Week,
+        local_week,
+    )
+    .unwrap();
+    destination_projection::replace_persisted(&db)
+        .unwrap()
+        .unwrap();
+    assert!(goat_json(&db, "goat-a").is_some());
+    let snap = goat_plan_cooldowns::snapshot_on(&db.conn).unwrap();
+    let changed_key = fixture_cipher_for("sk-fixture-changed");
+    db.conn
+        .execute(
+            "UPDATE credentials SET key_cipher = ?1, goat_plan_cooldowns_json = NULL
+             WHERE legacy_account_id = 'goat-a'",
+            [changed_key],
+        )
+        .unwrap();
+    goat_plan_cooldowns::restore_on(&db.conn, &snap).unwrap();
+    assert!(goat_json(&db, "goat-a").is_none());
+    db.conn
+        .execute(
+            "UPDATE credentials SET key_cipher = ?1 WHERE legacy_account_id = 'goat-a'",
+            [valid_a_cipher],
+        )
+        .unwrap();
+
+    let (credential_id, _, _, cipher) = goat_identity(&db, "goat-b");
+    db.conn
+        .execute(
+            "UPDATE credentials SET key_cipher = ?2 WHERE legacy_account_id = 'goat-b'",
+            params![credential_id, b_cipher],
+        )
+        .unwrap();
+    let incoming = GoatPlanCooldowns {
+        month: Some(later_week),
+        week: Some(local_week),
+        ..GoatPlanCooldowns::default()
+    };
+    goat_plan_cooldowns::apply_import_on(&db.conn, "goat-b", true, None).unwrap();
+    goat_plan_cooldowns::apply_import_on(&db.conn, "goat-b", false, Some(&incoming)).unwrap();
+    let replaced: GoatPlanCooldowns =
+        serde_json::from_str(&goat_json(&db, "goat-b").unwrap()).unwrap();
+    assert_eq!(replaced, incoming);
+    let earlier = GoatPlanCooldowns {
+        week: Some(five_hours),
+        ..GoatPlanCooldowns::default()
+    };
+    goat_plan_cooldowns::apply_import_on(&db.conn, "goat-b", true, Some(&earlier)).unwrap();
+    let merged: GoatPlanCooldowns =
+        serde_json::from_str(&goat_json(&db, "goat-b").unwrap()).unwrap();
+    assert_eq!(merged.week, Some(local_week));
+    assert_eq!(merged.month, Some(later_week));
+    goat_plan_cooldowns::apply_import_on(&db.conn, "goat-b", true, None).unwrap();
+    assert_eq!(
+        goat_json(&db, "goat-b")
+            .as_deref()
+            .map(|value| serde_json::from_str::<GoatPlanCooldowns>(value).unwrap()),
+        Some(merged.clone())
+    );
+    let _ = cipher;
+
+    drop(db);
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let reopened: GoatPlanCooldowns =
+        serde_json::from_str(&goat_json(&db, "goat-b").unwrap()).unwrap();
+    assert_eq!(reopened.week, Some(local_week));
+    let snapshot = RoutingSnapshot::load(&db).unwrap();
+    let routed = snapshot
+        .credentials
+        .iter()
+        .find(|row| row.id == "goat-b")
+        .unwrap();
+    assert_eq!(routed.goat_plan.week, Some(local_week));
+    assert!(routed.cooldown_week_until_is_ordinary());
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn goat_plan_restore_follows_the_key_when_the_destination_changes() {
+    use crate::goat_plan_cooldowns::{self, GoatPlanCooldowns};
+    use crate::models::UsageWindowKind;
+
+    let dir = temp_data_dir("goat-plan-move");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    db.create_account(&goat_account("goat-move")).unwrap();
+    db.create_account(&account("other-dest")).unwrap();
+    let (credential_id, binding, version, cipher) = goat_identity(&db, "goat-move");
+    let week = goat_instant("2026-10-02T12:25:45.241Z");
+    assert!(
+        goat_plan_cooldowns::record_window_on(
+            &db.conn,
+            &credential_id,
+            "goat-move",
+            &binding,
+            version,
+            &cipher,
+            UsageWindowKind::Week,
+            week,
+        )
+        .unwrap()
+    );
+    let snap = goat_plan_cooldowns::snapshot_on(&db.conn).unwrap();
+    let other_destination: String = db
+        .conn
+        .query_row(
+            "SELECT destination_id FROM credentials WHERE legacy_account_id = 'other-dest'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let own_destination: String = db
+        .conn
+        .query_row(
+            "SELECT destination_id FROM credentials WHERE legacy_account_id = 'goat-move'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(own_destination, other_destination);
+    db.conn
+        .execute(
+            "UPDATE credentials
+             SET destination_id = ?1, goat_plan_cooldowns_json = NULL
+             WHERE legacy_account_id = 'goat-move'",
+            [&other_destination],
+        )
+        .unwrap();
+    goat_plan_cooldowns::restore_on(&db.conn, &snap).unwrap();
+    let restored: GoatPlanCooldowns =
+        serde_json::from_str(goat_json(&db, "goat-move").unwrap().as_str()).unwrap();
+    assert_eq!(restored.week, Some(week));
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn goat_plan_merge_keeps_a_deadline_committed_by_another_connection() {
+    use crate::goat_plan_cooldowns::{self, GoatPlanCooldowns};
+    use crate::models::UsageWindowKind;
+    use rusqlite::Connection;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use std::time::Duration;
+
+    let dir = temp_data_dir("goat-plan-atomic");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    db.create_account(&goat_account("goat-race")).unwrap();
+    let (credential_id, binding, version, cipher) = goat_identity(&db, "goat-race");
+    let later = goat_instant("2026-10-09T00:00:00Z");
+    let five_hours = goat_instant("2026-10-01T05:00:00Z");
+    let path = dir.join("data.sqlite");
+    let locked = Arc::new(Barrier::new(2));
+    let writer_locked = locked.clone();
+    let writer = thread::spawn(move || {
+        let conn = Connection::open(&path).unwrap();
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        let pending = GoatPlanCooldowns {
+            week: Some(later),
+            ..GoatPlanCooldowns::default()
+        };
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        conn.execute(
+            "UPDATE credentials SET goat_plan_cooldowns_json = ?1
+             WHERE legacy_account_id = 'goat-race'",
+            [serde_json::to_string(&pending).unwrap()],
+        )
+        .unwrap();
+        writer_locked.wait();
+        thread::sleep(Duration::from_millis(250));
+        conn.execute_batch("COMMIT").unwrap();
+    });
+    locked.wait();
+    assert!(
+        goat_plan_cooldowns::record_window_on(
+            &db.conn,
+            &credential_id,
+            "goat-race",
+            &binding,
+            version,
+            &cipher,
+            UsageWindowKind::FiveHours,
+            five_hours,
+        )
+        .unwrap()
+    );
+    writer.join().unwrap();
+    let stored: GoatPlanCooldowns =
+        serde_json::from_str(goat_json(&db, "goat-race").unwrap().as_str()).unwrap();
+    assert_eq!(stored.week, Some(later));
+    assert_eq!(stored.five_hours, Some(five_hours));
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn same_plaintext_remap_off_goat_clears_plan_map_and_keeps_ordinary_cooldown() {
+    use crate::goat_plan_cooldowns::{self, GoatPlanCooldowns};
+    use crate::models::UpstreamChannel;
+    use crate::routing_snapshot::RoutingSnapshot;
+
+    let dir = temp_data_dir("goat-plan-remap");
+    let db = open_with_host_cipher(dir.clone()).unwrap();
+    let host = test_host_cipher();
+    let draft = goat_account("goat-remap");
+    let original_cipher = draft.key_cipher.clone();
+    db.create_account(&draft).unwrap();
+    let ordinary = goat_instant("2026-10-03T00:00:00Z");
+    let local_week = goat_instant("2026-10-09T00:00:00Z");
+    let between = goat_instant("2026-10-04T00:00:00Z");
+    db.set_account_rate_limit(
+        "goat-remap",
+        ordinary,
+        "ordinary week",
+        Some(UsageWindowKind::Week),
+    )
+    .unwrap();
+    let (credential_id, binding_id, version, cipher) = goat_identity(&db, "goat-remap");
+    assert_eq!(cipher, original_cipher);
+    assert!(
+        goat_plan_cooldowns::record_window_on(
+            &db.conn,
+            &credential_id,
+            "goat-remap",
+            &binding_id,
+            version,
+            &cipher,
+            UsageWindowKind::Week,
+            local_week,
+        )
+        .unwrap()
+    );
+    let quota_pool: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT quota_pool_id FROM credentials WHERE legacy_account_id = 'goat-remap'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let goat_destination: String = db
+        .conn
+        .query_row(
+            "SELECT destination_id FROM credentials WHERE legacy_account_id = 'goat-remap'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let cooled = db.get_account("goat-remap").unwrap().unwrap();
+    assert_eq!(cooled.cooldown_week_until, Some(ordinary));
+    assert_eq!(cooled.provider_id, COMMAND_CODE_PROVIDER_ID);
+    let legacy_id = "00000000-0000-4000-8000-00000000c081";
+    let destination_id = ocg_domain::destination::destination_id_for_custom_account(legacy_id);
+    assert_ne!(goat_destination, destination_id);
+    super::custom_store::upsert_imported_custom_destination_on(
+        &db.conn,
+        &destination_id,
+        legacy_id,
+        "Imported Custom",
+        "https://custom.example/v1/chat/completions",
+        UpstreamProtocolKind::ChatCompletions,
+        AuthScheme::Bearer,
+        &[ocg_domain::dynamic::DynamicModelMapping {
+            public_model: "custom-model".into(),
+            upstream_model: "vendor/custom-model".into(),
+            upstream_override: None,
+        }],
+        true,
+    )
+    .unwrap();
+
+    let mut carried =
+        custom_platform_import_record("goat-remap", "custom-model", "vendor/custom-model");
+    carried.account.key_cipher = fixture_cipher_for(FIXTURE_ACCOUNT_PLAINTEXT);
+    assert_ne!(carried.account.key_cipher, original_cipher);
+    assert_fixture_account_cipher(&carried.account.key_cipher);
+    carried.goat_plan = Some(GoatPlanCooldowns {
+        week: Some(local_week),
+        ..GoatPlanCooldowns::default()
+    });
+    assert!(validate_import_account_on(&db.conn, &carried, true, Some(&destination_id)).is_err());
+    carried.goat_plan = None;
+    validate_import_account_on(&db.conn, &carried, true, Some(&destination_id)).unwrap();
+    let (_, _, _, unchanged_cipher) = goat_identity(&db, "goat-remap");
+    assert_eq!(unchanged_cipher, original_cipher);
+    assert!(goat_json(&db, "goat-remap").is_some());
+    assert_eq!(
+        db.get_account("goat-remap").unwrap().unwrap().provider_id,
+        COMMAND_CODE_PROVIDER_ID
+    );
+
+    let mut goat_again = goat_account("goat-remap");
+    goat_again.key_cipher = fixture_cipher_for(FIXTURE_ACCOUNT_PLAINTEXT);
+    assert_ne!(goat_again.key_cipher, original_cipher);
+    let mut goat_record = AccountImportRecord {
+        account: goat_again,
+        custom_config: None,
+        capabilities: Vec::new(),
+        verification_status: ConnectionVerificationStatus::NotRequired,
+        connection_verified_at: None,
+        ollama_billing_tier: None,
+        goat_plan: Some(GoatPlanCooldowns {
+            week: Some(local_week),
+            ..GoatPlanCooldowns::default()
+        }),
+    };
+    validate_import_account_on(&db.conn, &goat_record, false, None).unwrap();
+    goat_record.goat_plan = None;
+    let tx = db.conn.unchecked_transaction().unwrap();
+    merge_import_account_on(&tx, &goat_record, false, None, Some(host.as_ref())).unwrap();
+    tx.commit().unwrap();
+    let kept: GoatPlanCooldowns =
+        serde_json::from_str(goat_json(&db, "goat-remap").unwrap().as_str()).unwrap();
+    assert_eq!(kept.week, Some(local_week));
+    let (_, _, _, kept_cipher) = goat_identity(&db, "goat-remap");
+    assert_eq!(kept_cipher, original_cipher);
+    let still_goat = db.get_account("goat-remap").unwrap().unwrap();
+    assert_eq!(still_goat.provider_id, COMMAND_CODE_PROVIDER_ID);
+    assert_eq!(still_goat.cooldown_until, cooled.cooldown_until);
+    assert_eq!(
+        still_goat.cooldown_generic_until,
+        cooled.cooldown_generic_until
+    );
+    assert_eq!(still_goat.cooldown_5h_until, cooled.cooldown_5h_until);
+    assert_eq!(still_goat.cooldown_week_until, Some(ordinary));
+    assert_eq!(still_goat.cooldown_month_until, cooled.cooldown_month_until);
+    assert_eq!(still_goat.cooldown_free_until, cooled.cooldown_free_until);
+    let destination_after_goat: String = db
+        .conn
+        .query_row(
+            "SELECT destination_id FROM credentials WHERE legacy_account_id = 'goat-remap'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(destination_after_goat, goat_destination);
+    let blocked_snapshot = RoutingSnapshot::load(&db).unwrap();
+    let blocked = blocked_snapshot
+        .credentials
+        .iter()
+        .find(|row| row.id == "goat-remap")
+        .unwrap();
+    assert_eq!(
+        blocked.cooldown_ends_at_for(UpstreamChannel::Go, between),
+        Some(local_week)
+    );
+
+    let tx = db.conn.unchecked_transaction().unwrap();
+    merge_import_account_on(
+        &tx,
+        &carried,
+        true,
+        Some(&destination_id),
+        Some(host.as_ref()),
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    assert!(goat_json(&db, "goat-remap").is_none());
+    let (after_id, after_binding, after_version, after_cipher) = goat_identity(&db, "goat-remap");
+    assert_eq!(after_id, credential_id);
+    assert_eq!(after_binding, binding_id);
+    assert_eq!(after_version, version);
+    assert_eq!(after_cipher, original_cipher);
+    assert_fixture_account_cipher(&after_cipher);
+    let remapped = db.get_account("goat-remap").unwrap().unwrap();
+    assert_eq!(remapped.provider_id, CUSTOM_PROVIDER_ID);
+    assert!(remapped.enabled);
+    assert_eq!(remapped.credential_kind, CredentialKind::ApiKey);
+    assert_eq!(remapped.quota_scope, QuotaScope::Key);
+    assert!(remapped.auth_error.is_none());
+    assert_eq!(remapped.cooldown_until, cooled.cooldown_until);
+    assert_eq!(
+        remapped.cooldown_generic_until,
+        cooled.cooldown_generic_until
+    );
+    assert_eq!(remapped.cooldown_5h_until, cooled.cooldown_5h_until);
+    assert_eq!(remapped.cooldown_week_until, Some(ordinary));
+    assert_eq!(remapped.cooldown_month_until, cooled.cooldown_month_until);
+    assert_eq!(remapped.cooldown_free_until, cooled.cooldown_free_until);
+    let quota_after: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT quota_pool_id FROM credentials WHERE legacy_account_id = 'goat-remap'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(quota_after, quota_pool);
+    let destination_after: String = db
+        .conn
+        .query_row(
+            "SELECT destination_id FROM credentials WHERE legacy_account_id = 'goat-remap'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(destination_after, destination_id);
+    let snapshot = RoutingSnapshot::load(&db).unwrap();
+    let routed = snapshot
+        .credentials
+        .iter()
+        .find(|row| row.id == "goat-remap")
+        .unwrap();
+    assert_eq!(routed.provider_id, CUSTOM_PROVIDER_ID);
+    assert_eq!(routed.destination_id, destination_id);
+    assert!(routed.goat_plan.is_empty());
+    assert_eq!(routed.cooldowns.week_until, Some(ordinary));
+    // Ordinary week has expired. The old GOAT deadline has not, so a retained
+    // local map would still block this Go channel.
+    assert!(
+        routed
+            .cooldown_ends_at_for(UpstreamChannel::Go, between)
+            .is_none()
+    );
+
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }

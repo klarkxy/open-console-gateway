@@ -75,7 +75,7 @@ const ENVELOPE_VERSION: u32 = 1;
 const LEGACY_PAYLOAD_VERSION: u32 = 1;
 #[cfg(test)]
 const NODE_PAYLOAD_VERSION: u32 = 2;
-const PAYLOAD_VERSION: u32 = 11;
+const PAYLOAD_VERSION: u32 = 12;
 const MIN_SUPPORTED_PAYLOAD_VERSION: u32 = 4;
 const V5_PAYLOAD_VERSION: u32 = 5;
 const V6_PAYLOAD_VERSION: u32 = 6;
@@ -84,6 +84,7 @@ const V8_PAYLOAD_VERSION: u32 = 8;
 const V9_PAYLOAD_VERSION: u32 = 9;
 const V10_PAYLOAD_VERSION: u32 = 10;
 const V11_PAYLOAD_VERSION: u32 = 11;
+const V12_PAYLOAD_VERSION: u32 = 12;
 const MAX_ROUTING_CARDS: usize = 1000;
 const AAD: &[u8] = b"ocg-manager-account-backup:v1:argon2id-m65536-t3-p1:aes-256-gcm";
 const ARGON_MEMORY_KIB: u32 = 64 * 1024;
@@ -570,6 +571,7 @@ struct ValidatedAccount {
     quota_scope: QuotaScope,
     identity: Option<ImportedAccountIdentity>,
     cooldowns: PortableCooldowns,
+    goat_plan: Option<crate::goat_plan_cooldowns::GoatPlanCooldowns>,
 }
 
 #[derive(Debug)]
@@ -782,6 +784,7 @@ async fn import_accounts_inner(
             verification_status: account.verification_status,
             connection_verified_at: account.connection_verified_at,
             ollama_billing_tier: account.ollama_billing_tier,
+            goat_plan: account.goat_plan.clone(),
         });
         items.push(preview_item(
             &account,
@@ -1473,6 +1476,16 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
             "protocol routes require a V11 backup".to_string(),
         ));
     }
+    if payload.version < V12_PAYLOAD_VERSION
+        && payload
+            .credentials
+            .iter()
+            .any(|credential| credential.goat_plan_cooldowns.is_some())
+    {
+        return Err(TransferError::Invalid(
+            "GOAT plan windows require a V12 backup".to_string(),
+        ));
+    }
     if payload.exported_at.chars().count() > 64
         || DateTime::parse_from_rfc3339(&payload.exported_at).is_err()
     {
@@ -1842,6 +1855,7 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
             } else {
                 PortableCooldowns::default()
             },
+            goat_plan: None,
         });
     }
     if payload.platform_accounts.len() > MAX_ACCOUNTS || payload.platform_links.len() > MAX_ACCOUNTS

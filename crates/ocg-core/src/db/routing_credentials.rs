@@ -10,7 +10,8 @@ pub(crate) fn load(
     let mut statement = db.conn.prepare(
         "SELECT id, legacy_account_id, destination_id, provider_id, name, key_cipher,
                 enabled, setup_step, auth_error, binding_id, binding_enabled,
-                credential_version, authorization_connection_id, quota_recovery_json
+                credential_version, authorization_connection_id, quota_recovery_json,
+                goat_plan_cooldowns_json
          FROM credentials WHERE COALESCE(credential_purpose, 'inference') = 'inference'
          ORDER BY routing_rank, created_at, legacy_account_id",
     )?;
@@ -30,6 +31,7 @@ pub(crate) fn load(
             row.get::<_, Option<i64>>(11)?,
             row.get::<_, String>(12)?,
             row.get::<_, Option<String>>(13)?,
+            row.get::<_, Option<String>>(14)?,
         ))
     })?;
     let mut credentials = Vec::new();
@@ -49,6 +51,7 @@ pub(crate) fn load(
             version,
             authorization_connection_id,
             quota_recovery_json,
+            goat_plan_json,
         ) = row?;
         let dto = projection
             .credentials
@@ -118,6 +121,13 @@ pub(crate) fn load(
                 .transpose()
                 .context("invalid credentials.quota_recovery_json")?,
             quota_probe: false,
+            goat_plan: goat_plan_json
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(serde_json::from_str)
+                .transpose()
+                .context("invalid credentials.goat_plan_cooldowns_json")?
+                .unwrap_or_default(),
         });
     }
     Ok(credentials)

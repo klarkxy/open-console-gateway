@@ -505,6 +505,9 @@ fn update_account_locked(
     }
     let key_cipher = match update.key.as_deref().map(str::trim) {
         Some("") | None => None,
+        Some(key) if crate::provider::is_command_code_goat(&existing.provider_id) => {
+            Some(goat_key_cipher_for_save(state, &existing.key_cipher, key)?)
+        }
         Some(key) => Some(state.encrypt_key(key).map_err(V3ApiError::internal)?),
     };
     let password_cipher = match update.password.as_deref().map(str::trim) {
@@ -885,7 +888,12 @@ pub(super) fn mutation_at(
 }
 
 fn account_from_state(state: &CoreState, account: ModelAccount) -> Result<Account, V3ApiError> {
-    let ((usage_sync_last_success_at, usage_sync_next_allowed_at), contract, ollama_billing) = {
+    let (
+        (usage_sync_last_success_at, usage_sync_next_allowed_at),
+        contract,
+        ollama_billing,
+        goat_plan,
+    ) = {
         let db = state.db.lock();
         let sync = db
             .account_usage_sync_state(&account.id)
@@ -899,10 +907,13 @@ fn account_from_state(state: &CoreState, account: ModelAccount) -> Result<Accoun
         } else {
             None
         };
+        let goat_plan = crate::goat_plan_cooldowns::load_for_legacy_on(&db.conn, &account.id)
+            .map_err(V3ApiError::internal)?;
         (
             crate::usage_sync::dashboard_sync_fields(sync.as_ref(), state.usage_sync.now()),
             contract,
             ollama_billing,
+            goat_plan,
         )
     };
     let known_secret = if account.last_error.is_some()
@@ -929,6 +940,14 @@ fn account_from_state(state: &CoreState, account: ModelAccount) -> Result<Accoun
     // billing cadence or credential expiry. Keep storage intact, but do not
     // publish invented subscription dates for these account-owned Keys.
     let has_builtin_lifecycle = plan.is_some();
+    let (cooldown_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until) =
+        crate::goat_plan_cooldowns::overlay_account_deadlines(
+            account.cooldown_until,
+            account.cooldown_5h_until,
+            account.cooldown_week_until,
+            account.cooldown_month_until,
+            goat_plan.as_ref(),
+        );
     Ok(Account {
         id: account.id.clone(),
         provider_id: account.provider_id.clone(),
@@ -950,11 +969,11 @@ fn account_from_state(state: &CoreState, account: ModelAccount) -> Result<Accoun
         } else {
             String::new()
         },
-        cooldown_until: account.cooldown_until.map(|t| t.to_rfc3339()),
+        cooldown_until,
         cooldown_generic_until: account.cooldown_generic_until.map(|t| t.to_rfc3339()),
-        cooldown_5h_until: account.cooldown_5h_until.map(|t| t.to_rfc3339()),
-        cooldown_week_until: account.cooldown_week_until.map(|t| t.to_rfc3339()),
-        cooldown_month_until: account.cooldown_month_until.map(|t| t.to_rfc3339()),
+        cooldown_5h_until,
+        cooldown_week_until,
+        cooldown_month_until,
         cooldown_free_until: account.cooldown_free_until.map(|t| t.to_rfc3339()),
         last_error: sanitize_persisted_error(account.last_error),
         auth_error: sanitize_persisted_error(account.auth_error),
@@ -1085,6 +1104,29 @@ fn clean_optional(value: Option<String>) -> Option<String> {
     })
 }
 
+/// Reuse the stored GOAT ciphertext when the trimmed Key matches.
+///
+/// Encryption draws a fresh nonce, so saving the same Key would otherwise
+/// look like a replacement and drop the plan-window map. A different Key,
+/// or a ciphertext that cannot be read, uses the normal encrypt path.
+/// The plaintext is compared here and is not logged.
+fn goat_key_cipher_for_save(
+    state: &CoreState,
+    current_cipher: &str,
+    incoming: &str,
+) -> Result<String, V3ApiError> {
+    let normalized = incoming.trim();
+    if !current_cipher.is_empty()
+        && state
+            .decrypt_key(current_cipher)
+            .ok()
+            .is_some_and(|stored| stored == normalized)
+    {
+        return Ok(current_cipher.to_string());
+    }
+    state.encrypt_key(normalized).map_err(V3ApiError::internal)
+}
+
 fn encrypted_optional(
     state: &CoreState,
     value: &Option<String>,
@@ -1159,3 +1201,6 @@ mod committed_revision_tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -2,6 +2,20 @@
 
 # 存储与迁移
 
+## Schema v65 — GOAT Key 本地计划窗口
+
+v65 增量增加可空 `credentials.goat_plan_cooldowns_json`。`migrate_to_v65` 要求 schema v64，添加该 TEXT 列，再写入 `schema_version` 65。既有行保持 NULL。已经是 v65 的打开直接返回，不改写该列。不改写 credentials 表，也不写 pre-v65 快照。普通冷却列、凭据 ID、路由顺序和 Key 密文保持原样。
+
+JSON 是只属于收到信号的 GOAT 推理 Key 的封闭映射，值为绝对 UTC 截止时间：`five_hours`、`week`、`month`。未知窗口或无法解析的时间戳 fail closed。具名普通冷却列和汇总列 `cooldown_until` 仍是普通冷却，仍可共享。读投影取本地截止与普通列中较晚的一个，不把映射抄回那些列。Go 通道上，路由跳过该 Key，直到最长的有效阻塞过去。Free 通道不读这份映射。每个窗口各自保留较晚的截止时间。全部有效截止都过去后，Key 恢复资格，到期不会强制重置粘性会话。
+
+该映射不是额度恢复。这个信号不开启回合或试探，也不改变鉴权、启用或余额。加入额度池、普通共享冷却写入，以及同级 Key 的解除，都不会复制或清除它。对所选 Key 手动解除冷却会清空该 Key 自己的映射，并挡住更早的在途回复。实际更换 Key 会清除映射。保存同一把 Key，包括只改元数据，会保留映射。路由卡片移动后只要仍是同一把 Key，映射保留。
+
+同一响应上更长的有效 `Retry-After` 是独立的进程内阻塞。它不写入该列，不导出，无关的目录刷新也不会丢掉它。重启丢掉该进程内等待，保留已保存的映射。
+
+当前便携导出是 payload V12，加密 envelope 仍为版本 1。V12 把 `goatPlanCooldowns` 与普通冷却字段分开存放。V4–V11 仍可导入，且只含普通冷却：缺少该字段绝不推断本地来源。同一明文 Key 的导入按窗口取较晚截止；旧包没有该字段时保留本机映射。Key 已更换时先丢掉旧的本机映射，再应用有效的传入映射。同一把 Key 的保留或合并只在传入凭据仍是 GOAT 时成立；把同一 id、同一明文改到非 GOAT 供应商（包括 Custom HTTP）仍是受支持的重映射，只丢掉 GOAT 映射，普通冷却保留。非 GOAT 凭据、观察者凭据、未知窗口或非法时间戳会拒绝整个包。早于 V12 却携带该字段的 payload 会被拒绝，因此该字段不能伪装成旧 payload 版本。V1–V3 以及新于 V12 的 payload 会被拒绝。
+
+旧二进制拒绝 v65 数据库。回退是用更早的二进制完整恢复升级前的数据目录。Schema 65 与 payload V12 是内部存储版本，不是产品发布版本。V12 备份给当前或更新的读取方；更早的二进制请保留更早的备份。
+
 ## Schema v64 — 预设的对外模型名
 
 v64 仅将已保存的 Configurable HTTP 映射中与 `<preset-id>/<upstream-id>` 完全一致的对外名称改为上游 ID 的最后一段。准确上游 ID、手动命名的映射和历史日志不变。同一目的地内最后一段重名的映射保留原名，供用户检查。迁移会同步修改相应 Key 的模型范围和下游展示设置。如果新名称已被其他目的地使用，原名称又处于隐藏状态，则跳过该映射，避免改变全局展示状态。使用旧对外名称的客户端需要更新模型设置。迁移在事务中完成；升级前备份整个数据目录，回退时还原该备份，因为旧版程序无法打开 v64 数据库。
@@ -14,7 +28,7 @@ v63 增量增加可空 `destinations.protocol_routes_json`。`NULL` 与空列表
 
 读路径不执行 DDL。迁移保留关闭行及其证据/覆盖。后续官方刷新只有在补充协议证据时才能启用未知 Auto 行；已确认关闭或显式 `force_off` 状态仍保持关闭。本迁移不创建 `pre-v63` 备份。升级生产数据目录前，请自行制作完整且一致的备份。旧二进制不能打开 schema 63；回退必须以相同 cipher identity 恢复完整的升级前数据目录。
 
-便携导出现在使用 payload V11，并随目的地、目录状态和授权一起携带显式路由。未带路由的 V4–V10 payload 仍按遗留目的地导入。早于 V11 但含非空路由的 payload 会被拒绝以避免丢失数据；V1–V3 及 V12 或更高版本不受支持。
+v63 当时的便携导出使用 payload V11，并随目的地、目录状态和授权一起携带显式路由。未带路由的 V4–V10 payload 仍按遗留目的地导入。早于 V11 但含非空路由的 payload 会被拒绝以避免丢失数据。当前导出是 payload V12；V1–V3 以及新于 V12 的 payload 不受支持。
 
 ## Schema v62 — 个人积分估算
 
@@ -71,7 +85,7 @@ GUI 或 CLI 启动时会原地执行 SQLite 迁移。打开新版二进制前：
 
 ## Schema v27 与 pre-v3 快照
 
-`CURRENT_SCHEMA_VERSION = 64`（`crates/ocg-core/src/db.rs`）。下文保留 v1–v57 的历史迁移细节。v58 新增 `destinations.model_resolution`，回填 `adapter_defined` / `public_only` / `public_and_upstream`，把遗留 Custom 目的地改为不限制凭据数量，保留全部目的地与凭据 ID，并在修改非全新规范 v57 源之前写入经校验的 pre-v58 SQLite 备份。v60 增量保存 `credentials.quota_recovery_json`（见上文）。
+`CURRENT_SCHEMA_VERSION = 65`（`crates/ocg-core/src/db.rs`）。下文保留 v1–v57 的历史迁移细节。v58 新增 `destinations.model_resolution`，回填 `adapter_defined` / `public_only` / `public_and_upstream`，把遗留 Custom 目的地改为不限制凭据数量，保留全部目的地与凭据 ID，并在修改非全新规范 v57 源之前写入经校验的 pre-v58 SQLite 备份。v60 增量保存 `credentials.quota_recovery_json`（见上文）。v65 增量保存 `credentials.goat_plan_cooldowns_json`（见上文）。
 
 ## Schema v45 — 身份 / 凭据 / 绑定附属表
 
@@ -95,7 +109,7 @@ v45 把遗留 Account 拆成身份容器 / 凭据 / 绑定语义，但不搬移 
 
 每一次账号插入（V3 创建、托管创建、用户定义供应商首把 Key、V4 onboarding commit、节点导入）都通过与本迁移共用的唯一映射器，在同一事务写入附属行。平台关联 / 解除关联在同一事务更新被关联身份的置信度与站点。
 
-轮换、绑定编辑、第二份凭据写入，以及可配置目的地 PATCH/DELETE 都是 V4 CAS 路径。新导出使用 portable payload V11（envelope v1），随目的地、凭据、按模型路由覆盖与 `modelResolution` 一起携带显式协议路由。未带路由的 V4–V10 均可导入；早于 V11 却带路由的 payload 会拒绝。V12+ 拒绝。遗留 Custom 行保持稳定 ID 与 `public_only` 解析，同时改为连接所有、多 Key。目的地/凭据归并保持单事务。
+轮换、绑定编辑、第二份凭据写入，以及可配置目的地 PATCH/DELETE 都是 V4 CAS 路径。新导出使用 portable payload V12（envelope v1），随目的地、凭据、按模型路由覆盖与 `modelResolution` 一起携带显式协议路由，并另行携带每把 GOAT Key 的计划窗口映射。V4–V12 均可导入。早于 V11 却带路由的 payload 会拒绝。早于 V12 却带计划窗口字段的 payload 会拒绝。新于 V12 的 payload 会拒绝。V4–V11 导入只有普通冷却：同一明文 Key 保留宿主机映射，Key 已更换则丢掉旧映射。V12 导入同一把 Key 时按窗口取较晚截止；Key 已更换时先丢掉旧的本机映射，再应用有效的传入映射。同一把 Key 的保留或合并只在传入凭据仍是 GOAT 时成立；把同一 id、同一明文改到非 GOAT 供应商（包括 Custom HTTP）仍是受支持的重映射，只丢掉 GOAT 映射，普通冷却保留。遗留 Custom 行保持稳定 ID 与 `public_only` 解析，同时改为连接所有、多 Key。目的地/凭据归并保持单事务。
 
 ## Schema v46 — 持久化绑定授权
 
@@ -106,7 +120,7 @@ v46 把凭据绑定授权存成已保存事实：
 
 空数组表示无授权。NULL 只在一次性迁移期间合法；v46 按当前已配置的已分配连接端点（与 `/connections` 使用同一套 id）回填既有行一次。新 Key 捕获同一套安全默认：密封适配器保持静态官方端点范围且无 Origin；Custom 与动态默认 URL 可包含同源既有路由端点；外站 Origin 的模型覆盖不会被隐式授权。轮换、连接/URL/模型编辑、修复与重新打开都不会制造或扩大已保存授权。显式授权在修复/重新打开/导入中保留。
 
-V4 `BindingDto.allowedEndpointIds` / `allowedOrigins` 投影这些已存事实。可选 PATCH 必须同时带上两个授权字段，按当前已配置的选定连接端点校验 id 与规范化 Origin；外站 id、畸形 Origin、未配置 Origin 会原子拒绝；接受的值按规范形式落库；两者都为空表示主动撤销。可选 `POST /identities/{id}/credentials` 的 `quotaSharing` 默认为 `{kind:"independent"}`（含省略该字段的旧客户端），或 `{kind:"shared", credentialId}` 显式指定同一身份上的推理凭据。既有 v45 身份池保留。显式加入会使用源池（若有），否则只创建包含所选源与新成员的池。普通共享池冷却写入在成员（含源）之间保留各窗口的最晚截止时间；显式手动清除仍会清空整个池。`GET /accounts` 的 `CredentialSummary.quotaPoolId` 投影已存池成员关系（非成员为 `null`），包括单成员身份池，即使 `quotaWindows` 为空也会给出。可选 `operationId` 复用 v44 HMAC 面板操作账本。V6 可移植身份图要求带授权，并在事务前拒绝畸形引用；V4/V5 导入一次性获得安全授权。不另写迁移前备份（只做加法，与 v43–v45 相同）。回滚仍是既有的整目录恢复。
+V4 `BindingDto.allowedEndpointIds` / `allowedOrigins` 投影这些已存事实。可选 PATCH 必须同时带上两个授权字段，按当前已配置的选定连接端点校验 id 与规范化 Origin；外站 id、畸形 Origin、未配置 Origin 会原子拒绝；接受的值按规范形式落库；两者都为空表示主动撤销。可选 `POST /identities/{id}/credentials` 的 `quotaSharing` 默认为 `{kind:"independent"}`（含省略该字段的旧客户端），或 `{kind:"shared", credentialId}` 显式指定同一身份上的推理凭据。既有 v45 身份池保留。显式加入会使用源池（若有），否则只创建包含所选源与新成员的池。普通共享池冷却写入在成员（含源）之间保留各窗口的最晚截止时间；显式手动清除仍会清空整个池的普通冷却列。收到信号的 GOAT Key 计划映射不在这次扇出之内。`GET /accounts` 的 `CredentialSummary.quotaPoolId` 投影已存池成员关系（非成员为 `null`），包括单成员身份池，即使 `quotaWindows` 为空也会给出。可选 `operationId` 复用 v44 HMAC 面板操作账本。V6 可移植身份图要求带授权，并在事务前拒绝畸形引用；V4/V5 导入一次性获得安全授权。不另写迁移前备份（只做加法，与 v43–v45 相同）。回滚仍是既有的整目录恢复。
 
 ## Schema v47 — 持久化入职草稿
 
@@ -300,7 +314,7 @@ v32 用 `endpoint_url` 与单值 `upstream_protocol` 替换 `account_custom_conf
 
 ## Schema v35 — Provider 单一身份
 
-v35 去掉 offering 维度。Provider 与 Plan 是同一产品身份，只按 `provider_id` 识别。已知 v34 对映射为 `opencode/go`、`opencode-zen-free/anonymous-free`、`command-code/goat`、`minimax/cn`、`kimi/cn`、`custom/api` 与 `cpa/local`。未知对与复合键冲突在任何写入前 fail closed。重建保留账号、密文字节、日志、定价/目录行、合约、Custom 配置/能力、设置与 access keys。同一 schema 版本还把类型化用户定义供应商存在 `dynamic_providers` 与 `dynamic_provider_models`（两者都在 v42 中改名为 `providers` / `provider_models`）。节点备份导出只含 `providerId` 的 payload V6，并带一份可选/默认空的用户定义供应商定义集合。payload V1–V3，以及除 4、5 或 6 以外的任何版本（包括未来的 V7 包），都会被明确的不支持版本错误拒绝。该 schema 当时的转移包导出 payload V6；当前版本导出 payload V11。导入 V4/V5 时仍用确定性 1:1 映射重建身份附属行。
+v35 去掉 offering 维度。Provider 与 Plan 是同一产品身份，只按 `provider_id` 识别。已知 v34 对映射为 `opencode/go`、`opencode-zen-free/anonymous-free`、`command-code/goat`、`minimax/cn`、`kimi/cn`、`custom/api` 与 `cpa/local`。未知对与复合键冲突在任何写入前 fail closed。重建保留账号、密文字节、日志、定价/目录行、合约、Custom 配置/能力、设置与 access keys。同一 schema 版本还把类型化用户定义供应商存在 `dynamic_providers` 与 `dynamic_provider_models`（两者都在 v42 中改名为 `providers` / `provider_models`）。节点备份导出只含 `providerId` 的 payload V6，并带一份可选/默认空的用户定义供应商定义集合。payload V1–V3，以及除 4、5 或 6 以外的任何版本（包括未来的 V7 包），都会被明确的不支持版本错误拒绝。该 schema 当时的转移包导出 payload V6；当前版本导出 payload V12。导入 V4/V5 时仍用确定性 1:1 映射重建身份附属行。
 
 在非空 v34 库做破坏性 v35 重建之前，进程会写入一份唯一、不覆盖的同目录快照：
 

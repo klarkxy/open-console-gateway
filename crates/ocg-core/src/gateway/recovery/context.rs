@@ -26,6 +26,7 @@ pub(crate) struct ResourceSet {
     quota: [u8; 32],
     credits: [u8; 32],
     credential: [u8; 32],
+    credential_retry: [u8; 32],
     policy_credential: [u8; 32],
     policy_model: Option<[u8; 32]>,
     owner: String,
@@ -85,11 +86,32 @@ impl ResourceSet {
                     .map(|destination| destination_identity(destination, free_contract)),
             })
         };
+        // Selected receiving Key. Catalog rows are mutable, so CredentialRetry
+        // hashes a destination_identity clone with only the catalog cleared.
+        // The same id still moves this digest when URL, auth, or protocol
+        // routes change. Quota and policy keep the uncleared identity above.
+        let retry_identity = |row: &ExecutionCredential| {
+            serde_json::json!({
+                "id": row.credential_id, "provider": row.provider_id, "cipher": row.key_cipher,
+                "enabled": row.enabled, "ready": row.ready,
+                "binding": (&row.binding_id, row.credential_version, row.binding_enabled,
+                    &row.scope, &row.grants, &row.authorization_connection_id),
+                "destination": snapshot.projection.destinations.iter()
+                    .find(|destination| destination.id == row.destination_id)
+                    .map(|destination| {
+                        let mut identity = destination_identity(destination, free_contract);
+                        identity.catalog.clear();
+                        identity
+                    }),
+            })
+        };
         let current = rows
             .iter()
             .find(|row| row.credential_id == account.credential_id)
             .ok_or_else(|| anyhow::anyhow!("recovery credential no longer routes"))?;
         let credential: [u8; 32] = Sha256::digest(serde_json::to_vec(&identity(current))?).into();
+        let credential_retry: [u8; 32] =
+            Sha256::digest(serde_json::to_vec(&retry_identity(current))?).into();
         let identities = rows.iter().map(|row| identity(row)).collect::<Vec<_>>();
         let quota: [u8; 32] = Sha256::digest(serde_json::to_vec(&identities)?).into();
         let credits = digest(&[&quota, model.as_bytes()]);
@@ -108,6 +130,7 @@ impl ResourceSet {
             quota,
             credits,
             credential,
+            credential_retry,
             policy_credential,
             policy_model,
             owner: account.id.clone(),
@@ -124,7 +147,8 @@ impl ResourceSet {
     }
     pub(super) fn owner_generation(&self, key: &ResourceKey) -> [u8; 32] {
         match key.kind {
-            ResourceKind::CredentialRetry | ResourceKind::PolicyCredential => self.credential,
+            ResourceKind::CredentialRetry => self.credential_retry,
+            ResourceKind::PolicyCredential => self.credential,
             ResourceKind::PolicyCredentialModel => self.policy_credential,
             _ => self.quota,
         }
@@ -170,7 +194,7 @@ impl ResourceSet {
             generation: match kind {
                 ResourceKind::EndpointModel => self.endpoint,
                 ResourceKind::Credits => self.credits,
-                ResourceKind::CredentialRetry => self.credential,
+                ResourceKind::CredentialRetry => self.credential_retry,
                 ResourceKind::PolicyCredential => self.policy_credential,
                 ResourceKind::PolicyCredentialModel => self.policy_model.unwrap_or([0; 32]),
                 ResourceKind::FreeEgress => [0; 32],
@@ -205,9 +229,22 @@ impl ResourceSet {
             && self.credential_id == other.credential_id
             && self.free_contract == other.free_contract
     }
+    /// Catalog-only digest change. Credential id, owner, and the CredentialRetry
+    /// digest stay. The whole credential and policy digests move.
+    #[cfg(test)]
+    pub(super) fn with_catalog_generation(mut self, generation: u8) -> Self {
+        self.credential = [generation; 32];
+        self.policy_credential = self.credential;
+        self.policy_model = self
+            .policy_model
+            .map(|_| digest(&[&[generation], &self.endpoint[..8], &[1]]));
+        self
+    }
+
     #[cfg(test)]
     pub(super) fn with_credential(mut self, generation: u8, owner: &str) -> Self {
         self.credential = [generation; 32];
+        self.credential_retry = [generation; 32];
         self.policy_credential = [generation; 32];
         self.policy_model = self
             .policy_model
@@ -238,6 +275,7 @@ impl ResourceSet {
         Self {
             quota: credential,
             credential,
+            credential_retry: credential,
             policy_credential: credential,
             policy_model: Some(digest(&[&credential, &[1], &[1]])),
             owner: owner.clone(),
@@ -262,6 +300,7 @@ impl ResourceSet {
         Self {
             quota: [credential; 32],
             credential: credential_id,
+            credential_retry: credential_id,
             policy_credential: credential_id,
             policy_model: Some(digest(&[&[credential], &[endpoint], &[model]])),
             owner: members.first().copied().unwrap_or("fixture").into(),

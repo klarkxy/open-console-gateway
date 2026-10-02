@@ -247,16 +247,18 @@ fn routing_snapshot_loader_runs_once_as_credential_count_grows() {
         .unwrap();
 
     let loads = Cell::new(0);
-    let (snapshot, custom_runtimes, dynamic_providers, routing) = {
+    let (snapshot, custom_runtimes, dynamic_providers, routing, goat_plans) = {
         let db = state.db.lock();
         loads.set(loads.get() + 1);
         let routing =
             CurrentHttpRoutingFacts::from_snapshot(&RoutingSnapshot::load(&db).unwrap()).unwrap();
+        let goat_plans = crate::goat_plan_cooldowns::load_all_on(&db.conn).unwrap();
         (
             db.list_identity_model().unwrap(),
             db.list_custom_account_runtimes().unwrap(),
             db.list_control_plane_dynamic_providers().unwrap(),
             routing,
+            goat_plans,
         )
     };
     assert_eq!(loads.get(), 1);
@@ -272,6 +274,7 @@ fn routing_snapshot_loader_runs_once_as_credential_count_grows() {
         &dynamic_providers,
         &custom_runtimes,
         &routing,
+        &goat_plans,
         Utc::now(),
     )
     .unwrap();

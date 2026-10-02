@@ -246,3 +246,85 @@ fn temporary_backoff_uses_valid_retry_after_or_thirty_seconds() {
         RetryHint::Unbounded
     );
 }
+
+fn plan_sentence(window: &str, reset: &str) -> String {
+    format!(
+        r#"{{"error":{{"code":"RATE_LIMITED","type":"rate_limit_error","message":"You've reached your {window} usage limit for your plan. Your limit resets at {reset}. Please wait for the window to reset or upgrade your plan to continue.","extra":"ignored"}}}}"#
+    )
+}
+
+#[test]
+fn exact_goat_plan_windows_persist_on_the_receiving_credential_without_a_probe() {
+    let weekly = plan_sentence("weekly", "2026-10-02T12:25:45.241Z");
+    let facts = rate(ErrorProfile::CommandCodeGoat, &weekly, None);
+    let decision = facts.decide();
+    assert_eq!(facts.cause, Cause::QuotaExhausted);
+    assert_eq!(facts.scope, Scope::Credential);
+    assert_eq!(facts.window, Some(UsageWindowKind::Week));
+    assert_eq!(
+        facts.upstream_reset_at,
+        Some(
+            DateTime::parse_from_rfc3339("2026-10-02T12:25:45.241Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        )
+    );
+    assert_eq!(facts.rule_id, "goat.plan_window");
+    assert_eq!(facts.rule_version, 1);
+    assert_eq!(
+        decision.persist_reset,
+        facts.window.zip(facts.upstream_reset_at)
+    );
+    assert!(!decision.wait_for_recovery);
+    assert!(facts.retry_not_before.is_none());
+    for (token, window) in [
+        ("5-hour", UsageWindowKind::FiveHours),
+        ("monthly", UsageWindowKind::Month),
+    ] {
+        let facts = rate(
+            ErrorProfile::CommandCodeGoat,
+            &plan_sentence(token, "2026-10-08T00:00:00Z"),
+            None,
+        );
+        assert_eq!(facts.window, Some(window));
+        assert_eq!(facts.scope, Scope::Credential);
+        assert!(!facts.decide().wait_for_recovery);
+    }
+}
+
+#[test]
+fn recognized_plan_reset_does_not_invent_thirty_seconds_and_keeps_a_longer_header() {
+    use super::decode::plan_window_admission;
+    let reset = DateTime::parse_from_rfc3339("2026-09-19T00:00:10Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let facts = rate(
+        ErrorProfile::CommandCodeGoat,
+        &plan_sentence("weekly", "2026-09-19T00:00:10Z"),
+        Some("120"),
+    );
+    assert_eq!(facts.decide().persist_reset.map(|(_, at)| at), Some(reset));
+    assert_eq!(
+        plan_window_admission(reset, Some("120"), now()),
+        Some(RetryHint::Until(now() + Duration::seconds(120)))
+    );
+    assert_eq!(
+        plan_window_admission(reset, Some("5"), now()),
+        Some(RetryHint::Until(reset))
+    );
+    assert_eq!(
+        plan_window_admission(reset, None, now()),
+        Some(RetryHint::Until(reset))
+    );
+    assert_eq!(
+        plan_window_admission(reset, Some("99999999999999999999999999"), now()),
+        Some(RetryHint::Unbounded)
+    );
+    let other = rate(
+        ErrorProfile::OpenCodeGo,
+        &plan_sentence("weekly", "2026-09-19T00:00:10Z"),
+        None,
+    );
+    assert_eq!(other.scope, Scope::Unspecified);
+    assert!(other.decide().persist_reset.is_none());
+}

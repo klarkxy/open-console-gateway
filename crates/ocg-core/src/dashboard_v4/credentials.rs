@@ -10,7 +10,7 @@ use crate::dashboard_v3::dynamic_providers::first_account_key;
 use crate::dashboard_v3::{
     ControlRevision, MutationExpectation, V3ApiError, check_expectation, parse_mutation_json,
 };
-use crate::provider::{CPA_ACCOUNT_ID, builtin_provider, validate_plan_key};
+use crate::provider::{CPA_ACCOUNT_ID, builtin_provider, is_command_code_goat, validate_plan_key};
 use crate::state::CoreState;
 
 use super::destinations::{DestinationsError, overlay_one_credential_dto, projection_refused};
@@ -96,7 +96,11 @@ fn rotate_locked(
                 validate_plan_key(plan, secret)
                     .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
             }
-            state.encrypt_key(secret).map_err(V3ApiError::internal)?
+            if is_command_code_goat(&account.provider_id) {
+                goat_key_cipher_for_save(state, &account.key_cipher, secret)?
+            } else {
+                state.encrypt_key(secret).map_err(V3ApiError::internal)?
+            }
         }
     };
 
@@ -136,7 +140,7 @@ fn quota_retry_locked(
     let _settings_update = state.settings_update.lock();
     check_expectation(state, &expectation)?;
     let now = state.sample_gateway_clock().0;
-    let (projection, recovery, probing, revision) = {
+    let (projection, recovery, probing, revision, goat_plan) = {
         let db = state.db.lock();
         let projection = read_v4_projection(&db)
             .map_err(V3ApiError::internal)?
@@ -159,6 +163,8 @@ fn quota_retry_locked(
         };
         let probing = state.is_quota_probing(&id, version, &key_cipher, recovery.epoch);
         let due = recovery.due_at(now);
+        let goat_plan = crate::goat_plan_cooldowns::load_for_legacy_on(&db.conn, &account_id)
+            .map_err(V3ApiError::internal)?;
         let episode = QuotaEpisode {
             credential_id: id,
             account_id,
@@ -166,7 +172,7 @@ fn quota_retry_locked(
             epoch: recovery.epoch,
             key_cipher,
         };
-        if probing || due {
+        let (projection, recovery, probing, revision) = if probing || due {
             (
                 projection,
                 recovery,
@@ -192,7 +198,8 @@ fn quota_retry_locked(
                 probing,
                 ControlRevision::from_state(state),
             )
-        }
+        };
+        (projection, recovery, probing, revision, goat_plan)
     };
     let credential = projection
         .credentials
@@ -201,8 +208,38 @@ fn quota_retry_locked(
         .expect("credential existed under settings lock");
     Ok(QuotaRetryResult {
         revision,
-        credential: overlay_one_credential_dto(state, credential, Some(&recovery), probing),
+        credential: overlay_one_credential_dto(
+            now,
+            credential,
+            Some(&recovery),
+            probing,
+            goat_plan.as_ref(),
+        ),
     })
+}
+
+/// Reuse the stored GOAT ciphertext when the trimmed Key matches.
+///
+/// Encryption draws a fresh nonce, so rotating the same Key would otherwise
+/// look like a replacement and drop the plan-window map. A different Key,
+/// or a ciphertext that cannot be read, uses the normal encrypt path.
+/// The plaintext is compared here and is not logged. Rotate still bumps
+/// credential versions after this returns.
+fn goat_key_cipher_for_save(
+    state: &CoreState,
+    current_cipher: &str,
+    incoming: &str,
+) -> Result<String, V3ApiError> {
+    let normalized = incoming.trim();
+    if !current_cipher.is_empty()
+        && state
+            .decrypt_key(current_cipher)
+            .ok()
+            .is_some_and(|stored| stored == normalized)
+    {
+        return Ok(current_cipher.to_string());
+    }
+    state.encrypt_key(normalized).map_err(V3ApiError::internal)
 }
 
 #[cfg(test)]

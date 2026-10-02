@@ -21,6 +21,8 @@ pub(crate) enum Scope {
     #[allow(dead_code)] // Recovery compatibility fixtures; inference creates no pool quota facts.
     QuotaPool,
     SharedFreeEgress,
+    /// One GOAT credential's declared plan window. Not a shared quota pool.
+    Credential,
     Unspecified,
 }
 
@@ -56,11 +58,14 @@ pub(crate) struct FailureDecision {
 impl FailureFacts {
     pub(crate) fn decide(&self) -> FailureDecision {
         let known_scope = matches!(self.scope, Scope::QuotaPool | Scope::SharedFreeEgress);
-        let persist_reset = if known_scope && self.cause == Cause::QuotaExhausted {
-            self.window.zip(self.upstream_reset_at)
-        } else {
-            None
-        };
+        let credential_plan =
+            self.scope == Scope::Credential && self.cause == Cause::QuotaExhausted;
+        let persist_reset =
+            if (known_scope || credential_plan) && self.cause == Cause::QuotaExhausted {
+                self.window.zip(self.upstream_reset_at)
+            } else {
+                None
+            };
         FailureDecision {
             persist_reset,
             wait_for_recovery: known_scope

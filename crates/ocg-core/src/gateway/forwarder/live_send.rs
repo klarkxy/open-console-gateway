@@ -951,6 +951,7 @@ pub(crate) fn selection_allows_observation(
             month_until: None,
             free_until: None,
         };
+        credential.goat_plan = crate::goat_plan_cooldowns::GoatPlanCooldowns::default();
     }
     Ok(verify_execution_authorization(&snapshot, selected, spec, chrono::Utc::now(), true).is_ok())
 }

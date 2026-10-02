@@ -169,6 +169,7 @@ fn import_record(
             verification_status: ConnectionVerificationStatus::NotRequired,
             connection_verified_at: None,
             ollama_billing_tier: None,
+            goat_plan: None,
         }],
         account_order,
         config_json: serde_json::to_string(&config).unwrap(),

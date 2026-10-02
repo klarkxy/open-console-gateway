@@ -2158,6 +2158,7 @@ pub(crate) fn rotate_account_credential_in(
     };
     let source = account_store::account_row_source(conn)?;
     crate::db::quota_recovery::clear_for_account_on(conn, account_id)?;
+    crate::goat_plan_cooldowns::clear_if_cipher_changes_on(conn, account_id, key_cipher)?;
     let account_updated = conn.execute(
         &format!(
             "UPDATE {} SET

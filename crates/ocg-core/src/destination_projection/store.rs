@@ -30,6 +30,7 @@ pub(super) fn replace_all_on(
 ) -> anyhow::Result<()> {
     let extras = crate::db::account_store::snapshot_credential_extras(conn)?;
     let quota_recoveries = crate::db::quota_recovery::snapshot_on(conn)?;
+    let goat_plans = crate::goat_plan_cooldowns::snapshot_on(conn)?;
     let credit_meters = crate::db::credit_lifecycle::snapshot_on(conn)?;
     let dest_extras = crate::db::platform::snapshot_destination_platform_extras(conn)?;
     let cpa_extras = crate::db::cpa::snapshot_destination_extras(conn)?;
@@ -51,6 +52,7 @@ pub(super) fn replace_all_on(
     crate::db::platform::restore_observer_credentials(conn, &observers)?;
     crate::db::identity::backfill_authorization_connections_on(conn)?;
     crate::db::quota_recovery::restore_on(conn, &quota_recoveries)?;
+    crate::goat_plan_cooldowns::restore_on(conn, &goat_plans)?;
     crate::db::credit_lifecycle::restore_on(conn, &credit_meters)?;
     Ok(())
 }

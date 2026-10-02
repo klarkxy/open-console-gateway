@@ -96,6 +96,8 @@ pub(super) fn export_new_model(
     let identity_model = db
         .list_identity_model()
         .map_err(|_| TransferError::Internal)?;
+    let goat_plans =
+        crate::goat_plan_cooldowns::load_all_on(&db.conn).map_err(|_| TransferError::Internal)?;
     let ollama_tiers = stored
         .credentials
         .iter()
@@ -307,6 +309,14 @@ pub(super) fn export_new_model(
             Utc::now(),
         )
         .map_err(|_| TransferError::Internal)?;
+        if purpose == PURPOSE_INFERENCE
+            && portable
+                .provider_id
+                .as_deref()
+                .is_some_and(ocg_domain::provider::is_command_code_goat)
+        {
+            portable.goat_plan_cooldowns = goat_plans.get(&credential.id).cloned();
+        }
         credentials.push(portable);
     }
     let mut exported_ids: HashSet<String> = credentials
@@ -916,6 +926,7 @@ pub(super) fn map_old_graph_to_unified(
         {
             portable.link_group = Some(link.group.clone());
         }
+        portable.goat_plan_cooldowns = account.goat_plan.clone();
         credentials.push(portable);
     }
     let (custom_destinations, custom_credential_destinations) =
@@ -1678,6 +1689,13 @@ fn validated_accounts_from_credentials(
         .collect();
     let mut validated = Vec::new();
     for (index, credential) in credentials.iter().enumerate() {
+        if credential.goat_plan_cooldowns.is_some()
+            && is_observer_purpose(credential_purpose(credential))
+        {
+            return Err(TransferError::Invalid(
+                "GOAT plan windows belong only to a GOAT inference Key".to_string(),
+            ));
+        }
         if is_observer_purpose(credential_purpose(credential)) {
             continue;
         }
@@ -1718,6 +1736,14 @@ fn validated_accounts_from_credentials(
         {
             return Err(TransferError::Invalid(format!(
                 "credential `{}` uses a Plan that cannot be imported",
+                credential.id
+            )));
+        }
+        if credential.goat_plan_cooldowns.is_some()
+            && !ocg_domain::provider::is_command_code_goat(&provider_id)
+        {
+            return Err(TransferError::Invalid(format!(
+                "credential `{}` cannot carry GOAT plan windows",
                 credential.id
             )));
         }
@@ -1916,6 +1942,10 @@ fn validated_accounts_from_credentials(
                     credential.cooldowns.free_until.as_deref(),
                 ),
             },
+            goat_plan: credential
+                .goat_plan_cooldowns
+                .clone()
+                .filter(|map| !map.is_empty()),
         });
     }
     Ok(validated)
@@ -2051,6 +2081,7 @@ fn portable_observer_credential(
         ollama_billing_tier: None,
         link_group: None,
         credit_meter: None,
+        goat_plan_cooldowns: None,
     }
 }
 
