@@ -1,0 +1,25 @@
+name: Quota repair workspace
+
+on:
+  push:
+    branches: [fix/account-quota-refresh-latency]
+    paths: [.github/workflows/quota-repair.yml, scripts/quota-repair.py]
+
+permissions:
+  contents: read
+
+jobs:
+  workspace:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Archive exact repair source
+        run: git archive --format=tar.gz --output="$RUNNER_TEMP/quota-source.tar.gz" HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quota-source-${{ github.sha }}
+          path: ${{ runner.temp }}/quota-source.tar.gz
+          retention-days: 1
