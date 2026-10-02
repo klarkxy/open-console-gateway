@@ -4,7 +4,7 @@ from pathlib import Path
 def replace(path, old, new):
     p = Path(path)
     text = p.read_text()
-    if new in text:
+    if (new and new in text) or (not new and old not in text):
         return
     assert text.count(old) == 1, (path, old[:100])
     p.write_text(text.replace(old, new))
@@ -30,6 +30,22 @@ replace('src/domain/useAccountUsage.ts', '    await billing.loadMany(targets);',
 replace('crates/ocg-core/src/dashboard_v4/types.rs', '    include_type::<crate::billing_types::BillingSnapshotRequest>(&mut serialize);\n', '')
 replace('crates/ocg-core/src/dashboard_v4/types.rs', '    let mut deserialize = SchemaSettings::draft2020_12().into_generator();', '''    let mut deserialize = SchemaSettings::draft2020_12().into_generator();
     include_type::<crate::billing_types::BillingSnapshotRequest>(&mut deserialize);''')
+
+# Future credit buckets are intentionally absent from the public projection.
+# Include their activation deadline from persisted state without changing DTOs.
+replace('crates/ocg-core/src/dashboard_v4/billing.rs', '        let after = ReadVersion::capture(state, db).map_err(V3ApiError::internal)?;', '''        let next_credit_start = if status.credits.is_some() {
+            storage::load_on(&db.conn, id).map_err(V3ApiError::internal)?
+                .and_then(|meter| meter.buckets.iter().map(|bucket| bucket.starts_at)
+                    .filter(|at| *at > now).min())
+        } else { None };
+        let after = ReadVersion::capture(state, db).map_err(V3ApiError::internal)?;''')
+replace('crates/ocg-core/src/dashboard_v4/billing.rs', '        state.billing_cache.lock().insert(&after, status.clone(), now);', '''        let mut cache = state.billing_cache.lock();
+        cache.insert(&after, status.clone(), now);
+        if let Some(at) = next_credit_start { cache.shorten_lifetime(id, at); }''')
+replace('crates/ocg-core/src/dashboard_v4/billing_cache.rs', '    pub(super) fn insert(&mut self,', '''    pub(super) fn shorten_lifetime(&mut self, id: &str, at: DateTime<Utc>) {
+        if let Some(entry) = self.entries.get_mut(id) { entry.valid_until = entry.valid_until.min(at); }
+    }
+    pub(super) fn insert(&mut self,''')
 
 append('crates/ocg-core/tests/dashboard_v4_official_api.rs', 'concurrent_balance_refreshes_share_one_request_and_cached_reads_stay_local', r'''
 
@@ -98,6 +114,26 @@ fn quota_reset_deadline_expires_before_the_normal_cache_age() {
     cache.insert(&version(), value, now);
     assert!(cache.get("timed", &version(), now).is_some());
     assert!(cache.get("timed", &version(), reset).is_none());
+}
+''')
+append('crates/ocg-core/src/dashboard_v4/billing/tests.rs', 'cache_expires_when_a_not_yet_visible_credit_bucket_becomes_active', r'''
+
+#[tokio::test]
+async fn cache_expires_when_a_not_yet_visible_credit_bucket_becomes_active() {
+    let (dir, state) = state();
+    account(&state, "future-credits");
+    let start = Utc::now() + chrono::Duration::seconds(10);
+    let mut future = bucket(25.0);
+    future["startsAt"] = serde_json::json!(start);
+    configure(State(state.clone()), Path("future-credits".into()), body(&state, serde_json::json!({
+        "configuration": configuration(), "initialBuckets": [future]
+    }))).await.unwrap();
+    let snapshot = status(&state, "future-credits").unwrap();
+    assert!(snapshot.credits.unwrap().buckets.is_empty());
+    let version = super::super::billing_cache::ReadVersion::capture(&state, &state.db.lock()).unwrap();
+    assert!(state.billing_cache.lock().get("future-credits", &version, start).is_none());
+    drop(state);
+    let _ = std::fs::remove_dir_all(dir);
 }
 ''')
 append('src/stores/billing.test.ts', 'batch loading bounds requests and never overwrites a newer binding', r'''
