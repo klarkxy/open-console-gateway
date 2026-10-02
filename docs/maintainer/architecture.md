@@ -12,11 +12,13 @@ their own chapters.
 ocg-gateway -> ocg-domain
 ocg-core    -> ocg-domain + ocg-gateway + ocg-infra
 ocg-cli     -> ocg-core
-src-tauri   -> ocg-core
 
 ocg-browser-worker   separate process; no internal ocg-* dependency
-Vue SPA              static assets; HTTP Dashboard V4 only
 ```
+
+This branch contains the Rust workspace and headless CLI only. The Vue
+workspace and Tauri desktop crate are not present; a future client remains an
+HTTP consumer of Dashboard V4 and does not add a WebView mutation path.
 
 The **Adapter Registry** is static and sealed. Runtime Provider definitions
 are typed data bound to Configurable HTTP.
@@ -27,7 +29,7 @@ are typed data bound to Configurable HTTP.
 | `ocg-gateway` | Alias resolution, `AttemptSpec`, classification, selector state machines, no-I/O JSON conversion | DB, `CoreState`, plaintext credentials, outbound HTTP |
 | `ocg-infra` | Key obfuscation, proxy-aware HTTP helpers, inference transport, SQLite log statements | Product catalogs, Dashboard DTOs, routing policy |
 | `ocg-core` | SQLite, `CoreState`, Dashboard control plane, adapters, gateway execution, usage sync, Host composition | Runtime plugin loading; adapter-owned DB or HTTP clients |
-| `ocg-cli` / `src-tauri` | Process composition for CLI and Desktop | A second control plane or direct WebView mutation path |
+| `ocg-cli` | Persistent `serve`, non-mutating `api`, offline `schema` | A second control plane, a private mutation path, or Dashboard route definitions |
 
 `ocg-domain::credential` holds the identity/credential/binding vocabulary and the single legacy mapper.
 
@@ -47,11 +49,29 @@ alias, and conversion behavior belongs in the lower crates.
   /dashboard/api/v3       410 tombstone
   /dashboard/api/v4       live Dashboard control plane
   /dashboard/api          preserved auth + browser WS; other REST -> 410 tombstone
-  /dashboard/             Vue SPA and assets
+  /dashboard/             static assets when a host supplies them
 ```
 
-The SPA remains an HTTP client. Desktop capabilities are registered into
-`CoreState`.
+`ocg-manager-cli serve` is the persistent native host. It installs
+`console_router` on that listener: inference, the live V4
+control plane, preserved auth, the preserved browser socket, the V3 tombstone,
+and static `dist/` when that directory is present. `api` is the non-mutating
+HTTP client of the listener. It does not open SQLite, including when
+`--data-dir` is set. `schema v3|v4` prints offline JSON help and does not
+contact `serve`.
+
+Shared core services stay behind the HTTP handlers. `serve` registers the native
+browser launcher and stopper and owned CPA restore and shutdown. The default
+`dsh-local-host` feature also registers BYOK and DSH hosts. A build
+with `--no-default-features` still mounts BYOK and DSH routes and answers
+with their unsupported-runtime states. Tray, Dock, and signed desktop update stay
+unregistered.
+
+`api` sends an ordinary HTTP request and reads the response. It does not
+upgrade the browser socket, so there is no `api GET .../ws` command. The
+preserved path `/dashboard/api/browser/sessions/{token}/ws` is outside the
+client allowlist. The server still mounts the socket. A remote viewer is later
+work, or an external WebSocket client pointed at the server.
 
 ## Gateway request path
 
@@ -96,16 +116,37 @@ exact raw pins.
 
 ## Control plane
 
-The Vue SPA calls remounted operational handlers through
-`src/api/dashboard-v3.ts` (HTTP base `/dashboard/api/v4`) and native V4 routes
-through `src/api/dashboard-v4.ts` (presenters in `src/api/connections.ts`).
-`/dashboard/api/v3` is a 410 tombstone. Live dashboard JSON is V4 only.
-CAS-protected mutations carry `expectedRevision` and `processGeneration`;
-pricing writes also carry `expectedPricingRevision`. Operational reads and
-diagnostics that do not mutate state skip CAS.
+Operators reach remounted operational handlers and native V4 routes at
+`/dashboard/api/v4` through `api`. The removed Vue client is not part of this
+branch. `/dashboard/api/v3` is a 410 tombstone. Live dashboard JSON is V4 only.
+CAS-protected mutations carry `expectedRevision` and `processGeneration`.
+`--cas-current` copies that pair from public `GET /dashboard/api/v4/auth/status`
+only when the body omits them, and it leaves a supplied value in place. It does
+not fill pricing fields. A multiplier write carries `expectedPricingRevision`
+from that provider's pricing snapshot: `pricingRevision` on `opencode`,
+`providerPricingRevision` on `command-code`. A provider pricing refresh carries
+`expectedProviderPricingRevision` from the provider pricing read. Operational
+reads and diagnostics that do not mutate state skip CAS. `api` does not replay
+a mutation after 409, 429, a timeout, or a port rebind.
 
-The CLI calls the same HTTP-neutral services without an argv CAS token. Shared
-services own persistence and revision bumps for both the CLI and the frontend.
+Shared services own persistence and revision bumps for the HTTP handlers. The
+CLI does not keep a second copy of that business logic.
+
+The listener requires a router factory installed by its host. `serve` installs
+`console_router`. Tests may install the same library factory through
+`start_gateway_on`. The listener does not choose a composition itself. `api`
+and `schema` do not install a factory.
+
+`account_control` owns credential rotation, HTTP destination replacement and
+deletion, routing-card layout, built-in catalog addition and editing,
+public-model publication, and model-metadata declaration. Configurable HTTP
+catalog refresh keeps its prepare, lock-free discovery, and commit stages in
+its adapter. These operations remain owned by their existing complete modules:
+onboarding, billing, identity credential creation, quota retry, bindings,
+temporary policy, CPA selection, platform import, application installation,
+settings rebind, official catalog/price/usage refresh, account transfer, and
+legacy provider/account compatibility writes. The CLI reaches those modules by
+HTTP. `api` does not open the database and does not call the legacy `key` verbs.
 
 The settings-specific persist/rebind/compensation sequence is shown in
 [Dashboard API](dashboard-api.md#settings-mutation-workflow). Account setup

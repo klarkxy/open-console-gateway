@@ -4,124 +4,81 @@
 
 ## 前置要求
 
-Node.js 22、`package.json` 的 `packageManager` 钉，以及 workspace 的
-`rust-version`（锁定依赖要求 Rust 1.88 或更新版本）。原生依赖以 `.github/workflows/release.yml` 在对应 runner
-上安装的为准。
+workspace 的 `rust-version` 为 Rust 1.88 或更新版本，这是锁定依赖的要求。当前分支没有根 `package.json`、Vue workspace 或 Tauri crate。Node 24 只用于可选的 `scripts/cli-acceptance.mjs` 检查。原 pnpm 脚本在恢复前端工程后返回。
 
 ## 开发模式
 
-退出已安装的托盘程序，避免占用单实例锁和 `9042` 端口，然后：
+用 Cargo 做无头 CLI 的类型检查、测试和构建。去掉默认 feature 的构建不启用 `dsh-local-host`，本机 DSH 与 BYOK 配置功能不可用；推理、控制面、浏览器和 CPA 仍保留。用默认二进制配合隔离数据目录运行。不要把已安装的数据目录用于开发：
 
 ```bash
-pnpm install
-pnpm run dev
+cargo check -p ocg-manager-cli --locked
+cargo test -p ocg-manager-cli --locked
+cargo build -p ocg-manager-cli --locked
+cargo build -p ocg-manager-cli --locked --no-default-features
+cargo run -p ocg-manager-cli -- --data-dir tmp/dev-data serve --port 19042
 ```
 
-`pnpm run dev` 以独立的开发默认端口 `OCG_GATEWAY_PORT=19042` 运行 `tauri dev`。
-部分 Windows 主机的 HNS/WSL/Docker 保留端口范围包含 `9042`，开发默认端口可避开该冲突。安装版仍默认 `9042`。Vite
-提供 `http://127.0.0.1:30001/dashboard/`，并把 `/dashboard/api`（含
-WebSocket）代理到该 Gateway 端口。启动前设置 `OCG_GATEWAY_PORT` 可同时覆盖
-Tauri 与 Vite；变量生效时，设置页以只读方式显示实际端口。
+部分 Windows 主机的 HNS/WSL/Docker 保留端口范围包含 `9042`，`19042` 可避开该冲突。当前没有 Rust 源码监视：修改网关 crate 后停止进程并重新运行命令。全新宿主初始化状态时会创建主 Gateway Key。用 `api --output` 把 `GET /dashboard/api/v4/connection` 的响应写到私有文件。[CLI 指南](../user/cli.zh-CN.md) 的请求体使用合成占位符。不要把 Key 放在命令行上。
 
-### 选择开发模式
+启用 Git hooks 后，`.githooks` 会在暂存 `*.rs` 时运行 `cargo fmt --all`。
 
-- `pnpm run dev`（默认）：Tauri 监视 Rust workspace，源码变更时重新编译并重启整个桌面应用，进程内网关和所有在途请求都会中断。额外参数会透传给 Tauri CLI：`pnpm run dev -- --no-watch` 关闭 Rust 监视器，已启动的开发构建会持续服务，直到你手动重启；Dashboard 的 Vite HMR 仍然生效，而已保存的 Rust 改动在下一次手动重启时才生效。
-- `pnpm run dev:split`：无头 `ocg-manager-cli` 网关 + Vite，不启动 Tauri 进程。适合 Dashboard、HTTP API、路由与协议开发。网关监听 `OCG_GATEWAY_PORT`（默认 `19042`），使用隔离数据目录（`tmp/dev-data`，可用 `OCG_DEV_DATA_DIR` 覆盖），因此可以和已安装的应用并行运行。没有任何 Rust 源码监视：修改网关相关 crate 后，停止脚本并重新运行以重新编译 `ocg-manager-cli`。`http://127.0.0.1:30001/dashboard/` 的 Dashboard 代理到拆分网关，Vue 改动仍然热更新。首次使用全新数据目录时，在私有终端用 `target/debug/ocg-manager-cli --data-dir tmp/dev-data status --show-key` 获取开发 Gateway Key。
-- 桌面宿主开发（托盘、自启动、原生浏览器、更新器）仍需 `pnpm run dev`：CLI 不注册这些宿主能力。
-
-拆分网关与 agent 正在使用的任何网关都是独立进程。重启它仍会中断自身的在途流；如果 agent 不能被打断，让它们继续连已安装的应用或另一个常驻实例。
-
-`pnpm install` 会启用 `.githooks`（暂存 `*.rs` 时运行 `cargo fmt --all`）。
-
-升级到支持启动恢复的版本后，手动**启动**一次托管 CPA。启动成功后，运行意图会跨 Tauri 后端重编译保存；新的后端在后台使用原配置和 auth 目录恢复 CPA。**停止**会清除该意图。宿主退出仍清理自己的子进程，恢复失败只报告一次，不循环重启。不要为了绕过开发重启而让另一个 CPA 实例同时使用同一个 auth 目录。
+`serve` 在启动时恢复自有的 CPA 运行时，退出时关闭该进程。`POST /dashboard/api/v4/external-integrations/cpa/runtime/stop` 清除已保存的运行意图。恢复失败只报告一次，不循环重试。不要让另一个 CPA 实例同时使用同一个 auth 目录。
 
 ## 检查
 
-以 `package.json` 中的脚本名为准。选能覆盖本次改动边界的最小检查：
+选择能覆盖本次改动边界的最小 Cargo 检查：
 
 | 改动 | 检查 |
 | --- | --- |
-| 单个前端或脚本测试 | `node --experimental-strip-types --test <file>` |
-| Vue / dashboard | 相邻测试，再 `pnpm run build:web` |
-| 单个 Rust crate | `cargo test -p <package>` |
-| Core / Dashboard V3 | `cargo test -p ocg-core --features ollama-cloud-loopback-test <filter>` |
-| Desktop Host | `cargo test -p ocg-manager --lib` |
-| V3 或 V4 Schema 或生成类型 | `pnpm run contract:v3:check` / `pnpm run contract:v4:check` |
-| `DESIGN.md` / 主题 | `pnpm run design:lint` |
+| 单个 Rust crate | `cargo test -p <package> --locked` |
+| Core 行为 | `cargo test -p ocg-core --locked --features ollama-cloud-loopback-test <filter>` |
+| CLI | `cargo test -p ocg-manager-cli --locked` |
+| CLI 类型检查 | `cargo check -p ocg-manager-cli --locked` |
+| CLI 构建 | `cargo build -p ocg-manager-cli --locked` |
+| 关闭默认 feature 的 CLI | `cargo build -p ocg-manager-cli --locked --no-default-features` |
+| V3 DTO Schema | `cargo test -p ocg-core --locked dashboard_v3::types` |
+| V4 DTO Schema | `cargo test -p ocg-core --locked dashboard_v4::types` |
 
-`pnpm run test` 是跨前端/Rust 门禁。`pnpm run test:rust`（以及 quality.yml 的
-Linux Rust job）会加上 `--features ocg-core/ollama-cloud-loopback-test`，以便
+Quality 工作流会加上 `--features ocg-core/ollama-cloud-loopback-test`，以便
 Ollama Cloud 网关集成测试安装仅 loopback 的测试接缝。该 feature 默认关闭：应用构建
 保持固定的 `https://ollama.com` 源，且不编译该接缝。未开启 feature 的 workspace
-`cargo test` 仍会编译 `ollama_cloud_gateway`，但其中用例不会运行。`pnpm run test:tooling` 覆盖
-`scripts/*.test.mjs`，已包含在 `pnpm run test` 和 Quality 工作流中；完整测试通过后不用再跑一遍。
-`pnpm run build` 构建原生发布包（`scripts/release.mjs`）。workspace
+`cargo test` 仍会编译 `ollama_cloud_gateway`，但其中用例不会运行。workspace
 `[profile.release]` 使用 thin LTO、`strip` 和 `panic = "abort"`。
 
-本地使用与 CI 一致的 Node.js 22。共用 `target/` 的 Cargo 测试、Clippy、契约生成和
-原生构建应顺序执行，保持构建配置一致以复用编译结果。修复后重跑受影响检查，最终
-main Quality 承担完整发布门禁。各项检查在本地与 CI 之间的分工见[发布流程](releasing.zh-CN.md)。
+当前分支的契约门禁是 Rust schema 测试。原来的 `pnpm run contract:v3:check`、
+`contract:v4:check`、`build:web` 和 `test:tooling` 属于已移除的前端工程。
+未来恢复前端时再接回 Node 生成器和生成的 TypeScript 检查。发布工作流仍保留历史桌面打包步骤，
+它不是当前 Quality 门禁。当前 job 见 [CI](ci.zh-CN.md)。
+[发布流程](releasing.zh-CN.md) 仍描述已移除的桌面包。
 
-## DSH 插件契约测试与真实冒烟
-
-`pnpm run test:dsh:plugin` 就是 `pnpm run test:tooling` 已经运行的那份隔离插件契约测试（`scripts/dsh-plugin-package.test.mjs`）。
-它不会启动 DSH、Gateway，也不会走任何依赖真实凭据的路径。
-
-下面两条是**手工验收冒烟**，需要本机真实的 DSH CLI（报告实际安装的版本，不固定版本号），和/或本地编译的
-`target/debug/ocg-manager-cli`。它们不属于 `pnpm run test`、`pnpm run test:web`、
-`pnpm run test:tooling` 或 CI。
-
-```bash
-pnpm run smoke:dsh:plugin
-pnpm run smoke:dsh:cli
-```
-
-`smoke:dsh:plugin` 使用已安装的 DSH CLI（Windows：`%APPDATA%/npm/node_modules/@deepseek-ai/dsh/lib/bin.js`），
-配合隔离的 `DSH_HOME` 和本机 loopback 的 models/chat 桩。`smoke:dsh:cli` 对带
-`dsh-local-host` 的原生 `ocg-manager-cli serve` 调用 `GET|POST|DELETE /dashboard/api/v4/applications/dsh`。
-若 CLI 构建时未启用该能力，加 `--expect-unsupported`；若要覆盖相对路径的 `--data-dir` /
-`DSH_HOME`，加 `--relative-roots`。默认冒烟检查 Profile 发现、验证已停止的 Web Profile 需要运行会话，并通过 OCG 验证 Web HTTP 安装生命周期；
-运行 `node scripts/dsh-headless-cli-smoke.mjs --scan-user-homes` 可验证隔离的
-`.dsh` 与 `.dsh-editor` 两个 Home 之间的目标选择。
-
-`node scripts/dsh-web-runtime-smoke.mjs --ocg` 通过 OCG V4 API，在隔离的已安装 DSH Web 运行时中验证安装、替换和卸载。加 `--desktop` 可验证已安装的官方 Desktop Host。这些冒烟使用临时 Profile，不调用真实模型供应商。
+共用 `target/` 的 Cargo 测试、Clippy 和原生构建应顺序执行，并保持构建配置一致以复用编译结果。修复后重跑受影响检查。
 
 Rust 单元测试放在同名子模块：`src/db.rs` 声明 `mod tests;`，测试正文在
 `src/db/tests.rs`。不要写断言源码文本、工作流 YAML 或文档正文的测试。
 
-CLI 沙箱（只创建 OpenCode Go 卡；不能创建 Custom、子 Key 或设置）：
-
-调试构建的 `serve` 不会自动同步用户 skill。原生正式版 `serve` 和桌面启动会同步内置 skill；正式版冒烟应使用隔离的 `USERPROFILE`（Windows）或 `HOME`（macOS/Linux）。显式 `skill sync` 即使在调试构建中也会写入所选用户目录。下面的 Key 是合成测试值，不要把真实秘密放进 agent 执行的命令参数。
-
-```bash
-ocg-manager-cli --data-dir /tmp/ocg-cli-test key add smoke sk-smoke
-ocg-manager-cli --data-dir /tmp/ocg-cli-test serve --port 19042
-```
-
 直接 `Database::update_account` 不 bump revision；这是有意的，也不是 CLI
 路径。
 
-## 本地未签名冒烟（Windows）
+## 可选验收
 
-从托盘退出已安装的 release。对齐 `package.json`、
-`src-tauri/tauri.conf.json`、两份 `Cargo.toml` 和 `compose.example.yaml`
-中的版本，然后运行 `pnpm run build`。
+`node scripts/cli-acceptance.mjs` 是针对已构建二进制的独立开发者检查。它不是 `quality.yml` 的 job。脚本自己生成合成请求、隔离的 home 和 cipher。不要传入真实 Key、用户配置目录或已安装的数据目录。本页不记录该脚本的运行结果。
 
-没有 `TAURI_SIGNING_PRIVATE_KEY` 时只生成普通本地包，不能用于应用内升级。
-可选签名变量：`TAURI_SIGNING_PRIVATE_KEY`、
-`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`、`TAURI_UPDATER_PUBLIC_KEY`（必须匹配
-`src-tauri/updater-public-key.sha256`），以及
-`OCG_REQUIRE_UPDATER_ARTIFACTS=1`。
+```bash
+node scripts/cli-acceptance.mjs target/debug/ocg-manager-cli tmp/cli-acceptance
+```
 
-本地 Tauri 构建可能改写 `src-tauri/Cargo.toml` 与
-`src-tauri/gen/schemas/*.json`——只保留有意修改。
+Windows 上的二进制名是 `target/debug/ocg-manager-cli.exe`。省略两个参数时，使用该默认二进制，以及 `tmp/ocg3-cli-delivery/` 下带时间戳的目录。
 
 ## 请求调试与日志分级
 
-`pnpm run dev` 同时默认设置 `OCG_DEBUG_REQUESTS=1`、`OCG_LOG_LEVEL=debug`，
-以及 `OCG_DEBUG_DIR=<仓库>/.artifacts/debug-requests`。启动输出会显示实际路径和级别。
-显式环境变量可覆盖默认值；设置 `OCG_DEBUG_REQUESTS=0` 可关闭落盘。
-普通 CLI／已安装应用启动默认不保存完整请求，日志级别为 `info`。
+在 `cargo run` 上自行设置落盘变量。当前分支不会自动打开它们：
+
+```bash
+OCG_DEBUG_REQUESTS=1 OCG_LOG_LEVEL=debug OCG_DEBUG_DIR="$PWD/.artifacts/debug-requests" \
+  cargo run -p ocg-manager-cli -- --data-dir tmp/dev-data serve --port 19042
+```
+
+启动输出会显示实际路径和级别。`OCG_DEBUG_REQUESTS=0` 关闭落盘。普通 `serve` 不保存完整请求，日志级别为 `info`。
 
 通过鉴权且未超过大小限制的推理 POST，会在协议解析前保存一份 `client` JSON；
 每次上游尝试会在协议转换、请求规范化之后，最终鉴权检查之前保存一份 `upstream` JSON。

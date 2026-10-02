@@ -2,6 +2,11 @@
 
 # Open Console Gateway
 
+This OCG3 checkout provides the backend and headless CLI. Start with the
+[CLI guide](docs/user/cli.md) to build, configure, and operate it. The React
+console and desktop interface are a later phase. The download and desktop
+setup sections below describe published releases.
+
 **Bring your AI subscriptions and APIs together.**
 
 Manage your provider accounts in one place and connect them to the desktop apps
@@ -13,8 +18,6 @@ for accounts, usage, and requests.
 [User guide](docs/USER.md)
 
 Windows · macOS · Linux · Docker
-
-![Open Console Gateway dashboard — connection center, account status, and daily usage](assets/dashboard-home.png)
 
 <p align="center">
   <a href="https://github.com/klarkxy/open-console-gateway">

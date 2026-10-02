@@ -6,86 +6,46 @@
 
 ## quality.yml
 
-在 pull request 与 `main` 上直接运行，也可由生产 tag 通过 `workflow_call`
-调用。手动候选构建跳过。三条并行 job：
+在 pull request、推送到 `main`，以及 `workflow_call` 时运行。没有 Compose job。两条 job：
 
-- **Web** — `contract:v3:check`、`contract:v4:check`、`typecheck`、`test:web`、
-  `test:tooling`、Vite 生产构建、`DESIGN.md` lint，以及
-  `docker compose -f compose.example.yaml config --quiet`。
-- **Rust** — `cargo fmt --all -- --check`、锁定依赖的 workspace 测试与
-  Clippy `-D warnings`，并加上 `--features ocg-core/ollama-cloud-loopback-test`
-  与 `--exclude ocg-manager`（桌面 crate 需要 WebKit
-  头文件和占位 `dist/index.html`；由 Windows job 覆盖；Linux 上的
-  `src-tauri` 编译在 release 矩阵）。
-- **Windows Tauri** — 对 stub `dist/index.html` 跑
-  `cargo test -p ocg-manager --lib` 与 Clippy `-D warnings`，同时覆盖
-  Windows 登录自启注册表同步。
+- **rust**（`ubuntu-22.04`，30 分钟）— `cargo fmt --all -- --check`，然后
+  `cargo test --workspace --locked --no-fail-fast --features ocg-core/ollama-cloud-loopback-test`，
+  然后带同一 feature 与 `-D warnings` 的 `cargo clippy --workspace --all-targets --locked`。
+- **windows-cli**（`windows-latest`，30 分钟）— `cargo test -p ocg-manager-cli --locked`
+  与 `cargo clippy -p ocg-manager-cli --all-targets --locked -- -D warnings`。
+  这条 job 不传 Ollama loopback feature。
+
+workspace 测试里的 Rust DTO schema 测试是当前 V3/V4 契约门禁。
+`scripts/cli-acceptance.mjs` 不是这个文件里的 job。
 
 ## release.yml
 
-触发：`workflow_dispatch` 与 `v*` tag。
+该文件是历史桌面发布器。它仍在树里，但不能作为当前 CLI 的发布路径。本页不授权发布，也不修改该工作流。
 
-- 手动触发：按所选平台生成未签名冒烟产物；即使 ref 是 tag 也不注入生产签名。
-- `v*` tag **push**：完整三平台矩阵、仓库签名密钥、质量门加上 Ubuntu
-  预检（版本清单、发版辅助测试、签名对与
-  `src-tauri/updater-public-key.sha256`）。随后原生构建、CLI/GUI 冒烟、
-  `draft-release` → `verify-release` → `publish-release`。
+preflight 与 build 仍运行 `pnpm/action-setup`、`pnpm install --frozen-lockfile`、
+`pnpm run test:tooling`、`pnpm run release:check` 和 `pnpm run build`。Windows GUI
+冒烟从 `package.json` 读取版本。build job 仍传入 `TAURI_SIGNING_PRIVATE_KEY`、
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 和 `TAURI_UPDATER_PUBLIC_KEY`。当前分支没有根
+`package.json`，也没有 `src-tauri/` 目录，因此这些步骤不能发布 `ocg-manager-cli`。
 
-`verify-release` 要求 GitHub 附件名称与组装后的 `release/` 集合一致
-（当前 16 个文件）。draft job 传递数字 Release ID，因为 tag 查询端点
-看不到 draft。发布进入 `release-moving-channels` 串行队列。`latest`
-只对严格更高的稳定 SemVer 前进。预发布 tag 设 `prerelease=true` 且
-`make_latest=false`。
-
-Windows GUI 冒烟是 `scripts/smoke-windows-release.ps1`（自启用 V3 CAS，
-NSIS `/UPDATE` 原地升级、静默卸载保留数据、再装回记住的目录）。macOS 检查 universal `lipo` 与 ad-hoc
-`codesign`，并重跑 Linux quality.yml 已覆盖的 Unix CPA 进程归属测试
-（`cpa_runtime::host`）。Linux 在 Xvfb 下启动 AppImage。
-
-## 升级签名
-
-密钥只在仓库外生成一次：
-
-```powershell
-node node_modules/@tauri-apps/cli/tauri.js signer generate -w <secure-path>/ocg-updater.key
-```
-
-私钥与密码存为 repository secrets `TAURI_SIGNING_PRIVATE_KEY` 与
-`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。公钥**内容**存入 variable
-`TAURI_UPDATER_PUBLIC_KEY`。`src-tauri/updater-public-key.sha256` 是已提交
-信任锚点；轮换属于 break-glass（新密钥对、为既有客户端准备直接安装引导、
-审查指纹变更）。至少保留两份独立加密备份。升级签名不是操作系统代码签名。
-Windows 安装包未签名；macOS 使用 ad-hoc（`-`）。
+同一文件仍包含那套旧发布器的桌面包冒烟（安装包、DMG、AppImage）和 updater manifest 步骤。
+写本页时没有重跑这些步骤。其中的平台检查不是当前证据。CLI 宿主上的已签名桌面更新仍然不可用，见 [CLI 指南](../user/cli.zh-CN.md)。
 
 ## container.yml
 
-用 `github.token` 公开的 Release 不会启动此工作流。签名 tag 流水线结束后，
-对该 tag 显式触发（稳定版 `publish_latest=true`）。
-
-原生构建：amd64 用 `ubuntu-24.04`，arm64 用 `ubuntu-24.04-arm`。冒烟（主镜像
-+ 浏览器）只在 amd64 运行。镜像先按 digest 推送；用户可见标签只在本地
-OCI index 预检、匿名拉取两个精确版本标签、以及 GitHub provenance 之后创建。
-`X.Y.Z` 与 `sha-*` 不可变；`X.Y` 与 `latest` 是单调移动通道。浏览器镜像是
-GHCR 包，不是 Release 附件。
-
-新的浏览器 package 在设为**公开**前保持私有；第一次运行预期停在匿名拉取
-门禁，随后以相同 digest 重跑完成发布。之后每个 Release 都必须在第一次运行
-时通过该门禁。
+该文件在 GitHub Release 被发布时触发，也可通过带 tag 的 `workflow_dispatch` 触发。这次只读了触发头和 resolve job 的头部。镜像名、digest 和平台结果没有复查。它不是当前 CLI 的发布路径。
 
 ## pages.yml
 
-把 `docs/` 发布到 GitHub Pages（入口 `docs/index.html`）。首次部署前把仓库
-Pages 源设为 **GitHub Actions**。
+该文件在 `workflow_dispatch` 时触发，也在推送到 `main` 且改动工作流、`docs/**` 或 `scripts/build-pages.mjs` 时触发。job 运行 `node scripts/build-pages.mjs`。当前分支的 `scripts/` 里没有这个脚本。本页不把该工作流当作已核实的发布器。
 
 ## CI 覆盖不到的
 
-质量门覆盖前端、排除桌面 crate 的 Linux Rust，以及 Windows 桌面单元测试。
-原生安装包冒烟只在候选或 tag 流程运行。容器冒烟仅 amd64。
+`quality.yml` 覆盖带 loopback feature 的 Linux workspace Rust 测试与 Clippy，以及 Windows 原生 CLI 包的测试与 Clippy。它不运行 Compose、pnpm、桌面 crate 或 `scripts/cli-acceptance.mjs`。
 
-这些工作流未覆盖真实桌面交互、第三方客户端配置与推理、备份恢复、真实上游账号、
-Google/OpenCode 登录、noVNC 输入与 Cookie 跨重启保留。按照[发布流程](releasing.zh-CN.md)
-选择适用的人工检查并记录未执行项。真实支付不是例行发布要求。数据库不支持降级；
-回滚使用升级前备份，见[存储与迁移](storage-migration.zh-CN.md)。
+`release.yml` 不是当前 CLI 发布。 [发布流程](releasing.zh-CN.md) 仍描述已移除的桌面包，因此它不是当前质量清单。
+
+这些工作流之外还有：第三方客户端配置与推理、备份与恢复演练、真实上游账号，以及 Google 或 OpenCode 登录。真实支付不是例行要求。数据库不支持降级；回滚使用升级前备份，见[存储与迁移](storage-migration.zh-CN.md)。
 
 ---
 

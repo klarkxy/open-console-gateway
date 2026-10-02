@@ -14,9 +14,9 @@ existing installation directory. The installer never uninstalls first. The
 upgrade keeps the data directory and auto-start setting and migrates existing
 desktop and Start-menu shortcuts. Uninstall only from Windows **Installed apps**.
 
-## Database Migration And Access Keys (Schema v63)
+## Database Migration And Access Keys (Schema v64)
 
-The database schema is **v63**; historical databases migrate in place on
+The database schema is **v64**; historical databases migrate in place on
 startup. The primary access key keeps the fixed id
 `00000000-0000-0000-0000-000000000001`, so clients keep authenticating with
 the same value across upgrades. The `access_keys` table holds the primary key
@@ -27,7 +27,7 @@ Before protected schema migrations (v27, v35, v42, v48, v58, v59), the migrator 
 a unique, never-overwritten sibling snapshot — `data.sqlite.pre-v3.<timestamp>.bak`,
 `data.sqlite.pre-v35.<timestamp>.bak`, `data.sqlite.pre-v42.<timestamp>.bak`,
 `data.sqlite.pre-v48.<timestamp>.bak`, `data.sqlite.pre-v58.<timestamp>.bak`, or `data.sqlite.pre-v59.<timestamp>.bak` — plus a SHA-256 sidecar. Very old databases (schema 1–22 / 1–23) also write `data.sqlite.pre-v22.` / `pre-v23.` snapshots. A fresh
-empty data directory creates schema v63 directly and skips the snapshot. That
+empty data directory creates schema v64 directly and skips the snapshot. That
 snapshot is a rollback point, not a substitute for a complete backup: verify
 the sidecar before restoring it, and restore it only onto a binary that can
 open that schema version or to retry an upgrade that never committed. Never

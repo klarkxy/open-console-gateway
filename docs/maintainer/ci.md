@@ -7,99 +7,66 @@ not obvious from the YAML.
 
 ## quality.yml
 
-Runs on pull requests and `main`, and via `workflow_call` from a production
-tag. Manual release candidates skip it. Three parallel jobs:
+Runs on pull requests, on pushes to `main`, and by `workflow_call`. There is
+no Compose job. Two jobs:
 
-- **Web** — `contract:v3:check`, `contract:v4:check`, `typecheck`, `test:web`,
-  `test:tooling`, Vite production build, `DESIGN.md` lint, and
-  `docker compose -f compose.example.yaml config --quiet`.
-- **Rust** — `cargo fmt --all -- --check`, locked workspace tests and Clippy
-  `-D warnings` with `--features ocg-core/ollama-cloud-loopback-test` and
-  `--exclude ocg-manager` (the desktop crate needs WebKit
-  headers and a `dist/index.html` stub; Windows covers it; Linux `src-tauri`
-  compile is the release matrix).
-- **Windows Tauri** — `cargo test -p ocg-manager --lib` and Clippy `-D warnings`
-  against a stub `dist/index.html`. Also covers Windows auto-start registry
-  sync.
+- **rust** (`ubuntu-22.04`, 30 minutes) — `cargo fmt --all -- --check`, then
+  `cargo test --workspace --locked --no-fail-fast --features ocg-core/ollama-cloud-loopback-test`,
+  then `cargo clippy --workspace --all-targets --locked` with the same feature
+  and `-D warnings`.
+- **windows-cli** (`windows-latest`, 30 minutes) — `cargo test -p ocg-manager-cli --locked`
+  and `cargo clippy -p ocg-manager-cli --all-targets --locked -- -D warnings`.
+  This job does not pass the Ollama loopback feature.
+
+Rust DTO schema tests inside the workspace test are the V3/V4 contract gate.
+`scripts/cli-acceptance.mjs` is not a job in this file.
 
 ## release.yml
 
-Triggers: `workflow_dispatch` and `v*` tags.
+This file is the historical desktop publisher. It is still in the tree, and it
+is not a usable publication path for the current CLI. This page does not
+authorize a release and does not change the workflow.
 
-- Manual dispatch: unsigned smoke artifacts for the selected platforms,
-  even if the ref is a tag.
-- `v*` tag **push**: full three-platform matrix, repository signing
-  secrets, quality gate plus Ubuntu preflight (version manifests, release
-  helper tests, signing pair vs `src-tauri/updater-public-key.sha256`).
-  Then native builds, CLI/GUI smokes, `draft-release` → `verify-release`
-  → `publish-release`.
+Preflight and build still run `pnpm/action-setup`, `pnpm install --frozen-lockfile`,
+`pnpm run test:tooling`, `pnpm run release:check`, and `pnpm run build`. The
+Windows GUI smoke reads the version from `package.json`. The build job still
+passes `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, and
+`TAURI_UPDATER_PUBLIC_KEY`. This branch has no root `package.json` and no
+`src-tauri/` tree, so those steps cannot publish `ocg-manager-cli`.
 
-`verify-release` requires GitHub asset names to match the assembled
-`release/` set (currently 16 files). The draft job passes a numeric
-Release ID because the tag lookup endpoint does not expose drafts.
-Publication is serialized on `release-moving-channels`. `latest` advances
-only for a strictly newer stable SemVer. Prerelease tags set
-`prerelease=true` and `make_latest=false`.
-
-Windows GUI smoke is `scripts/smoke-windows-release.ps1` (V3 CAS for
-auto-start, in-place NSIS `/UPDATE`, silent uninstall keeping data, and
-reinstall into the remembered directory). macOS checks universal
-`lipo` plus ad-hoc `codesign`, and re-runs Unix CPA process-ownership
-tests (`cpa_runtime::host`) that Linux already covered in quality.yml.
-Linux launches the AppImage under Xvfb.
-
-## Updater signing
-
-Generate the key once outside the checkout:
-
-```powershell
-node node_modules/@tauri-apps/cli/tauri.js signer generate -w <secure-path>/ocg-updater.key
-```
-
-Store private key and password as repository secrets
-`TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
-Store public-key **content** in the `TAURI_UPDATER_PUBLIC_KEY` variable.
-`src-tauri/updater-public-key.sha256` is the committed trust anchor;
-rotation is break-glass (new pair, direct-install bootstrap for existing
-clients, reviewed fingerprint change). Keep two independent encrypted
-backups. Updater signatures are not OS code signing. Windows installers
-are unsigned; macOS uses ad-hoc (`-`).
+The same file still contains desktop package smokes (installer, DMG, AppImage)
+and an updater-manifest step from that older publisher. Those steps were not
+re-run for this page. Their platform checks are not current evidence. Signed
+desktop update stays unavailable on the CLI host; see the [CLI guide](../user/cli.md).
 
 ## container.yml
 
-A Release published with `github.token` does not start this workflow.
-After the signed tag pipeline, dispatch it for that tag
-(`publish_latest=true` for stable).
-
-Native builds: amd64 on `ubuntu-24.04`, arm64 on `ubuntu-24.04-arm`.
-Smoke (main + browser) runs on amd64 only. Images push by digest first;
-user-visible tags are created only after local OCI-index preflight,
-anonymous pull of both exact version tags, and GitHub provenance.
-`X.Y.Z` and `sha-*` are immutable; `X.Y` and `latest` are monotonic
-moving channels. Browser is a GHCR package, not a Release asset.
-
-A new browser package is private until someone sets it **Public**; the
-first run is expected to stop at the anonymous-pull gate, then a
-same-digest rerun completes publication. Later releases must pass that
-gate on the first run.
+The file triggers on a published GitHub Release and on `workflow_dispatch`
+with a tag. This pass read that header and the resolve-job header only. Image
+names, digests, and platform results were not re-checked. It is not a
+publication path for the current CLI.
 
 ## pages.yml
 
-Publishes `docs/` to GitHub Pages (`docs/index.html`). Set the repository
-Pages source to **GitHub Actions** before the first deployment.
+The file triggers on `workflow_dispatch` and on pushes to `main` that touch
+the workflow, `docs/**`, or `scripts/build-pages.mjs`. The job runs
+`node scripts/build-pages.mjs`. That script is not in `scripts/` on this
+branch. This page does not treat the workflow as a verified publisher.
 
 ## What CI does not cover
 
-Quality covers frontend + Linux Rust excluding the desktop crate + Windows
-desktop unit tests. Native installer smokes run on candidates and tags.
-Container smoke is amd64 only.
+`quality.yml` covers Linux workspace Rust tests and Clippy with the loopback
+feature, plus Windows native CLI package tests and Clippy. It does not run
+Compose, pnpm, a desktop crate, or `scripts/cli-acceptance.mjs`.
 
-Coverage outside these workflows includes real desktop interaction, third-party
-client configuration and inference, backup/restore, live upstream accounts,
-Google/OpenCode login, noVNC input, and cookie persistence across restart.
-Choose applicable manual checks using [Release Procedure](releasing.md) and
-record omissions. Real payment is not a routine release requirement. Database
-downgrade is unsupported; rollback uses a pre-upgrade backup as described in
+`release.yml` is not a current CLI publication. [Releasing](releasing.md)
+still describes the removed desktop package, so it is not the current quality
+list.
+
+Outside these workflows: third-party client configuration and inference,
+backup and restore drills, live upstream accounts, and Google or OpenCode
+login. Real payment is not a routine requirement. Database downgrade is
+unsupported; rollback uses a pre-upgrade backup as described in
 [Storage And Migrations](storage-migration.md).
 ---
 

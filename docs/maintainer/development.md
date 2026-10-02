@@ -4,170 +4,112 @@
 
 ## Prerequisites
 
-Node.js 22, the `packageManager` pin in `package.json`, and the workspace
-`rust-version` (Rust 1.88 or newer, as required by the locked dependencies). Native packages are whatever
-`.github/workflows/release.yml` installs on that runner.
+The workspace `rust-version` is Rust 1.88 or newer, as required by the locked
+dependencies. This branch has no root `package.json`, Vue workspace, or Tauri
+crate. Node 24 is used only for the optional `scripts/cli-acceptance.mjs` check.
+The former pnpm scripts return when that frontend work is restored.
 
 ## Dev loop
 
-Quit the installed tray app so it does not hold the single-instance lock or
-port `9042`, then:
+Typecheck, test, and build the headless CLI with Cargo. The feature-off build
+drops the default `dsh-local-host` feature, so local DSH and BYOK configuration
+are unavailable; inference, the control plane, browser and CPA remain. Run the default binary against an isolated data directory. Do not use
+an installed data directory for development:
 
 ```bash
-pnpm install
-pnpm run dev
+cargo check -p ocg-manager-cli --locked
+cargo test -p ocg-manager-cli --locked
+cargo build -p ocg-manager-cli --locked
+cargo build -p ocg-manager-cli --locked --no-default-features
+cargo run -p ocg-manager-cli -- --data-dir tmp/dev-data serve --port 19042
 ```
 
-`pnpm run dev` runs `tauri dev` with `OCG_GATEWAY_PORT=19042`, a separate
-development default. On some Windows hosts, HNS/WSL/Docker reserves port
-ranges that include `9042`; the development default can avoid that conflict.
-Installed builds still default to `9042`. Vite serves
-`http://127.0.0.1:30001/dashboard/` and proxies `/dashboard/api` (including
-WebSockets) to that gateway port. Override both Tauri and Vite with
-`OCG_GATEWAY_PORT` before starting; Settings shows the effective port as
-read-only while the variable is set.
+On some Windows hosts, HNS/WSL/Docker reserves port ranges that include
+`9042`; `19042` avoids that conflict. Nothing watches Rust sources: stop the
+process and rerun the command after changing gateway crates. A fresh host
+creates its primary Gateway Key during state initialization. Read
+`GET /dashboard/api/v4/connection` into a private file with `api --output`. The [CLI guide](../user/cli.md) uses
+synthetic placeholders for the request bodies. Do not put a key on the command
+line.
 
-### Choosing a dev mode
+`.githooks` runs `cargo fmt --all` on staged `*.rs` when Git hooks are enabled.
 
-- `pnpm run dev` (default): Tauri watches the Rust workspace and rebuilds and
-  restarts the whole desktop app on change, which drops the in-process
-  gateway and every in-flight request. Extra arguments forward to the Tauri
-  CLI: `pnpm run dev -- --no-watch` disables the Rust watcher so a running
-  dev build keeps serving until you restart it manually; Vite HMR for the
-  dashboard still applies, and saved Rust changes take effect only on the
-  next manual restart.
-- `pnpm run dev:split`: a headless `ocg-manager-cli` gateway plus Vite, with
-  no Tauri process. This is the mode for dashboard, HTTP API, and
-  routing/protocol work. The gateway listens on `OCG_GATEWAY_PORT` (default
-  `19042`) against an isolated data directory (`tmp/dev-data`, override with
-  `OCG_DEV_DATA_DIR`), so it can run alongside the installed app. Nothing
-  watches Rust sources: after changing gateway crates, stop the script and
-  rerun it to rebuild `ocg-manager-cli`. The dashboard at
-  `http://127.0.0.1:30001/dashboard/` proxies to the split gateway, and Vue
-  changes still hot-reload. On the first run against a fresh data directory,
-  retrieve the development Gateway Key from a private terminal with
-  `target/debug/ocg-manager-cli --data-dir tmp/dev-data status --show-key`.
-- Desktop host work (tray, autostart, native browser, updater) still needs
-  `pnpm run dev`: the CLI does not register those host capabilities.
-
-The split gateway is a separate process from any gateway your agents use.
-Restarting it still ends its in-flight streams; keep agents on the installed
-app or another long-lived instance when they must not be interrupted.
-
-`pnpm install` enables `.githooks` (`cargo fmt --all` on staged `*.rs`).
-
-For managed CPA, click **Start** once after upgrading to startup recovery.
-A successful manual start is remembered across Tauri backend rebuilds: each
-new backend restores CPA in the background using its existing configuration
-and auth directory. **Stop** clears that intent. Host exit still cleans up
-its child, and failed recovery is reported once without a restart loop.
-Do not run another CPA instance against the same auth directory to work
-around development restarts.
+`serve` restores an owned CPA runtime when it starts and shuts that process
+down when it exits. `POST /dashboard/api/v4/external-integrations/cpa/runtime/stop`
+clears the stored intent. Failed recovery is reported once and is not looped.
+Do not point another CPA instance at the same auth directory.
 
 ## Checks
 
-`package.json` scripts are the names to run. Pick the smallest check that
-covers the changed boundary:
+Pick the smallest Cargo check that covers the changed boundary:
 
 | Change | Check |
 | --- | --- |
-| One frontend or script test | `node --experimental-strip-types --test <file>` |
-| Vue / dashboard | adjacent test, then `pnpm run build:web` |
-| One Rust crate | `cargo test -p <package>` |
-| Core / Dashboard V3 | `cargo test -p ocg-core --features ollama-cloud-loopback-test <filter>` |
-| Desktop Host | `cargo test -p ocg-manager --lib` |
-| V3 or V4 schema or generated types | `pnpm run contract:v3:check` / `pnpm run contract:v4:check` |
-| `DESIGN.md` / theme | `pnpm run design:lint` |
+| One Rust crate | `cargo test -p <package> --locked` |
+| Core behavior | `cargo test -p ocg-core --locked --features ollama-cloud-loopback-test <filter>` |
+| CLI | `cargo test -p ocg-manager-cli --locked` |
+| CLI typecheck | `cargo check -p ocg-manager-cli --locked` |
+| CLI build | `cargo build -p ocg-manager-cli --locked` |
+| Feature-off CLI | `cargo build -p ocg-manager-cli --locked --no-default-features` |
+| V3 DTO schema | `cargo test -p ocg-core --locked dashboard_v3::types` |
+| V4 DTO schema | `cargo test -p ocg-core --locked dashboard_v4::types` |
 
-`pnpm run test` is the cross-frontend/Rust gate. `pnpm run test:rust` and
-the quality.yml Linux Rust job pass `--features ocg-core/ollama-cloud-loopback-test`
+The quality workflow passes `--features ocg-core/ollama-cloud-loopback-test`
 so the Ollama Cloud gateway integration suite can install its loopback-only
 test seam. That feature is default-off: application builds keep the fixed
 `https://ollama.com` origin and do not compile the seam. A workspace
 `cargo test` without the feature still compiles `ollama_cloud_gateway` but
-runs none of its cases. `pnpm run test:tooling`
-covers `scripts/*.test.mjs` and is already included in `pnpm run test`
-and the Quality workflow; do not run it again after a passing full test.
-`pnpm run build` is native release packaging
-(`scripts/release.mjs`). Workspace `[profile.release]` uses thin LTO,
+runs none of its cases. Workspace `[profile.release]` uses thin LTO,
 `strip`, and `panic = "abort"`.
 
-Use Node.js 22 locally as in CI. Run Cargo tests, Clippy, contract generators,
-and native builds sequentially when they share `target/`; keep the same build
-configuration to reuse compiled work. After a fix, rerun the affected checks;
-the final main Quality run supplies the full release gate. See the
-[release procedure](releasing.md) for which checks belong locally or in CI.
+Rust schema tests are the contract gate on this branch. The former
+`pnpm run contract:v3:check`, `contract:v4:check`, `build:web`, and
+`test:tooling` commands belonged to the removed frontend workspace. Restore
+the Node generator and generated TypeScript checks with the future frontend.
+The release workflow still contains historical desktop packaging steps and is
+not the current quality gate. Current jobs are in [CI](ci.md).
+[Releasing](releasing.md) still describes the removed desktop package.
 
-## DSH plugin contract vs real smokes
-
-`pnpm run test:dsh:plugin` is the same isolated plugin contract test that
-`pnpm run test:tooling` already runs (`scripts/dsh-plugin-package.test.mjs`).
-It does not start DSH, the Gateway, or any credential-dependent path.
-
-The following commands are **manual acceptance smokes**. They need a real DSH
-CLI (the installed version is reported, not pinned) and/or a locally built `target/debug/ocg-manager-cli`. They
-are not part of `pnpm run test`, `pnpm run test:web`, `pnpm run test:tooling`,
-or CI.
-
-```bash
-pnpm run smoke:dsh:plugin
-pnpm run smoke:dsh:cli
-```
-
-`smoke:dsh:plugin` uses the installed DSH CLI (Windows: `%APPDATA%/npm/node_modules/@deepseek-ai/dsh/lib/bin.js`)
-with an isolated `DSH_HOME` and a loopback models/chat stub. `smoke:dsh:cli`
-drives `GET|POST|DELETE /dashboard/api/v4/applications/dsh` against a native
-`ocg-manager-cli serve` with `dsh-local-host`. Pass `--expect-unsupported` when
-the CLI was built without that feature, or `--relative-roots` to exercise
-relative `--data-dir` / `DSH_HOME` values. The default smoke checks profile discovery, verifies that stopped Web profiles require a live session, and runs the Web HTTP lifecycle through OCG. Run
-`node scripts/dsh-headless-cli-smoke.mjs --scan-user-homes` to verify selection
-across isolated `.dsh` and `.dsh-editor` Homes.
-
-`node scripts/dsh-web-runtime-smoke.mjs --ocg` exercises install, replacement and removal through the OCG V4 API against an isolated installed DSH Web runtime. Add `--desktop` to exercise the installed official Desktop Host. These smokes use temporary profiles and do not call a real model provider.
+Run Cargo tests, Clippy, and native builds sequentially when they share
+`target/`; keep the same build configuration to reuse compiled work. After a
+fix, rerun the affected checks.
 
 Rust unit tests live in sibling `tests.rs` modules (`src/db.rs` declares
 `mod tests;` and the tests are in `src/db/tests.rs`). Do not add tests that
 assert on source text, workflow YAML, or documentation prose.
 
-CLI sandbox (OpenCode Go cards only; no Custom, sub keys, or settings):
-
-Debug `serve` builds skip automatic user-skill synchronization. Native release
-`serve` builds and desktop startup synchronize the embedded skill; use an
-isolated `USERPROFILE` (Windows) or `HOME` (macOS/Linux) for release smokes.
-Explicit `skill sync` always writes to the selected user home, including in
-debug builds. The sample Key below is synthetic; do not put real secrets in
-agent-run command arguments.
-
-```bash
-ocg-manager-cli --data-dir /tmp/ocg-cli-test key add smoke sk-smoke
-ocg-manager-cli --data-dir /tmp/ocg-cli-test serve --port 19042
-```
-
 Direct `Database::update_account` does not bump revision; that is
 intentional and is not the CLI path.
 
-## Local unsigned smoke (Windows)
+## Optional acceptance
 
-Quit the installed release from the tray. Align versions in `package.json`,
-`src-tauri/tauri.conf.json`, both `Cargo.toml` files, and
-`compose.example.yaml`, then `pnpm run build`.
+`node scripts/cli-acceptance.mjs` is an independent developer check against a
+binary you already built. It is not a `quality.yml` job. The script creates
+its own synthetic requests, isolated home, and cipher. Do not pass a live key,
+a user profile, or an installed data directory. This page does not record a
+result from that script.
 
-Without `TAURI_SIGNING_PRIVATE_KEY` the script writes plain local packages
-that cannot drive in-app upgrades. Optional signing variables:
-`TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`,
-`TAURI_UPDATER_PUBLIC_KEY` (must match
-`src-tauri/updater-public-key.sha256`), and
-`OCG_REQUIRE_UPDATER_ARTIFACTS=1`.
+```bash
+node scripts/cli-acceptance.mjs target/debug/ocg-manager-cli tmp/cli-acceptance
+```
 
-A local Tauri build may rewrite `src-tauri/Cargo.toml` and
-`src-tauri/gen/schemas/*.json` — keep only the intended edits.
+On Windows the binary name is `target/debug/ocg-manager-cli.exe`. Omit both
+arguments to use that default binary and a timestamped directory under
+`tmp/ocg3-cli-delivery/`.
+
 ## Request debugging and log levels
 
-`pnpm run dev` also sets `OCG_DEBUG_REQUESTS=1`, `OCG_LOG_LEVEL=debug`, and
-`OCG_DEBUG_DIR=<repository>/.artifacts/debug-requests`. The startup output shows
-the active path and level. Explicit environment values override these defaults;
-set `OCG_DEBUG_REQUESTS=0` to disable capture. Normal CLI/installed startup does
-not enable capture and defaults to `info`.
+Set the capture variables on the `cargo run` yourself. Nothing on this branch
+turns them on:
+
+```bash
+OCG_DEBUG_REQUESTS=1 OCG_LOG_LEVEL=debug OCG_DEBUG_DIR="$PWD/.artifacts/debug-requests" \
+  cargo run -p ocg-manager-cli -- --data-dir tmp/dev-data serve --port 19042
+```
+
+Startup output shows the active path and level. `OCG_DEBUG_REQUESTS=0`
+disables capture. A normal `serve` does not enable capture and defaults to
+`info`.
 
 Each authenticated, within-limit inference POST saves a `client` JSON file before
 protocol parsing. Each prepared upstream attempt saves an `upstream` file after

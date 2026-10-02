@@ -2,6 +2,10 @@
 
 # Open Console Gateway
 
+当前 OCG3 源码提供后端和无界面 CLI。构建、配置与操作从
+[CLI 指南](docs/user/cli.zh-CN.md)开始。React 控制台和桌面界面属于后续阶段；
+下方下载与桌面安装说明对应已发布版本。
+
 **把你的 AI 订阅和 API，接到一起。**
 
 多家服务商的账号集中管理，接入你常用的桌面应用和编程工具。
@@ -12,8 +16,6 @@
 [用户指南](docs/USER.zh-CN.md)
 
 Windows · macOS · Linux · Docker
-
-![Open Console Gateway 主页：接入中心、账号状态与每日用量](assets/dashboard-home.png)
 
 <p align="center">
   <a href="https://github.com/klarkxy/open-console-gateway">
