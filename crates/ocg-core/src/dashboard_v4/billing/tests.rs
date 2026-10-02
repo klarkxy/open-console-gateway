@@ -457,3 +457,143 @@ async fn disabling_credits_on_an_official_provider_returns_the_cash_receipt() {
     drop(state);
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[tokio::test]
+async fn cached_reads_see_usage_writes_without_a_settings_revision_and_external_writes() {
+    let (dir, state) = state();
+    account(&state, "credits");
+    let _ = configure(
+        State(state.clone()),
+        Path("credits".into()),
+        body(
+            &state,
+            serde_json::json!({
+                "configuration": configuration(), "initialBuckets": [bucket(75.0)]
+            }),
+        ),
+    )
+    .await
+    .unwrap();
+    let first = status(&state, "credits").unwrap();
+    let second = status(&state, "credits").unwrap();
+    assert_eq!(
+        first.credits.as_ref().unwrap().estimated_at,
+        second.credits.as_ref().unwrap().estimated_at
+    );
+    let revision = state.settings_revision();
+    storage::grant_on(
+        &state.db.lock().conn,
+        "credits",
+        "local settlement".into(),
+        5.0,
+        None,
+        Utc::now(),
+    )
+    .unwrap();
+    assert_eq!(state.settings_revision(), revision);
+    assert_eq!(remaining(&status(&state, "credits").unwrap()), 80.0);
+    let path = state.db.lock().conn.path().unwrap().to_string();
+    let external = rusqlite::Connection::open(path).unwrap();
+    storage::grant_on(
+        &external,
+        "credits",
+        "other connection".into(),
+        7.0,
+        None,
+        Utc::now(),
+    )
+    .unwrap();
+    assert_eq!(remaining(&status(&state, "credits").unwrap()), 87.0);
+    external
+        .execute(
+            "DELETE FROM credentials WHERE legacy_account_id = 'credits'",
+            [],
+        )
+        .unwrap();
+    assert!(
+        status(&state, "credits").is_err(),
+        "deleted credentials cannot return a cached balance"
+    );
+    drop(external);
+    drop(state);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn batch_reads_isolate_errors_deduplicate_and_enforce_a_bound() {
+    let (dir, state) = state();
+    account(&state, "valid");
+    let batch = snapshots(
+        State(state.clone()),
+        Bytes::from_static(br#"{"accountIds":["valid","missing","valid"]}"#),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(batch.statuses.len(), 1);
+    assert_eq!(batch.statuses[0].account_id, "valid");
+    assert_eq!(batch.errors.len(), 1);
+    assert!(batch.errors.contains_key("missing"));
+    let too_many = serde_json::json!({"accountIds": vec!["valid"; 65]});
+    assert!(
+        snapshots(State(state.clone()), Bytes::from(too_many.to_string()))
+            .await
+            .is_err()
+    );
+    drop(state);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn cache_expires_when_a_not_yet_visible_credit_bucket_becomes_active() {
+    let (dir, state) = state();
+    account(&state, "future-credits");
+    let start = Utc::now() + chrono::Duration::seconds(10);
+    let mut future = bucket(25.0);
+    future["startsAt"] = serde_json::json!(start);
+    let _ = configure(
+        State(state.clone()),
+        Path("future-credits".into()),
+        body(
+            &state,
+            serde_json::json!({
+                "configuration": configuration(), "initialBuckets": [future]
+            }),
+        ),
+    )
+    .await
+    .unwrap();
+    let snapshot = status(&state, "future-credits").unwrap();
+    assert!(snapshot.credits.unwrap().buckets.is_empty());
+    let version =
+        super::super::billing_cache::ReadVersion::capture(&state, &state.db.lock()).unwrap();
+    assert!(
+        state
+            .billing_cache
+            .lock()
+            .get("future-credits", &version, start)
+            .is_none()
+    );
+    drop(state);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn malformed_batch_bodies_do_not_mutate_control_or_billing_state() {
+    let (dir, state) = state();
+    let revision = state.settings_revision();
+    for input in [
+        r#"null"#,
+        r#"{}"#,
+        r#"{"accountIds":[null]}"#,
+        r#"{"accountIds":[],"unknown":true}"#,
+    ] {
+        let error = snapshots(State(state.clone()), Bytes::from(input.to_string()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.envelope().code, "invalidJson");
+        assert_eq!(state.settings_revision(), revision);
+    }
+    drop(state);
+    let _ = std::fs::remove_dir_all(dir);
+}

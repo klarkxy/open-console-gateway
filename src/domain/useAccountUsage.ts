@@ -75,6 +75,8 @@ export function useAccountUsage(
     message?: Pick<ReturnType<typeof useMessage>, "success" | "warning" | "error">;
     endpointUrlFor?: (account: Account) => string | null;
     officialBalanceFor?: (account: Account) => boolean;
+    /** Quota observations finish without model discovery; model-only fallback remains available. */
+    quotaOnly?: boolean;
     /** Manual companion work, including model-only accounts; covered by the refresh lock. */
     afterUsageRefresh?: (accountId: string, isCurrent: () => boolean) => Promise<void>;
     /** Loaded destination plan. Absent plans fall back to sealed manual windows. */
@@ -578,7 +580,9 @@ export function useAccountUsage(
         // A failed/rate-limited quota request must not start unrelated writes.
         // Manual model-only accounts do not issue an unsupported billing POST.
         if (!automatic && isCurrent() && (refreshed || !canRefreshUsage)) {
-          await options?.afterUsageRefresh?.(accountId, isCurrent);
+          if (!canRefreshUsage || !options?.quotaOnly) {
+            await options?.afterUsageRefresh?.(accountId, isCurrent);
+          }
           if (refreshed && isCurrent()) message.success(t("成功"));
         }
       } catch {
@@ -710,6 +714,28 @@ export function useAccountUsage(
     usageRefreshLoadingSelectors.clear();
   }, { flush: "sync" });
 
+  async function loadAccountUsageSnapshots(ids: string[], refresh = false): Promise<void> {
+    if (disposed) return;
+    const targets = ids.flatMap(id => {
+      const account = accounts.value.find(account => account.id === id);
+      if (!account || !accountIsReady(account)) return [];
+      const binding = bindingFor(account);
+      const slot = billing.slotFor(id).value;
+      if (!refresh && slot?.loaded && !slot.error && slot.boundVersion === binding) return [];
+      return [{ accountId: id, binding }];
+    });
+    const current = new Map(targets.map(target => {
+      const account = accounts.value.find(account => account.id === target.accountId)!;
+      return [target.accountId, requestStillCurrent(account)];
+    }));
+    await billing.loadMany(targets);
+    for (const { accountId } of targets) {
+      if (!current.get(accountId)?.()) continue;
+      const account = accounts.value.find(account => account.id === accountId);
+      if (account && usageCapabilities(account).manual) syncUsageEdits(accountId, getUsage(accountId));
+    }
+  }
+
   function ensureAccountUsage(accountId: string): Promise<void> {
     const account = accounts.value.find(item => item.id === accountId);
     if (!account) return Promise.resolve();
@@ -742,6 +768,7 @@ export function useAccountUsage(
     automaticRefreshTarget,
     loadAccountUsage,
     ensureAccountUsage,
+    loadAccountUsageSnapshots,
     revalidateAccountUsage,
     forgetAccount,
   };

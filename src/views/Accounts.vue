@@ -555,6 +555,7 @@ import type { PlatformAccount, PlatformLink } from "../api/platform-accounts.ts"
 import { useAccountUsage, type UsageLimitView } from "../domain/useAccountUsage.ts";
 import { createAccountsAutoRefresh, type AccountRefreshTarget, type AccountRefreshTargets } from "../domain/accounts-auto-refresh.ts";
 import { createAccountRefreshQueue, platformRefreshBinding, waitForAccountRefreshIdle, type AccountRefreshState } from "../domain/account-refresh-queue.ts";
+import { ACCOUNT_REFRESH_CONCURRENCY } from "../domain/account-refresh-scheduler.ts";
 import { accountInferenceEndpointUrl, officialBalanceSupported } from "../domain/upstream-balance.ts";
 import { useRoutingCardLayout } from "./useRoutingCardLayout.ts";
 import { MotionConfig, motion } from "motion-v";
@@ -868,10 +869,11 @@ const {
   refreshAccountUsage,
   automaticRefreshTarget,
   loadAccountUsage,
-  ensureAccountUsage,
+  loadAccountUsageSnapshots,
   revalidateAccountUsage,
   forgetAccount,
 } = useAccountUsage(accounts, now, providerCatalog, {
+  quotaOnly: true,
   endpointUrlFor: (account) => accountInferenceEndpointUrl(
     account,
     identitiesStore.byAccountId.get(account.id) ?? null,
@@ -1377,6 +1379,19 @@ function rowMenuOptions(
         ? platformMutating.value || busy.value || !!platformRefreshing.value[`${parent.id}:${credential.legacy_account_id}`]
         : busy.value || usageRefreshLoadingFor(overlay.id).value,
     });
+    if (!parent && usageCompanionCatalog({
+      providerId: overlay.provider_id,
+      catalog: providerCatalog.value,
+      destination: destinationForAccountId(overlay.id),
+    }).kind !== "none") {
+      utilities.push({
+        key: "refresh-models",
+        label: t("刷新模型目录"),
+        accountId: menuTarget.id,
+        accountName: menuTarget.name,
+        disabled: busy.value || !accountIsReady(overlay) || Boolean(refreshStates.value[overlay.id]),
+      });
+    }
     if (accountCapabilities(overlay, providerCatalog.value, destinationForAccountId(overlay.id)).testable) {
       utilities.push({
         key: "test-connection",
@@ -1421,6 +1436,7 @@ function rowMenuOptionsFor(
     busy.value,
     parent ? !!platformRefreshing.value[`${parent.id}:${credential.legacy_account_id}`] : false,
     overlay ? usageRefreshLoadingFor(overlay.id).value : false,
+    refreshStates.value[overlayId],
     providerCatalog.value,
     identityForCard(overlayId),
     destinationForAccountId(overlayId),
@@ -1433,6 +1449,10 @@ function handleMenuSelect(key: string | number, accountId: string, parent: Platf
   if (busy.value) return;
   if (key === "refresh-usage") {
     queueAccountRefresh(accountId, parent);
+    return;
+  }
+  if (key === "refresh-models") {
+    queueAccountModelRefresh(accountId);
     return;
   }
   if (key === "test-connection") {
@@ -2051,6 +2071,8 @@ function queueAccountRefresh(accountId: string, parent: PlatformAccount | null):
       ? platformStore.linkForAccount(accountId)?.platformAccountId === parent.id
         && platformRefreshBinding(platformStore.parents.find(row => row.id === parent.id)) === platformRefreshBinding(parent)
       : !platformStore.linkForAccount(accountId));
+  // Unknown snapshots and platform/model writes retain the exclusive lane.
+  const sharedQuota = !parent && billingStore.slotFor(accountId).value?.status?.officialRefresh === true;
   void refreshQueue.enqueue(accountId, isCurrent, async current => {
     if (parent) {
       if (!await waitForPlatformRefresh(accountId, parent.id, current)) return;
@@ -2058,11 +2080,32 @@ function queueAccountRefresh(accountId: string, parent: PlatformAccount | null):
     } else {
       // A preceding queued write may have advanced CAS since this row was read.
       await loadAccountUsage(accountId);
+      // A capability change must not turn a shared quota job into a model write.
+      if (sharedQuota && billingStore.slotFor(accountId).value?.status?.officialRefresh !== true) return;
       if (current()) await refreshAccountUsage(accountId);
     }
-    if (current()) await destinationsStore.load();
+  }, { exclusive: !sharedQuota }).then(async () => {
+    // Release this account's refresh state and pool slot before projection I/O.
+    if (isCurrent()) await destinationsStore.load();
   }).catch(error => {
     if (isCurrent()) message.error(t("刷新失败：{error}", { error: dashboardErrorDetail(error) }));
+  });
+}
+
+function queueAccountModelRefresh(accountId: string): void {
+  const account = accountsStore.byId.get(accountId);
+  if (!account || platformStore.linkForAccount(accountId)) return;
+  const destinationId = destinationForAccountId(accountId)?.id;
+  const session = billingStore.sessionEpoch;
+  const current = () => sessionStore.authenticated && billingStore.sessionEpoch === session
+    && accountsStore.byId.get(accountId)?.updated_at === account.updated_at
+    && destinationForAccountId(accountId)?.id === destinationId
+    && !platformStore.linkForAccount(accountId);
+  void refreshQueue.enqueue(accountId, current, async isCurrent => {
+    await destinationsStore.load();
+    if (isCurrent()) await refreshCompanionCatalog(accountId, isCurrent);
+  }).catch(error => {
+    if (current()) message.error(t("刷新失败：{error}", { error: dashboardErrorDetail(error) }));
   });
 }
 
@@ -2073,7 +2116,8 @@ function queuePlatformParentRefresh(parent: PlatformAccount): void {
   void refreshQueue.enqueue(`platform:${parent.id}`, current, async isCurrent => {
     if (!await waitForPlatformRefresh(`platform:${parent.id}`, parent.id, isCurrent)) return;
     await platformSectionRef.value?.refreshParent(platformStore.parents.find(row => row.id === parent.id)!);
-    if (isCurrent()) await destinationsStore.load();
+  }).then(async () => {
+    if (current()) await destinationsStore.load();
   }).catch(error => {
     if (current()) message.error(t("刷新失败：{error}", { error: dashboardErrorDetail(error) }));
   });
@@ -2621,23 +2665,21 @@ async function loadAccounts(): Promise<boolean> {
   const session = accountViewSession;
   const current = () => generation === accountLoadGeneration && session === accountViewSession;
   accountListError.value = "";
+  // These are independent local reads. Start them together, but settle the
+  // identity/endpoint binding before loading per-account billing snapshots.
   const overlay = loadIdentitiesOverlay();
+  const projection = destinationsStore.load().catch(() => undefined);
+  const connections = providersStore.connections
+    ? Promise.resolve()
+    : providersStore.loadConnections().then(() => undefined).catch(() => undefined);
   try {
     const loaded = await accountsStore.loadPresented();
     if (!current()) return false;
     applyAccountDeepLink();
-    try {
-      await destinationsStore.load();
-    } catch {
-      // A projection refusal must not hide the V3 account list.
-    }
+    await projection;
     if (!current()) return false;
     refreshCpaSnapshot();
-    await overlay;
-    if (!current()) return false;
-    if (!providersStore.connections) {
-      await providersStore.loadConnections().catch(() => undefined);
-    }
+    await Promise.all([overlay, connections]);
     if (!current()) return false;
     // Limit concurrent provider/local usage reads for large account lists.
     await loadUsageSnapshots(loaded, true);
@@ -2652,14 +2694,12 @@ async function loadAccounts(): Promise<boolean> {
 
 let usageReadGeneration = 0;
 async function loadUsageSnapshots(list = accounts.value, refresh = false): Promise<void> {
-  const generation = ++usageReadGeneration;
-  const session = billingStore.sessionEpoch;
-  await mapWithConcurrency(list.filter(account => accountIsReady(account) && accountHasUsageDisplay(account)), 4, async account => {
-    // Route identity changes before KeepAlive's leave transition finishes.
-    if (generation !== usageReadGeneration || session !== billingStore.sessionEpoch
-      || !accountsViewActive || route.name !== "accounts" || !sessionStore.authenticated) return;
-    await (refresh ? loadAccountUsage(account.id) : ensureAccountUsage(account.id));
-  });
+  usageReadGeneration += 1;
+  if (!accountsViewActive || route.name !== "accounts" || !sessionStore.authenticated) return;
+  const ids = list.filter(account => accountIsReady(account)
+    && (accountHasUsageDisplay(account) || (!providerCatalog.value && !platformStore.linkForAccount(account.id))))
+    .map(account => account.id);
+  await loadAccountUsageSnapshots(ids, refresh);
 }
 
 async function loadRegistrationOptions(): Promise<void> {
@@ -2697,12 +2737,13 @@ async function loadProviderCatalog(): Promise<void> {
 }
 
 async function initializeAccounts() {
-  // The account list follows the catalog so usage display reads the settled rows.
   const registrationOptions = loadRegistrationOptions();
-  await loadProviderCatalog();
+  const metadata = loadProviderCatalog();
+  // Account rows and existing quota snapshots do not wait for catalog metadata.
   await loadAccounts();
-  // loadAccounts already waits for the first connections snapshot.
-  if (!providersStore.connections) await providersStore.loadConnections().catch(() => undefined);
+  await metadata;
+  // Fill any newly classified rows without re-reading matching cached slots.
+  await loadUsageSnapshots();
   // Usage is the primary entry task. Registration/browser capabilities must
   // not delay the first stale-usage pass or block account configuration.
   void automaticRefresh.run();
@@ -3123,12 +3164,13 @@ function accountHasActiveCountdown(account: Account): boolean {
 
 let accountsViewActive = false;
 const automaticRefresh = createAccountsAutoRefresh({
+  concurrency: ACCOUNT_REFRESH_CONCURRENCY,
   allowed: () => accountsViewActive && document.visibilityState === "visible"
     && sessionStore.authenticated && !busy.value && !platformStore.mutating
     && !sortMode.value && !layoutDraft.value && !showModal.value
     && !showCredentialModal.value && !showCreateModal.value && !showAddModal.value
     && !showTransfer.value && !showManagedWizard.value,
-  // Automatic writes advance CAS; keep the next card-layout edit on current tokens.
+  // Reconcile shared layout tokens once after the pass, not after each quota.
   afterRefresh: () => destinationsStore.load().then(() => undefined),
   targets: (): AccountRefreshTargets => {
     const parentsById = new Map(platformStore.parents.map((parent) => [parent.id, parent]));
@@ -3141,23 +3183,29 @@ const automaticRefresh = createAccountsAutoRefresh({
         if (!parent) continue;
         byId.set(account.id, {
           id: account.id,
-          binding: `${account.updated_at}\0${parent.id}\0${parent.version}`,
+          binding: `${account.updated_at}\0${platformRefreshBinding(parent)}`,
           observedAt: (link.snapshot?.observedAt ?? 0) * 1000,
           nextAllowedAt: 0,
-          busy: platformStore.loading || Boolean(platformStore.refreshing[`${parent.id}:${account.id}`])
+          busy: platformStore.loading || Boolean(refreshStates.value[account.id])
+            || Boolean(platformStore.refreshing[`${parent.id}:${account.id}`])
             || Boolean(platformStore.refreshing[parent.id]),
           refresh: async (isCurrent) => {
             await refreshQueue.enqueue(account.id, isCurrent, async current => {
               if (await waitForPlatformRefresh(account.id, parent.id, current)) await platformStore.refreshChild(parent.id, account.id);
-            });
+            }, { priority: "background" });
           },
         });
         continue;
       }
       const target = automaticRefreshTarget(account);
-      if (target) byId.set(account.id, { ...target, refresh: (isCurrent) => refreshQueue.enqueue(
-        account.id, isCurrent, current => target.refresh(current),
-      ) });
+      if (target) byId.set(account.id, {
+        ...target,
+        busy: target.busy || Boolean(refreshStates.value[account.id]),
+        refresh: (isCurrent) => refreshQueue.enqueue(
+          account.id, isCurrent, current => target.refresh(current),
+          { exclusive: false, priority: "background" },
+        ),
+      });
     }
     return { ids: () => [...byId.keys()], current: (id) => byId.get(id) };
   },

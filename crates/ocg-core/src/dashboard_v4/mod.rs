@@ -13,6 +13,7 @@
 
 mod applications;
 mod billing;
+pub(crate) mod billing_cache;
 mod bindings;
 mod byok_applications;
 mod catalog;
@@ -93,6 +94,7 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route("/credentials", get(destinations::list_credentials))
         .route("/accounts/{id}/official-api", get(official_api::get_status))
         .route("/accounts/{id}/billing", get(billing::get_status))
+        .route("/billing/snapshots", post(billing::snapshots))
         .route(
             "/accounts/{id}/billing/credits",
             axum::routing::put(billing::configure).delete(billing::disable),

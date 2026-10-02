@@ -334,3 +334,80 @@ async fn official_api_financial_routes_require_dashboard_session() {
     }
     h.stop();
 }
+
+#[tokio::test]
+async fn concurrent_balance_refreshes_share_one_request_and_cached_reads_stay_local() {
+    let h = start_loopback("balance-singleflight").await;
+    clock(&h, now());
+    let (_, id) = create(&h, "deepseek").await;
+    let (base, calls, _stop) = start_fake_upstream_with_delay(
+        HashMap::from([(
+            KEY.into(),
+            VecDeque::from([
+                FakeReply {
+                    status: 200,
+                    body: BALANCE,
+                },
+                FakeReply {
+                    status: 500,
+                    body: "provider down",
+                },
+            ]),
+        )]),
+        std::time::Duration::from_millis(500),
+    )
+    .await;
+    let _guard = install_official_api_endpoint_for_test(
+        h.state.process_generation(),
+        BALANCE_URL,
+        &format!("{base}/user/balance"),
+    )
+    .unwrap();
+    let path = format!("/accounts/{id}/official-api/balance");
+    let billing = format!("/accounts/{id}/billing");
+    for _ in 0..2 {
+        let (status, body) = send(&h, Method::GET, &billing, json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_safe(&body);
+    }
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "snapshot reads cannot fetch upstream"
+    );
+    let (left, right) = tokio::join!(
+        send(&h, Method::POST, &path, cas(&h)),
+        send(&h, Method::POST, &path, cas(&h)),
+    );
+    assert_eq!(left.0, StatusCode::OK, "{}", left.1);
+    assert_eq!(right.0, StatusCode::OK, "{}", right.1);
+    assert_eq!(left.1["balances"], right.1["balances"]);
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    let (status, snapshot) = send(
+        &h,
+        Method::POST,
+        "/billing/snapshots",
+        json!({"accountIds":[id]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{snapshot}");
+    assert_eq!(
+        snapshot["statuses"][0]["cash"]["balances"],
+        left.1["balances"]
+    );
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    clock(&h, now() + Duration::seconds(16));
+    let (failed_left, failed_right) = tokio::join!(
+        send(&h, Method::POST, &path, cas(&h)),
+        send(&h, Method::POST, &path, cas(&h)),
+    );
+    assert_eq!(failed_left.0, StatusCode::BAD_GATEWAY);
+    assert_eq!(failed_right.0, StatusCode::BAD_GATEWAY);
+    assert_eq!(calls.lock().unwrap().len(), 2, "failures are also shared");
+    let (status, retained) = send(&h, Method::GET, &billing, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{retained}");
+    assert_eq!(
+        retained["cash"]["balances"], left.1["balances"],
+        "failure must retain amounts and observation times"
+    );
+    assert_safe(&retained);
+}

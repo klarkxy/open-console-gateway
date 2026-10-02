@@ -66,6 +66,7 @@ const savedUsage: UsageWindow = {
 async function fixture(
   t: TestContext,
   afterUsageRefresh?: (accountId: string, isCurrent: () => boolean) => Promise<void>,
+  quotaOnly = false,
 ) {
   setActivePinia(createPinia());
   const originalStatus = billingApi.status;
@@ -81,6 +82,7 @@ async function fixture(
   const usage = scope.run(() => useAccountUsage(accounts, ref(Date.now()), ref(null), {
     message: { success: notify, warning: notify, error: notify },
     afterUsageRefresh,
+    quotaOnly,
   }))!;
   t.after(() => {
     scope.stop(); billingApi.status = originalStatus; dashboardApi.updateAccountUsage = originalSave;
@@ -710,4 +712,40 @@ test("a changed binding drops a first calibration response", async (t) => {
   await saving;
   assert.equal(calls, 1);
   assert.equal(f.usage.getUsage("goat").window_5h, null);
+});
+
+test("quota-only mode completes without starting slow companion discovery", async (t) => {
+  let companions = 0;
+  const f = await fixture(t, async () => { companions++; await f.request.promise; }, true);
+  f.store.refreshUsage = async () => status(80);
+  await f.usage.refreshAccountUsage("a");
+  assert.equal(companions, 0);
+  assert.equal(f.usage.usageRefreshLoadingFor("a").value, false);
+  assert.equal(f.notifications(), 1);
+});
+
+test("quota-only mode retains manual model-only fallback and its account lock", async (t) => {
+  let companions = 0;
+  const f = await fixture(t, async () => { companions++; await f.request.promise; }, true);
+  billingApi.status = async () => ({ ...status(10), officialRefresh: false });
+  await f.usage.loadAccountUsage("a");
+  f.store.refreshUsage = async () => { assert.fail("model-only account sent a quota POST"); };
+  const refresh = f.usage.refreshAccountUsage("a");
+  assert.equal(companions, 1);
+  assert.equal(f.usage.usageRefreshLoadingFor("a").value, true);
+  await f.usage.refreshAccountUsage("a");
+  assert.equal(companions, 1);
+  f.request.resolve(savedUsage);
+  await refresh;
+  assert.equal(f.usage.usageRefreshLoadingFor("a").value, false);
+});
+
+test("quota-only failures keep the cached value and never invoke model writes", async (t) => {
+  let companions = 0;
+  const f = await fixture(t, async () => { companions++; }, true);
+  f.store.refreshUsage = async () => { throw new Error("offline"); };
+  await f.usage.refreshAccountUsage("a");
+  assert.equal(companions, 0);
+  assert.equal(f.usage.getUsage("a").window_5h, 10);
+  assert.equal(f.usage.usageRefreshLoadingFor("a").value, false);
 });

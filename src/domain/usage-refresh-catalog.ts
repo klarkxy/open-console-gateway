@@ -9,8 +9,8 @@ import { isCustomApiAccount } from "./custom-account.ts";
 import { findPlanDefinition } from "./plans.ts";
 
 /**
- * How **Refresh quota** should also refresh models for this card, so Accounts
- * does not send the operator to Providers to hunt for 刷新模型目录.
+ * Model-discovery capability for the account's independent catalog action
+ * and the manual fallback on model-only accounts.
  */
 export type UsageCompanionCatalog =
   | { kind: "provider_catalog"; providerId: string }

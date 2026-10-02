@@ -24,74 +24,154 @@ pub(super) async fn get_status(
     State(state): State<CoreState>,
     Path(id): Path<String>,
 ) -> Result<Json<BillingStatus>, V3ApiError> {
-    status(&state, &id).map(Json)
+    tokio::task::spawn_blocking(move || status(&state, &id).map(Json))
+        .await
+        .map_err(V3ApiError::internal)?
 }
 
 fn status(state: &CoreState, id: &str) -> Result<BillingStatus, V3ApiError> {
-    // Existing observer projections acquire their own locks. Check the revision
-    // around composition rather than recursively acquiring the settings mutex.
+    let _settings = state.settings_update.lock();
+    let db = state.db.lock();
+    cached_status(state, &db, id)
+}
+
+fn cached_status(
+    state: &CoreState,
+    db: &crate::db::Database,
+    id: &str,
+) -> Result<BillingStatus, V3ApiError> {
+    use super::billing_cache::ReadVersion;
     for _ in 0..3 {
-        let (revision, provider_id, adapter, endpoint, configurable, credits, official_cash) = {
-            let _settings = state.settings_update.lock();
-            let db = state.db.lock();
-            let account = db
-                .get_account(id)
+        let before = ReadVersion::capture(state, db).map_err(V3ApiError::internal)?;
+        let now = Utc::now();
+        if let Some(status) = state.billing_cache.lock().get(id, &before, now) {
+            return Ok(status);
+        }
+        let status = compose_status(state, db, id)?;
+        let next_credit_start = if status.credits.is_some() {
+            storage::load_on(&db.conn, id)
                 .map_err(V3ApiError::internal)?
-                .ok_or_else(|| V3ApiError::not_found_at(state, "account not found"))?;
-            let (adapter, endpoint, legacy_kind) = destination(&db.conn, id)
-                .map_err(V3ApiError::internal)?
-                .ok_or_else(|| V3ApiError::not_found_at(state, "account destination not found"))?;
-            let configurable = adapter == AdapterKind::Http
-                && matches!(legacy_kind.as_str(), "dynamic" | "custom_account");
-            let credits =
-                storage::read_view_on(&db.conn, id, Utc::now()).map_err(V3ApiError::internal)?;
-            let official_cash = db
-                .get_dynamic_provider(&account.provider_id)
-                .map_err(V3ApiError::internal)?
-                .as_ref()
-                .and_then(crate::official_api::kind_for_runtime)
-                .is_some();
-            (
-                state.settings_revision(),
-                account.provider_id,
-                adapter,
-                endpoint,
-                configurable,
-                credits,
-                official_cash,
-            )
-        };
-        let usage = crate::dashboard_v3::usage::load_provider_usage(state, id)?;
-        let model = if credits.is_some() {
-            BillingModel::Credits
-        } else {
-            billing_model_for_destination(adapter, &endpoint)
-        };
-        let cash = if official_cash && model == BillingModel::Cash {
-            Some(super::official_api::status(state, id)?)
+                .and_then(|meter| {
+                    meter
+                        .buckets
+                        .iter()
+                        .map(|bucket| bucket.starts_at)
+                        .filter(|at| *at > now)
+                        .min()
+                })
         } else {
             None
         };
-        if revision != state.settings_revision() {
+        let after = ReadVersion::capture(state, db).map_err(V3ApiError::internal)?;
+        // Read helpers may advance windows, and another SQLite connection may write.
+        // Retry instead of caching a composition under a version it did not observe.
+        if before != after {
             continue;
         }
-        return Ok(project_billing(
-            state,
-            id,
-            revision,
-            &provider_id,
-            adapter,
-            &endpoint,
-            configurable,
-            credits,
-            usage,
-            cash,
-        ));
+        let mut cache = state.billing_cache.lock();
+        cache.insert(&after, status.clone(), now);
+        if let Some(at) = next_credit_start {
+            cache.shorten_lifetime(id, at);
+        }
+        return Ok(status);
     }
     Err(V3ApiError::conflict_at(
         state,
-        "billing configuration changed during read",
+        "billing data changed during read",
     ))
+}
+
+fn compose_status(
+    state: &CoreState,
+    db: &crate::db::Database,
+    id: &str,
+) -> Result<BillingStatus, V3ApiError> {
+    let account = db
+        .get_account(id)
+        .map_err(V3ApiError::internal)?
+        .ok_or_else(|| V3ApiError::not_found_at(state, "account not found"))?;
+    let (adapter, endpoint, legacy_kind) = destination(&db.conn, id)
+        .map_err(V3ApiError::internal)?
+        .ok_or_else(|| V3ApiError::not_found_at(state, "account destination not found"))?;
+    let configurable = adapter == AdapterKind::Http
+        && matches!(legacy_kind.as_str(), "dynamic" | "custom_account");
+    let credits = storage::read_view_on(&db.conn, id, Utc::now()).map_err(V3ApiError::internal)?;
+    let official_cash = db
+        .get_dynamic_provider(&account.provider_id)
+        .map_err(V3ApiError::internal)?
+        .as_ref()
+        .and_then(crate::official_api::kind_for_runtime)
+        .is_some();
+    let usage = crate::dashboard_v3::usage::provider_usage_from_db(state, db, id)?;
+    let model = if credits.is_some() {
+        BillingModel::Credits
+    } else {
+        billing_model_for_destination(adapter, &endpoint)
+    };
+    let cash = if official_cash && model == BillingModel::Cash {
+        Some(super::official_api::status_locked(state, db, id)?)
+    } else {
+        None
+    };
+    Ok(project_billing(
+        state,
+        id,
+        state.settings_revision(),
+        &account.provider_id,
+        adapter,
+        &endpoint,
+        configurable,
+        credits,
+        usage,
+        cash,
+    ))
+}
+
+/// Local read only. Never fetches upstream and never starts background I/O.
+/// Per-account errors cannot prevent other accounts from receiving snapshots.
+pub(super) async fn snapshots(
+    State(state): State<CoreState>,
+    body: Bytes,
+) -> Result<Json<crate::billing_types::BillingSnapshots>, V3ApiError> {
+    let input =
+        crate::dashboard_v3::parse_json::<crate::billing_types::BillingSnapshotRequest>(&body)?;
+    if input.account_ids.len() > 64
+        || input
+            .account_ids
+            .iter()
+            .any(|id| id.is_empty() || id.len() > 256)
+    {
+        return Err(V3ApiError::invalid_request_at(
+            &state,
+            "at most 64 valid account ids are allowed",
+        ));
+    }
+    tokio::task::spawn_blocking(move || {
+        let _settings = state.settings_update.lock();
+        let db = state.db.lock();
+        let mut statuses = Vec::new();
+        let mut errors = std::collections::BTreeMap::new();
+        let mut seen = std::collections::HashSet::new();
+        for id in input.account_ids {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            match cached_status(&state, &db, &id) {
+                Ok(status) => statuses.push(status),
+                Err(error) => {
+                    errors.insert(id, error.envelope().clone());
+                }
+            }
+        }
+        Json(crate::billing_types::BillingSnapshots {
+            statuses,
+            errors,
+            revision: state.settings_revision(),
+            process_generation: state.process_generation(),
+        })
+    })
+    .await
+    .map_err(V3ApiError::internal)
 }
 
 fn destination(

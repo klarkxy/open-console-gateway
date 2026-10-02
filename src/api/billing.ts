@@ -7,6 +7,7 @@ import type { MutationExpectation } from "./generated/dashboard-v3.ts";
 import type {
   BillingStatus,
   CreditBucket,
+  BillingSnapshots,
   CreditCalibrationRequest,
   CreditGrantRequest,
   MonthlyCredits,
@@ -80,6 +81,9 @@ async function withCas<T>(
 }
 
 export const billingApi = {
+  snapshots: (accountIds: string[]) => requestV4<BillingSnapshots>("/billing/snapshots", {
+    method: "POST", body: JSON.stringify({ accountIds }),
+  }),
   status: (id: string) => requestV4<BillingStatus>(billingPath(id)),
   configureCredits: (
     id: string,

@@ -118,6 +118,10 @@ pub struct CoreStateInner {
     pub(crate) modelsdev_last_attempt: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
     pub provider_models_refresh: tokio::sync::Mutex<()>,
     pub(crate) provider_usage_refresh: crate::usage_sync::ProviderUsageRefreshGate,
+    pub(crate) balance_refresh:
+        crate::usage_sync::SingleFlight<Result<(), crate::dashboard_v3::V3ApiError>>,
+    /// Leaf lock, acquired only after settings_update and db; never over I/O.
+    pub(crate) billing_cache: Mutex<crate::dashboard_v4::billing_cache::BillingReadCache>,
     /// Serializes typed operations against the one local CPA integration.
     /// Network calls may hold this async gate but never the SQLite mutex.
     pub cpa_operations: tokio::sync::Mutex<()>,
@@ -557,6 +561,10 @@ impl CoreStateInner {
             provider_models_refresh: tokio::sync::Mutex::new(()),
             provider_usage_refresh: crate::usage_sync::ProviderUsageRefreshGate::new(
                 crate::usage_sync::PROVIDER_REFRESH_CONCURRENCY,
+            ),
+            balance_refresh: crate::usage_sync::SingleFlight::default(),
+            billing_cache: Mutex::new(
+                crate::dashboard_v4::billing_cache::BillingReadCache::default(),
             ),
             cpa_operations: tokio::sync::Mutex::new(()),
             cpa_runtime: crate::cpa_runtime::CpaRuntimeCapabilities::new(),

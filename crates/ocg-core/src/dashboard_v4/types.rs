@@ -173,6 +173,8 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "BillingModel",
     "BillingSource",
     "BillingStatus",
+    "BillingSnapshotRequest",
+    "BillingSnapshots",
     "CreditRate",
     "CreditConfigurationWrite",
     "MonthlyCredits",
@@ -1934,6 +1936,7 @@ pub fn contract_schema() -> Value {
     include_type::<crate::official_api::OfficialApiStatus>(&mut serialize);
     include_type::<BillingStatus>(&mut serialize);
     include_type::<CreditConfigurationWrite>(&mut serialize);
+    include_type::<crate::billing_types::BillingSnapshots>(&mut serialize);
     include_type::<CreditBalanceCorrection>(&mut serialize);
     include_type::<RoutingMode>(&mut serialize);
     include_type::<RoutingClientProtocol>(&mut serialize);
@@ -1960,6 +1963,7 @@ pub fn contract_schema() -> Value {
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
+    include_type::<crate::billing_types::BillingSnapshotRequest>(&mut deserialize);
     include_type::<OnboardingCommitRequest>(&mut deserialize);
     include_type::<OnboardingCommitMode>(&mut deserialize);
     include_type::<OnboardingConnection>(&mut deserialize);

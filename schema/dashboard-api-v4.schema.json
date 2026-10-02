@@ -211,6 +211,56 @@
       ],
       "type": "string"
     },
+    "BillingSnapshotRequest": {
+      "additionalProperties": false,
+      "description": "Bounded, local-only batch read; it is not a control-plane mutation.",
+      "properties": {
+        "accountIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "accountIds"
+      ],
+      "type": "object"
+    },
+    "BillingSnapshots": {
+      "additionalProperties": false,
+      "properties": {
+        "errors": {
+          "additionalProperties": {
+            "$ref": "#/$defs/V3Error"
+          },
+          "type": "object"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "statuses": {
+          "items": {
+            "$ref": "#/$defs/BillingStatus"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "statuses",
+        "errors",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
     "BillingSource": {
       "enum": [
         "official",
@@ -6444,6 +6494,12 @@
     },
     {
       "$ref": "#/$defs/BillingStatus"
+    },
+    {
+      "$ref": "#/$defs/BillingSnapshotRequest"
+    },
+    {
+      "$ref": "#/$defs/BillingSnapshots"
     },
     {
       "$ref": "#/$defs/CreditRate"

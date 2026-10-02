@@ -110,6 +110,8 @@ export type DashboardApiV4 =
   | BillingModel
   | BillingSource
   | BillingStatus
+  | BillingSnapshotRequest
+  | BillingSnapshots
   | CreditRate
   | CreditConfigurationWrite
   | MonthlyCredits
@@ -1756,6 +1758,20 @@ export interface UsageSyncState {
   lastExpeditedAt: string | null;
   lastSuccessAt: string | null;
   nextEligibleAt: string | null;
+}
+/**
+ * Bounded, local-only batch read; it is not a control-plane mutation.
+ */
+export interface BillingSnapshotRequest {
+  accountIds: string[];
+}
+export interface BillingSnapshots {
+  errors: {
+    [k: string]: V3Error;
+  };
+  processGeneration: number;
+  revision: number;
+  statuses: BillingStatus[];
 }
 /**
  * Manual credit setup. Token rates and the currency conversion factor are not writable.
