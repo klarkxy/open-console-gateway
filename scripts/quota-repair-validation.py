@@ -16,6 +16,8 @@ replace('crates/ocg-core/src/dashboard_v3/mod.rs',
 replace('crates/ocg-core/src/dashboard_v4/billing.rs',
         'parse_mutation_json::<crate::billing_types::BillingSnapshotRequest>(&body)?',
         'crate::dashboard_v3::parse_json::<crate::billing_types::BillingSnapshotRequest>(&body)?')
+replace('src/api/billing.ts', 'method: "POST", body: { accountIds },',
+        'method: "POST", body: JSON.stringify({ accountIds }),')
 
 p = Path('crates/ocg-core/src/dashboard_v4/billing/tests.rs')
 s = p.read_text()
@@ -53,4 +55,30 @@ async fn malformed_batch_bodies_do_not_mutate_control_or_billing_state() {
 }
 ''')
 
-print('Applied verified read-only parser and strict batch-body regression fixes.')
+p = Path('src/api/billing.test.ts')
+if not p.exists():
+    p.write_text(r'''import assert from "node:assert/strict";
+import test from "node:test";
+import { billingApi } from "./billing.ts";
+import { installFetchMock, setupControlPlane } from "../test-helpers/dashboard-v3-fetch.ts";
+
+test("billing snapshots serialize one bounded local-read request without mutation tokens or secrets", async () => {
+  setupControlPlane(5, 12, "price");
+  const requests = installFetchMock(({ url, method, body }) => {
+    assert.equal(method, "POST");
+    assert.match(url, /\/dashboard\/api\/v4\/billing\/snapshots$/);
+    assert.deepEqual(body, { accountIds: ["account/one", "account/two"] });
+    return {
+      statuses: [],
+      errors: { "account/two": { code: "notFound", message: "missing", currentRevision: 5, processGeneration: 12 } },
+      revision: 5,
+      processGeneration: 12,
+    };
+  });
+  const result = await billingApi.snapshots(["account/one", "account/two"]);
+  assert.equal(requests.length, 1);
+  assert.equal(result.errors["account/two"]?.code, "notFound");
+});
+''')
+
+print('Applied verified read-only parser and serialized batch transport regression fixes.')
