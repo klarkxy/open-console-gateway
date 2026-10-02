@@ -615,6 +615,7 @@ fn adapter_descriptors_preserve_current_capability_decisions() {
         ProviderProductSurface::ExternalIntegration
     );
     assert_eq!(cpa.inference.auth, InferenceAuthDescriptor::Bearer);
+    assert!(!cpa.inference.follow_redirects);
     assert_eq!(
         cpa.inference.origin,
         InferenceOriginKind::LocalExternalIntegration

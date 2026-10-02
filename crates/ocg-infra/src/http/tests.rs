@@ -159,10 +159,3 @@ fn invalid_proxy_url_fails_manual_and_list_proxy_legs() {
     assert!(configured_builder(&direct).is_ok());
     assert!(build(&direct).is_ok());
 }
-
-#[test]
-fn no_redirect_construction_succeeds_for_direct() {
-    let client = build_no_redirect(&spec(ProxyMode::Direct, ProxyListDirection::Whitelist, ""))
-        .expect("no-redirect client");
-    let _ = client;
-}

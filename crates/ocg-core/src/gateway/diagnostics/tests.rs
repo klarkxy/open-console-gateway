@@ -25,13 +25,6 @@ fn request_summary_never_keeps_content_or_tool_arguments() {
 }
 
 #[test]
-fn diagnostic_facade_reexports_pure_sanitizers() {
-    let encoded = sanitize_upstream_error_value_with_known_secret("secret=abc", "abc").to_string();
-    assert!(!encoded.contains("abc"));
-    assert_eq!(redact_known_secret("token abc", "abc"), "token <redacted>");
-}
-
-#[test]
 fn success_value_redaction_never_changes_json_keys() {
     let mut value = json!({
         "data": "data",

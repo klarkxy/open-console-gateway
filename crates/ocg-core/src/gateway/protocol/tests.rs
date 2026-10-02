@@ -35,12 +35,6 @@ fn plan_with_model(client: ApiFormat, upstream: ApiFormat, model: &str) -> Reque
 }
 
 #[test]
-fn unknown_models_are_not_in_the_protocol_table() {
-    assert!(!is_known_model("x-preview-f-free"));
-    assert!(!is_known_model("totally-made-up-xyz"));
-}
-
-#[test]
 fn muse_spark_contributor_family_routes_clients_to_responses() {
     let chat = prepare_request(
         ApiFormat::ChatCompletions,

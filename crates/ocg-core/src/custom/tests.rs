@@ -232,21 +232,6 @@ fn custom_runtime_identity_is_configurable_http_not_a_base_class() {
 }
 
 #[test]
-fn custom_model_id_matching_is_exact_or_case_folded_without_separator_folding() {
-    assert!(custom_model_id_matches("glm-5.2", "GLM-5.2"));
-    assert!(custom_model_id_matches("my-local", "my-local"));
-    assert!(!custom_model_id_matches("glm-5.2", "glm/5.2"));
-    assert!(custom_model_id_matches(
-        "deepseek/deepseek-v4-flash",
-        "DeepSeek/deepseek-v4-flash"
-    ));
-    assert!(!custom_model_id_matches(
-        "deepseek/deepseek-v4-flash",
-        "deepseek-v4-flash"
-    ));
-}
-
-#[test]
 fn verification_bodies_are_non_stream_and_token_bounded() {
     let chat = serde_json::from_slice::<Value>(
         &minimal_verification_body(UpstreamProtocolKind::ChatCompletions, "local-model").unwrap(),

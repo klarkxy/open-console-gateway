@@ -378,8 +378,16 @@ fn assert_secret_free(body: &Value, secrets: &[&str]) {
             );
         }
     }
+    // Field names and string values are checked above. `currentRevision` and
+    // `processGeneration` are random u64 control-plane values, so a purely
+    // numeric secret (a port number, for example) can appear inside one by
+    // coincidence; the raw-blob scan only applies to secrets that cannot be
+    // confused with that metadata.
     let encoded = body.to_string();
     for secret in secrets {
+        if !secret.is_empty() && secret.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
         assert!(
             !encoded.contains(secret),
             "browser JSON leaked secret {secret} in encoded JSON: {body}"

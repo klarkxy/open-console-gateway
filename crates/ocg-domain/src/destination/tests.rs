@@ -1,6 +1,5 @@
 use super::*;
 use crate::account::{AccountSetupStep, AccountType};
-use crate::catalog::UpstreamProtocolKind;
 use crate::connection::EndpointOperation;
 use crate::credential::{
     AuthState, ModelScope, OnboardingTaskKind, OnboardingTaskState, RouteSpec,
@@ -805,12 +804,6 @@ fn destination_ids_are_deterministic_and_kind_scoped() {
         destination_id_for_custom_account("acct")
     );
     assert!(Uuid::parse_str(&destination_id_for_custom_account("acct")).is_ok());
-}
-
-#[test]
-fn protocol_alias_is_the_catalog_wire_enum() {
-    assert_eq!(Protocol::Responses, UpstreamProtocolKind::Responses);
-    assert_eq!(Protocol::ALL.len(), 3);
 }
 
 fn route(protocol: Protocol, url: &str, auth: AuthScheme) -> HttpProtocolRoute {

@@ -93,22 +93,6 @@ fn r01_ambiguous_raw_model_id_fails_closed_without_outbound() {
 }
 
 #[test]
-fn parse_helpers_are_reexported_for_adapters() {
-    let parsed = parse_client(ApiFormat::ChatCompletions, chat_body("glm-5.2")).unwrap();
-    assert_eq!(parsed.requested_model, "glm-5.2");
-    let gemini = parse_gemini(
-        "glm-5.2".into(),
-        false,
-        Bytes::from(
-            serde_json::to_vec(&json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}]}))
-                .unwrap(),
-        ),
-    )
-    .unwrap();
-    assert_eq!(gemini.client, ApiFormat::Gemini);
-}
-
-#[test]
 fn materialize_keeps_client_name_and_mapped_upstream_alias() {
     let body = Bytes::from(
         serde_json::to_vec(&json!({

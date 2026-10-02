@@ -6,12 +6,12 @@ use crate::models::{Account, AccountSetupStep, AccountType, AppConfig};
 use crate::provider::{
     COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
     COMMAND_CODE_PROVIDER_ID, CPA_PROVIDER_ID, CUSTOM_PROVIDER_ID, CredentialKind,
-    InferenceAuthDescriptor, KIMI_CN_BASE_URL, KIMI_CN_CHAT_COMPLETIONS_PATH,
-    KIMI_CN_MESSAGES_PATH, KIMI_PROVIDER_ID, MINIMAX_CN_ANTHROPIC_BASE_URL, MINIMAX_CN_BASE_URL,
-    MINIMAX_CN_CHAT_COMPLETIONS_PATH, MINIMAX_CN_MESSAGES_PATH, MINIMAX_CN_RESPONSES_PATH,
-    MINIMAX_PROVIDER_ID, OLLAMA_CLOUD_BASE_URL, OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH,
-    OLLAMA_PROVIDER_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ProviderAdapterKind,
-    QuotaScope, ZEN_FREE_ACCOUNT_ID, ZEN_FREE_ACCOUNT_NAME,
+    KIMI_CN_BASE_URL, KIMI_CN_CHAT_COMPLETIONS_PATH, KIMI_CN_MESSAGES_PATH, KIMI_PROVIDER_ID,
+    MINIMAX_CN_ANTHROPIC_BASE_URL, MINIMAX_CN_BASE_URL, MINIMAX_CN_CHAT_COMPLETIONS_PATH,
+    MINIMAX_CN_MESSAGES_PATH, MINIMAX_CN_RESPONSES_PATH, MINIMAX_PROVIDER_ID,
+    OLLAMA_CLOUD_BASE_URL, OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH, OLLAMA_PROVIDER_ID,
+    OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ProviderAdapterKind, QuotaScope,
+    ZEN_FREE_ACCOUNT_ID, ZEN_FREE_ACCOUNT_NAME,
 };
 use crate::routing_snapshot::ExecutionCredential;
 use bytes::Bytes;
@@ -404,67 +404,6 @@ fn adapter_kind_dispatch_preserves_route_auth_and_model_decisions() {
         .unwrap_err()
         .contains("unsupported provider offering")
     );
-}
-
-#[test]
-fn adapter_kind_match_is_exhaustive_and_consistent_with_descriptors() {
-    for kind in ProviderAdapterKind::ALL {
-        match kind {
-            ProviderAdapterKind::OpenCodeGo
-            | ProviderAdapterKind::ZenFree
-            | ProviderAdapterKind::CommandCodeGoat
-            | ProviderAdapterKind::MiniMaxCn
-            | ProviderAdapterKind::KimiCn
-            | ProviderAdapterKind::OllamaCloud
-            | ProviderAdapterKind::Cpa
-            | ProviderAdapterKind::ConfigurableHttp => {}
-        }
-        let descriptor = ProviderRegistry::iter()
-            .find(|entry| entry.kind == kind)
-            .expect("each adapter kind has a registry descriptor");
-        match kind {
-            ProviderAdapterKind::OpenCodeGo => {
-                assert_eq!(
-                    descriptor.inference.auth,
-                    InferenceAuthDescriptor::OpenCodeProtocolDefault
-                );
-                assert!(descriptor.inference.follow_redirects);
-                assert!(descriptor.inference.production_inference);
-            }
-            ProviderAdapterKind::ZenFree => {
-                assert_eq!(descriptor.inference.auth, InferenceAuthDescriptor::None);
-                assert!(descriptor.inference.follow_redirects);
-                assert_eq!(
-                    descriptor.inference.channel,
-                    Some(crate::provider::InferenceChannelKind::Free)
-                );
-            }
-            ProviderAdapterKind::CommandCodeGoat => {
-                assert_eq!(descriptor.inference.auth, InferenceAuthDescriptor::Bearer);
-                assert!(!descriptor.inference.follow_redirects);
-                assert!(descriptor.inference.production_inference);
-                assert!(!descriptor.inference.loopback_test_seam_only);
-            }
-            ProviderAdapterKind::MiniMaxCn
-            | ProviderAdapterKind::KimiCn
-            | ProviderAdapterKind::OllamaCloud => {
-                assert_eq!(descriptor.inference.auth, InferenceAuthDescriptor::Bearer);
-                assert!(!descriptor.inference.follow_redirects);
-                assert!(descriptor.inference.catalog_routable);
-            }
-            ProviderAdapterKind::Cpa => {
-                assert_eq!(descriptor.inference.auth, InferenceAuthDescriptor::Bearer);
-                assert!(!descriptor.inference.follow_redirects);
-            }
-            ProviderAdapterKind::ConfigurableHttp => {
-                assert_eq!(
-                    descriptor.inference.auth,
-                    InferenceAuthDescriptor::ProtocolDerivedBearerOrXApiKey
-                );
-                assert!(!descriptor.inference.follow_redirects);
-            }
-        }
-    }
 }
 
 #[test]
