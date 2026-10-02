@@ -59,6 +59,8 @@ export function useAccountUsage(
     message?: Pick<ReturnType<typeof useMessage>, "success" | "warning" | "error">;
     endpointUrlFor?: (account: Account) => string | null;
     officialBalanceFor?: (account: Account) => boolean;
+    /** Quota observations finish without model discovery; model-only fallback remains available. */
+    quotaOnly?: boolean;
     /** Manual companion work, including model-only accounts; covered by the refresh lock. */
     afterUsageRefresh?: (accountId: string, isCurrent: () => boolean) => Promise<void>;
   },
@@ -502,7 +504,9 @@ export function useAccountUsage(
         // A failed/rate-limited quota request must not start unrelated writes.
         // Manual model-only accounts do not issue an unsupported billing POST.
         if (!automatic && isCurrent() && (refreshed || !canRefreshUsage)) {
-          await options?.afterUsageRefresh?.(accountId, isCurrent);
+          if (!canRefreshUsage || !options?.quotaOnly) {
+            await options?.afterUsageRefresh?.(accountId, isCurrent);
+          }
           if (refreshed && isCurrent()) message.success(t("成功"));
         }
       } catch {

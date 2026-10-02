@@ -1,5 +1,4 @@
 import type { BillingStatus } from "../api/billing.ts";
-import { ACCOUNT_REFRESH_CONCURRENCY } from "./account-refresh-scheduler.ts";
 
 export const ACCOUNT_AUTO_REFRESH_MS = 5 * 60_000;
 
@@ -51,7 +50,9 @@ export function createAccountsAutoRefresh(options: {
   concurrency?: number;
 }) {
   const now = options.now ?? Date.now;
-  const concurrency = options.concurrency ?? ACCOUNT_REFRESH_CONCURRENCY;
+  // Callers that mix control-plane writes keep the serial default; the
+  // Accounts quota scheduler explicitly opts into its bounded shared pool.
+  const concurrency = options.concurrency ?? 1;
   if (!Number.isInteger(concurrency) || concurrency < 1) {
     throw new RangeError("refresh concurrency must be a positive integer");
   }

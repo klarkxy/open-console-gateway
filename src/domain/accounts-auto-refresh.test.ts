@@ -120,7 +120,7 @@ test("automatic attempts reconcile the shared projection only once per pass", as
   assert.deepEqual(events, ["a", "b", "projection"]);
 });
 
-test("the default pool advances fast accounts before the slow first account completes", async () => {
+test("a four-worker pool advances fast accounts before the slow first account completes", async () => {
   const gates = Array.from({ length: 6 }, deferred);
   const calls: number[] = [];
   let projections = 0;
@@ -129,7 +129,7 @@ test("the default pool advances fast accounts before the slow first account comp
     refresh: async () => { calls.push(index); await gate.promise; },
   }));
   const controller = createAccountsAutoRefresh({
-    allowed: () => true, targets: () => targets,
+    allowed: () => true, targets: () => targets, concurrency: 4,
     afterRefresh: async () => { projections++; },
   });
   const pass = controller.run();
