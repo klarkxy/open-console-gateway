@@ -17,7 +17,6 @@ use crate::state::CoreState;
 use anyhow::Result;
 use axum::Router;
 use std::net::SocketAddr;
-use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::oneshot;
 
@@ -37,14 +36,7 @@ pub(crate) trait GatewayRouterHost {
     fn compose_router(state: CoreState) -> Router;
 }
 
-/// Installs the router the listener serves. The full console host installs
-/// the dashboard composition; the minimal CLI installs the inference router
-/// only. Unset keeps the default host composition.
-pub fn set_router_override(compose: fn(CoreState) -> Router) {
-    ROUTER_OVERRIDE.set(compose).ok();
-}
-
-static ROUTER_OVERRIDE: OnceLock<fn(CoreState) -> Router> = OnceLock::new();
+pub(crate) type RouterFactory = fn(CoreState) -> Router;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ListenerStopOutcome {
@@ -90,6 +82,7 @@ impl Drop for PublicListenerRegistration {
 impl GatewayLifecycle {
     pub async fn bind(state: CoreState, addr: SocketAddr) -> Result<GatewayHandle> {
         let _lifecycle = state.lock_gateway_lifecycle().await;
+        let compose = Self::require_router_factory(&state)?;
         Self::repair_active_dashboard_trust(&state);
         let prepared = match Self::prepare(addr).await {
             Ok(prepared) => prepared,
@@ -116,7 +109,7 @@ impl GatewayLifecycle {
                 .as_ref()
                 .is_none_or(|handle| handle.dashboard_is_local);
         state.set_dashboard_local_mode(dashboard_is_local && can_enable_local);
-        Ok(Self::spawn_prepared(state.clone(), prepared))
+        Ok(Self::spawn_prepared(state.clone(), prepared, compose))
     }
 
     async fn prepare(addr: SocketAddr) -> Result<PreparedListener> {
@@ -128,7 +121,17 @@ impl GatewayLifecycle {
         })
     }
 
-    fn spawn_prepared(state: CoreState, prepared: PreparedListener) -> GatewayHandle {
+    fn require_router_factory(state: &CoreState) -> Result<RouterFactory> {
+        state
+            .router_factory()
+            .ok_or_else(|| anyhow::anyhow!("gateway router factory must be installed before bind"))
+    }
+
+    fn spawn_prepared(
+        state: CoreState,
+        prepared: PreparedListener,
+        compose: RouterFactory,
+    ) -> GatewayHandle {
         let PreparedListener {
             listener,
             local_addr,
@@ -137,13 +140,9 @@ impl GatewayLifecycle {
         let public_registration =
             (!dashboard_is_local).then(|| PublicListenerRegistration::new(state.clone()));
         spawn_forward_log_backfill(state.clone());
-        // Composed by the host root through the explicit listener boundary so
-        // this module does not import dashboard mounts. A minimal host may
-        // replace that composition before bind.
-        let app = match ROUTER_OVERRIDE.get() {
-            Some(compose) => compose(state.clone()),
-            None => <CoreState as GatewayRouterHost>::compose_router(state.clone()),
-        };
+        // The caller captured the installed factory. Reuse that exact function
+        // instead of selecting a Dashboard composition here.
+        let app = compose(state.clone());
         let port = local_addr.port();
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -259,6 +258,7 @@ impl GatewayLifecycle {
 
     async fn rebind_inner(state: CoreState, addr: SocketAddr, wait_for_old: bool) -> Result<u16> {
         let _lifecycle = state.lock_gateway_lifecycle().await;
+        let compose = Self::require_router_factory(&state)?;
         Self::repair_active_dashboard_trust(&state);
 
         let requested_port = addr.port();
@@ -303,7 +303,7 @@ impl GatewayLifecycle {
             state.set_dashboard_local_mode(
                 dashboard_is_local && !state.has_dashboard_public_listener(),
             );
-            let handle = Self::spawn_prepared(state.clone(), prepared);
+            let handle = Self::spawn_prepared(state.clone(), prepared, compose);
             let port = handle.port;
             let displaced = state.gateway.lock().replace(handle);
             debug_assert!(displaced.is_none());
@@ -347,7 +347,7 @@ impl GatewayLifecycle {
         } else if !had_old_listener && !state.has_dashboard_public_listener() {
             state.set_dashboard_local_mode(true);
         }
-        let handle = Self::spawn_prepared(state.clone(), prepared);
+        let handle = Self::spawn_prepared(state.clone(), prepared, compose);
         let port = handle.port;
         let old_handle = state.gateway.lock().replace(handle);
         let previous_port = old_handle.as_ref().map(|handle| handle.port);

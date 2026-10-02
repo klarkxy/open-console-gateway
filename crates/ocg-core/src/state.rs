@@ -466,6 +466,7 @@ pub struct CoreStateInner {
     gateway_clock: crate::gateway_clock::GatewayClock,
     pub data_dir: PathBuf,
     pub cipher: Arc<dyn KeyCipher + Send + Sync>,
+    router_factory: std::sync::OnceLock<crate::gateway::listener::RouterFactory>,
 }
 
 pub type CoreState = Arc<CoreStateInner>;
@@ -825,7 +826,17 @@ impl CoreStateInner {
             gateway_clock,
             data_dir,
             cipher,
+            router_factory: OnceLock::new(),
         })
+    }
+
+    /// Install this process's HTTP router exactly once.
+    ///
+    /// The factory is stored by function pointer and receives request state as
+    /// an argument, so it cannot capture this `CoreState` and form an `Arc`
+    /// cycle. Later binds and rebinds use the same factory.
+    pub fn set_router_factory(&self, factory: crate::gateway::listener::RouterFactory) -> bool {
+        self.router_factory.set(factory).is_ok()
     }
 
     /// Persist temporary-unavailability rules and install the compiled snapshot
@@ -1024,6 +1035,10 @@ impl CoreStateInner {
             encoded,
             message,
         );
+    }
+
+    pub(crate) fn router_factory(&self) -> Option<crate::gateway::listener::RouterFactory> {
+        self.router_factory.get().copied()
     }
 
     /// One wall+mono pair for a Gateway outer-fallback decision. Production

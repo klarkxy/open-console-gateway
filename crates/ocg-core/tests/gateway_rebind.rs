@@ -34,6 +34,7 @@ fn temp_state(label: &str) -> (PathBuf, CoreState) {
     let db = Database::open(dir.clone()).unwrap();
     let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("rebind-test"));
     let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+    state.set_router_factory(ocg_core::host_router::console_router);
     (dir, state)
 }
 

@@ -51,11 +51,9 @@ fn request_body_limit(value: Option<&str>) -> usize {
     }
 }
 
-pub use listener::set_router_override;
-
 /// Inference routes only: chat, responses, messages, and the model list.
-/// A minimal host installs this through [`set_router_override`] so the
-/// listener never mounts the dashboard.
+/// A minimal host installs this on its process state so the listener never
+/// mounts the dashboard.
 pub fn inference_only_router(state: CoreState) -> Router {
     inference_router(state.clone()).with_state(state)
 }
@@ -99,6 +97,10 @@ pub async fn start_gateway(state: CoreState, port: u16) -> Result<GatewayHandle>
 }
 
 pub async fn start_gateway_on(state: CoreState, addr: SocketAddr) -> Result<GatewayHandle> {
+    // A host that already installed its own factory keeps it. The console
+    // factory is only the library default, so gateway no longer selects the
+    // control-plane composition for every caller.
+    let _installed = state.set_router_factory(crate::host_router::console_router);
     crate::usage_sync::ControlPlaneWorkers::ensure_started(state.clone());
     listener::GatewayLifecycle::bind(state, addr).await
 }

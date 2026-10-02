@@ -55,6 +55,7 @@ async fn install_held_listener(state: &CoreState) -> (u16, oneshot::Receiver<()>
         .expect("held listener should bind");
     let local_addr = listener.local_addr().expect("held listener local address");
     state.set_dashboard_local_mode(true);
+    assert!(state.set_router_factory(ocg_core::host_router::console_router));
     let app = ocg_core::host_router::build_router(state.clone());
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (shutdown_seen_tx, shutdown_seen_rx) = oneshot::channel();

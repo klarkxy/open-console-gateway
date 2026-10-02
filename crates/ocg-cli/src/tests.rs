@@ -1,8 +1,11 @@
 use super::{
-    Cli, Commands, KeyAction, build_state, key_command, ping_keys, resolve_cipher_with,
-    resolve_dashboard_dir, resolve_data_dir, start_serve, status_command, stop_serve,
-    toggle_account,
+    Cli, Commands, KeyAction, attach_api_help, build_state, dispatch_to, key_command,
+    key_command_targeting, ping_keys, resolve_cipher_with, resolve_dashboard_dir, resolve_data_dir,
+    start_serve, status_command, stop_serve, toggle_account,
 };
+use crate::api_cmd::{self, ApiRequest, BodySink};
+use crate::endpoint;
+use crate::listener_owner::{self, Owner};
 use chrono::Utc;
 use clap::{CommandFactory, Parser};
 use ocg_core::browser::browser_profile_paths;
@@ -16,7 +19,7 @@ use ocg_core::provider::{
     OPENCODE_PROVIDER_ID, UpstreamProtocolKind, ZEN_FREE_ACCOUNT_ID,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -38,6 +41,30 @@ fn free_port() -> u16 {
 
 fn test_cipher() -> Arc<dyn KeyCipher + Send + Sync> {
     Arc::new(StaticKeyCipher::new("cli-test-secret"))
+}
+
+#[tokio::test]
+async fn offline_helpers_cannot_open_data_while_the_host_owns_it() {
+    let dir = temp_dir("offline-owner");
+    let owner = crate::serve_lock::ServeLock::acquire(&dir).unwrap();
+    assert!(
+        key_command(dir.clone(), test_cipher(), KeyAction::List)
+            .await
+            .is_err()
+    );
+    assert!(
+        status_command(dir.clone(), test_cipher(), false)
+            .await
+            .is_err()
+    );
+    assert!(!dir.join("data.sqlite").exists());
+    drop(owner);
+    assert!(
+        status_command(dir.clone(), test_cipher(), false)
+            .await
+            .is_ok()
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -204,7 +231,7 @@ async fn key_lifecycle_and_status_cover_cli_account_commands() {
         .await
         .unwrap();
 
-    key_command(
+    let offline_add = key_command(
         dir.clone(),
         cipher.clone(),
         KeyAction::Add {
@@ -215,22 +242,27 @@ async fn key_lifecycle_and_status_cover_cli_account_commands() {
         },
     )
     .await
-    .unwrap();
-
-    key_command(
-        dir.clone(),
-        cipher.clone(),
-        KeyAction::Add {
-            name: "blank-creds".into(),
-            key: "sk-blank".into(),
-            username: Some("   ".into()),
-            password: Some("".into()),
-        },
-    )
-    .await
-    .unwrap();
+    .unwrap_err();
+    assert!(offline_add.to_string().contains("serve"), "{offline_add:#}");
+    assert!(account_named(&dir, cipher.clone(), "main").is_none());
 
     let state = build_state(dir.clone(), cipher.clone()).unwrap();
+    ocg_core::account_control::create_go_api_key(
+        &state,
+        "main".into(),
+        "sk-main".into(),
+        Some("  alice  ".into()),
+        Some("  secret  ".into()),
+    )
+    .unwrap();
+    ocg_core::account_control::create_go_api_key(
+        &state,
+        "blank-creds".into(),
+        "sk-blank".into(),
+        Some("   ".into()),
+        Some("".into()),
+    )
+    .unwrap();
     let accounts = state
         .db
         .lock()
@@ -271,7 +303,7 @@ async fn key_lifecycle_and_status_cover_cli_account_commands() {
         .await
         .unwrap();
 
-    key_command(
+    let refused_disable = key_command(
         dir.clone(),
         cipher.clone(),
         KeyAction::Disable {
@@ -279,11 +311,25 @@ async fn key_lifecycle_and_status_cover_cli_account_commands() {
         },
     )
     .await
-    .unwrap();
+    .unwrap_err();
+    assert!(
+        refused_disable.to_string().contains("serve"),
+        "{refused_disable:#}"
+    );
+    assert!(
+        state
+            .db
+            .lock()
+            .get_account(&main.id)
+            .unwrap()
+            .unwrap()
+            .enabled
+    );
+    toggle_account(&state, &main.id, false).unwrap();
     let disabled = state.db.lock().get_account(&main.id).unwrap().unwrap();
     assert!(!disabled.enabled);
 
-    key_command(
+    let refused_enable = key_command(
         dir.clone(),
         cipher.clone(),
         KeyAction::Enable {
@@ -291,7 +337,21 @@ async fn key_lifecycle_and_status_cover_cli_account_commands() {
         },
     )
     .await
-    .unwrap();
+    .unwrap_err();
+    assert!(
+        refused_enable.to_string().contains("serve"),
+        "{refused_enable:#}"
+    );
+    assert!(
+        !state
+            .db
+            .lock()
+            .get_account(&main.id)
+            .unwrap()
+            .unwrap()
+            .enabled
+    );
+    toggle_account(&state, &main.id, true).unwrap();
     let enabled = state.db.lock().get_account(&main.id).unwrap().unwrap();
     assert!(enabled.enabled);
 
@@ -315,7 +375,7 @@ async fn key_lifecycle_and_status_cover_cli_account_commands() {
         std::fs::write(profile.join("Cookies"), b"session").unwrap();
     }
 
-    key_command(
+    let refused_remove = key_command(
         dir.clone(),
         cipher.clone(),
         KeyAction::Remove {
@@ -323,44 +383,42 @@ async fn key_lifecycle_and_status_cover_cli_account_commands() {
         },
     )
     .await
-    .unwrap();
+    .unwrap_err();
+    assert!(
+        refused_remove.to_string().contains("serve"),
+        "{refused_remove:#}"
+    );
+    assert!(state.db.lock().get_account(&blank.id).unwrap().is_some());
+    ocg_core::account_control::delete_account(&state, &blank.id, None)
+        .await
+        .unwrap();
     assert!(state.db.lock().get_account(&blank.id).unwrap().is_none());
     assert!(blank_profiles.iter().all(|path| !path.exists()));
 
     let pending_profile = browser_profile_paths(&dir, &pending.id).unwrap()[0].clone();
     std::fs::create_dir_all(&pending_profile).unwrap();
     std::fs::write(pending_profile.join("SingletonLock"), b"active").unwrap();
-    let active_profile = key_command(
-        dir.clone(),
-        cipher.clone(),
-        KeyAction::Remove {
-            id: pending.id.clone(),
-        },
-    )
-    .await;
+    let active_profile = ocg_core::account_control::delete_account(&state, &pending.id, None).await;
     assert!(active_profile.is_err());
     assert!(state.db.lock().get_account(&pending.id).unwrap().is_some());
     assert!(pending_profile.exists());
     std::fs::remove_file(pending_profile.join("SingletonLock")).unwrap();
-    key_command(
-        dir.clone(),
-        cipher.clone(),
-        KeyAction::Remove {
-            id: pending.id.clone(),
-        },
-    )
-    .await
-    .unwrap();
+    ocg_core::account_control::delete_account(&state, &pending.id, None)
+        .await
+        .unwrap();
 
-    let missing = key_command(
+    let missing = ocg_core::account_control::delete_account(&state, "missing-id", None).await;
+    assert!(missing.is_err());
+    let missing_cli = key_command(
         dir.clone(),
         cipher.clone(),
         KeyAction::Remove {
             id: "missing-id".into(),
         },
     )
-    .await;
-    assert!(missing.is_err());
+    .await
+    .unwrap_err();
+    assert!(missing_cli.to_string().contains("serve"), "{missing_cli:#}");
 
     let missing_toggle = toggle_account(&state, "missing-id", true);
     assert!(missing_toggle.is_err());
@@ -430,17 +488,13 @@ async fn cli_enable_rejects_unroutable_catalog_plans_without_mutation() {
         assert!(!state.db.lock().get_account(&id).unwrap().unwrap().enabled);
     }
 
-    key_command(
-        dir.clone(),
-        cipher.clone(),
-        KeyAction::Add {
-            name: "go-main".into(),
-            key: "sk-go".into(),
-            username: None,
-            password: None,
-        },
+    ocg_core::account_control::create_go_api_key(
+        &state,
+        "go-main".into(),
+        "sk-go".into(),
+        None,
+        None,
     )
-    .await
     .unwrap();
     let go = state
         .db
@@ -451,20 +505,8 @@ async fn cli_enable_rejects_unroutable_catalog_plans_without_mutation() {
         .find(|account| account.name == "go-main")
         .unwrap();
     assert!(go.enabled);
-    key_command(
-        dir.clone(),
-        cipher.clone(),
-        KeyAction::Disable { id: go.id.clone() },
-    )
-    .await
-    .unwrap();
-    key_command(
-        dir.clone(),
-        cipher.clone(),
-        KeyAction::Enable { id: go.id.clone() },
-    )
-    .await
-    .unwrap();
+    toggle_account(&state, &go.id, false).unwrap();
+    toggle_account(&state, &go.id, true).unwrap();
     assert!(
         state
             .db
@@ -504,18 +546,26 @@ async fn cli_key_operations_reject_the_provider_owned_zen_singleton() {
         KeyAction::Remove {
             id: ZEN_FREE_ACCOUNT_ID.into(),
         },
+    ] {
+        let error = key_command(dir.clone(), cipher.clone(), action)
+            .await
+            .expect_err("offline key writes must not open a second database");
+        assert!(error.to_string().contains("serve"), "{error}");
+        assert!(!error.to_string().contains("Zen Free"), "{error}");
+    }
+    let ping_error = key_command(
+        dir.clone(),
+        cipher.clone(),
         KeyAction::Ping {
             id: Some(ZEN_FREE_ACCOUNT_ID.into()),
             model: "deepseek-v4-flash-free".into(),
             message: "ping".into(),
             max_tokens: 3,
         },
-    ] {
-        let error = key_command(dir.clone(), cipher.clone(), action)
-            .await
-            .expect_err("Zen must not be mutable through CLI key commands");
-        assert!(error.to_string().contains("Zen Free"), "{error}");
-    }
+    )
+    .await
+    .expect_err("Zen must not be pinged through CLI key commands");
+    assert!(ping_error.to_string().contains("Zen Free"), "{ping_error}");
 
     let state_after = build_state(dir.clone(), cipher).unwrap();
     let zen_after = state_after
@@ -567,17 +617,13 @@ async fn ping_keys_hits_configured_upstream_and_handles_empty_targets() {
     config.non_stream_timeout_secs = 5;
     state.set_config(config).unwrap();
 
-    key_command(
-        dir.clone(),
-        cipher.clone(),
-        KeyAction::Add {
-            name: "pingable".into(),
-            key: "sk-ping".into(),
-            username: None,
-            password: None,
-        },
+    ocg_core::account_control::create_go_api_key(
+        &state,
+        "pingable".into(),
+        "sk-ping".into(),
+        None,
+        None,
     )
-    .await
     .unwrap();
     let account_id = state
         .db
@@ -786,6 +832,18 @@ async fn cli_key_mutations_share_control_plane_revision_in_process() {
     .unwrap();
     let revision_after_serve = serving.settings_revision();
 
+    let zen_error = key_command(
+        dir.clone(),
+        cipher.clone(),
+        KeyAction::Enable {
+            id: ZEN_FREE_ACCOUNT_ID.into(),
+        },
+    )
+    .await
+    .expect_err("Zen stays rejected on the live host");
+    assert!(zen_error.to_string().contains("Zen Free"), "{zen_error}");
+    assert_eq!(serving.settings_revision(), revision_after_serve);
+
     key_command(
         dir.clone(),
         cipher.clone(),
@@ -798,12 +856,18 @@ async fn cli_key_mutations_share_control_plane_revision_in_process() {
     )
     .await
     .unwrap();
-    key_command(dir.clone(), cipher.clone(), KeyAction::List)
-        .await
-        .unwrap();
-    status_command(dir.clone(), cipher.clone(), false)
-        .await
-        .unwrap();
+    assert_eq!(serving.settings_revision(), revision_after_serve + 1);
+    let list_while_serving = key_command(dir.clone(), cipher.clone(), KeyAction::List).await;
+    assert!(
+        list_while_serving.is_err(),
+        "key list must fail while serve holds the data directory: {list_while_serving:?}"
+    );
+    let status_while_serving = status_command(dir.clone(), cipher.clone(), false).await;
+    assert!(
+        status_while_serving.is_err(),
+        "status must fail while serve holds the data directory: {status_while_serving:?}"
+    );
+    assert_eq!(serving.settings_revision(), revision_after_serve + 1);
 
     let go = serving
         .db
@@ -812,16 +876,11 @@ async fn cli_key_mutations_share_control_plane_revision_in_process() {
         .unwrap()
         .into_iter()
         .find(|account| account.name == "go-cas")
-        .expect("CLI key add must be visible to the live serve CoreState via SQLite");
+        .expect("HTTP key add must be visible in the serving database");
     assert_eq!(go.provider_id, OPENCODE_PROVIDER_ID);
     assert!(go.enabled);
     assert_eq!(go.setup_step, AccountSetupStep::Ready);
     assert_eq!(go.credential_kind, CredentialKind::ApiKey);
-    assert_eq!(
-        serving.settings_revision(),
-        revision_after_serve,
-        "out-of-process CLI key add/list/status cannot bump another CoreState CAS token"
-    );
 
     key_command(
         dir.clone(),
@@ -837,7 +896,7 @@ async fn cli_key_mutations_share_control_plane_revision_in_process() {
     )
     .await
     .unwrap();
-    assert_eq!(serving.settings_revision(), revision_after_serve);
+    assert_eq!(serving.settings_revision(), revision_after_serve + 3);
     assert!(
         serving
             .db
@@ -849,7 +908,8 @@ async fn cli_key_mutations_share_control_plane_revision_in_process() {
     );
 
     let before_toggle = serving.settings_revision();
-    toggle_account(&serving, &go.id, false).unwrap();
+    let core = serving.core();
+    toggle_account(&core, &go.id, false).unwrap();
     assert!(
         !serving
             .db
@@ -875,17 +935,18 @@ async fn cli_key_mutations_share_control_plane_revision_in_process() {
     assert!(serving.db.lock().get_account(&go.id).unwrap().is_none());
     assert_eq!(
         serving.settings_revision(),
-        before_toggle + 1,
-        "out-of-process CLI key remove cannot bump the live serve CAS token"
+        before_toggle + 2,
+        "HTTP key remove bumps the live serve revision"
     );
 
     stop_serve(&serving).await;
     assert!(serving.gateway.lock().is_none());
     assert_eq!(
         serving.settings_revision(),
-        before_toggle + 1,
+        before_toggle + 2,
         "stop_serve must leave settings_revision untouched"
     );
+    assert!(matches!(listener_owner::inspect(&dir), Owner::Absent));
     assert_eq!(serving.config().gateway_port, port);
 
     let _ = std::fs::remove_dir_all(dir);
@@ -919,7 +980,7 @@ async fn cli_enable_allows_pending_custom_without_verification() {
     assert_eq!(after.status, ConnectionVerificationStatus::Pending);
     assert_eq!(state.settings_revision(), revision + 1);
 
-    key_command(
+    let refused = key_command(
         dir.clone(),
         cipher,
         KeyAction::Disable {
@@ -927,9 +988,10 @@ async fn cli_enable_allows_pending_custom_without_verification() {
         },
     )
     .await
-    .unwrap();
+    .unwrap_err();
+    assert!(refused.to_string().contains("serve"), "{refused:#}");
     assert!(
-        !state
+        state
             .db
             .lock()
             .get_account("cli-custom")
@@ -973,5 +1035,876 @@ fn cli_update_shaped_writes_skip_revision_unlike_dashboard() {
         "renamed"
     );
 
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn dead_pid() -> u32 {
+    let mut command = if cfg!(windows) {
+        std::process::Command::new("cmd")
+    } else {
+        std::process::Command::new("true")
+    };
+    if cfg!(windows) {
+        command.args(["/C", "exit", "0"]);
+    }
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    child.wait().unwrap();
+    pid
+}
+
+fn dashboard_cookie(path: &Path) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    value.get("cookies")?.as_array()?.iter().find_map(|cookie| {
+        if cookie.get("name")?.as_str()? == "ocg_dashboard_session" {
+            let text = cookie.get("value")?.as_str()?;
+            (!text.is_empty()).then(|| text.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn account_named(
+    dir: &Path,
+    cipher: Arc<dyn KeyCipher + Send + Sync>,
+    name: &str,
+) -> Option<Account> {
+    let state = build_state(dir.to_path_buf(), cipher).unwrap();
+    state
+        .db
+        .lock()
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .find(|account| account.name == name)
+}
+
+async fn host_request(
+    endpoint: &str,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+    cas_current: bool,
+    session_file: Option<&Path>,
+) -> Result<(u16, Vec<u8>), api_cmd::ApiFailure> {
+    let mut sink = Vec::new();
+    let success = api_cmd::execute(
+        ApiRequest {
+            endpoint: endpoint.to_string(),
+            method: method.to_string(),
+            path: path.to_string(),
+            body: body.map(|bytes| bytes.to_vec()),
+            cas_current,
+            bearer: None,
+            session_file: session_file.map(Path::to_path_buf),
+        },
+        &mut sink as &mut dyn BodySink,
+    )
+    .await?;
+    Ok((success.status, sink))
+}
+
+#[test]
+fn help_and_endpoint_flags_match_the_live_contract() {
+    let mut command = Cli::command();
+    attach_api_help(&mut command);
+    assert!(command.find_subcommand("api").is_some());
+    assert!(command.find_subcommand("serve").is_some());
+    assert!(command.find_subcommand("schema").is_some());
+    assert!(command.find_subcommand("key").is_some());
+    assert!(command.find_subcommand("status").is_some());
+
+    let explicit = Cli::command()
+        .try_get_matches_from([
+            "ocg-manager-cli",
+            "--endpoint",
+            "http://127.0.0.1:9",
+            "status",
+        ])
+        .unwrap();
+    assert_eq!(
+        explicit.value_source("endpoint"),
+        Some(clap::parser::ValueSource::CommandLine)
+    );
+    let defaulted = Cli::command()
+        .try_get_matches_from(["ocg-manager-cli", "status"])
+        .unwrap();
+    assert_ne!(
+        defaulted.value_source("endpoint"),
+        Some(clap::parser::ValueSource::CommandLine)
+    );
+
+    let parsed = Cli::try_parse_from(["ocg-manager-cli", "schema", "v4"]).unwrap();
+    assert_eq!(parsed.endpoint, endpoint::DEFAULT_ORIGIN);
+
+    let before = Cli::try_parse_from([
+        "ocg-manager-cli",
+        "--endpoint",
+        "http://127.0.0.1:19042",
+        "api",
+        "GET",
+        "/dashboard/api/v4/contract",
+    ])
+    .unwrap();
+    assert_eq!(before.endpoint, "http://127.0.0.1:19042");
+
+    let on_api = Cli::try_parse_from([
+        "ocg-manager-cli",
+        "api",
+        "--endpoint",
+        "http://127.0.0.1:19043",
+        "GET",
+        "/dashboard/api/v4/contract",
+    ])
+    .unwrap();
+    assert_eq!(on_api.endpoint, "http://127.0.0.1:19043");
+}
+
+#[tokio::test]
+async fn api_and_schema_do_not_create_a_data_directory() {
+    let dir = temp_dir("api-no-db");
+    std::fs::remove_dir_all(&dir).unwrap();
+    let schema = Cli::try_parse_from([
+        "ocg-manager-cli",
+        "--data-dir",
+        dir.to_str().unwrap(),
+        "schema",
+        "v4",
+    ])
+    .unwrap();
+    let mut sink = Vec::new();
+    dispatch_to(schema, &mut sink).await.unwrap();
+    assert!(String::from_utf8(sink).unwrap().contains("DashboardApiV4"));
+    assert!(!dir.exists());
+
+    let api = Cli::try_parse_from([
+        "ocg-manager-cli",
+        "--data-dir",
+        dir.to_str().unwrap(),
+        "--endpoint",
+        "http://127.0.0.1:1",
+        "api",
+        "GET",
+        "/dashboard/api/v4/contract",
+    ])
+    .unwrap();
+    let error = dispatch_to(api, &mut Vec::<u8>::new()).await.unwrap_err();
+    let failure = error
+        .downcast_ref::<api_cmd::ApiFailure>()
+        .unwrap_or_else(|| panic!("{error:#}"));
+    assert_eq!(failure.code, "transport");
+    assert!(failure.status.is_none());
+    assert!(!dir.exists());
+}
+
+#[tokio::test]
+async fn loopback_serve_answers_v4_and_a_dead_listener_does_not_own_writes() {
+    let dir = temp_dir("loopback-api");
+    let cipher = test_cipher();
+    let port = free_port();
+    let serving = start_serve(
+        dir.clone(),
+        cipher.clone(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        Some(port),
+        None,
+    )
+    .await
+    .unwrap();
+    let Owner::Live { endpoint } = listener_owner::inspect(&dir) else {
+        panic!("serve must publish a live listener marker");
+    };
+    assert_eq!(endpoint, format!("http://127.0.0.1:{port}"));
+    #[cfg(feature = "dsh-local-host")]
+    {
+        assert!(serving.dsh_application_host().is_some());
+        assert!(serving.byok_application_host().is_some());
+    }
+    #[cfg(not(feature = "dsh-local-host"))]
+    {
+        assert!(serving.dsh_application_host().is_none());
+        assert!(serving.byok_application_host().is_none());
+    }
+    let capabilities = serving.browser.capabilities().await;
+    if crate::native_browser::chromium_executable_available() {
+        assert_eq!(capabilities.mode, ocg_core::browser::BrowserMode::Native);
+    } else {
+        assert_ne!(capabilities.mode, ocg_core::browser::BrowserMode::Native);
+        if capabilities.mode == ocg_core::browser::BrowserMode::Unsupported {
+            assert!(
+                capabilities
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| !reason.is_empty())
+            );
+        }
+    }
+
+    let (status, body) = host_request(
+        &endpoint,
+        "GET",
+        "/dashboard/api/v4/contract",
+        None,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    let contract: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let revision = serving.settings_revision();
+    assert_eq!(contract["revision"].as_u64().unwrap(), revision);
+    assert_eq!(
+        contract["processGeneration"].as_u64().unwrap(),
+        serving.process_generation()
+    );
+
+    let session = dir.join("loopback-session.json");
+    let (status, body) = host_request(
+        &endpoint,
+        "POST",
+        "/dashboard/api/v4/auth/register",
+        Some(br#"{"username":"loop-admin","password":"correct-horse"}"#),
+        true,
+        Some(&session),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 201);
+    let cookie = dashboard_cookie(&session).expect("register stores the session cookie");
+    let text = String::from_utf8(body).unwrap();
+    assert!(!text.contains(&cookie));
+    assert!(!text.contains("correct-horse"));
+    assert_eq!(serving.settings_revision(), revision);
+
+    let (status, _) = host_request(
+        &endpoint,
+        "POST",
+        "/dashboard/api/v4/auth/logout",
+        Some(b"{}"),
+        true,
+        Some(&session),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    assert!(dashboard_cookie(&session).is_none());
+    assert_eq!(serving.settings_revision(), revision);
+
+    let (status, body) = host_request(
+        &endpoint,
+        "POST",
+        "/dashboard/api/v4/auth/login",
+        Some(br#"{"username":"loop-admin","password":"correct-horse"}"#),
+        true,
+        Some(&session),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    let cookie = dashboard_cookie(&session).expect("login stores a new session cookie");
+    assert!(!String::from_utf8(body).unwrap().contains(&cookie));
+    assert_eq!(serving.settings_revision(), revision);
+
+    stop_serve(&serving).await;
+    assert!(matches!(listener_owner::inspect(&dir), Owner::Absent));
+
+    let pid = dead_pid();
+    std::fs::write(
+        listener_owner::path_for(&dir),
+        format!(r#"{{"pid":{pid},"endpoint":"http://127.0.0.1:9"}}"#),
+    )
+    .unwrap();
+    assert!(matches!(listener_owner::inspect(&dir), Owner::Absent));
+    let offline = key_command(
+        dir.clone(),
+        cipher.clone(),
+        KeyAction::Add {
+            name: "offline-go".into(),
+            key: "sk-offline".into(),
+            username: None,
+            password: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(offline.to_string().contains("serve"), "{offline:#}");
+    assert!(account_named(&dir, cipher.clone(), "offline-go").is_none());
+    key_command(dir.clone(), cipher.clone(), KeyAction::List)
+        .await
+        .unwrap();
+
+    std::fs::write(listener_owner::path_for(&dir), b"not-json").unwrap();
+    let invalid = key_command(
+        dir.clone(),
+        cipher.clone(),
+        KeyAction::Add {
+            name: "blocked".into(),
+            key: "sk-blocked".into(),
+            username: None,
+            password: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(invalid.to_string().contains("invalid"), "{invalid:#}");
+    status_command(dir.clone(), cipher.clone(), false)
+        .await
+        .unwrap();
+    assert!(account_named(&dir, cipher.clone(), "blocked").is_none());
+
+    listener_owner::write(&dir, "http://127.0.0.1:1").unwrap();
+    assert!(matches!(listener_owner::inspect(&dir), Owner::Live { .. }));
+    key_command(dir.clone(), cipher.clone(), KeyAction::List)
+        .await
+        .unwrap();
+    let transport = key_command(
+        dir.clone(),
+        cipher.clone(),
+        KeyAction::Add {
+            name: "no-fallback".into(),
+            key: "sk-nofallback".into(),
+            username: None,
+            password: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    let failure = transport
+        .downcast_ref::<api_cmd::ApiFailure>()
+        .unwrap_or_else(|| panic!("{transport:#}"));
+    assert_eq!(failure.code, "transport");
+    assert!(!transport.to_string().contains("sk-nofallback"));
+    assert!(account_named(&dir, cipher.clone(), "no-fallback").is_none());
+    assert!(account_named(&dir, cipher, "offline-go").is_none());
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn failed_bind_leaves_no_listener_marker() {
+    let dir = temp_dir("bind-fail");
+    let listener = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let error = start_serve(
+        dir.clone(),
+        test_cipher(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        Some(port),
+        None,
+    )
+    .await
+    .err()
+    .expect("an occupied port must fail startup");
+    assert!(
+        !listener_owner::path_for(&dir).exists(),
+        "bind failure must not leave a listener marker: {error:#}"
+    );
+    drop(listener);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn public_bind_key_write_requires_a_session_and_restart_rejects_stale_cas() {
+    let dir = temp_dir("public-bind");
+    let cipher = test_cipher();
+    let port = free_port();
+    let serving = start_serve(
+        dir.clone(),
+        cipher.clone(),
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        Some(port),
+        None,
+    )
+    .await
+    .unwrap();
+    let Owner::Live { endpoint } = listener_owner::inspect(&dir) else {
+        panic!("public bind must publish the loopback client origin");
+    };
+    assert_eq!(endpoint, format!("http://127.0.0.1:{port}"));
+    let revision = serving.settings_revision();
+    let secret = "sk-public";
+    let denied = key_command(
+        dir.clone(),
+        cipher.clone(),
+        KeyAction::Add {
+            name: "no-session".into(),
+            key: secret.into(),
+            username: None,
+            password: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    let failure = denied
+        .downcast_ref::<api_cmd::ApiFailure>()
+        .unwrap_or_else(|| panic!("{denied:#}"));
+    assert_eq!(failure.status, Some(401));
+    assert_eq!(failure.code, "unauthorized");
+    assert!(!denied.to_string().contains(secret));
+    assert_eq!(serving.settings_revision(), revision);
+    assert!(
+        serving
+            .db
+            .lock()
+            .list_accounts()
+            .unwrap()
+            .iter()
+            .all(|account| account.name != "no-session")
+    );
+
+    let contract = host_request(
+        &endpoint,
+        "GET",
+        "/dashboard/api/v4/contract",
+        None,
+        false,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(contract.status, Some(401));
+
+    let (status, body) = host_request(
+        &endpoint,
+        "GET",
+        "/dashboard/api/v4/auth/status",
+        None,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    let auth_status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(auth_status["local"], false);
+    assert_eq!(auth_status["initialized"], false);
+    assert_eq!(auth_status["revision"].as_u64().unwrap(), revision);
+    let generation = auth_status["processGeneration"].as_u64().unwrap();
+    assert_eq!(generation, serving.process_generation());
+
+    let session = dir.join("public-session.json");
+    let (status, body) = host_request(
+        &endpoint,
+        "POST",
+        "/dashboard/api/v4/auth/register",
+        Some(br#"{"username":"cli-admin","password":"correct-horse"}"#),
+        true,
+        Some(&session),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 201);
+    assert_eq!(serving.settings_revision(), revision);
+    let cookie = dashboard_cookie(&session).expect("public register stores the cookie");
+    let text = String::from_utf8(body).unwrap();
+    assert!(!text.contains(&cookie));
+    assert!(!text.contains("correct-horse"));
+    let stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&session).unwrap()).unwrap();
+    assert_eq!(stored["endpoint"], endpoint);
+    assert_eq!(stored["version"], 1);
+
+    let (status, body) = host_request(
+        &endpoint,
+        "GET",
+        "/dashboard/api/v4/contract",
+        None,
+        false,
+        Some(&session),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    let contract: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(contract["processGeneration"].as_u64().unwrap(), generation);
+    assert_eq!(contract["revision"].as_u64().unwrap(), revision);
+
+    let create = br#"{"name":"go-live","key":"sk-live"}"#;
+    let (status, body) = host_request(
+        &endpoint,
+        "POST",
+        "/dashboard/api/v4/accounts",
+        Some(create),
+        true,
+        Some(&session),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    let text = String::from_utf8(body.clone()).unwrap();
+    assert!(!text.contains("sk-live"));
+    let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let id = created["account"]["id"].as_str().unwrap().to_string();
+    assert_eq!(created["account"]["name"], "go-live");
+    assert_eq!(created["account"]["enabled"], true);
+    assert!(serving.db.lock().get_account(&id).unwrap().unwrap().enabled);
+    let stale_revision = serving.settings_revision();
+    let stale_generation = serving.process_generation();
+    assert_eq!(stale_revision, revision + 1);
+    assert_eq!(stale_generation, generation);
+
+    stop_serve(&serving).await;
+    let restarted = start_serve(
+        dir.clone(),
+        cipher,
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        Some(port),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_ne!(restarted.process_generation(), stale_generation);
+    let stale = host_request(
+        &endpoint,
+        "GET",
+        "/dashboard/api/v4/contract",
+        None,
+        false,
+        Some(&session),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(stale.status, Some(401));
+    assert_eq!(stale.code, "unauthorized");
+
+    let (status, body) = host_request(
+        &endpoint,
+        "GET",
+        "/dashboard/api/v4/auth/status",
+        None,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    let fresh: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(fresh["initialized"], true);
+    assert_eq!(
+        fresh["processGeneration"].as_u64().unwrap(),
+        restarted.process_generation()
+    );
+    let before_login = restarted.settings_revision();
+    let login = serde_json::json!({
+        "username": "cli-admin",
+        "password": "correct-horse",
+        "expectedRevision": fresh["revision"].as_u64().unwrap(),
+        "processGeneration": fresh["processGeneration"].as_u64().unwrap(),
+    });
+    let (status, body) = host_request(
+        &endpoint,
+        "POST",
+        "/dashboard/api/v4/auth/login",
+        Some(&serde_json::to_vec(&login).unwrap()),
+        true,
+        Some(&session),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(restarted.settings_revision(), before_login);
+    let cookie = dashboard_cookie(&session).expect("login replaces the stale cookie");
+    assert!(!String::from_utf8(body).unwrap().contains(&cookie));
+
+    let patch = serde_json::json!({
+        "enabled": false,
+        "expectedRevision": stale_revision,
+        "processGeneration": stale_generation,
+    });
+    let conflict = host_request(
+        &endpoint,
+        "PATCH",
+        &format!("/dashboard/api/v4/accounts/{id}"),
+        Some(&serde_json::to_vec(&patch).unwrap()),
+        true,
+        Some(&session),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(conflict.status, Some(409));
+    assert_eq!(conflict.code, "revisionConflict");
+    assert_eq!(
+        conflict.current_revision,
+        Some(restarted.settings_revision())
+    );
+    assert_eq!(
+        conflict.process_generation,
+        Some(restarted.process_generation())
+    );
+    assert_eq!(restarted.settings_revision(), before_login);
+    assert!(
+        restarted
+            .db
+            .lock()
+            .get_account(&id)
+            .unwrap()
+            .unwrap()
+            .enabled
+    );
+
+    stop_serve(&restarted).await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn preserved_auth_paths_set_and_clear_the_session_without_cas() {
+    let dir = temp_dir("v2-auth");
+    let port = free_port();
+    let serving = start_serve(
+        dir.clone(),
+        test_cipher(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        Some(port),
+        None,
+    )
+    .await
+    .unwrap();
+    let endpoint = format!("http://127.0.0.1:{port}");
+    let revision = serving.settings_revision();
+    let session = dir.join("v2-session.json");
+    let (status, body) = host_request(
+        &endpoint,
+        "POST",
+        "/dashboard/api/auth/register",
+        Some(br#"{"username":"v2-admin","password":"correct-horse"}"#),
+        false,
+        Some(&session),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 201);
+    assert_eq!(serving.settings_revision(), revision);
+    let cookie = dashboard_cookie(&session).expect("preserved register stores the cookie");
+    let text = String::from_utf8(body).unwrap();
+    assert!(!text.contains(&cookie));
+    assert!(!text.contains("correct-horse"));
+    assert_eq!(text, r#"{"ok":true}"#);
+
+    let (status, body) = host_request(
+        &endpoint,
+        "POST",
+        "/dashboard/api/auth/logout",
+        None,
+        false,
+        Some(&session),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 204);
+    assert!(body.is_empty());
+    assert!(dashboard_cookie(&session).is_none());
+    assert_eq!(serving.settings_revision(), revision);
+
+    stop_serve(&serving).await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn absent_chromium_does_not_force_native_mode() {
+    let dir = temp_dir("no-browser");
+    let state = build_state(dir.clone(), test_cipher()).unwrap();
+    crate::native_browser::register_discovered(&state, false).unwrap();
+    let capabilities = state.browser.capabilities().await;
+    assert_ne!(capabilities.mode, ocg_core::browser::BrowserMode::Native);
+    if capabilities.mode == ocg_core::browser::BrowserMode::Unsupported {
+        assert!(
+            capabilities
+                .reason
+                .as_deref()
+                .is_some_and(|reason| !reason.is_empty())
+        );
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn explicit_endpoint_is_one_request_and_absent_marker_does_not_write() {
+    let dir = temp_dir("explicit-endpoint");
+    let cipher = test_cipher();
+    let absent = key_command(
+        dir.clone(),
+        cipher.clone(),
+        KeyAction::Add {
+            name: "offline-go".into(),
+            key: "sk-offline".into(),
+            username: None,
+            password: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(absent.to_string().contains("serve"), "{absent:#}");
+    assert!(account_named(&dir, cipher.clone(), "offline-go").is_none());
+
+    let transport = key_command_targeting(
+        dir.clone(),
+        cipher.clone(),
+        KeyAction::Add {
+            name: "explicit-go".into(),
+            key: "sk-explicit".into(),
+            username: None,
+            password: None,
+        },
+        "http://127.0.0.1:1",
+        true,
+    )
+    .await
+    .unwrap_err();
+    let failure = transport
+        .downcast_ref::<api_cmd::ApiFailure>()
+        .unwrap_or_else(|| panic!("{transport:#}"));
+    assert_eq!(failure.code, "transport");
+    assert_eq!(failure.exit_code, 1);
+    assert!(!transport.to_string().contains("sk-explicit"));
+    assert!(account_named(&dir, cipher, "explicit-go").is_none());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn second_serve_is_rejected_and_a_foreign_marker_is_left_untouched() {
+    let dir = temp_dir("one-serve");
+    let port = free_port();
+    let first = start_serve(
+        dir.clone(),
+        test_cipher(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        Some(port),
+        None,
+    )
+    .await
+    .unwrap();
+    let second = start_serve(
+        dir.clone(),
+        test_cipher(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        Some(free_port()),
+        None,
+    )
+    .await
+    .err()
+    .expect("a second serve must fail while the first holds the data directory");
+    assert!(
+        second.to_string().contains("did not open the database"),
+        "{second:#}"
+    );
+    assert_eq!(
+        listener_owner::inspect(&dir),
+        Owner::Live {
+            endpoint: format!("http://127.0.0.1:{port}")
+        }
+    );
+    stop_serve(&first).await;
+
+    let foreign_dir = temp_dir("foreign-serve");
+    let mut command = if cfg!(windows) {
+        std::process::Command::new("cmd")
+    } else {
+        std::process::Command::new("sleep")
+    };
+    if cfg!(windows) {
+        command.args(["/C", "ping", "-n", "30", "127.0.0.1"]);
+    } else {
+        command.arg("30");
+    }
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let marker = format!(r#"{{"pid":{pid},"endpoint":"http://127.0.0.1:9"}}"#);
+    std::fs::write(listener_owner::path_for(&foreign_dir), &marker).unwrap();
+    let blocked = start_serve(
+        foreign_dir.clone(),
+        test_cipher(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        Some(9),
+        None,
+    )
+    .await
+    .err()
+    .expect("a live foreign marker must block serve");
+    assert!(
+        blocked.to_string().contains("not an exclusive owner"),
+        "{blocked:#}"
+    );
+    assert!(!foreign_dir.join("data.sqlite").exists());
+    assert_eq!(
+        std::fs::read_to_string(listener_owner::path_for(&foreign_dir)).unwrap(),
+        marker
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(foreign_dir);
+}
+
+#[tokio::test]
+async fn marker_follows_the_rebound_port_for_the_next_write() {
+    let dir = temp_dir("rebind-marker");
+    let cipher = test_cipher();
+    let port = free_port();
+    let mut next = free_port();
+    if next == port {
+        next = free_port();
+    }
+    let serving = start_serve(
+        dir.clone(),
+        cipher.clone(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        Some(port),
+        None,
+    )
+    .await
+    .unwrap();
+    let core = serving.core();
+    core.rebind_gateway_listener_if_port_changed(port, next, true)
+        .await
+        .unwrap();
+    let expected = format!("http://127.0.0.1:{next}");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Owner::Live { endpoint } = listener_owner::inspect(&dir)
+            && endpoint == expected
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "listener marker was not updated from the bound port"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    key_command(
+        dir.clone(),
+        cipher,
+        KeyAction::Add {
+            name: "rebound".into(),
+            key: "sk-rebound".into(),
+            username: None,
+            password: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        serving
+            .db
+            .lock()
+            .list_accounts()
+            .unwrap()
+            .iter()
+            .any(|account| account.name == "rebound")
+    );
+    stop_serve(&serving).await;
+    assert!(matches!(listener_owner::inspect(&dir), Owner::Absent));
     let _ = std::fs::remove_dir_all(dir);
 }

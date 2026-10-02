@@ -124,6 +124,14 @@ async fn require_local_dashboard_authority(
     next.run(req).await
 }
 
+/// Complete console composition for a library host.
+///
+/// The function receives request state as an argument and does not capture a
+/// `CoreState`, so storing its pointer cannot form an `Arc` cycle.
+pub fn console_router(state: CoreState) -> Router {
+    <CoreState as GatewayRouterHost>::compose_router(state)
+}
+
 impl GatewayRouterHost for CoreState {
     /// Axum assembly used by the listener. Defined here so `gateway` does not
     /// import dashboard mounts.

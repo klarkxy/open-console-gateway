@@ -29,6 +29,7 @@ fn loopback_ephemeral() -> std::net::SocketAddr {
 #[tokio::test]
 async fn bind_does_not_start_usage_loop() {
     let (dir, state) = test_state("bind-no-loop");
+    state.set_router_factory(crate::host_router::console_router);
     assert!(!usage_loop_started(&state));
 
     let first =
@@ -69,6 +70,7 @@ async fn bind_does_not_start_usage_loop() {
 #[tokio::test]
 async fn spawn_usage_sync_loop_starts_once_per_core_state() {
     let (dir, state) = test_state("once-loop");
+    state.set_router_factory(crate::host_router::console_router);
     assert!(!usage_loop_started(&state));
     spawn_usage_sync_loop(state.clone());
     assert!(usage_loop_started(&state));
@@ -118,6 +120,7 @@ async fn spawn_usage_sync_loop_starts_once_per_core_state() {
 #[tokio::test]
 async fn start_gateway_on_starts_usage_loop_and_stop_does_not_clear_it() {
     let (dir, state) = test_state("compat-start-loop");
+    state.set_router_factory(crate::host_router::console_router);
     assert!(!usage_loop_started(&state));
     let handle = crate::gateway::start_gateway_on(state.clone(), loopback_ephemeral())
         .await
@@ -149,6 +152,7 @@ async fn start_gateway_on_starts_usage_loop_and_stop_does_not_clear_it() {
 #[tokio::test]
 async fn rebind_does_not_start_usage_loop() {
     let (dir, state) = test_state("rebind-no-loop");
+    state.set_router_factory(crate::host_router::console_router);
     assert!(!usage_loop_started(&state));
 
     let first =
@@ -200,6 +204,7 @@ async fn rebind_does_not_start_usage_loop() {
 #[tokio::test]
 async fn rebind_keeps_started_usage_loop_without_duplicate() {
     let (dir, state) = test_state("rebind-keep-loop");
+    state.set_router_factory(crate::host_router::console_router);
     assert!(!usage_loop_started(&state));
     let handle = crate::gateway::start_gateway_on(state.clone(), loopback_ephemeral())
         .await
@@ -257,6 +262,7 @@ async fn rebind_keeps_started_usage_loop_without_duplicate() {
 #[tokio::test]
 async fn settings_port_rebind_keeps_started_usage_loop() {
     let (dir, state) = test_state("settings-rebind-loop");
+    state.set_router_factory(crate::host_router::console_router);
     let handle = crate::gateway::start_gateway_on(state.clone(), loopback_ephemeral())
         .await
         .unwrap();
@@ -473,6 +479,7 @@ fn sample_snapshot() -> GoUsageSnapshot {
 #[tokio::test]
 async fn manual_throttle_and_dedupe_share_one_upstream_call() {
     let (dir, state) = test_state("throttle-dedupe");
+    state.set_router_factory(crate::host_router::console_router);
     let account = ready_account(&state, "acc-1", "sk-acc-1");
     state.db.lock().create_account(&account).unwrap();
 
@@ -732,6 +739,7 @@ async fn stale_guarded_follower_cannot_veto_background_owned_inflight_result() {
 #[tokio::test]
 async fn failure_preserves_last_success_and_calibration() {
     let (dir, state) = test_state("failure-preserve");
+    state.set_router_factory(crate::host_router::console_router);
     let account = ready_account(&state, "acc-2", "sk-acc-2");
     state.db.lock().create_account(&account).unwrap();
     let now = fixed("2026-08-18T12:00:00Z");
@@ -809,6 +817,7 @@ async fn failure_preserves_last_success_and_calibration() {
 #[tokio::test]
 async fn key_cas_leaves_windows_unchanged_when_account_changes() {
     let (dir, state) = test_state("cas");
+    state.set_router_factory(crate::host_router::console_router);
     let account = ready_account(&state, "acc-3", "sk-acc-3");
     state.db.lock().create_account(&account).unwrap();
     let limits = state.pricing_snapshot().limits.clone();
@@ -900,6 +909,7 @@ async fn key_cas_leaves_windows_unchanged_when_account_changes() {
 #[tokio::test]
 async fn official_rate_limited_status_does_not_write_cooldown() {
     let (dir, state) = test_state("official-rate-limited");
+    state.set_router_factory(crate::host_router::console_router);
     let account = ready_account(&state, "acc-4", "sk-acc-4");
     state.db.lock().create_account(&account).unwrap();
     let now = fixed("2026-08-18T12:00:00Z");
@@ -1073,6 +1083,7 @@ fn seed_high_usage(state: &CoreState, account_id: &str) {
 #[tokio::test]
 async fn failed_expedited_sync_stays_in_backoff_across_scheduler_scans() {
     let (dir, state) = test_state("expedite-backoff");
+    state.set_router_factory(crate::host_router::console_router);
     let account = ready_account(&state, "hi", "sk-hi");
     state.db.lock().create_account(&account).unwrap();
     let now = fixed("2026-08-18T12:00:00Z");
@@ -1144,6 +1155,7 @@ async fn failed_expedited_sync_stays_in_backoff_across_scheduler_scans() {
 #[tokio::test]
 async fn successful_high_usage_retry_is_not_immediately_re_expedited() {
     let (dir, state) = test_state("no-reexpedite");
+    state.set_router_factory(crate::host_router::console_router);
     let account = ready_account(&state, "hi2", "sk-hi2");
     state.db.lock().create_account(&account).unwrap();
     // Usage-window reads use the production clock, so keep this integration
@@ -1260,6 +1272,7 @@ fn take_inflight_if_generation_ignores_stale_waiters() {
 #[tokio::test]
 async fn stale_waiter_does_not_drop_newer_inflight_generation() {
     let (dir, state) = test_state("inflight-gen");
+    state.set_router_factory(crate::host_router::console_router);
     let account = ready_account(&state, "gen", "sk-gen");
     state.db.lock().create_account(&account).unwrap();
     let now = fixed("2026-08-18T12:00:00Z");
@@ -1370,6 +1383,7 @@ async fn stale_waiter_does_not_drop_newer_inflight_generation() {
 #[tokio::test]
 async fn decrypt_internal_failure_records_backoff_not_busy_loop() {
     let (dir, state) = test_state("decrypt-fail");
+    state.set_router_factory(crate::host_router::console_router);
     let mut account = ready_account(&state, "bad", "sk-bad");
     // Store ciphertext the StaticKeyCipher cannot decrypt.
     account.key_cipher = "not-a-valid-cipher".into();
@@ -1415,6 +1429,7 @@ async fn decrypt_internal_failure_records_backoff_not_busy_loop() {
 #[test]
 fn inactive_to_active_pulls_hourly_without_overriding_failure_backoff() {
     let (dir, state) = test_state("inactive-active");
+    state.set_router_factory(crate::host_router::console_router);
     let account = ready_account(&state, "wake", "sk-wake");
     state.db.lock().create_account(&account).unwrap();
     let now = fixed("2026-08-18T12:00:00Z");
@@ -1500,6 +1515,7 @@ fn inactive_to_active_pulls_hourly_without_overriding_failure_backoff() {
 #[tokio::test]
 async fn goat_key_windows_are_independent_and_usage_failure_is_fail_soft() {
     let (dir, state) = test_state("goat-independent");
+    state.set_router_factory(crate::host_router::console_router);
     let mut first = ready_account(&state, "goat-a", "goat-key-a");
     first.provider_id = COMMAND_CODE_PROVIDER_ID.to_string();
     first.enabled = false;
@@ -1902,6 +1918,7 @@ async fn usage_sync_host_loop_exits_when_the_host_is_dropped() {
 #[tokio::test]
 async fn authoritative_usage_replaces_exhaustion_but_preserves_temporary_cooldown() {
     let (dir, state) = test_state("official-quota-evidence");
+    state.set_router_factory(crate::host_router::console_router);
     let mut account = ready_account(&state, "official-quota", "test-key");
     let now = Utc::now();
     account.cooldown_generic_until = Some(now + Duration::seconds(120));
@@ -1972,6 +1989,7 @@ async fn authoritative_usage_replaces_exhaustion_but_preserves_temporary_cooldow
 #[tokio::test]
 async fn changed_credential_version_with_same_cipher_rejects_usage_write() {
     let (dir, state) = test_state("official-version-guard");
+    state.set_router_factory(crate::host_router::console_router);
     let account = ready_account(&state, "version-guard", "same-key");
     state.db.lock().create_account(&account).unwrap();
     let before = state
@@ -2014,6 +2032,7 @@ async fn changed_credential_version_with_same_cipher_rejects_usage_write() {
 #[test]
 fn first_reactive_attempt_creates_throttle_metadata_without_a_success() {
     let (dir, state) = test_state("reactive-attempt-row");
+    state.set_router_factory(crate::host_router::console_router);
     let account = ready_account(&state, "first-reactive", "test-key");
     state.db.lock().create_account(&account).unwrap();
     let now = Utc::now();

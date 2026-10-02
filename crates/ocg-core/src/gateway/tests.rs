@@ -9,6 +9,63 @@ use std::fs;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+#[tokio::test]
+async fn installed_router_factory_is_instance_local() {
+    let inference_dir = std::env::temp_dir().join(format!(
+        "ocg-router-factory-inference-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let console_dir = std::env::temp_dir().join(format!(
+        "ocg-router-factory-console-{}",
+        uuid::Uuid::new_v4()
+    ));
+    fs::create_dir_all(&inference_dir).unwrap();
+    fs::create_dir_all(&console_dir).unwrap();
+    let db = Database::open(inference_dir.clone()).unwrap();
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("router-factory"));
+    let inference =
+        Arc::new(CoreStateInner::new(db, inference_dir.clone(), cipher.clone()).unwrap());
+    assert!(inference.set_router_factory(super::inference_only_router));
+    let console_db = Database::open(console_dir.clone()).unwrap();
+    let console = Arc::new(CoreStateInner::new(console_db, console_dir.clone(), cipher).unwrap());
+
+    let inference_handle =
+        start_gateway_on(inference.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+    let console_handle = start_gateway_on(console.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let inference_status = client
+        .get(format!(
+            "http://127.0.0.1:{}/dashboard/api/v4/contract",
+            inference_handle.port
+        ))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    let console_status = client
+        .get(format!(
+            "http://127.0.0.1:{}/dashboard/api/v4/contract",
+            console_handle.port
+        ))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(inference_status, StatusCode::NOT_FOUND);
+    assert_ne!(console_status, StatusCode::NOT_FOUND);
+
+    super::stop_gateway_and_wait(inference_handle).await;
+    super::stop_gateway_and_wait(console_handle).await;
+    drop(inference);
+    drop(console);
+    fs::remove_dir_all(inference_dir).unwrap();
+    fs::remove_dir_all(console_dir).unwrap();
+}
+
 #[test]
 fn gateway_request_body_limit_configuration() {
     assert_eq!(request_body_limit(None), 64 * 1024 * 1024);
