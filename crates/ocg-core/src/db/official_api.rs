@@ -11,7 +11,7 @@ impl Database {
         kind: OfficialApiKind,
     ) -> Result<OfficialPriceSheet> {
         match self.latest_provider_pricing_snapshot(provider)? {
-            None => Ok(official_api::pricing::seed(kind)),
+            None => anyhow::bail!("official pricing is retired"),
             Some(row) => {
                 let sheet: OfficialPriceSheet = serde_json::from_str(&row.snapshot_json)?;
                 anyhow::ensure!(

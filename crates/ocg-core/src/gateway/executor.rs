@@ -21,7 +21,6 @@ use crate::gateway::routing::resolve_conversation_key;
 use crate::gateway::attempt::UpstreamAuth;
 use crate::gateway::recovery::{ResourceSet, restriction_endpoint_identity};
 use crate::http_client::{ForwardRouteSet, RouteLabel};
-use crate::kernel::pricing::PricingSnapshot;
 use crate::kernel::protocol::ApiFormat;
 use crate::models::AppConfig;
 use crate::state::CoreState;
@@ -29,6 +28,7 @@ use axum::body::Bytes;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use ocg_gateway::selector::SelectionError;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 const MAX_REQUEST_ATTEMPTS: u32 = 32;
@@ -44,11 +44,61 @@ fn request_budget_duration(config: &AppConfig, stream: bool) -> Duration {
     )
 }
 
+/// Permute materialized routes into the live credential order.
+///
+/// Request entry freezes route identity from the published preparation.
+/// `reorder_accounts` updates `routing_rank` without bumping that generation,
+/// so selection has to walk the order stored now. Routes that share an account
+/// keep their original relative order. A route whose account is absent from
+/// the live snapshot sorts after every live credential.
+fn live_route_order(
+    routes: &[crate::gateway::materialize::ExecutionRoute],
+    credentials: &[crate::routing_snapshot::ExecutionCredential],
+) -> Vec<usize> {
+    order_indexes_by_ids(
+        routes.iter().map(|route| route.routing.account.id.as_str()),
+        credentials.iter().map(|credential| credential.id.as_str()),
+    )
+}
+
+fn order_indexes_by_ids<'a>(
+    route_ids: impl Iterator<Item = &'a str>,
+    credential_ids: impl Iterator<Item = &'a str>,
+) -> Vec<usize> {
+    let route_ids = route_ids.collect::<Vec<_>>();
+    let mut position = HashMap::<&str, usize>::with_capacity(route_ids.len());
+    for (index, id) in credential_ids.enumerate() {
+        position.entry(id).or_insert(index);
+    }
+    let mut order = (0..route_ids.len()).collect::<Vec<_>>();
+    order.sort_by_key(|&route_index| {
+        (
+            position
+                .get(route_ids[route_index])
+                .copied()
+                .unwrap_or(usize::MAX),
+            route_index,
+        )
+    });
+    order
+}
+
+/// Authorization and decrypt both compare the selection with the live row.
+/// Copy the identity fields that can change without a preparation republish.
+fn align_selection_with_account(
+    selection: &mut LiveSendSelection,
+    account: &crate::routing_snapshot::ExecutionCredential,
+) {
+    selection.credential_id = Some(account.credential_id.clone());
+    selection.binding_id = account.binding_id.clone();
+    selection.credential_version = account.credential_version;
+    selection.key_cipher = account.key_cipher.clone();
+}
+
 /// Process-state values frozen at request entry. Live credential availability
 /// and authorization are reread before every dispatch.
 pub(crate) struct RequestSnapshots {
     config: AppConfig,
-    pricing: Arc<PricingSnapshot>,
     routes: Arc<ForwardRouteSet>,
     resolved: alias::ResolvedModel,
     cpa_base_url: Option<String>,
@@ -56,9 +106,11 @@ pub(crate) struct RequestSnapshots {
 }
 
 impl RequestSnapshots {
+    /// Freezes the rest of the preparation view from the published aggregate.
+    /// Every field comes from one `Arc`, so routing, config, and routes are
+    /// the same generation.
     fn capture(
-        state: &CoreState,
-        config: AppConfig,
+        preparation: &crate::state::GatewayPreparationSnapshot,
         resolved: alias::ResolvedModel,
         routing: crate::routing_snapshot::RoutingSnapshot,
     ) -> anyhow::Result<Self> {
@@ -71,9 +123,8 @@ impl RequestSnapshots {
                 .and_then(|d| d.base_url.clone())
         });
         Ok(Self {
-            config,
-            pricing: state.pricing_snapshot(),
-            routes: state.forward_route_set(),
+            config: preparation.config().clone(),
+            routes: preparation.routes(),
             resolved,
             cpa_base_url,
             routing,
@@ -116,12 +167,18 @@ impl GatewayExecutor {
         routing_model: String,
         client_key_id: Option<String>,
     ) -> Response {
-        let (snapshots, facts, route_set, prices) = {
-            // Publish settings, catalog, credentials, route and pricing identities
-            // as one preparation phase. No guard crosses upstream I/O.
-            let _settings_update = state.settings_update.lock();
-            let routing = match crate::routing_snapshot::RoutingSnapshot::load(&state.db.lock()) {
-                Ok(routing) => routing,
+        let (snapshots, facts, route_set) = {
+            // Alias resolution and proxy transport stay on one published
+            // generation. Each attempt keeps that generation's destinations
+            // and rebuilds account routes from the live credential list, so
+            // rank, Key, and accounts created after the last republish are
+            // visible without letting a mid-request catalog publish drop the
+            // alias this request already resolved. Ordinary preparation takes
+            // no `settings_update`: a writer republishes the whole view with
+            // one Arc swap, so the read lock below is held for an Arc clone
+            // and nothing else. No guard crosses upstream I/O.
+            let preparation = match state.gateway_preparation() {
+                Ok(preparation) => preparation,
                 Err(error) => {
                     return protocol_error_response(
                         client_format,
@@ -131,6 +188,7 @@ impl GatewayExecutor {
                     );
                 }
             };
+            let routing = preparation.routing().clone();
             let catalog = crate::gateway::handler::RuntimeCatalogSnapshot::from_routing(
                 routing,
                 state.sample_gateway_clock().0,
@@ -148,12 +206,8 @@ impl GatewayExecutor {
                     );
                 }
             };
-            let snapshots = match RequestSnapshots::capture(
-                &state,
-                state.config(),
-                resolved,
-                catalog.routing,
-            ) {
+            let snapshots = match RequestSnapshots::capture(&preparation, resolved, catalog.routing)
+            {
                 Ok(snapshots) => snapshots,
                 Err(error) => {
                     return protocol_error_response(
@@ -213,20 +267,7 @@ impl GatewayExecutor {
                     Some(&client_body),
                 );
             }
-            let prices = route_set
-                .routes
-                .iter()
-                .map(|route| {
-                    crate::gateway::attempt_pricing::capture_execution_pricing(
-                        &state,
-                        &route.routing.account,
-                        route.routing.adapter,
-                        &route.plan,
-                        snapshots.pricing.clone(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            (snapshots, facts, route_set, prices)
+            (snapshots, facts, route_set)
         };
         let mut loop_state = LoopState::new();
         let conversation_key = if snapshots.config.conversation_sticky {
@@ -319,23 +360,63 @@ impl GatewayExecutor {
                 let probes = state.quota_probes.lock();
                 live.apply_quota_probes(&probes);
             }
-            let mut live_authorization_error = None;
-            let routing_candidates = route_set
+            // Catalog, protocols, and destination identity stay on the entry
+            // snapshot. Credential membership, order, and Key come from `live`.
+            let mut routing = snapshots.routing.clone();
+            routing.credentials = live.credentials.clone();
+            routing.ollama_pinned = live.ollama_pinned.clone();
+            let route_set = match materialize_execution_routes(
+                &routing,
+                &snapshots.config,
+                &parsed,
+                &snapshots.resolved,
+                &client_model,
+                &routing_model,
+                snapshots.cpa_base_url.as_deref(),
+            ) {
+                Ok(routes) => routes,
+                Err(error) => {
+                    return local_protocol_failure(
+                        &state,
+                        &trace,
+                        client_format,
+                        error,
+                        Some(client_body.len()),
+                        Some(&client_body),
+                    );
+                }
+            };
+            let prices = route_set
                 .routes
                 .iter()
                 .map(|route| {
+                    crate::gateway::attempt_pricing::capture_execution_pricing(
+                        &state,
+                        &route.routing.account,
+                        route.routing.adapter,
+                        &route.plan,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut live_authorization_error = None;
+            let route_order = live_route_order(&route_set.routes, &live.credentials);
+            let routing_candidates = route_order
+                .iter()
+                .map(|&route_index| {
+                    let route = &route_set.routes[route_index];
                     let mut candidate = route.routing.clone();
+                    let mut selection =
+                        LiveSendSelection::from_execution(route, &client_model, &routing_model);
                     if let Some(current) = live
                         .credentials
                         .iter()
-                        .find(|c| c.id == candidate.account.id)
+                        .find(|credential| credential.id == candidate.account.id)
                     {
                         candidate.account = current.clone();
+                        align_selection_with_account(&mut selection, &candidate.account);
                     } else {
                         candidate.account.enabled = false;
                     }
-                    let selection =
-                        LiveSendSelection::from_execution(route, &client_model, &routing_model);
                     if let Err(error) = crate::gateway::forwarder::verify_execution_authorization(
                         &live,
                         &selection,
@@ -538,8 +619,8 @@ impl GatewayExecutor {
                     return protocol_error_response(client_format, status, &message, None);
                 }
             };
-            let route = match route_set.routes.get(selected_index).cloned() {
-                Some(route) => route,
+            let route_index = match route_order.get(selected_index).copied() {
+                Some(index) => index,
                 None => {
                     let (status, message) =
                         routing_selector_invariant(SelectorInvariant::CandidateIndexOutOfRange {
@@ -559,6 +640,8 @@ impl GatewayExecutor {
                     return protocol_error_response(client_format, status, &message, None);
                 }
             };
+            let mut route = route_set.routes[route_index].clone();
+            route.routing.account = routing_candidates[selected_index].account.clone();
             let selection =
                 LiveSendSelection::from_execution(&route, &client_model, &routing_model);
             if let Ok(resources) = capture_route_resources(&live, &route, &snapshots)
@@ -579,7 +662,7 @@ impl GatewayExecutor {
                     &client_body,
                     loop_state.attempt,
                     client_key_id.as_deref(),
-                    &prices[selected_index],
+                    &prices[route_index],
                     &wait,
                 );
                 loop_state.last_error = Some(
@@ -650,7 +733,7 @@ impl GatewayExecutor {
                     loop_state.attempt,
                     !retried_same_account,
                     headers.clone(),
-                    prices[selected_index].clone(),
+                    prices[route_index].clone(),
                     client_key_id.as_deref(),
                     &frozen_spec,
                     &selection,

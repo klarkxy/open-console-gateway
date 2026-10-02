@@ -5,24 +5,16 @@ use crate::gateway::attempt_pricing::{
 use crate::kernel::pricing::PricingSnapshot;
 
 fn install_test_credits(state: &CoreState, account: &Account) {
-    use crate::billing_types::{CreditBucket, CreditBucketKind, CreditConfiguration, CreditRate};
+    use crate::billing_types::{CreditBucket, CreditBucketKind, CreditConfigurationWrite};
     let now = Utc::now();
     let db = state.db.lock();
     let tx = db.conn.unchecked_transaction().unwrap();
     crate::db::billing::configure_on(
         &tx,
         &account.id,
-        CreditConfiguration {
+        CreditConfigurationWrite {
             name: "test credits".into(),
             currency: "CNY".into(),
-            credits_per_currency: 1_000_000.0,
-            rates: vec![CreditRate {
-                model: "local-custom".into(),
-                input_per_million: 10.0,
-                output_per_million: 20.0,
-                cache_read_per_million: Some(2.0),
-                cache_write_per_million: Some(10.0),
-            }],
             monthly: None,
             source_url: None,
         },
@@ -113,28 +105,27 @@ async fn credits_json_and_sse_settle_one_native_receipt_and_survive_reopen() {
         let view = test_credit_view(&state);
         assert_eq!(view.pending_requests, 0, "{stream}");
         assert_eq!(view.unpriced_requests, 0, "{stream}");
-        // Check the normalized groups actually persisted, including cache-write support.
+        assert!((view.remaining - 100_000_000.0).abs() < 1e-6, "{stream}");
         let db = state.db.lock();
         let logs = db.list_forward_logs(10).unwrap();
         assert_eq!(logs.len(), 1, "{stream}: {logs:?}");
         let log = &logs[0];
-        let expected = ocg_domain::billing::token_charge(
-            ocg_domain::billing::BillingTokens::new(
-                log.prompt_tokens,
-                log.completion_tokens,
-                log.cached_tokens,
-                log.cache_creation_tokens,
-            ),
-            ocg_domain::billing::TokenRates::per_million(10.0, 20.0, Some(2.0), Some(10.0)),
-        )
-        .unwrap()
-            * 1_000_000.0;
-        assert!(expected > 10_000_000.0 && expected < 13_000_000.0);
-        assert!((view.remaining - (100_000_000.0 - expected)).abs() < 1e-6);
+        assert_eq!(log.prompt_tokens, 1_000_000, "{stream}");
+        assert_eq!(log.completion_tokens, 100_000, "{stream}");
+        assert_eq!(log.cached_tokens, 200_000, "{stream}");
+        assert_eq!(log.cache_creation_tokens, 0, "{stream}");
+        assert_eq!(log.status, "success", "{stream}");
+        assert_eq!(log.cost_state, "unknown", "{stream}");
+        assert!(log.cost.is_none(), "{stream}");
+        assert!(log.pricing_revision_id.is_none(), "{stream}");
+        assert!(
+            log.raw_cost_usd.is_none() && log.quota_debit.is_none(),
+            "{stream}"
+        );
         let native = db.forward_log_native_attribution(log.id).unwrap().unwrap();
-        assert_eq!(native.native_cost_unit.as_deref(), Some("credits"));
-        assert_eq!(native.native_cost_value, Some(expected));
-        assert!(log.raw_cost_usd.is_none() && log.quota_debit.is_none());
+        assert_eq!(native.native_cost_unit, None, "{stream}");
+        assert_eq!(native.native_cost_value, None, "{stream}");
+        assert_eq!(native.native_cost_currency, None, "{stream}");
         drop(db);
         let remaining = view.remaining;
         drop(state);
@@ -181,16 +172,15 @@ async fn credits_cancelled_before_headers_keeps_uncertainty_and_releases_calibra
         result = &mut future => panic!("request completed before fixture signal: {:?}", result.error_message),
         result = tokio::time::timeout(StdDuration::from_secs(10), received.notified()) => result.unwrap(),
     }
-    assert_eq!(test_credit_view(&state).pending_requests, 1);
-    assert!(
-        crate::db::billing::calibrate_on(&state.db.lock().conn, ACCOUNT, &[], Utc::now()).is_err()
-    );
+    assert_eq!(test_credit_view(&state).pending_requests, 0);
+    assert_eq!(test_credit_view(&state).unpriced_requests, 0);
+    crate::db::billing::calibrate_on(&state.db.lock().conn, ACCOUNT, &[], Utc::now())
+        .expect("an in-flight request no longer holds a credit receipt");
     drop(future);
     let view = test_credit_view(&state);
     assert_eq!(view.pending_requests, 0);
-    assert_eq!(view.unpriced_requests, 1);
+    assert_eq!(view.unpriced_requests, 0);
     assert_eq!(view.remaining, 100_000_000.0);
-    assert_eq!(state.db.lock().list_forward_logs(10).unwrap().len(), 1);
     server.abort();
     drop(state);
     let _ = fs::remove_dir_all(dir);
@@ -210,13 +200,15 @@ fn credits_startup_recovers_an_abandoned_pre_send_receipt_once() {
         Utc::now(),
     )
     .unwrap();
+    let attempt = context.credit_attempt.clone().unwrap();
     let pricing = RequestPricingSnapshot::Credits {
-        attempt: context.credit_attempt.clone().unwrap(),
+        attempt: attempt.clone(),
         provider_id: CUSTOM_PROVIDER_ID.into(),
         revision: "credit-estimate:fixture".into(),
         token_pricing_supported: true,
     };
-    DbAttemptSink::new(&state.db.lock())
+    let db = state.db.lock();
+    let log_id = DbAttemptSink::new(&db)
         .insert(
             &(&account).into(),
             "local-custom",
@@ -228,7 +220,9 @@ fn credits_startup_recovers_an_abandoned_pre_send_receipt_once() {
             None,
         )
         .unwrap();
-    assert_eq!(test_credit_view(&state).pending_requests, 1);
+    crate::db::billing::attach_attempt_on(&db.conn, log_id, &attempt).unwrap();
+    drop(db);
+    assert_eq!(test_credit_view(&state).pending_requests, 0);
     drop(state);
     for _ in 0..2 {
         let db = Database::open(dir.clone()).unwrap();
@@ -236,7 +230,7 @@ fn credits_startup_recovers_an_abandoned_pre_send_receipt_once() {
             .unwrap()
             .unwrap();
         assert_eq!(view.pending_requests, 0);
-        assert_eq!(view.unpriced_requests, 1);
+        assert_eq!(view.unpriced_requests, 0);
         assert_eq!(view.remaining, 100_000_000.0);
         drop(db);
     }
@@ -609,12 +603,7 @@ fn frozen_exact_model_and_group_writes_native_cost_without_usd() {
     metrics.scope_to_provider(Some(CUSTOM_PROVIDER_ID), true);
     assert_eq!(metrics.cost_state, "unknown");
     assert_usd_and_quota_null(&metrics);
-    assert!(
-        metrics
-            .pricing_revision_id
-            .as_deref()
-            .is_some_and(|id| id.contains(PARENT) && id.contains(UPSTREAM) && id.contains(GROUP))
-    );
+    assert_eq!(metrics.pricing_revision_id, None);
 
     let id = persist_priced_row(&state, &account, &pricing, &context, 10, 5, 0, 0);
     let log = state.db.lock().list_forward_logs(1).unwrap().remove(0);
@@ -629,9 +618,9 @@ fn frozen_exact_model_and_group_writes_native_cost_without_usd() {
         .forward_log_native_attribution(id)
         .unwrap()
         .unwrap();
-    assert!((native.native_cost_value.unwrap() - (10.0 * 0.002 + 5.0 * 0.008)).abs() < 1e-12);
-    assert_eq!(native.native_cost_unit.as_deref(), Some("CNY"));
-    assert_eq!(native.native_cost_currency.as_deref(), Some("CNY"));
+    assert_eq!(native.native_cost_value, None);
+    assert_eq!(native.native_cost_unit, None);
+    assert_eq!(native.native_cost_currency, None);
     drop(state);
     let _ = fs::remove_dir_all(dir);
 }
@@ -654,8 +643,7 @@ fn cache_arithmetic_applies_only_when_rates_are_known() {
         .forward_log_native_attribution(id)
         .unwrap()
         .unwrap();
-    let expected = 5.0 * 0.002 + 2.0 * 0.008 + 4.0 * 0.001 + 1.0 * 0.003;
-    assert!((native.native_cost_value.unwrap() - expected).abs() < 1e-12);
+    assert_eq!(native.native_cost_value, None);
     drop(state);
     let _ = fs::remove_dir_all(dir);
 }
@@ -784,7 +772,7 @@ fn linked_unknown_does_not_inherit_go_provider_prices() {
     official.official_reference = true;
     link_with_snapshot(&state, pinned_group(), snapshot(vec![official], false));
     let (pricing, _) = bind_for(&state, &account, UPSTREAM);
-    assert!(matches!(pricing, RequestPricingSnapshot::Platform(_)));
+    assert!(matches!(pricing, RequestPricingSnapshot::Unpriced));
     let mut metrics = pricing_metrics(&pricing, "gpt-5", 1_000_000, 1_000_000, 0, 0, None);
     metrics.scope_to_provider(Some(CUSTOM_PROVIDER_ID), true);
     assert_eq!(metrics.cost_state, "unknown");
@@ -861,7 +849,7 @@ fn streaming_finalize_retains_the_attempt_frozen_price() {
         .forward_log_native_attribution(id)
         .unwrap()
         .unwrap();
-    assert!((native.native_cost_value.unwrap() - (10.0 * 0.002 + 5.0 * 0.008)).abs() < 1e-12);
+    assert_eq!(native.native_cost_value, None);
     let log = state.db.lock().list_forward_logs(1).unwrap().remove(0);
     assert_eq!(log.raw_cost_usd, None);
     assert_eq!(log.quota_debit, None);
@@ -912,8 +900,8 @@ fn fallback_attempt_rebinds_from_the_live_link_snapshot() {
         .forward_log_native_attribution(second_id)
         .unwrap()
         .unwrap();
-    assert!((first_native.native_cost_value.unwrap() - 0.02).abs() < 1e-12);
-    assert!((second_native.native_cost_value.unwrap() - 0.50).abs() < 1e-12);
+    assert_eq!(first_native.native_cost_value, None);
+    assert_eq!(second_native.native_cost_value, None);
     drop(state);
     let _ = fs::remove_dir_all(dir);
 }
@@ -1009,13 +997,12 @@ fn o05_fallback_from_a_to_b_keeps_each_attempts_native_rate() {
         .forward_log_native_attribution(id_b)
         .unwrap()
         .unwrap();
-    assert!((native_a.native_cost_value.unwrap() - (10.0 * 0.002 + 5.0 * 0.008)).abs() < 1e-12);
-    assert_eq!(native_a.native_cost_currency.as_deref(), Some("CNY"));
-    assert_eq!(native_a.native_cost_unit.as_deref(), Some("CNY"));
-    assert!((native_b.native_cost_value.unwrap() - (10.0 * 0.01 + 5.0 * 0.03)).abs() < 1e-12);
-    assert_eq!(native_b.native_cost_currency.as_deref(), Some("USD"));
-    assert_eq!(native_b.native_cost_unit.as_deref(), Some("USD"));
-    assert_ne!(native_a.native_cost_currency, native_b.native_cost_currency);
+    assert_eq!(native_a.native_cost_value, None);
+    assert_eq!(native_a.native_cost_currency, None);
+    assert_eq!(native_a.native_cost_unit, None);
+    assert_eq!(native_b.native_cost_value, None);
+    assert_eq!(native_b.native_cost_currency, None);
+    assert_eq!(native_b.native_cost_unit, None);
     drop(state);
     let _ = fs::remove_dir_all(dir);
 }
@@ -1434,6 +1421,317 @@ async fn r06_granted_same_origin_custom_sends_once() {
     let result = forward_once(&state, &account, &plan, &selection, &[]).await;
     assert_eq!(hits.load(Ordering::SeqCst), 1, "{:?}", result.error_message);
     let _ = stop_tx.send(());
+    drop(state);
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// Pre-send confirmation with no quota trial pending re-authorizes against live
+/// rows only, so it must not wait for the global `settings_update` gate. The
+/// gate is a writer lock; ordinary traffic may not queue behind dashboard
+/// writes.
+#[test]
+fn confirm_execution_send_authorizes_while_the_settings_gate_is_held() {
+    let (dir, state) = test_state("confirm-fast-path");
+    let endpoint = "https://example.test/v1/chat/completions";
+    let mut config = state.config();
+    config.proxy_mode = ProxyMode::Direct;
+    state.set_config(config).unwrap();
+    let account = custom_account(&state);
+    persist_custom_at(&state, &account, endpoint);
+    grant_binding(
+        &state,
+        &account.id,
+        &[RouteSpec {
+            operation: EndpointOperation::ChatCreate,
+            url: Some(endpoint.into()),
+        }],
+        LegacyConnectionKind::CustomAccount,
+        &account.id,
+    );
+    let plan = chat_plan("local-custom", Some(endpoint));
+    let selection = live_send_selection(&state, &account, &plan);
+    let spec = selection
+        .attempt_spec
+        .clone()
+        .expect("a routed fixture must carry the attempt spec it was built from");
+
+    let worker_state = Arc::clone(&state);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        // Hold the control-plane gate on this thread, then confirm the send.
+        // An implementation that acquires `settings_update` before deciding
+        // whether a quota trial is needed self-deadlocks here, because
+        // `settings_update` is not reentrant. The receive timeout below turns
+        // that regression into an ordinary failure instead of a hung suite.
+        let _gate = worker_state.settings_update.lock();
+        let outcome = super::live_send::confirm_execution_send(&worker_state, &selection, &spec);
+        let _ = tx.send(outcome.map(|episode| episode.is_some()));
+    });
+
+    match rx.recv_timeout(StdDuration::from_secs(10)) {
+        Ok(Ok(trial_started)) => {
+            worker
+                .join()
+                .expect("the confirmation thread should finish");
+            assert!(
+                !trial_started,
+                "no quota recovery is pending, so confirmation must not start a trial"
+            );
+        }
+        Ok(Err(error)) => panic!("an unchanged routed selection must still authorize: {error:?}"),
+        // Deliberately not joining: a regression leaves that thread blocked on
+        // the gate forever, and joining it would hang the suite instead.
+        Err(_) => panic!(
+            "confirm_execution_send blocked on settings_update: the no-trial fast path must not take the gate"
+        ),
+    }
+
+    drop(state);
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// The `next_retry_at` one published generation carries for a credential.
+fn published_retry_at(
+    aggregate: &crate::state::GatewayPreparationSnapshot,
+    account_id: &str,
+) -> chrono::DateTime<chrono::Utc> {
+    aggregate
+        .routing()
+        .credentials
+        .iter()
+        .find(|credential| credential.id == account_id)
+        .expect("the fixture credential should be in the published routing rows")
+        .quota_recovery
+        .as_ref()
+        .expect("the fixture starts in quota recovery")
+        .next_retry_at
+}
+
+/// A confirmed quota-trial send mutates routing state (`quota_recovery_json`),
+/// advances the revision, and republishes — and that publish belongs to the
+/// production entry, not to a test standing in for it. Stamping the aggregate
+/// before the bump would leave it one revision behind, so every later request
+/// would pay a gated drift rebuild for a trial the send path already had in hand.
+///
+/// The teeth are the gate. `confirm_execution_send` publishes before it
+/// returns, so the very next read is already current and completes on the fast
+/// path while another thread holds `settings_update`. Delete the republish from
+/// the `QuotaAcquire::Trial` arm — revision bumped, nothing published — and the
+/// same read blocks on the gate, which the timeout below turns into a failure
+/// instead of a hung suite.
+#[test]
+fn a_confirmed_trial_send_publishes_the_preparation_aggregate() {
+    let endpoint = "https://example.test/v1/chat/completions";
+    let (dir, state) = test_state("trial-publish");
+    let mut config = state.config();
+    config.proxy_mode = ProxyMode::Direct;
+    state.set_config(config).unwrap();
+    let account = custom_account(&state);
+    persist_granted_custom(&state, &account, endpoint);
+    seed_due_recovery(&state, &account.id);
+    let plan = chat_plan("local-custom", Some(endpoint));
+    let selection = live_send_selection(&state, &account, &plan);
+    let spec = selection
+        .attempt_spec
+        .clone()
+        .expect("a routed fixture must carry the attempt spec it was built from");
+
+    // The fixture writes its rows directly, which is not a wired writer. Publish
+    // once so the starting aggregate genuinely carries the due recovery.
+    {
+        let _settings_update = state.settings_update.lock();
+        let db = state.db.lock();
+        state
+            .publish_gateway_preparation(&db)
+            .expect("the fixture should publish");
+    }
+    let before = state
+        .gateway_preparation()
+        .expect("the aggregate should publish");
+    assert_eq!(before.revision(), state.settings_revision());
+    let ready_at = published_retry_at(&before, &account.id);
+
+    let episode = super::live_send::confirm_execution_send(&state, &selection, &spec)
+        .expect("a due recovery must still authorize the send")
+        .expect("a due recovery must start a trial");
+    assert_eq!(episode.account_id, account.id);
+    assert!(
+        state.settings_revision() > before.revision(),
+        "starting a trial advances the revision"
+    );
+
+    let worker_state = Arc::clone(&state);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let _gate = worker_state.settings_update.lock();
+        let aggregate = worker_state
+            .gateway_preparation()
+            .expect("the aggregate should publish");
+        let _ = tx.send(aggregate.revision());
+    });
+    let published_revision = rx
+        .recv_timeout(StdDuration::from_secs(10))
+        // Deliberately not joining on the timeout path: a regression leaves that
+        // thread blocked on the gate forever, and joining it would hang the suite.
+        .unwrap_or_else(|_| {
+            panic!(
+                "a confirmed trial send must publish the preparation aggregate: \
+                 the next read waited for the settings gate over a generation the send path already had"
+            )
+        });
+    worker.join().expect("the reading thread should finish");
+    assert_eq!(
+        published_revision,
+        state.settings_revision(),
+        "the publish must stamp the post-bump revision, or the next reader rebuilds for nothing"
+    );
+
+    let after = state
+        .gateway_preparation()
+        .expect("the aggregate should publish");
+    assert!(
+        Arc::ptr_eq(&after, &state.gateway_preparation().unwrap()),
+        "a send path that published correctly leaves later reads on the fast path"
+    );
+    assert!(
+        published_retry_at(&after, &account.id) > ready_at,
+        "the published rows must carry the trial's crash-safe retry, not the pre-trial generation"
+    );
+
+    drop(state);
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// The `auth_error` a request path writes is an admission gate inside
+/// `RoutingSnapshot`. If that write never invalidates the published preparation
+/// aggregate, a key the upstream just rejected stays selectable — and, because
+/// nothing else on this path advances the revision, it stays selectable for the
+/// life of the process.
+///
+/// This pins the write as the forwarder performs it. Without the revision bump
+/// the aggregate still matches the (unchanged) revision, so the read below
+/// takes the fast path and serves the pre-401 credential.
+#[test]
+fn an_upstream_401_reaches_the_next_preparation_read() {
+    let (dir, state) = test_state("auth-error-invalidation");
+    let account = custom_account(&state);
+    persist_custom_at(&state, &account, "https://example.test/v1/chat/completions");
+
+    // The fixture writes its rows directly, which is not a wired writer. Publish
+    // once so the starting aggregate genuinely contains this credential with no
+    // auth error, rather than merely lacking it.
+    {
+        let _settings_update = state.settings_update.lock();
+        let db = state.db.lock();
+        state
+            .publish_gateway_preparation(&db)
+            .expect("the fixture should publish");
+    }
+
+    let before = state
+        .gateway_preparation()
+        .expect("the aggregate should publish");
+    let credential = before
+        .routing()
+        .credentials
+        .iter()
+        .find(|credential| credential.id == account.id)
+        .expect("the fixture credential should be in the published routing rows");
+    assert_eq!(
+        credential.auth_error, None,
+        "the fixture starts healthy, so a failure below can only come from the write"
+    );
+
+    {
+        let db = state.db.lock();
+        super::record_upstream_auth_error(
+            &state,
+            &db,
+            &account.id,
+            &account.key_cipher,
+            "upstream account error 401: bad key",
+        )
+        .expect("a current-key 401 should record");
+    }
+
+    let after = state
+        .gateway_preparation()
+        .expect("the aggregate should rebuild");
+    let credential = after
+        .routing()
+        .credentials
+        .iter()
+        .find(|credential| credential.id == account.id)
+        .expect("the fixture credential should still be in the published routing rows");
+    assert_eq!(
+        credential.auth_error.as_deref(),
+        Some("upstream account error 401: bad key"),
+        "a key the upstream rejected must leave the routing set, not stay selectable"
+    );
+    assert_eq!(
+        after.revision(),
+        state.settings_revision(),
+        "the rebuild must land on the current revision so later reads stay on the fast path"
+    );
+
+    drop(state);
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// The bump is conditional on the guarded write landing. A late 401 for a key
+/// that has since been rotated writes no row, so it must not invalidate the
+/// aggregate either — otherwise every stale response would hand every later
+/// request a rebuild for a no-op.
+#[test]
+fn a_stale_key_401_leaves_the_preparation_aggregate_alone() {
+    let (dir, state) = test_state("auth-error-stale-key");
+    let account = custom_account(&state);
+    persist_custom_at(&state, &account, "https://example.test/v1/chat/completions");
+    {
+        let _settings_update = state.settings_update.lock();
+        let db = state.db.lock();
+        state
+            .publish_gateway_preparation(&db)
+            .expect("the fixture should publish");
+    }
+
+    let before = state
+        .gateway_preparation()
+        .expect("the aggregate should publish");
+    let revision = state.settings_revision();
+
+    {
+        let db = state.db.lock();
+        super::record_upstream_auth_error(
+            &state,
+            &db,
+            &account.id,
+            "cipher-of-a-key-that-was-already-replaced",
+            "late 401 from the replaced key",
+        )
+        .expect("a stale-key 401 is a no-op, not a failure");
+    }
+
+    assert_eq!(
+        state.settings_revision(),
+        revision,
+        "a write that matched no row must not invalidate the published aggregate"
+    );
+    let after = state
+        .gateway_preparation()
+        .expect("the aggregate should publish");
+    assert!(
+        Arc::ptr_eq(&before, &after),
+        "without a bump there is no drift, so the reader must keep the same generation"
+    );
+    let credential = after
+        .routing()
+        .credentials
+        .iter()
+        .find(|credential| credential.id == account.id)
+        .expect("the fixture credential should be in the published routing rows");
+    assert_eq!(credential.auth_error, None);
+
     drop(state);
     let _ = fs::remove_dir_all(dir);
 }
@@ -2151,11 +2449,9 @@ fn official_api_attempt_pricing_is_native_frozen_and_never_attaches_to_foreign_r
         let metrics = pricing_metrics(&price, model, 1000, 1000, 0, 0, None);
         assert_eq!(metrics.quota_debit, None);
         assert_eq!(metrics.effective_paid_cost_usd, None);
-        if currency == "CNY" {
-            assert_eq!(metrics.raw_cost_usd, None);
-        } else {
-            assert_eq!(metrics.raw_cost_usd, Some(amount));
-        }
+        assert_eq!(metrics.raw_cost_usd, None);
+        assert_eq!(metrics.cost_state, "unknown");
+        let _ = (currency, amount);
         let mut context = attempt_context(model);
         context.provider_id = Some(runtime.id.clone());
         context.official_price = Some(frozen.clone());
@@ -2177,8 +2473,8 @@ fn official_api_attempt_pricing_is_native_frozen_and_never_attaches_to_foreign_r
             .forward_log_native_attribution(id)
             .unwrap()
             .unwrap();
-        assert!((native.native_cost_value.unwrap() - amount).abs() < 1e-12);
-        assert_eq!(native.native_cost_currency.as_deref(), Some(currency));
+        assert_eq!(native.native_cost_value, None);
+        assert_eq!(native.native_cost_currency, None);
         // Finalizing a stream keeps the captured prices, not a later sheet.
         DbAttemptSink::new(&state.db.lock())
             .finalize(id, "success", Some(200), metrics, None, None, &context)
@@ -2191,7 +2487,7 @@ fn official_api_attempt_pricing_is_native_frozen_and_never_attaches_to_foreign_r
                 .unwrap()
                 .unwrap()
                 .native_cost_value,
-            Some(amount)
+            None
         );
         let mut positive = attempt_context(model);
         let bound = bind_official_attempt_price(
@@ -2201,9 +2497,9 @@ fn official_api_attempt_pricing_is_native_frozen_and_never_attaches_to_foreign_r
             std::slice::from_ref(&runtime),
             RequestPricingSnapshot::Unpriced,
         );
-        assert!(matches!(bound, RequestPricingSnapshot::OfficialApi(_)));
+        assert!(matches!(bound, RequestPricingSnapshot::Unpriced));
         positive.attach_pricing(&bound);
-        assert!(positive.official_price.is_some());
+        assert!(positive.official_price.is_none());
         for endpoint in [
             "https://attacker.test/chat/completions",
             "http://127.0.0.1:9/chat/completions",
@@ -2303,7 +2599,7 @@ async fn forward_request(
         plan,
     )
     .unwrap();
-    let pricing = capture_execution_pricing(state, &execution, adapter, plan, pricing);
+    let pricing = capture_execution_pricing(state, &execution, adapter, plan);
     super::forward_request(
         client,
         route,
@@ -3499,7 +3795,7 @@ async fn metered_malformed_accepted_json_stays_uncertain_without_replay() {
     assert_eq!(hits.load(Ordering::SeqCst), 1);
     let view = test_credit_view(&state);
     assert_eq!(view.pending_requests, 0);
-    assert_eq!(view.unpriced_requests, 1);
+    assert_eq!(view.unpriced_requests, 0);
     assert_eq!(view.remaining, 100_000_000.0);
     let logs = state.db.lock().list_forward_logs(10).unwrap();
     assert_eq!(logs.len(), 1);

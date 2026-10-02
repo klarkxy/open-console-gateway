@@ -75,14 +75,10 @@ import type {
   ModelProtocolOverridesUpdate,
   MutationAck,
   MutationExpectation,
-  PricingMultipliersUpdate,
   ProtocolProbeRequest,
   ProtocolProbeResponse,
   ProviderCatalog,
   ProviderContracts,
-  ProviderPricing,
-  ProviderPricingRefresh,
-  ProviderPricingRefreshUpdate,
   ProviderUsage,
   ProxyTestRequest,
   ProxyTestResponse,
@@ -105,9 +101,19 @@ import type {
  * Every non-2xx response uses the stable `V3Error` envelope
  * (`{ code, message, currentRevision, processGeneration }`); the transport
  * below maps it onto typed errors so callers can branch on 401 / 409 / 410 /
- * 429 without re-parsing bodies. Control-plane identity tokens observed on
- * any response are forwarded to the registered revision sink (the
- * controlPlane store) so later mutations always start from fresh CAS tokens.
+ * 429 without re-parsing bodies. Settings CAS tokens (`revision` and
+ * `processGeneration`) observed on a response are forwarded to the
+ * registered revision sink so later mutations start from those tokens.
+ * Publication is withheld when the body still names the process captured
+ * at dispatch after a different process became current, and when an
+ * unbound response would replace an already observed process. 401 and 410
+ * global events use the same captured origin. A 401 whose process is still
+ * current fires before the body is read; a changed process rechecks the
+ * live getter after the envelope is parsed. A 410 samples the current
+ * process after its body is parsed and before this response publishes
+ * tokens. After a process change, the envelope must name the process
+ * current at that sample. Replacing the sink suppresses both. The caller
+ * still receives the original body or error.
  */
 
 export const DASHBOARD_AUTH_REQUIRED_EVENT = "ocg-dashboard-auth-required";
@@ -124,46 +130,109 @@ export const PRIMARY_KEY_ID = "00000000-0000-0000-0000-000000000001";
 /** Sentinel selecting forward logs without client key attribution. */
 export const UNATTRIBUTED_KEY_FILTER = "__unattributed__";
 
-/** Control-plane identity tokens carried by (almost) every V3 payload. */
+/** Settings CAS revision and backend process generation. */
 export interface ControlPlaneTokens {
   revision: number;
   processGeneration: number;
-  pricingRevision?: string | null;
 }
 
 type ControlRevisionSink = (tokens: ControlPlaneTokens) => void;
+/** Reads the process the Pinia owner currently holds. Transport never writes through it. */
+type ControlProcessGetter = () => number | null;
 
 let controlRevisionSink: ControlRevisionSink | null = null;
+let controlProcessGetter: ControlProcessGetter | null = null;
 let controlRevisionEpoch = 0;
 
-/** Registered once by the controlPlane store; replaced when a new Pinia activates. */
-export function setControlRevisionSink(sink: ControlRevisionSink | null): void {
+/**
+ * Registered once by the controlPlane store; replaced when a new Pinia activates.
+ * `currentProcess` is optional. Replacing the sink clears a getter the new
+ * registration does not supply, and bumps the epoch so earlier responses
+ * cannot publish into the new session.
+ */
+export function setControlRevisionSink(
+  sink: ControlRevisionSink | null,
+  currentProcess?: ControlProcessGetter | null,
+): void {
   controlRevisionEpoch += 1;
   controlRevisionSink = sink;
+  controlProcessGetter = currentProcess ?? null;
 }
 
-function publishTokens(body: unknown, epoch: number): void {
-  if (epoch !== controlRevisionEpoch) return;
-  if (!controlRevisionSink || typeof body !== "object" || body === null) return;
+function observedProcess(): number | null {
+  const value = controlProcessGetter?.();
+  return typeof value === "number" ? value : null;
+}
+
+function readControlTokens(body: unknown): ControlPlaneTokens | null {
+  if (typeof body !== "object" || body === null) return null;
   const record = body as Record<string, unknown>;
   if (typeof record.revision === "number" && typeof record.processGeneration === "number") {
-    controlRevisionSink({
-      revision: record.revision,
-      processGeneration: record.processGeneration,
-      pricingRevision: typeof record.pricingRevision === "string" ? record.pricingRevision : null,
-    });
-    return;
+    return { revision: record.revision, processGeneration: record.processGeneration };
   }
   // V4 listings/commits nest `{ revision: ControlRevision }`.
   const nested = record.revision;
-  if (typeof nested !== "object" || nested === null) return;
+  if (typeof nested !== "object" || nested === null) return null;
   const nestedRecord = nested as Record<string, unknown>;
-  if (typeof nestedRecord.revision !== "number" || typeof nestedRecord.processGeneration !== "number") return;
-  controlRevisionSink({
-    revision: nestedRecord.revision,
-    processGeneration: nestedRecord.processGeneration,
-    pricingRevision: typeof nestedRecord.pricingRevision === "string" ? nestedRecord.pricingRevision : null,
-  });
+  if (typeof nestedRecord.revision !== "number" || typeof nestedRecord.processGeneration !== "number") return null;
+  return { revision: nestedRecord.revision, processGeneration: nestedRecord.processGeneration };
+}
+
+/**
+ * Process ids are equal or not; they are not ordered.
+ *
+ * `origin` is the process at dispatch, or null when none was loaded.
+ * `current` is the process at publication.
+ * Withhold a response that names `origin` after `current` has become a
+ * different process. Withhold an unbound response that names some process
+ * other than an already observed `current`. Publish when the response names
+ * `current`, when it names a process other than a left-behind origin, or
+ * when nothing is current yet. Same-process revision order stays in the store.
+ */
+function mayPublishControlTokens(
+  origin: number | null,
+  current: number | null,
+  incoming: number,
+): boolean {
+  if (origin !== null && current !== null && current !== origin && incoming === origin) return false;
+  if (origin === null && current !== null && incoming !== current) return false;
+  return true;
+}
+
+function publishTokens(body: unknown, epoch: number, origin: number | null): void {
+  if (epoch !== controlRevisionEpoch || !controlRevisionSink) return;
+  const tokens = readControlTokens(body);
+  if (!tokens) return;
+  if (!mayPublishControlTokens(origin, observedProcess(), tokens.processGeneration)) return;
+  controlRevisionSink(tokens);
+}
+
+/**
+ * 401 and 410 notifications. Process ids are equal or not; they are not ordered.
+ * A replaced sink never notifies. An unchanged dispatch process notifies
+ * without consulting the envelope. After the process changes, the envelope
+ * must name the process current at notification time.
+ */
+function mayEmitDashboardSignal(
+  epoch: number,
+  origin: number | null,
+  current: number | null,
+  incoming: number | null,
+): boolean {
+  if (epoch !== controlRevisionEpoch) return false;
+  if (origin === current) return true;
+  return current !== null && incoming === current;
+}
+
+async function errorEnvelopeProcess(response: Response): Promise<number | null> {
+  const responseText = await response.text().catch(() => "");
+  if (!responseText) return null;
+  try {
+    const body = JSON.parse(responseText) as { processGeneration?: unknown };
+    return typeof body.processGeneration === "number" ? body.processGeneration : null;
+  } catch {
+    return null;
+  }
 }
 
 export class DashboardAuthError extends Error {
@@ -282,7 +351,10 @@ export async function requestDashboard<T>(
 ): Promise<T> {
   // Resetting the session also replaces the revision sink. A receipt or 401
   // from an earlier session must not alter the newly authenticated session.
+  // The process is captured here, before the request leaves, so a later
+  // response can be recognized as referring back to that origin.
   const epoch = controlRevisionEpoch;
+  const originProcess = observedProcess();
   const headers = new Headers(init.headers);
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
@@ -295,8 +367,16 @@ export async function requestDashboard<T>(
   if (!response.ok) {
     if (response.status === 401 && notifyAuthRequired) {
       const message = t("登录已失效，重新登录");
-      if (epoch === controlRevisionEpoch) {
+      // Unchanged context notifies before any body read. A changed context
+      // parses the envelope, then rechecks the live process.
+      const signalProcess = observedProcess();
+      if (mayEmitDashboardSignal(epoch, originProcess, signalProcess, null)) {
         window.dispatchEvent(new CustomEvent(DASHBOARD_AUTH_REQUIRED_EVENT, { detail: message }));
+      } else if (epoch === controlRevisionEpoch) {
+        const incoming = await errorEnvelopeProcess(response);
+        if (mayEmitDashboardSignal(epoch, originProcess, observedProcess(), incoming)) {
+          window.dispatchEvent(new CustomEvent(DASHBOARD_AUTH_REQUIRED_EVENT, { detail: message }));
+        }
       }
       throw new DashboardAuthError(message);
     }
@@ -313,8 +393,12 @@ export async function requestDashboard<T>(
     }
     const currentRevision = typeof body?.currentRevision === "number" ? body.currentRevision : null;
     const processGeneration = typeof body?.processGeneration === "number" ? body.processGeneration : null;
+    // After the body is known, before this response can publish. A 410 must
+    // not notify from the process seen on the headers, or from a process it
+    // is about to install itself.
+    const signalProcess = observedProcess();
     if (currentRevision !== null && processGeneration !== null) {
-      publishTokens({ revision: currentRevision, processGeneration }, epoch);
+      publishTokens({ revision: currentRevision, processGeneration }, epoch, originProcess);
     }
     const retryAfterHeader = response.headers.get("Retry-After");
     const retryAfterSeconds = retryAfterHeader && /^\d+$/.test(retryAfterHeader)
@@ -326,7 +410,7 @@ export async function requestDashboard<T>(
     }
     if (response.status === 410) {
       const error = new DashboardGoneError(message, path, currentRevision, processGeneration);
-      if (epoch === controlRevisionEpoch) {
+      if (mayEmitDashboardSignal(epoch, originProcess, signalProcess, processGeneration)) {
         window.dispatchEvent(new CustomEvent(DASHBOARD_GONE_EVENT, {
           detail: { message: error.message, guidance: error.guidance, path },
         }));
@@ -349,7 +433,7 @@ export async function requestDashboard<T>(
   }
   if (response.status === 204) return undefined as T;
   const body = await response.json() as T;
-  publishTokens(body, epoch);
+  publishTokens(body, epoch, originProcess);
   return body;
 }
 
@@ -596,29 +680,6 @@ export const dashboardV3 = {
       method: "POST",
       body: withExpectation({ expectedVersion } satisfies WithoutExpectation<InstallUpdate>, expectation),
     }),
-
-  // --- pricing ---
-  refreshProviderPricing: (
-    providerId: string,
-    refresh: WithoutExpectation<ProviderPricingRefreshUpdate>,
-    expectation: MutationExpectation,
-  ) => requestV3<ProviderPricingRefresh>(`/providers/${encode(providerId)}/pricing/refresh`, {
-    method: "POST",
-    body: withExpectation(refresh, expectation),
-  }),
-  putProviderPricingMultipliers: (
-    providerId: string,
-    update: WithoutExpectation<PricingMultipliersUpdate>,
-    expectation: MutationExpectation,
-  ) => requestV3<ProviderPricing>(
-    `/providers/${encode(providerId)}/pricing/multipliers`,
-    {
-      method: "PUT",
-      body: withExpectation(update, expectation),
-    },
-  ),
-  getProviderPricing: (providerId: string) =>
-    requestV3<ProviderPricing>(`/providers/${encode(providerId)}/pricing`),
 
   // --- accounts ---
   listAccounts: () => requestV3<AccountList>("/account-records"),

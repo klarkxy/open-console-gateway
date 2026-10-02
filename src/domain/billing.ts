@@ -1,19 +1,21 @@
-import type { UsageWindow } from "../api/dashboard.ts";
 import type {
   BillingModel,
   BillingSource,
   BillingStatus,
   CreditBalanceCorrection,
   CreditBucket,
-  CreditConfiguration,
+  CreditConfigurationWrite,
   CreditMeterView,
   CreditPreset,
-  CreditRate,
   MonthlyCredits,
   ProviderUsage,
 } from "../api/billing.ts";
-import { presentProviderUsage, type ProviderUsageResponse } from "../api/providers.ts";
-import type { UsageKey } from "./accounts-usage.ts";
+import {
+  presentProviderUsage,
+  type ProviderQuotaWindow,
+  type ProviderUsageResponse,
+} from "../api/providers.ts";
+import type { ObservedUsageWindow, UsageKey } from "./accounts-usage.ts";
 import type { MessageKey } from "../i18n/index.ts";
 
 export const CHINA_OFFSET_MINUTES = 480;
@@ -73,6 +75,30 @@ const WINDOW_KIND: Record<UsageKey, string> = {
   window_week: "week",
   window_month: "month",
 };
+
+/**
+ * One acknowledged percent window. It is not a billing status: no cash,
+ * credit, CAS, provider, or sync metadata, and no copied migration offset.
+ */
+export interface ManualQuotaWindow {
+  windowKind: string;
+  used: number;
+  limitValue: 100;
+  unit: "percent";
+  source: "manual";
+  observedAt: string;
+  resetsAt: string | null;
+  updatedAt: string;
+}
+
+/** Quota-only receipt for one binding. Missing kinds stay absent, not zero. */
+export interface ManualQuotaReceipt {
+  windows: ManualQuotaWindow[];
+}
+
+export interface QuotaWindowsView {
+  quota_windows: ProviderQuotaWindow[];
+}
 
 export function billingBinding(accountVersion: string, endpointUrl: string | null | undefined): string {
   return `${accountVersion}\0${endpointUrl ?? ""}`;
@@ -260,8 +286,7 @@ export function cashRefreshKind(status: BillingStatus): CashRefreshKind {
 export function billingManualCalibration(status: BillingStatus): boolean {
   if (!status.manualCalibration) return false;
   if (status.credits) return false;
-  if (status.model === "quota") return true;
-  return usdCreditMonthWindow(status.usage);
+  return true;
 }
 
 export type CreditCalibrationBlock = "pending";
@@ -278,55 +303,199 @@ export function presentedUsageOf(status: BillingStatus | null | undefined): Prov
   return status?.usage ? presentProviderUsage(status.usage) : null;
 }
 
-export function usageWindowFromProviderUsage(
-  usage: ProviderUsage | null | undefined,
-  accountId: string,
-): UsageWindow {
-  const blank: UsageWindow = {
+function observedPercent(used: number | null | undefined): number | null {
+  return typeof used === "number" && Number.isFinite(used) ? used : null;
+}
+
+function blankObserved(accountId: string): ObservedUsageWindow {
+  return {
     account_id: accountId,
-    window_5h: 0,
-    window_week: 0,
-    window_month: 0,
+    window_5h: null,
+    window_week: null,
+    window_month: null,
     resets_in_5h: null,
     resets_in_week: null,
     resets_in_month: null,
   };
-  if (!usage) return blank;
+}
+
+function quotaKindMatches(actual: string, kind: string): boolean {
+  return actual === kind || (kind === "month" && actual === "monthly");
+}
+
+function acknowledgedManualWindow(
+  key: UsageKey,
+  window: ObservedUsageWindow,
+): { used: number; resetsAt: string | null; kind: string } | null {
+  const used = observedPercent(window[key]);
+  if (used === null) return null;
+  const resetsAt = key === "window_5h"
+    ? window.resets_in_5h
+    : key === "window_week"
+      ? window.resets_in_week
+      : window.resets_in_month;
+  return { used, resetsAt, kind: WINDOW_KIND[key] };
+}
+
+function manualQuotaWindow(
+  kind: string,
+  used: number,
+  resetsAt: string | null,
+  updatedAt: string,
+): ManualQuotaWindow {
+  return {
+    windowKind: kind,
+    used,
+    limitValue: 100,
+    unit: "percent",
+    source: "manual",
+    observedAt: updatedAt,
+    resetsAt,
+    updatedAt,
+  };
+}
+
+export function usageWindowFromProviderUsage(
+  usage: ProviderUsage | null | undefined,
+  accountId: string,
+): ObservedUsageWindow {
+  if (!usage) return blankObserved(accountId);
   const byKind = new Map(usage.quotaWindows.map((window) => [window.windowKind, window]));
   const five = byKind.get("five_hours");
   const week = byKind.get("week");
   const month = byKind.get("month") ?? byKind.get("monthly");
   return {
     account_id: usage.accountId || accountId,
-    window_5h: five?.used ?? 0,
-    window_week: week?.used ?? 0,
-    window_month: month?.used ?? 0,
+    window_5h: observedPercent(five?.used),
+    window_week: observedPercent(week?.used),
+    window_month: observedPercent(month?.used),
     resets_in_5h: five?.resetsAt ?? null,
     resets_in_week: week?.resetsAt ?? null,
     resets_in_month: month?.resetsAt ?? null,
   };
 }
 
+/**
+ * Percent windows from a quota-only receipt. Kinds the receipt does not
+ * mention stay null; an entered 0 stays 0.
+ */
+export function usageWindowFromManualReceipt(
+  receipt: ManualQuotaReceipt | null | undefined,
+  accountId: string,
+): ObservedUsageWindow {
+  if (!receipt || receipt.windows.length === 0) return blankObserved(accountId);
+  const byKind = new Map(receipt.windows.map((window) => [window.windowKind, window]));
+  const five = byKind.get("five_hours");
+  const week = byKind.get("week");
+  const month = byKind.get("month") ?? byKind.get("monthly");
+  return {
+    account_id: accountId,
+    window_5h: observedPercent(five?.used),
+    window_week: observedPercent(week?.used),
+    window_month: observedPercent(month?.used),
+    resets_in_5h: five?.resetsAt ?? null,
+    resets_in_week: week?.resetsAt ?? null,
+    resets_in_month: month?.resetsAt ?? null,
+  };
+}
+
+/** Maps a receipt to the quota-window rows the summary renders. */
+export function manualReceiptQuotaView(
+  receipt: ManualQuotaReceipt | null | undefined,
+  accountId: string,
+): QuotaWindowsView | null {
+  if (!receipt || receipt.windows.length === 0) return null;
+  return {
+    quota_windows: receipt.windows.map((window) => ({
+      account_id: accountId,
+      window_kind: window.windowKind,
+      used: window.used,
+      limit_value: window.limitValue,
+      started_at: null,
+      resets_at: window.resetsAt,
+      calibration_offset: 0,
+      unit: window.unit,
+      source: window.source,
+      observed_at: window.observedAt,
+      updated_at: window.updatedAt,
+    })),
+  };
+}
+
+/**
+ * Records one acknowledged window on the receipt. A null percent does not
+ * insert 0 and does not drop sibling windows.
+ */
+export function mergeManualQuotaReceipt(
+  current: ManualQuotaReceipt | null,
+  key: UsageKey,
+  window: ObservedUsageWindow,
+  updatedAt: string,
+): ManualQuotaReceipt | null {
+  const acknowledged = acknowledgedManualWindow(key, window);
+  const existing = current?.windows ?? [];
+  if (!acknowledged) return existing.length > 0 ? { windows: existing } : null;
+  let matched = false;
+  const windows = existing.map((row) => {
+    if (!quotaKindMatches(row.windowKind, acknowledged.kind)) return row;
+    matched = true;
+    return manualQuotaWindow(row.windowKind, acknowledged.used, acknowledged.resetsAt, updatedAt);
+  });
+  if (!matched) {
+    windows.push(manualQuotaWindow(
+      acknowledged.kind,
+      acknowledged.used,
+      acknowledged.resetsAt,
+      updatedAt,
+    ));
+  }
+  return { windows };
+}
+
 export function applyUsageCalibration(
   usage: ProviderUsage,
   key: UsageKey,
-  window: UsageWindow,
+  window: ObservedUsageWindow,
   updatedAt: string,
 ): ProviderUsage {
-  const kind = WINDOW_KIND[key];
-  const resetsAt = key === "window_5h"
-    ? window.resets_in_5h
-    : key === "window_week"
-      ? window.resets_in_week
-      : window.resets_in_month;
-  return {
-    ...usage,
-    quotaWindows: usage.quotaWindows.map((row) => (
-      row.windowKind === kind
-        ? { ...row, used: window[key], resetsAt, updatedAt }
-        : row
-    )),
-  };
+  const acknowledged = acknowledgedManualWindow(key, window);
+  if (!acknowledged) return usage;
+  let matched = false;
+  const quotaWindows = usage.quotaWindows.map((row) => {
+    if (!quotaKindMatches(row.windowKind, acknowledged.kind)) return row;
+    matched = true;
+    // The acknowledged percent replaces the old row. Legacy usd_credits,
+    // a non-100 limit, and a migration offset are not reused as the observation.
+    return {
+      accountId: row.accountId,
+      calibrationOffset: 0,
+      limitValue: 100,
+      observedAt: updatedAt,
+      resetsAt: acknowledged.resetsAt,
+      source: "manual",
+      startedAt: null,
+      unit: "percent",
+      updatedAt,
+      used: acknowledged.used,
+      windowKind: row.windowKind,
+    };
+  });
+  if (!matched) {
+    quotaWindows.push({
+      accountId: usage.accountId,
+      calibrationOffset: 0,
+      limitValue: 100,
+      observedAt: updatedAt,
+      resetsAt: acknowledged.resetsAt,
+      source: "manual",
+      startedAt: null,
+      unit: "percent",
+      updatedAt,
+      used: acknowledged.used,
+      windowKind: acknowledged.kind,
+    });
+  }
+  return { ...usage, quotaWindows };
 }
 
 export function monthlyWithReset(
@@ -356,15 +525,17 @@ export function presetById(presets: readonly CreditPreset[], id: string): Credit
 export function configurationFromPreset(
   preset: CreditPreset,
   nextResetAt: string,
-): CreditConfiguration {
+): CreditConfigurationWrite {
   return {
-    ...preset.configuration,
+    name: preset.configuration.name,
+    currency: preset.configuration.currency,
     monthly: monthlyWithReset(preset.configuration.monthly, nextResetAt, CHINA_OFFSET_MINUTES),
+    sourceUrl: preset.configuration.sourceUrl,
   };
 }
 
 export function initialMonthlyBucket(
-  configuration: CreditConfiguration,
+  configuration: { name: string; monthly: MonthlyCredits | null },
   remaining: number,
   startsAt: string,
 ): CreditBucket {
@@ -382,8 +553,6 @@ export function initialMonthlyBucket(
 export function buildInitialCreditConfigure(input: {
   name: string;
   currency: string;
-  creditsPerCurrency: number;
-  rates: CreditRate[];
   remaining: number;
   monthlyEnabled: boolean;
   monthlyAmount: number | null;
@@ -391,16 +560,14 @@ export function buildInitialCreditConfigure(input: {
   timezoneOffsetMinutes: number;
   sourceUrl: string | null;
   startsAt: string;
-}): { configuration: CreditConfiguration; initialBuckets: CreditBucket[] } | { issue: CreditSetupIssue } {
+}): { configuration: CreditConfigurationWrite; initialBuckets: CreditBucket[] } | { issue: CreditSetupIssue } {
   if (input.monthlyEnabled) {
     if (input.monthlyAmount == null) return { issue: "missing" };
     if (!Number.isFinite(input.monthlyAmount) || input.monthlyAmount < 0) return { issue: "invalid" };
     if (!input.nextResetAt) return { issue: "date" };
-    const configuration: CreditConfiguration = {
+    const configuration: CreditConfigurationWrite = {
       name: input.name,
       currency: input.currency,
-      creditsPerCurrency: input.creditsPerCurrency,
-      rates: input.rates,
       monthly: {
         amount: input.monthlyAmount,
         nextResetAt: input.nextResetAt,
@@ -422,11 +589,9 @@ export function buildInitialCreditConfigure(input: {
       }],
     };
   }
-  const configuration: CreditConfiguration = {
+  const configuration: CreditConfigurationWrite = {
     name: input.name,
     currency: input.currency,
-    creditsPerCurrency: input.creditsPerCurrency,
-    rates: input.rates,
     monthly: null,
     sourceUrl: input.sourceUrl,
   };
@@ -445,43 +610,42 @@ export function buildInitialCreditConfigure(input: {
 }
 
 export function buildCreditSettingsConfiguration(
-  current: CreditConfiguration,
+  current: {
+    name: string;
+    currency: string;
+    sourceUrl?: string | null;
+    monthly: MonthlyCredits | null;
+  },
   input: {
     name: string;
     currency: string;
-    creditsPerCurrency: number;
-    rates: CreditRate[];
     monthlyEnabled: boolean;
     monthlyAmount: number | null;
     nextResetAt: string | null;
     timezoneOffsetMinutes: number;
   },
-): CreditConfiguration | { issue: CreditSetupIssue } {
+): CreditConfigurationWrite | { issue: CreditSetupIssue } {
   if (!input.monthlyEnabled) {
     return {
-      ...current,
       name: input.name,
       currency: input.currency,
-      creditsPerCurrency: input.creditsPerCurrency,
-      rates: input.rates,
       monthly: null,
+      sourceUrl: current.sourceUrl ?? null,
     };
   }
   if (input.monthlyAmount == null) return { issue: "missing" };
   if (!Number.isFinite(input.monthlyAmount) || input.monthlyAmount < 0) return { issue: "invalid" };
   if (!input.nextResetAt) return { issue: "date" };
   return {
-    ...current,
     name: input.name,
     currency: input.currency,
-    creditsPerCurrency: input.creditsPerCurrency,
-    rates: input.rates,
     monthly: {
       amount: input.monthlyAmount,
       nextResetAt: input.nextResetAt,
       timezoneOffsetMinutes: input.timezoneOffsetMinutes,
       renewalEndsAt: current.monthly?.renewalEndsAt ?? null,
     },
+    sourceUrl: current.sourceUrl ?? null,
   };
 }
 

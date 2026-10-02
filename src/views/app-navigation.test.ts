@@ -60,7 +60,7 @@ test("provider deep-link query fields round-trip on the providers view", () => {
     connection: null,
     provider: "command-code",
     destination: null,
-    model: null,
+    model: null, capabilities: null,
     tab: null,
     add: false,
     preset: null,
@@ -68,18 +68,19 @@ test("provider deep-link query fields round-trip on the providers view", () => {
   const url = applyAppViewSearchParams(
     new URL("http://127.0.0.1:9042/dashboard/?view=accounts"),
     "providers",
-    { provider: "minimax", tab: "pricing" },
+    { provider: "minimax", tab: "models" },
   );
   assert.equal(url.searchParams.get("view"), "providers");
   assert.equal(url.searchParams.get("provider"), "minimax");
   assert.equal(url.searchParams.get("connection"), null);
-  assert.equal(url.searchParams.get("tab"), "pricing");
+  assert.equal(url.searchParams.get("tab"), "models");
   assert.deepEqual(readProviderPageQuery(url.search), {
     connection: null,
     provider: "minimax",
     destination: null,
     model: null,
-    tab: "pricing",
+    capabilities: null,
+    tab: "models",
     add: false,
     preset: null,
   });
@@ -97,11 +98,18 @@ test("writing a connection id emits connection= and strips a leftover provider="
     connection: "uuid-open",
     provider: null,
     destination: null,
-    model: null,
+    model: null, capabilities: null,
     tab: "settings",
     add: false,
     preset: null,
   });
+});
+
+test("the capabilities deep link reads the target model as a one-shot field", () => {
+  const query = readProviderPageQuery("?view=providers&provider=command-code&tab=models&model=opus&capabilities=opus");
+  assert.equal(query.capabilities, "opus");
+  assert.equal(query.model, "opus");
+  assert.equal(readProviderPageQuery("?view=providers&provider=command-code").capabilities, null);
 });
 
 test("provider= and destination= can coexist on read so selection can rank them", () => {
@@ -111,7 +119,7 @@ test("provider= and destination= can coexist on read so selection can rank them"
       connection: null,
       provider: "lab-http",
       destination: "dest-a",
-      model: null,
+      model: null, capabilities: null,
       tab: null,
       add: false,
       preset: null,
@@ -129,7 +137,7 @@ test("the add flow round-trips with and without a preset", () => {
     connection: null,
     provider: null,
     destination: null,
-    model: null,
+    model: null, capabilities: null,
     tab: null,
     add: true,
     preset: null,
@@ -145,7 +153,7 @@ test("the add flow round-trips with and without a preset", () => {
     connection: null,
     provider: null,
     destination: null,
-    model: null,
+    model: null, capabilities: null,
     tab: null,
     add: true,
     preset: "openai",
@@ -155,26 +163,26 @@ test("the add flow round-trips with and without a preset", () => {
 test("legacy provider scope links map onto the new query", () => {
   assert.deepEqual(
     readProviderPageQuery("?view=providers&scope_kind=provider&scope_id=command-code"),
-    { connection: null, provider: "command-code", destination: null, model: null, tab: null, add: false, preset: null },
+    { connection: null, provider: "command-code", destination: null, model: null, capabilities: null, tab: null, add: false, preset: null },
   );
   assert.deepEqual(
     readProviderPageQuery("?view=providers&scope_kind=dynamic&scope_id=acme"),
-    { connection: null, provider: "acme", destination: null, model: null, tab: null, add: false, preset: null },
+    { connection: null, provider: "acme", destination: null, model: null, capabilities: null, tab: null, add: false, preset: null },
   );
   assert.deepEqual(
     readProviderPageQuery("?view=providers&scope_kind=preset&scope_id=openai"),
-    { connection: null, provider: null, destination: null, model: null, tab: null, add: true, preset: "openai" },
+    { connection: null, provider: null, destination: null, model: null, capabilities: null, tab: null, add: true, preset: "openai" },
   );
   // Account-owned custom endpoint scopes have no provider row; degrade to the
   // default selection instead of failing.
   assert.deepEqual(
     readProviderPageQuery("?view=providers&scope_kind=custom_endpoint&scope_id=acc-9"),
-    { connection: null, provider: null, destination: null, model: null, tab: null, add: false, preset: null },
+    { connection: null, provider: null, destination: null, model: null, capabilities: null, tab: null, add: false, preset: null },
   );
   // An explicit new-style parameter always wins over a stale legacy one.
   assert.deepEqual(
     readProviderPageQuery("?view=providers&provider=kimi&scope_kind=provider&scope_id=opencode"),
-    { connection: null, provider: "kimi", destination: null, model: null, tab: null, add: false, preset: null },
+    { connection: null, provider: "kimi", destination: null, model: null, capabilities: null, tab: null, add: false, preset: null },
   );
 });
 
@@ -182,17 +190,21 @@ test("legacy provider tab values map onto the detail tabs", () => {
   assert.equal(normalizeProviderDetailTab("catalog"), "models");
   assert.equal(normalizeProviderDetailTab(PROVIDER_OTHER_TAB), "settings");
   assert.equal(normalizeProviderDetailTab("models"), "models");
-  assert.equal(normalizeProviderDetailTab("pricing"), "pricing");
+  assert.equal(normalizeProviderDetailTab("pricing"), "models");
   assert.equal(normalizeProviderDetailTab("settings"), "settings");
   assert.equal(normalizeProviderDetailTab("nope"), null);
   assert.equal(normalizeProviderDetailTab(null), null);
   assert.deepEqual(
+    readProviderPageQuery("?view=providers&provider=opencode&tab=pricing"),
+    { connection: null, provider: "opencode", destination: null, model: null, capabilities: null, tab: "models", add: false, preset: null },
+  );
+  assert.deepEqual(
     readProviderPageQuery("?view=providers&scope_kind=provider&scope_id=opencode&tab=other"),
-    { connection: null, provider: "opencode", destination: null, model: null, tab: "settings", add: false, preset: null },
+    { connection: null, provider: "opencode", destination: null, model: null, capabilities: null, tab: "settings", add: false, preset: null },
   );
   assert.deepEqual(
     readProviderPageQuery("?view=providers&provider=opencode&tab=catalog"),
-    { connection: null, provider: "opencode", destination: null, model: null, tab: "models", add: false, preset: null },
+    { connection: null, provider: "opencode", destination: null, model: null, capabilities: null, tab: "models", add: false, preset: null },
   );
 });
 
@@ -284,7 +296,7 @@ test("a destination-only Providers scope writes destination= and strips on leave
     connection: null,
     provider: null,
     destination: "dest-site",
-    model: null,
+    model: null, capabilities: null,
     tab: null,
     add: false,
     preset: null,
@@ -311,9 +323,9 @@ test("the Accounts add deep link survives a providers write untouched", () => {
 
 test("appViewRoute targets the named route with the legacy query semantics, minus view", () => {
   assert.deepEqual(appViewRoute("accounts"), { name: "accounts", query: {} });
-  assert.deepEqual(appViewRoute("providers", { destination: "dest-site", tab: "pricing" }), {
+  assert.deepEqual(appViewRoute("providers", { destination: "dest-site", tab: "models" }), {
     name: "providers",
-    query: { destination: "dest-site", tab: "pricing" },
+    query: { destination: "dest-site", tab: "models" },
   });
   assert.deepEqual(appViewRoute("accounts", undefined, { account_id: "acct-1" }), {
     name: "accounts",
@@ -327,13 +339,14 @@ test("appViewRoute targets the named route with the legacy query semantics, minu
 });
 
 test("routeQuerySearch round-trips into the legacy readers", () => {
-  const search = routeQuerySearch("providers", { destination: "dest-site", tab: "pricing" });
+  const search = routeQuerySearch("providers", { destination: "dest-site", tab: "models" });
   assert.deepEqual(readProviderPageQuery(search), {
     connection: null,
     provider: null,
     destination: "dest-site",
     model: null,
-    tab: "pricing",
+    capabilities: null,
+    tab: "models",
     add: false,
     preset: null,
   });

@@ -34,6 +34,7 @@ import type {
   DestinationCatalogRefreshResult,
   DestinationModelMetadata,
   DestinationModelMetadataUpdate,
+  ModelMetadataCatalog,
   DshApplication,
   DshApplicationInstallRequest,
   DshApplicationOutcome,
@@ -106,6 +107,8 @@ export const dashboardV4 = {
     requestV4<DestinationModelMetadata>(
       `/destinations/${encodeURIComponent(id)}/model-metadata`,
     ),
+  /** Every destination's effective metadata in one read (alias page). */
+  getModelMetadataCatalog: () => requestV4<ModelMetadataCatalog>("/model-metadata"),
   putDestinationModelMetadata: (
     id: string,
     input: WithoutExpectation<DestinationModelMetadataUpdate>,

@@ -35,27 +35,14 @@ Accounts are arranged in supplier cards. A card can contain several accounts / K
 **Accounts** owns identity, the account **Key**, verification, enabled state,
 card order, managed registration, and available usage / cooldown / quota-recovery state.
 Catalogs, protocol probes, per-model protocol overrides, configurable HTTP
-Endpoint/auth/protocol/mappings, and scoped pricing live on **Providers**.
+Endpoint/auth/protocol/mappings live on **Providers**.
 An account stores one Key (when auth requires it), notes, enablement, model
 scope, grants, quota relation, and runtime state. No-auth connections expose
 one singleton credential and reject a second.
 
-Quota cards follow catalog capabilities instead of Provider IDs. `usageAvailability=available` loads Provider quota windows and enables the refresh action. `manualUsageCalibration=true` additionally loads the local calibration object for editing, while the card itself still renders the Provider windows. Other rows show no quota strip; Zen Free keeps its separate egress cooldown. Known MiniMax/Kimi window names remain friendly, and unknown window names are humanized without changing stored wire values. Custom API and user-defined Provider cards whose stored Endpoint host is exactly `api.deepseek.com`, `api.moonshot.cn`, or `api.moonshot.ai` can also **Refresh quota** to read that official current balance. Pay-as-you-go API cards (DeepSeek / Zhipu presets and New API / Sub2API sites) show **Balance**, **This month**, and **Lifetime** as figures, never a quota bar. Known-host official balances keep a remaining figure. **Refresh quota** also refreshes that destination’s model list (the official Provider catalog for built-in Plans; `/v1/models` discovery for Custom / known-host balance cards and platform Keys), so you do not need to open **Providers** only to refresh the catalog. Built-in catalog rows follow each Provider's documented default policy; GOAT's first snapshot starts only its plan-included models on. Usage snapshots stay display-only: a bar at 100%, unknown, or failed never marks a Key exhausted and never changes routing. Other Custom destinations have no balance endpoint in this product.
+Quota cards follow catalog capabilities instead of Provider IDs. `usageAvailability=available` loads Provider quota windows and enables the refresh action. `manualUsageCalibration=true` additionally loads the local calibration object for editing, while the card itself still renders the Provider windows. OpenCode Go, GOAT, and Ollama set that flag. Go edits the 5-hour, weekly, and monthly windows. Ollama edits the month window, including before a tier is chosen, and does not accept a week percentage. Zen, MiniMax, Kimi, Custom, and CPA do not show the editor. Metadata that explicitly turns manual calibration off also hides it. A missing, blank, or null percentage is not saved as 0. Other rows show no quota strip; Zen Free keeps its separate egress cooldown. Known MiniMax/Kimi window names remain friendly, and unknown window names are humanized without changing stored wire values. Custom API and user-defined Provider cards whose stored Endpoint host is exactly `api.deepseek.com`, `api.moonshot.cn`, or `api.moonshot.ai` can also **Refresh quota** to read that official current balance. DeepSeek and Zhipu official API cards show the observed remaining balance. It is not a quota bar, and it is not a price-based monthly or lifetime spend. A New API / Sub2API parent card shows the site's Balance, This month, and Lifetime from the site wallet and consume log. Those three figures are not a local price and not a request cost. A missing balance stays unavailable and is not shown as 0. Known-host official balances keep a remaining figure. **Refresh quota** also refreshes that destination’s model list (the official Provider catalog for built-in Plans; `/v1/models` discovery for Custom / known-host balance cards and platform Keys), so you do not need to open **Providers** only to refresh the catalog. Built-in catalog rows follow each Provider's documented default policy; GOAT's first snapshot starts only its plan-included models on. Usage snapshots stay display-only: a bar at 100%, unknown, or failed never marks a Key exhausted and never changes routing. Other Custom destinations have no balance endpoint in this product.
 
-GOAT cards offer **Refresh quota** to read the `$14 / $35 / $70`
-windows from Command Code first-party account usage. The endpoint is used
-by the official CLI but is not documented in the public Provider API.
-Between snapshots, priced OCG request logs continue accumulating locally.
-The official snapshot is the baseline, so the card has no manual calibration editor.
-The monthly reset still
-uses the configured purchase date, not an upstream monthly-reset timestamp.
-Paid Ollama Cloud cards (Pro / Max / Team) show
-one monthly USD-Credits window from locally priced request logs against
-`$60 / $300 / $1000`. Ollama Cloud exposes no official usage API in this
-product. The meter is a soft estimate — used credit may exceed the limit, the
-bar clamps at 100%, and fullness never writes cooldown or changes routing. New
-accounts must choose Pro, Max, or Team plus a purchase date. Existing accounts
-with no billing row stay unconfigured until edited and remain routeable.
+GOAT cards offer **Refresh quota** to read the official 5-hour, weekly, and monthly windows. When that reading includes a percentage, the window uses it against a full window of 100 and keeps its reset. The endpoint is used by the official CLI but is not documented in the public Provider API. Later requests do not add a price onto the percentage, and a dollar amount is not relabeled as a percentage. You can save a manual percentage. With no official reading and no manual percentage, the window stays unavailable and is not shown as 0. The monthly reset still uses the configured purchase date when the upstream does not provide one. Ollama Cloud exposes no official usage API in this product and does not estimate a monthly credit meter from request prices. The account form still presents Pro, Max, or Team and a purchase date. A manual percentage does not require a price. A month percentage can be saved before a tier is chosen. A week percentage is not accepted. Without an official or manual usage observation, usage stays unavailable. Existing accounts remain routeable. Previously stored billing rows stay on disk and are not recalculated.
 
 The Adapter Registry is sealed. Built-in Provider families are:
 
@@ -66,36 +53,18 @@ The Adapter Registry is sealed. Built-in Provider families are:
 | Command Code GOAT | `command-code` | Yes | Public Provider catalog; the first snapshot starts only GOAT plan models on. Models first discovered later default on with documented endpoints. Saved switches persist; models with no protocol evidence wait for official documentation. No account-level GOAT/All or Max mode. |
 | MiniMax CN Token Plan | `minimax` | Yes | Dedicated `sk-cp` Key; fixed official Chat, Responses, and Messages routes, authenticated model directory, and manual official Token Plan usage refresh |
 | Kimi Code CN | `kimi` | Yes | Dedicated Kimi Code Key; fixed official Chat and Messages routes, authenticated model directory, and manual official weekly/rate-window usage refresh |
-| Ollama Cloud | `ollama` | Yes | Fixed-origin Chat Completions only (`https://ollama.com`, Bearer); public keyless catalog refresh; account billing tier (Pro $60 / Max $300 / Team $1000 USD Credits per billing month) plus purchase date; local monthly soft-credit estimate from official per-request usage and the manual `https://ollama.com/pricing` table; unconfigured existing accounts stay routeable with no meter |
-| Custom API | `custom` | Yes | Compatibility identity for migrated configurable HTTP connections; one connection owns its API URL, auth, protocol, and public-name → upstream-ID mappings, while multiple Key accounts may attach; existing records remain separate and retain public-name-only resolution; unknown cost unless personal rates are configured; no provider quota debit |
+| Ollama Cloud | `ollama` | Yes | Fixed-origin Chat Completions only (`https://ollama.com`, Bearer); public keyless catalog refresh. No official usage API in this product, and no monthly credit meter estimated from request prices. The form still presents Pro, Max, or Team and a purchase date. A manual percentage does not require a price. A month percentage can be saved before a tier is chosen. A week percentage is not accepted. Without an official or manual usage observation, usage stays unavailable. Existing accounts stay routeable |
+| Custom API | `custom` | Yes | Compatibility identity for migrated configurable HTTP connections; one connection owns its API URL, auth, protocol, and public-name → upstream-ID mappings, while multiple Key accounts may attach; existing records remain separate and retain public-name-only resolution; request cost stays unknown and is not shown as zero or free; a manual credit balance is not deducted from the request |
 
 Configurable HTTP connections and individual models have separate **Enabled** switches in **Providers → Edit connection**. Renaming a connection or editing mappings preserves existing disabled models. Deleting the final Key preserves the connection and its model settings.
 
-## Personal credit estimates
+## Manual credit balance
 
-Custom API and saved configurable HTTP accounts can track a personal credit
-balance. Initialize it in **Add Key** or the Key's **Edit** form. Step Plan offers
-its tiers, current remaining balance and next reset; other HTTP accounts can opt
-into **Estimate credits locally** and enter rates by exact upstream model ID.
-The card shows the saved balance, with later corrections under **Calibrate usage**
-in the Key's action row. Monthly issuance and expiring top-ups remain separate. Each Key has
-its own estimate even when several Keys share a supplier. New API / Sub2API site
-Keys and sealed built-in Plans keep their existing billing views; they do not
-offer this personal-credit editor.
+Custom API and saved configurable HTTP accounts can keep a manual credit balance. Buckets, grants, monthly renewal, and expiry stay separate, and you can correct the saved balance by hand. The fields you set are the name, currency, monthly amount, and source URL. The product does not ask for per-token rates or a currency conversion, and a completed request does not reduce the balance.
 
-Editing a Key preserves an existing credit ledger. If the Key saves but credit
-setup fails, retry in the same form to finish setup without creating another
-Key. You can also close the form and finish setup from that Key's **Edit** action.
+A missing figure stays unknown. It is not shown as zero or free. Opening the dashboard, exporting, or sending a request does not recalculate stored balances or old receipts. Only an explicit manual change updates the balance. An empty or unknown balance does not disable routing.
 
-Completed requests deduct credits using the rate captured when that attempt
-started. Missing usage or prices remain unknown. Calibration waits for in-flight
-requests; changing rates preserves the current balance. An estimated zero
-balance never disables routing. Step Plan uses local estimation and manual
-calibration; it does not read a private console usage API.
-
-Current backups carry credit settings and remaining balances. Existing
-target meters survive a merge. Pending requests appear as uncertainty in the
-exported estimate. See [Upgrade and backup](upgrade-backup.md).
+New API / Sub2API site Keys and sealed built-in Plans keep their observed billing views. Editing a Key keeps an existing manual balance. If the Key save is confirmed and a later read fails, the Key stays saved; read it again instead of creating another. See [Upgrade and backup](upgrade-backup.md).
 
 ## Move a node configuration
 
@@ -218,9 +187,7 @@ Endpoint, Key, mappings, or protocol leaves the account enabled. Endpoint and
 upstream protocol can be edited after create; the config and complete mapping
 set are replaced in one CAS transaction. Disabling the declared protocol makes
 the model unroutable; no fixed-priority fallback or override can enable an
-undeclared protocol. Custom traffic has unknown cost unless personal credit rates are configured
-for the exact upstream model. Personal estimates do not debit provider quota,
-and Custom has no provider usage refresh. `MODEL_PROTOCOLS` is Go-specific; Custom
+undeclared protocol. Custom traffic does not get a local price. A missing cost stays unknown and is not shown as zero or free. A manual credit balance is not deducted from the request, and Custom has no provider usage refresh. `MODEL_PROTOCOLS` is Go-specific; Custom
 converts the client protocol to the account's single upstream protocol.
 
 Use the existing-connection choices to add another Key without creating a second Provider. New-service choices contain unused built-in templates, Plan/API presets, Custom API and platform types. Search matches vendor, variant, preset name and endpoint host. Selecting a result retains its exact variant when the search clears. Zen Free is a backend-owned singleton, managed only from the account list; OpenCode Go offers its optional managed-registration action where the host supports it.
@@ -284,35 +251,11 @@ identity step. Deleting an account likewise deletes its cookies/profile, and the
 confirmation states this explicitly. That login state can then be recovered only
 from a backup or by signing in again.
 
-Each ready OpenCode Go or GOAT card shows the account name, cooldown state, and
-5-hour / weekly / monthly usage bars. OpenCode Go periodically calibrates the
-local accounting against its official endpoint. GOAT calibrates only when you
-click **Refresh quota**, then continues from that official baseline with priced
-OCG logs. Zen Free has its own anonymous, egress-IP-shared free cooldown rather
-than a key quota.
+Each ready OpenCode Go or GOAT card shows the account name, cooldown state, and 5-hour / weekly / monthly usage windows. OpenCode Go periodically replaces those windows with the official percentage and reset. GOAT does that only when you click **Refresh quota**. Later requests do not add a price onto the percentage. Zen Free has its own anonymous, egress-IP-shared free cooldown rather than a key quota.
 
-- **Usage baselines.** Type a percentage or drag a bar to set its current
-  real-world usage baseline. After the value is saved, successful request cost
-  recorded by Open Console Gateway continues to accumulate above that baseline. Reaching
-  100% is still only a warning; it does not stop the gateway from selecting the
-  account. Manual calibration is shown only when the Plan declares it. Ollama
-  Cloud uses it because it has no official usage API.
-- **Refresh quota (ready Key and managed accounts).** The existing OpenCode Go
-  scheduler continues to calibrate local estimates from `/zen/go/v1/usage` on
-  its established cadence; no new global polling loop is added. **Refresh
-  quota** uses the same throttled, concurrently coalesced path on demand. A real
-  `429` starts the temporary Key cooldown immediately and can queue that same
-  asynchronous refresh without making the client request wait. Fetched Go usage
-  may establish or clear Go quota state. A failed, rate-limited, or unsupported
-  refresh keeps the previous observation or unknown and never writes inference
-  cooldown or `auth_error`. The request uses the same global outbound proxy as
-  other dashboard fetches.
-- **Refresh GOAT quota.** The GOAT card calls the fixed first-party
-  `https://api.commandcode.ai/alpha/billing/credits` endpoint with that
-  account's Key only after an explicit click. OCG validates the GOAT 5-hour,
-  weekly, and monthly caps before atomically replacing all three baselines.
-  This path has the same 15-second per-account throttle and global proxy, but
-  no automatic schedule; its result never writes inference cooldown or the saved plan deadlines, and it does not change routing. There is no separate manual calibration editor.
+- **Usage baselines.** Type a percentage or drag a bar to save the current usage for that window. The saved percentage stays until the next official refresh or the next manual save. Request prices are not added on top. Reaching 100% is still only a warning; it does not stop the gateway from selecting the account. The control appears only when that Plan allows manual calibration. A window with no official reading and no saved percentage stays unavailable and is not shown as 0. The first saved percentage is only that quota window. Opening the page again, or reading it again while it stays open, shows that percentage and does not fill in a full billing status. A manual credit balance, a cash balance, and a platform site's observed consumption history stay separate.
+- **Refresh quota (ready Key and managed accounts).** The existing OpenCode Go scheduler continues to replace the windows from `/zen/go/v1/usage` on its established cadence; no new global polling loop is added. **Refresh quota** uses the same throttled, concurrently coalesced path on demand. A real `429` starts the temporary Key cooldown immediately and can queue that same asynchronous refresh without making the client request wait. Fetched Go usage may establish or clear Go quota state. A failed, rate-limited, or unsupported refresh keeps the previous observation or unknown and never writes inference cooldown or `auth_error`. The request uses the same global outbound proxy as other dashboard fetches.
+- **Refresh GOAT quota.** The GOAT card calls the fixed first-party `https://api.commandcode.ai/alpha/billing/credits` endpoint with that account's Key only after an explicit click. When the reading includes a percentage, the 5-hour, weekly, and monthly windows use that percentage against 100. This path has the same 15-second per-account throttle and global proxy, but no automatic schedule; its result never writes inference cooldown or the saved plan deadlines, and it does not change routing. You can still save a manual percentage. A missing reading stays unavailable and is not shown as 0.
 - **GOAT inference restrictions.** An unrecognized `429` starts the same 30-second
   temporary Key cooldown, extended but never shortened by valid `Retry-After`.
   The exact plan-limit sentence — HTTP 429, `error.code` `RATE_LIMITED`,
@@ -342,7 +285,8 @@ than a key quota.
   current date. Click the expiry tag on a card to choose another purchase date
   or set it directly to today; the full edit form remains available. The managed
   wizard also writes the purchase date when
-  payment advances to key verification. Expiry is the same day in the next
+  payment advances to key verification. That date change, and the wizard's
+  write, do not clear a previously stored monthly usage cost offset. Expiry is the same day in the next
   natural month, clamped to that month's last day when necessary:
   `2026-01-31` expires on `2026-02-28`. Accounts and Dashboard show days
   remaining, due today, or days expired. This is informational only and never
@@ -350,8 +294,7 @@ than a key quota.
   Custom API have no purchase-cycle expiry and show no expiry tag or alert.
 - **Priority order.** Reorder cards and the accounts inside them directly. Move a whole card, reorder its rows, or move a Key to another card of the same supplier. To arrange `A1 → B1 → A2`, create another A card and move A2 into it. Pointer and keyboard controls save the same order. Sorting is disabled while filters are active so hidden accounts keep their positions. Empty cards and adjacent cards of the same supplier remain separate.
 - **Card folding and sort mode.** Each card header chevron folds the card to a one-line summary (Key count and enabled count); folding is view-only state saved in this browser across page reloads. A card's overflow menu also offers **Move up**, **Move down**, **Move to top**, and **Move to bottom**, saved through the same full-layout write as dragging. The toolbar **Reorder** toggle switches the list to a compact sort mode: the filters are bypassed and disabled so every card and Key stays visible as a single draggable line, and **Done** exits, restoring the previous filters and folded cards.
-- **Cooldown reset.** You can reset an ordinary cooldown manually from this view. On the selected Key this also clears that Key's saved GOAT plan deadlines and fences a response already in flight. A sibling Key's deadlines stay. The bar
-  snaps back to its local estimate as soon as the cooldown is cleared.
+- **Cooldown reset.** You can reset an ordinary cooldown manually from this view. On the selected Key this also clears that Key's saved GOAT plan deadlines and fences a response already in flight. A sibling Key's deadlines stay. The bar shows the official or saved manual percentage again as soon as the cooldown is cleared. A window with no such percentage stays unavailable and is not shown as 0.
 - **429 cooldown.** An unrecognized `429` cools its exact Key for 30 seconds unless a valid
   `Retry-After` produces a later deadline. The exact GOAT plan-limit sentence uses that Key's declared reset instead; see the GOAT bullet above. It does not spread to a quota-pool
   sibling, and no background probe is sent when it becomes eligible. Retained

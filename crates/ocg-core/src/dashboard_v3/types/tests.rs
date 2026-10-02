@@ -685,7 +685,6 @@ const ACCOUNTS_CATALOG_PREFIX: &[&str] = &[
     "ControlRevision",
     "MutationAck",
     "MutationExpectation",
-    "PricingRevision",
     "V3Error",
     "ConnectionInfo",
     "ConnectionSubKey",
@@ -1590,22 +1589,7 @@ const PROVIDER_CATALOG_TYPES: &[&str] = &[
     "ProtocolProbeResponse",
 ];
 
-const PRICING_CATALOG_TYPES: &[&str] = &[
-    "PricingSnapshot",
-    "PricingLimits",
-    "PricingModel",
-    "PricingAdjustment",
-    "PricingTimeWindow",
-    "PricingRefresh",
-    "PricingRefreshStatus",
-    "PricingMultiplierChange",
-    "PricingRefreshUpdate",
-    "PricingRefreshPolicy",
-    "PricingMultipliersUpdate",
-    "PricingMultiplierWrite",
-    "ProviderPricing",
-    "PricingAvailability",
-];
+const PRICING_CATALOG_TYPES: &[&str] = &[];
 
 const USAGE_CATALOG_TYPES: &[&str] = &[
     "UsageWindow",
@@ -1696,14 +1680,7 @@ const USAGE_REFRESH_CATALOG_TYPES: &[&str] = &[
     "UsageRefreshUpdate",
     "UsageRefreshThrottleError",
 ];
-const PROVIDER_REFRESH_CATALOG_TYPES: &[&str] = &[
-    "ProviderModelsRefreshUpdate",
-    "ProviderModels",
-    "ProviderPricingSnapshot",
-    "ProviderPricingValue",
-    "ProviderPricingRefresh",
-    "ProviderPricingRefreshUpdate",
-];
+const PROVIDER_REFRESH_CATALOG_TYPES: &[&str] = &["ProviderModelsRefreshUpdate", "ProviderModels"];
 const ACCOUNT_TRANSFER_CATALOG_TYPES: &[&str] = &[
     "AccountExportRequest",
     "AccountExport",
@@ -2201,9 +2178,9 @@ fn observability_dtos_emit_camel_case_nulls_and_stay_secret_free() {
         total_accounts: 2,
         available_accounts: 1,
         gateway_running: true,
-        today_cost: 1.5,
-        week_cost: 2.5,
-        month_cost: 3.5,
+        today_cost: Some(1.5),
+        week_cost: Some(2.5),
+        month_cost: Some(3.5),
         revision: 11,
         process_generation: 9,
         pricing_revision: "seed".into(),
@@ -2252,7 +2229,7 @@ fn observability_dtos_emit_camel_case_nulls_and_stay_secret_free() {
             prompt_tokens: 1,
             completion_tokens: 2,
             cached_tokens: 0,
-            cost: 0.1,
+            cost: Some(0.1),
         },
         revision: 11,
         process_generation: 9,
@@ -2384,9 +2361,9 @@ fn observability_catalog_registers_new_defs_without_reshaping_the_prefix() {
 fn usage_responses_emit_camel_case_nulls_and_reject_unknown_request_fields() {
     let usage = UsageWindow {
         account_id: "acct-1".into(),
-        window_5h: 6.0,
-        window_week: 6.0,
-        window_month: 6.0,
+        window_5h: Some(6.0),
+        window_week: Some(6.0),
+        window_month: Some(6.0),
         resets_in_5h: None,
         resets_in_week: None,
         resets_in_month: None,
@@ -2805,9 +2782,9 @@ fn usage_refresh_dtos_are_camel_case_secret_free_and_append_only() {
     let refresh = UsageRefresh {
         usage: UsageWindow {
             account_id: "acct-1".into(),
-            window_5h: 6.0,
-            window_week: 6.0,
-            window_month: 6.0,
+            window_5h: Some(6.0),
+            window_week: Some(6.0),
+            window_month: Some(6.0),
             resets_in_5h: None,
             resets_in_week: None,
             resets_in_month: None,

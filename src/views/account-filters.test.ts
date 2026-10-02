@@ -78,6 +78,45 @@ test("disabled accounts and expired cooldowns never need attention", () => {
   assert.deepEqual(items.map((item) => item.accountId), ["offdraft"]);
 });
 
+test("disabled ready accounts with retained auth errors stay out of attention, incomplete drafts stay in", () => {
+  const accounts = [
+    account({
+      id: "off-auth",
+      name: "OffAuth",
+      enabled: false,
+      setup_step: "ready",
+      auth_error: "401",
+    }),
+    account({
+      id: "on-auth",
+      name: "OnAuth",
+      enabled: true,
+      setup_step: "ready",
+      auth_error: "401",
+    }),
+    account({
+      id: "off-draft",
+      name: "OffDraft",
+      enabled: false,
+      setup_step: "key_verification",
+    }),
+    account({
+      id: "off-pay",
+      name: "OffPay",
+      enabled: false,
+      setup_step: "payment",
+    }),
+  ];
+  assert.deepEqual(
+    buildNeedsAttention(accounts, NOW).map((item) => [item.accountId, item.reason]),
+    [
+      ["on-auth", "auth-error"],
+      ["off-draft", "setup-incomplete"],
+      ["off-pay", "setup-incomplete"],
+    ],
+  );
+});
+
 test("Custom API ignores legacy lifecycle dates", () => {
   const custom = account({
     id: "custom",
@@ -214,7 +253,6 @@ function catalogRow(provider_id: string, extra: Partial<ProviderCatalogEntry> = 
     verification_runtime_availability: "available",
     routable: true,
     managed_registration: false,
-    pricing_availability: "available",
     usage_availability: "available",
     manual_usage_calibration: false,
     quota_unit: "tokens",
@@ -297,7 +335,7 @@ test("loaded destination cadence and cooldown facts drive attention and filters"
     account_controls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false },
     auth_scheme: "bearer", max_credentials: null,
     capabilities: { testable: true, managed_signup: false, external_integration: false, billing_tier_required: false },
-    plan: { expiry_cadence: "monthly", manual_calibration: false, pricing_source: "unpriced", usage_source: "none", windows: [{ kind: "month" }] },
+    plan: { expiry_cadence: "monthly", manual_calibration: false, usage_source: "none", windows: [{ kind: "month" }] },
   };
   const row = account({ id: "new", provider_id: "unknown", purchase_date: "2026-07-01", expires_on: "2026-08-01" });
   assert.deepEqual(buildNeedsAttention([row], NOW, [], () => destination).map((item) => item.reason), ["expired"]);

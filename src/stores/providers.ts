@@ -5,6 +5,7 @@ import { isRevisionConflict } from "../api/dashboard.ts";
 import { dashboardV4 } from "../api/dashboard-v4.ts";
 import { providerApi, type ProviderDefinitionView } from "../api/providers.ts";
 import type {
+  ContractCatalogModelsRemoval,
   ContractScopeKind,
   EffectiveModelContract,
   ModelProtocolOverrideUpdate,
@@ -17,17 +18,72 @@ import { applyModelContractToResponse, type ProviderScopeRef } from "../domain/p
 import { publicModelPublicationKey } from "../domain/provider-aliases.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { isLocalMutationCancelled, useControlPlaneStore } from "./controlPlane.ts";
+import { dropSnapshot, readSnapshot, writeSnapshot } from "./persistence.ts";
+
+const SNAPSHOT_KEY = "providers";
+
+interface ProvidersSnapshot {
+  catalog: ProviderCatalogEntry[] | null;
+  contracts: ProviderContractsResponse | null;
+  connections: Connection[] | null;
+  aliasUnpublished: string[] | null;
+}
+
+function validateSnapshot(data: unknown): ProvidersSnapshot | null {
+  if (!data || typeof data !== "object") return null;
+  const candidate = data as Partial<ProvidersSnapshot>;
+  for (const key of ["catalog", "connections", "aliasUnpublished"] as const) {
+    if (candidate[key] !== null && candidate[key] !== undefined && !Array.isArray(candidate[key])) {
+      return null;
+    }
+  }
+  return candidate as ProvidersSnapshot;
+}
+
+/**
+ * In-place projection of a confirmed V4 catalog removal onto cached
+ * contracts. Mirrors the backend's own receipt-time compensation
+ * (`restrict_provider_catalog_after_reload_failure`): catalog membership is
+ * the receipt's post-removal list, and contract models survive only while
+ * their `model_id` stays in that list. The receipt also carries the advanced
+ * settings CAS revision.
+ */
+export function projectCatalogModelsRemoval(
+  response: ProviderContractsResponse,
+  scope: ProviderScopeRef,
+  receipt: ContractCatalogModelsRemoval,
+): ProviderContractsResponse {
+  const retained = new Set(receipt.catalog_models);
+  return {
+    ...response,
+    revision: receipt.revision,
+    process_generation: receipt.process_generation,
+    providers: response.providers.map((group) => (
+      scope.scope_kind === "provider" && group.scope_kind === "provider" && group.scope_id === scope.scope_id
+        ? {
+          ...group,
+          catalog: { ...group.catalog, models: [...receipt.catalog_models] },
+          models: group.models.filter((model) => retained.has(model.model_id)),
+        }
+        : group
+    )),
+  };
+}
 
 /**
  * Provider catalog and contract fetches used by Providers and Aliases.
- * Probe progress and pricing refresh stay page-local.
+ * Probe progress stays page-local.
  */
 export const useProvidersStore = defineStore("providers", () => {
   // Snapshots are always committed wholesale (immutable style), so shallow
-  // refs skip the deep reactive wrap of these large payloads.
-  const catalog = shallowRef<ProviderCatalogEntry[] | null>(null);
-  const contracts = shallowRef<ProviderContractsResponse | null>(null);
-  const connections = shallowRef<Connection[] | null>(null);
+  // refs skip the deep reactive wrap of these large payloads. The catalog /
+  // contracts / connections / alias-publication projections are secret-free
+  // by the V4 contract and persist across restarts; hydrated snapshots
+  // render immediately and the mount revalidation replaces them.
+  const hydrated = readSnapshot(SNAPSHOT_KEY, validateSnapshot);
+  const catalog = shallowRef<ProviderCatalogEntry[] | null>(hydrated?.catalog ?? null);
+  const contracts = shallowRef<ProviderContractsResponse | null>(hydrated?.contracts ?? null);
+  const connections = shallowRef<Connection[] | null>(hydrated?.connections ?? null);
   const cpaModels = shallowRef<CpaCatalogEntry[] | null>(null);
   const definitions = shallowRef<Map<string, ProviderDefinitionView>>(new Map());
   const loading = ref(false);
@@ -62,6 +118,15 @@ export const useProvidersStore = defineStore("providers", () => {
     return token.session === sessionGeneration;
   }
 
+  function persistProjection(): void {
+    writeSnapshot(SNAPSHOT_KEY, {
+      catalog: catalog.value,
+      contracts: contracts.value,
+      connections: connections.value,
+      aliasUnpublished: aliasUnpublished.value,
+    } satisfies ProvidersSnapshot);
+  }
+
   function commitContractsMutation(
     token: ContractsMutationToken,
     result: ProviderContractsResponse,
@@ -80,6 +145,7 @@ export const useProvidersStore = defineStore("providers", () => {
     contracts.value = result;
     loading.value = false;
     error.value = "";
+    persistProjection();
   }
 
   function failContractsMutation(token: ContractsMutationToken): void {
@@ -98,6 +164,7 @@ export const useProvidersStore = defineStore("providers", () => {
     const result = await providerApi.getProviderCatalog();
     if (generation !== catalogGeneration) return result;
     catalog.value = result;
+    persistProjection();
     // Brand marks for preset-derived rows resolve through the persisted
     // preset id on the definition; warm those definitions in the background.
     for (const entry of result) {
@@ -112,6 +179,7 @@ export const useProvidersStore = defineStore("providers", () => {
     const result = await connectionsApi.list();
     if (generation !== connectionsGeneration) return result;
     connections.value = result;
+    persistProjection();
     return result;
   }
 
@@ -129,6 +197,7 @@ export const useProvidersStore = defineStore("providers", () => {
       if (generation !== contractsGeneration) return result;
       contracts.value = result;
       error.value = "";
+      persistProjection();
       return result;
     } catch (e) {
       if (generation === contractsGeneration) {
@@ -209,11 +278,11 @@ export const useProvidersStore = defineStore("providers", () => {
     scopeKind: ContractScopeKind,
     scopeId: string,
     modelIds: string[],
-  ): Promise<ProviderContractsResponse> {
+  ): Promise<ContractCatalogModelsRemoval> {
     const token = beginContractsMutation();
     try {
       const result = await providerApi.removeContractCatalogModels(scopeKind, scopeId, modelIds);
-      commitContractsMutation(token, result);
+      commitCatalogModelsRemoval(token, { scope_kind: scopeKind, scope_id: scopeId }, result);
       return result;
     } catch (cause) {
       failContractsMutation(token);
@@ -222,6 +291,29 @@ export const useProvidersStore = defineStore("providers", () => {
       }
       throw cause;
     }
+  }
+
+  // A confirmed removal commits from its receipt, never from a re-fetch:
+  // older reads are invalidated first so a slow pending load cannot restore
+  // the deleted rows, and a same-process revision regression is rejected.
+  function commitCatalogModelsRemoval(
+    token: ContractsMutationToken,
+    scope: ProviderScopeRef,
+    receipt: ContractCatalogModelsRemoval,
+  ): void {
+    if (!mutationSessionIsCurrent(token)) return;
+    if (
+      contracts.value
+      && receipt.process_generation === contracts.value.process_generation
+      && receipt.revision < contracts.value.revision
+    ) return;
+    contractsGeneration += 1;
+    if (contracts.value) {
+      contracts.value = projectCatalogModelsRemoval(contracts.value, scope, receipt);
+    }
+    loading.value = false;
+    error.value = "";
+    persistProjection();
   }
 
   async function putModelProtocolOverrides(
@@ -266,7 +358,7 @@ export const useProvidersStore = defineStore("providers", () => {
   // lane so rapid toggles on different rows serialize on fresh CAS tokens
   // instead of self-conflicting, and each receipt commits only when the
   // session is still current.
-  const aliasUnpublished = shallowRef<string[] | null>(null);
+  const aliasUnpublished = shallowRef<string[] | null>(hydrated?.aliasUnpublished ?? null);
   const aliasPublicationOverlays = ref<Readonly<Record<string, boolean>>>({});
   const aliasPublicationPending = ref<readonly string[]>([]);
   const aliasPublicationLoadError = ref("");
@@ -295,6 +387,7 @@ export const useProvidersStore = defineStore("providers", () => {
       if (generation !== aliasPublicationGeneration || session !== sessionGeneration) return;
       aliasUnpublished.value = result.unpublished;
       aliasPublicationLoadError.value = "";
+      persistProjection();
     } catch (cause) {
       // A failed read keeps the last committed list (and its ready state).
       if (generation !== aliasPublicationGeneration || session !== sessionGeneration) return;
@@ -324,6 +417,7 @@ export const useProvidersStore = defineStore("providers", () => {
       // Invalidate any load that started before this ordered receipt.
       aliasPublicationGeneration += 1;
       aliasUnpublished.value = result.unpublished;
+      persistProjection();
       dropAliasPublicationOverlay(key);
       aliasPublicationSaveError.value = "";
     } catch (cause) {
@@ -366,6 +460,7 @@ export const useProvidersStore = defineStore("providers", () => {
     aliasPublicationSaveError.value = "";
     loading.value = false;
     error.value = "";
+    dropSnapshot(SNAPSHOT_KEY);
   }
 
   return {

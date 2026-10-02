@@ -171,6 +171,12 @@ pub(super) async fn put_integration(
         .map_err(V3ApiError::internal)?;
     state.routing.reset();
     state.bump_settings_revision();
+    // The integration row is a routing destination and credential, so publish
+    // the rebuilt preparation view instead of leaving the first request after
+    // this write to discover the drift and re-enter the settings gate.
+    state
+        .publish_gateway_preparation(&state.db.lock())
+        .map_err(|error| V3ApiError::internal_at(&state, error.to_string()))?;
     integration_view(&state).map(Json)
 }
 

@@ -316,7 +316,7 @@ test("expired cooldown restores route availability without becoming quota recove
 });
 
 test("Zen only consults the free cooldown channel", () => {
-  const zen = dest({ adapter: "zen", auth_scheme: "none", max_credentials: 1, plan: { expiry_cadence: null, manual_calibration: false, pricing_source: "unpriced", usage_source: "none", windows: [{ kind: "free" }] } });
+  const zen = dest({ adapter: "zen", auth_scheme: "none", max_credentials: 1, plan: { expiry_cadence: null, manual_calibration: false, usage_source: "none", windows: [{ kind: "free" }] } });
   const fiveHourOnly = key({
     has_secret: false,
     cooldowns: { ...idleCooldowns(), five_hour_until: FUTURE },
@@ -343,7 +343,7 @@ test("Go ignores a free-only cooldown", () => {
 });
 
 test("Zen generic cooldown makes the Key unavailable", () => {
-  const zen = dest({ adapter: "zen", auth_scheme: "none", max_credentials: 1, plan: { expiry_cadence: null, manual_calibration: false, pricing_source: "unpriced", usage_source: "none", windows: [{ kind: "free" }] } });
+  const zen = dest({ adapter: "zen", auth_scheme: "none", max_credentials: 1, plan: { expiry_cadence: null, manual_calibration: false, usage_source: "none", windows: [{ kind: "free" }] } });
   const genericOnly = key({
     has_secret: false,
     cooldowns: { ...idleCooldowns(), generic_until: FUTURE },

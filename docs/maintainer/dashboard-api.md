@@ -2,15 +2,25 @@
 
 # Dashboard API
 
-## Billing and local credit estimates (V4)
+## Billing (V4)
 
-`GET /dashboard/api/v4/accounts/{id}/billing` presents timed quota, cash, or credits together with its observation source and available actions. Here `id` identifies one account (one Key); several accounts in a supplier container remain independent. The read makes no upstream request. Existing official balance and quota refresh endpoints retain their provider-specific observation adapters.
+`GET /dashboard/api/v4/accounts/{id}/billing` presents observed quota windows, official balances, and stored manual credit balances together with available actions. Here `id` identifies one account (one Key); several accounts in a supplier container remain independent. The read makes no upstream request and does not settle, reprice, or advance stored balances. Existing official balance and quota refresh endpoints retain their provider-specific observation adapters.
 
-`PUT .../billing/credits` configures a personal credit estimate. Initial setup supplies current buckets; later rate/settings edits preserve balances. `POST .../billing/credits/calibrate` corrects current bucket balances, `POST .../billing/credits/grants` adds a grant or top-up, and `DELETE .../billing/credits` disables this estimate. Mutations require `expectedRevision` and `processGeneration` and return the updated `BillingStatus`. Requests that start after calibration settle against that new baseline; pending and unpriced requests remain visible. Estimated exhaustion never changes routing eligibility.
+`PUT .../billing/credits` records manual buckets. It does not accept token rates or a currency conversion. `POST .../billing/credits/calibrate` corrects current bucket balances, `POST .../billing/credits/grants` adds a grant, and `DELETE .../billing/credits` disables the manual balance. Mutations require `expectedRevision` and `processGeneration` and return `BillingStatus`. Only an explicit manual edit changes the stored balance. Reading, opening, exporting, or a new inference request does not. A read may show a stored grant past its saved expiry without writing that expiry back. A new request does not debit personal credit. An empty or unknown balance does not change routing eligibility. Historical `credit_meter_json` and `credit_receipt_json` remain readable. A stored pending receipt stays byte-exact. A billing read reports active `pendingRequests` as 0. Explicit calibration writes that meter's balance. The historical receipt does not block that write, and the write does not settle or delete the receipt. Opening does not settle it, and export does not collapse it. The configuration written here is the name, currency, monthly amount, and source URL. A portable import keeps legacy rates stored for historical compatibility. It rebuilds a validated meter and does not call `CreditMeterState::new` or `advance`. Binding and meter ids are new. The monthly expiry, expired buckets, configuration, counters, monthly cursor, `created_at`, and `last_calibration_at` stay exact. The remaining charge attempt returns no debit.
 
-Step Plan uses this local estimation/calibration contract until an official usage API is available. The former private console-token endpoints and `StepFunUsageStatus` contract are retired. StepFun ordinary API balance remains separate from the `/step_plan` channel.
+Step Plan keeps manual buckets, monthly renewal, expiry, and calibration. A Step preset is an amount and a monthly renewal, not a token rate. The former private console-token endpoints and `StepFunUsageStatus` contract are retired. StepFun ordinary API balance remains separate from the `/step_plan` channel.
 
-Personal credits are configurable only for `http` destinations of legacy kind `custom_account` or `dynamic`. Platform-linked Keys, observer credentials and sealed built-in Plans retain their existing billing contracts. Credit calibration rejects pending requests; it does not move their baseline while they are in flight.
+Manual credit is limited to `http` destinations of legacy kind `custom_account` or `dynamic`. Platform-linked Keys, observer credentials, and sealed built-in Plans keep their observed billing views.
+
+These pricing routes are not registered and answer with the ordinary V4 404. There is no new tombstone registry for them:
+
+- `GET /dashboard/api/v4/providers/{id}/pricing`
+- `POST /dashboard/api/v4/providers/{id}/pricing/refresh`
+- `PUT /dashboard/api/v4/providers/{id}/pricing/multipliers`
+- `GET /dashboard/api/v4/providers/{id}/official-api/pricing`
+- `POST /dashboard/api/v4/providers/{id}/official-api/pricing`
+
+`/dashboard/api/v3` remains a 410 tombstone. The V3 DTO contract toolchain remains.
 
 ## Dashboard V3
 
@@ -33,11 +43,10 @@ Control-plane identity:
   a successful persist. Not stored in SQLite as the CAS token.
 - `process_generation` — assigned once per `CoreState`, never persisted.
   A CAS token from a previous process cannot be reused after restart.
-- `pricingRevision` — immutable snapshot id. Pricing mutations also send
-  `expectedPricingRevision`.
+- `pricingRevision` — generated `ControlRevision` still includes this legacy read string, and Rust `ControlRevision::from_state` still copies the in-memory pricing snapshot revision. It is not a CAS token, and it is not removed. The live dashboard client publishes only `revision` and `processGeneration`. There is no pricing mutation. Do not send `expectedPricingRevision`.
 
 `GET /contract` returns the current process's live revision / generation token
-(`ControlRevision`: `revision`, `processGeneration`, `pricingRevision`).
+(`ControlRevision`: `revision`, `processGeneration`).
 
 Mutations require top-level `expectedRevision` and `processGeneration`
 (including `/auth/register`, `/auth/login`, `/auth/logout`, and
@@ -62,7 +71,7 @@ it returns the primary key and every non-deleted sub-key value, including
 disabled sub-keys, under dashboard session protection. Only enabled keys enter
 the authentication snapshot. `CustomModelDiscoveryRequest.apiKey` is write-only.
 Account list/get payloads stay secret-free. Logs and error envelopes redact
-known secrets.
+known secrets. A confirmed Key create or rotate acknowledgement is committed even when the following `GET /connection` fails. The acknowledgement does not include plaintext. After rotation or revocation the previous plaintext is blank. Recovery is another GET. The client must not create or rotate the Key again.
 
 The frozen contract is `schema/dashboard-api-v3.schema.json`, generated from
 `dashboard_v3::contract_schema_pretty()` by
@@ -107,16 +116,15 @@ Read-only routes are `GET /contract`, `GET /templates`,
 `GET /connections`, `GET /accounts` (identities), `GET /account-records`
 (remounted V3 account-list shim), `GET /destinations`, `GET /credentials`,
 `GET /accounts/{id}/billing`, `GET /accounts/{id}/official-api`,
-`GET /providers/{id}/official-api/pricing`, `GET /routing/cards`,
+`GET /routing/cards`,
 `GET /applications/dsh` (optional `profilePath` and `runtimeUrl`),
 `GET /cpa/models`, and `GET /alias-publication`. Those reads perform no outbound
 requests.
 
-The official-api family — `GET /accounts/{id}/official-api`,
-`POST /accounts/{id}/official-api/balance`, and
-`GET|POST /providers/{id}/official-api/pricing` — exposes official-API preset
-financial evidence. The GETs are local projections; the CAS-protected POSTs are
-the only network paths. See
+The official-api family — `GET /accounts/{id}/official-api` and
+`POST /accounts/{id}/official-api/balance` — exposes official balance evidence
+for matching presets. The GET is a local projection; the CAS-protected POST is
+the network path. Price-table routes are not registered. See
 [Official API Financial Evidence](runtime-invariants.md#official-api-financial-evidence).
 
 `GET /templates` is the read-only add catalog: the sealed built-ins (CPA
@@ -307,6 +315,8 @@ listener is running. If rebind fails, the request returns `500` with code
 `internal`. Compensation restores the previous port only when the live config
 still contains the failed committed port, so a later successful write is not
 overwritten.
+
+A confirmed settings acknowledgement means the write is saved. If the following canonical read fails, that is a separate read warning. The client must not treat it as a write failure and must not submit the same write again. A gateway-port change does not navigate by itself. On a direct connection, the page may offer a link the operator opens. That link keeps the current scheme, host name, path, query, and hash, and changes only the port. The page does not follow the link automatically, including when the new port is the loopback port the dashboard was already using. A reverse-proxy origin stays unchanged. A failed bind returns the `500` `internal` above, is not success, and does not offer that link.
 
 ## V2 REST tombstone
 

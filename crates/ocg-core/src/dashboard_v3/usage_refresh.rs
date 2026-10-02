@@ -114,9 +114,8 @@ fn usage_refresh_from_success(
     state: &CoreState,
     success: OfficialUsageRefreshSuccess,
 ) -> UsageRefresh {
-    let pricing_revision = Some(state.pricing_snapshot().revision.clone());
     UsageRefresh {
-        usage: usage_window_from_model(state, success.usage, pricing_revision),
+        usage: usage_window_from_model(state, success.usage, None),
         source: success.source.to_string(),
         last_success_at: success.last_success_at,
         next_allowed_at: success.next_allowed_at,
@@ -130,17 +129,18 @@ pub(super) fn usage_window_from_model(
     usage: ModelUsageWindow,
     pricing_revision: Option<String>,
 ) -> UsageWindow {
+    let _ = pricing_revision;
     UsageWindow {
         account_id: usage.account_id,
-        window_5h: usage.window_5h,
-        window_week: usage.window_week,
-        window_month: usage.window_month,
+        window_5h: Some(usage.window_5h),
+        window_week: Some(usage.window_week),
+        window_month: Some(usage.window_month),
         resets_in_5h: rfc3339_opt(usage.resets_in_5h),
         resets_in_week: rfc3339_opt(usage.resets_in_week),
         resets_in_month: rfc3339_opt(usage.resets_in_month),
         revision: state.settings_revision(),
         process_generation: state.process_generation(),
-        pricing_revision,
+        pricing_revision: None,
     }
 }
 

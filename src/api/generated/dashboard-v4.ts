@@ -80,6 +80,7 @@ export type DashboardApiV4 =
   | DestinationModelMetadata
   | DestinationModelMetadataEntry
   | DestinationModelMetadataUpdate
+  | ModelMetadataCatalog
   | DestinationCatalogModelUpdate
   | DestinationModelTestRequest
   | DestinationModelTestResult
@@ -103,16 +104,14 @@ export type DashboardApiV4 =
   | CatalogModelDto
   | DestinationProjectionRefusedError
   | OfficialApiKind
-  | OfficialPriceRow
-  | OfficialPriceSheet
   | OfficialBalance
   | OfficialSpend
   | OfficialApiStatus
-  | OfficialApiPrices
   | BillingModel
   | BillingSource
   | BillingStatus
   | CreditRate
+  | CreditConfigurationWrite
   | MonthlyCredits
   | CreditConfiguration
   | CreditBucketKind
@@ -1517,6 +1516,16 @@ export interface DestinationModelMetadataUpdate {
   publicModel: string;
 }
 /**
+ * Every destination's effective metadata in one payload. The alias page
+ * renders per-mapping capabilities from this single read; fanning the
+ * per-destination endpoint out across rows would serialize N full routing
+ * snapshots behind the settings lock.
+ */
+export interface ModelMetadataCatalog {
+  destinations: DestinationModelMetadata[];
+  revision: ControlRevision;
+}
+/**
  * Required process-scoped mutation precondition.
  *
  * Both fields travel at the top level of every mutation request. The random
@@ -1622,25 +1631,6 @@ export interface RefusedRowDto {
    */
   providerId: string | null;
 }
-export interface OfficialPriceRow {
-  cacheReadPerMillion: number | null;
-  currency: string;
-  inputPerMillion: number;
-  model: string;
-  outputPerMillion: number;
-  /**
-   * `all`, or DeepSeek `peak` / `off_peak` at the frozen attempt time.
-   */
-  period: string;
-}
-export interface OfficialPriceSheet {
-  kind: OfficialApiKind;
-  observedAt: string;
-  revision: string;
-  rows: OfficialPriceRow[];
-  sourceUrl: string;
-  validUntil: string;
-}
 export interface OfficialBalance {
   currency: string;
   granted: number;
@@ -1661,17 +1651,10 @@ export interface OfficialApiStatus {
   lifetimeSpend: OfficialSpend[];
   monthSpend: OfficialSpend[];
   monthStartedAt: string;
-  prices: OfficialPriceSheet;
   processGeneration: number;
   providerId: string;
   revision: number;
   unpricedRequests: number;
-}
-export interface OfficialApiPrices {
-  prices: OfficialPriceSheet;
-  processGeneration: number;
-  providerId: string;
-  revision: number;
 }
 export interface BillingStatus {
   accountId: string;
@@ -1718,8 +1701,7 @@ export interface CreditBucket {
 /**
  * GET `/accounts/{id}/provider-usage` body. Distinct from stored quota rows.
  *
- * `pricingRevision` is present when live Go quota windows use one captured
- * pricing snapshot.
+ * `pricingRevision` is always absent. Usage is no longer a pricing CAS token.
  */
 export interface ProviderUsage {
   accountId: string;
@@ -1776,6 +1758,16 @@ export interface UsageSyncState {
   nextEligibleAt: string | null;
 }
 /**
+ * Manual credit setup. Token rates and the currency conversion factor are not writable.
+ * Stored historical rates stay on the meter and are not replaced by this body.
+ */
+export interface CreditConfigurationWrite {
+  currency: string;
+  monthly: MonthlyCredits | null;
+  name: string;
+  sourceUrl: string | null;
+}
+/**
  * Required process-scoped mutation precondition.
  *
  * Both fields travel at the top level of every mutation request. The random
@@ -1783,7 +1775,7 @@ export interface UsageSyncState {
  * accepted by a fresh process whose in-memory counter reused the same value.
  */
 export interface CreditConfigureRequest {
-  configuration: CreditConfiguration;
+  configuration: CreditConfigurationWrite;
   expectedRevision: number;
   /**
    * Required for initial setup; omitted for a rate/settings edit so balances survive.

@@ -84,43 +84,18 @@ test("dashboard request errors preserve a non-JSON proxy response body", async (
   );
 });
 
-test("settings update writes CAS tokens and reloads the full config", async () => {
-  setupControlPlane(7);
+test("settings update sends the captured snapshot CAS and does not revalidate inside the write", async () => {
+  setupControlPlane(9, 100);
   const requests = installFetchMock(({ url, method }) => {
     if (method === "PUT" && url.endsWith("/settings")) {
-      return { revision: 8, processGeneration: 99 };
-    }
-    if (method === "GET" && url.endsWith("/settings")) {
-      return {
-        revision: 8,
-        processGeneration: 99,
-        pricingRevision: null,
-        gatewayPort: 9042,
-        gatewayPortFromEnv: true,
-        proxyMode: "auto",
-        proxyUrl: "",
-        proxyListDirection: "whitelist",
-        proxyListModels: [],
-        proxySupportedModels: [],
-        opencodeInviteUrl: "https://opencode.ai/go?ref=68XPB6NP8V",
-        clientRootUrl: "",
-        clientRootUrlFromEnv: false,
-        autoStart: false,
-        autoStartSupported: false,
-        showDockIcon: true,
-        dockVisibilitySupported: false,
-        connectTimeoutSecs: 30,
-        nonStreamTimeoutSecs: 900,
-        streamIdleTimeoutSecs: 300,
-        routingMode: "strict-priority",
-        conversationSticky: false,
-      };
+      return { revision: 8, processGeneration: 11 };
     }
     throw new Error(`unexpected request ${method} ${url}`);
   });
 
   const result = await dashboardApi.updateSettings({
     revision: 7,
+    process_generation: 11,
     gateway_port: 9042,
     gateway_port_from_env: true,
     proxy_mode: "auto",
@@ -142,44 +117,55 @@ test("settings update writes CAS tokens and reloads the full config", async () =
     conversation_sticky: false,
   });
 
-  assert.equal(requests[0]?.body?.expectedRevision, 7);
-  assert.equal(requests[0]?.body?.processGeneration, 99);
-  assert.equal("revision" in (requests[0]?.body ?? {}), false);
-  assert.equal("gatewayPort" in (requests[0]?.body ?? {}), false);
-  assert.equal(result.revision, 8);
-  assert.equal(result.gateway_port, 9042);
-  assert.equal(result.gateway_port_from_env, true);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0]?.method, "PUT");
+  const body = requests[0]?.body ?? {};
+  assert.equal(body.expectedRevision, 7);
+  assert.equal(body.processGeneration, 11);
+  assert.equal(body.routingMode, "strict-priority");
+  assert.equal(body.conversationSticky, false);
+  assert.equal(body.opencodeInviteUrl, "https://opencode.ai/go?ref=68XPB6NP8V");
+  assert.equal("gatewayPort" in body, false);
+  assert.equal("autoStart" in body, false);
+  assert.equal("showDockIcon" in body, false);
+  assert.equal("pricingRevision" in body, false);
+  assert.equal("revision" in body, false);
+  assert.deepEqual(result, { revision: 8, processGeneration: 11 });
 });
 
-test("primary key regeneration reloads plaintext from the connection endpoint", async () => {
+test("primary key regeneration finishes at the POST receipt and reads plaintext back once", async () => {
   setupControlPlane(7);
-  let primaryKey = "ocg-old-key";
+  let releaseRead!: (response: Response) => void;
+  const read = new Promise<Response>((resolve) => { releaseRead = resolve; });
   const requests = installFetchMock(({ url, method }) => {
     if (method === "POST" && url.endsWith("/keys/primary/regenerate")) {
-      primaryKey = "ocg-new-key";
       return { revision: 8, processGeneration: 99 };
     }
-    if (method === "GET" && url.endsWith("/connection")) {
-      return {
-        revision: 8,
-        processGeneration: 99,
-        gatewayPort: 9042,
-        clientRootUrl: "http://127.0.0.1:9042",
-        primaryKey,
-        subKeys: [],
-      };
-    }
+    if (method === "GET" && url.endsWith("/connection")) return read;
     throw new Error(`unexpected request ${method} ${url}`);
   });
 
   const store = useConnectionStore();
   const regenerated = await store.regeneratePrimaryKey();
-
-  assert.equal(regenerated, "ocg-new-key");
+  assert.equal(regenerated.committed, true);
+  assert.equal(regenerated.value, undefined);
   assert.deepEqual(
     requests.filter(({ method }) => method === "POST").map(({ body }) => body),
     [{ expectedRevision: 7, processGeneration: 99 }],
   );
+  assert.equal(requests.filter(({ method }) => method === "GET").length, 1);
+  releaseRead(new Response(JSON.stringify({
+    revision: 8,
+    processGeneration: 99,
+    gatewayPort: 9042,
+    clientRootUrl: "http://127.0.0.1:9042",
+    primaryKey: "ocg-new-key",
+    subKeys: [],
+  }), { headers: { "Content-Type": "application/json" } }));
+  assert.equal(await regenerated.revalidation, "loaded");
+  assert.equal(regenerated.value, "ocg-new-key");
+  assert.equal(store.info?.primary_key, "ocg-new-key");
+  assert.equal(requests.filter(({ method }) => method === "POST").length, 1);
 });
 
 test("account API sends purchase dates and the complete reorder payload", async () => {

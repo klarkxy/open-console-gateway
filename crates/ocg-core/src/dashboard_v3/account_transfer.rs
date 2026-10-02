@@ -941,6 +941,14 @@ async fn import_accounts_inner(
         })
         .map_err(|error| V3ApiError::conflict_at(&state, error.to_string()))?;
     state.install_imported_node_runtime(runtime);
+    // The import replaced every routing row in one transaction; publish the new
+    // request-preparation aggregate so the next request resolves against it
+    // without re-entering the settings gate. This reuses the `db` guard already
+    // held for the import: taking `state.db.lock()` again here would deadlock
+    // on the non-reentrant mutex.
+    state
+        .publish_gateway_preparation(&db)
+        .map_err(|error| V3ApiError::conflict_at(&state, error.to_string()))?;
     let revision = state.settings_revision();
 
     Ok(Json(AccountImportResult {

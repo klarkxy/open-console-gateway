@@ -33,6 +33,15 @@
         </n-button>
       </n-alert>
       <n-alert
+        v-if="catalogLoadError"
+        type="warning"
+        :title="t('加载供应商目录失败：{error}', { error: catalogLoadError })"
+      >
+        <n-button size="small" secondary :loading="loading" @click="loadAliases({ retain: true })">
+          {{ t("重试") }}
+        </n-button>
+      </n-alert>
+      <n-alert
         v-if="accountsLoadError"
         type="warning"
         :title="t('加载 Custom Alias 账号失败：{error}', { error: accountsLoadError })"
@@ -45,6 +54,15 @@
         v-if="dynamicLoadError"
         type="warning"
         :title="t('加载供应商失败：{error}', { error: dynamicLoadError })"
+      >
+        <n-button size="small" secondary :loading="loading" @click="loadAliases({ retain: true })">
+          {{ t("重试") }}
+        </n-button>
+      </n-alert>
+      <n-alert
+        v-if="destinationsLoadError"
+        type="warning"
+        :title="t('目的地投影刷新失败：{error}', { error: destinationsLoadError })"
       >
         <n-button size="small" secondary :loading="loading" @click="loadAliases({ retain: true })">
           {{ t("重试") }}
@@ -83,6 +101,15 @@
         type="warning"
         :title="t('更新对外展示失败：{error}', { error: publicationSaveError })"
       />
+      <n-alert
+        v-if="capabilitiesLoadError"
+        type="warning"
+        :title="t('加载模型能力失败：{error}', { error: capabilitiesLoadError })"
+      >
+        <n-button size="small" secondary :loading="loading" @click="loadAliases({ retain: true })">
+          {{ t("重试") }}
+        </n-button>
+      </n-alert>
       <n-empty v-if="aliasGroups.length === 0" :description="search.trim() ? t('无匹配模型') : t('暂无 Alias')" />
       <div v-else class="aliases-table-wrap" tabindex="0" role="region" :aria-label="t('模型映射')">
         <table class="aliases-table">
@@ -92,6 +119,7 @@
               <th>{{ t("供应商 / 方案") }}</th>
               <th>{{ t("路由顺位") }}</th>
               <th>{{ t("上游模型 ID") }}</th>
+              <th>{{ t("能力") }}</th>
               <th><span class="sr-only">{{ t("打开相关目标") }}</span></th>
             </tr>
           </thead>
@@ -129,6 +157,44 @@
               </td>
               <td class="aliases-rank">{{ rankText(row) }}</td>
               <td><code>{{ row.upstream_model }}</code></td>
+              <td class="aliases-capability">
+                <template v-if="capabilityFor(row).state === 'ready'">
+                  <n-tag
+                    v-for="modality in capabilityFor(row).input_modalities"
+                    :key="modality"
+                    size="tiny"
+                    :bordered="false"
+                  >
+                    {{ modalityLabel(modality) }}
+                  </n-tag>
+                  <n-tag size="tiny" :bordered="false" class="aliases-capability-source">
+                    {{ sourceLabel(capabilityFor(row).source) }}
+                  </n-tag>
+                </template>
+                <template v-else-if="capabilityFor(row).state === 'unknown'">
+                  <n-tag size="tiny" type="warning" :bordered="false">{{ t("未知") }}</n-tag>
+                  <n-button
+                    v-if="aliasCapabilityTarget(row)"
+                    text
+                    size="tiny"
+                    type="primary"
+                    :aria-label="`${t('去声明')} ${row.public_model}`"
+                    @click="openCapabilityTarget(row)"
+                  >
+                    {{ t("去声明") }}
+                  </n-button>
+                </template>
+                <n-tag
+                  v-else-if="capabilityFor(row).state === 'error'"
+                  size="tiny"
+                  type="error"
+                  :bordered="false"
+                >
+                  {{ t("加载失败") }}
+                </n-tag>
+                <span v-else-if="capabilityFor(row).state === 'unavailable'" class="aliases-capability-none">—</span>
+                <span v-else class="aliases-capability-none">{{ t("加载中…") }}</span>
+              </td>
               <td class="aliases-action">
                 <n-button
                   v-if="aliasRowTarget(row)"
@@ -156,6 +222,12 @@ import { useRouter, type RouteLocationRaw } from "vue-router";
 import { NAlert, NButton, NEmpty, NIcon, NInput, NSpin, NSwitch, NTag } from "naive-ui";
 import { LinkOutlined } from "@vicons/antd";
 import { isDynamicCatalogEntry } from "../domain/dynamic-provider.ts";
+import {
+  ALIAS_CAPABILITY_SOURCE_KEYS,
+  ALIAS_MODALITY_KEYS,
+  aliasCapabilityView,
+  type AliasCapabilityView,
+} from "../domain/alias-capabilities.ts";
 import { flattenProviderScopes, normalizeProviderContractsResponse } from "../domain/provider-contracts.ts";
 import { CPA_PROVIDER_ID } from "../domain/destination-providers.ts";
 import {
@@ -202,8 +274,11 @@ const cpaModels = computed(() => providersStore.cpaModels ?? []);
 const loading = ref(false);
 const search = ref("");
 const loadError = ref("");
+const catalogLoadError = ref("");
+const capabilitiesLoadError = ref("");
 const accountsLoadError = ref("");
 const dynamicLoadError = ref("");
+const destinationsLoadError = ref("");
 const cpaLoadError = ref("");
 const identitiesLoadError = ref("");
 // Alias publication lives in the providers store; these are read-through views.
@@ -215,6 +290,7 @@ const router = useRouter();
 let activatedOnce = false;
 let aliasesLoadedAt = 0;
 let loadGeneration = 0;
+let capabilitiesGeneration = 0;
 // Activation refreshes skip data loaded recently; user actions call
 // loadAliases directly and stay immediate.
 const ACTIVATED_REFRESH_FRESHNESS_MS = 30_000;
@@ -278,6 +354,72 @@ function groupHasOverlap(rows: readonly ProviderAliasRow[]): boolean {
   return rows.some((row) => overlapFlags.value.has(row.key));
 }
 
+// Effective capabilities are read-through projections of the destinations
+// store's per-destination metadata snapshots; the view never copies them.
+const capabilities = computed(() => {
+  const views = new Map<string, AliasCapabilityView>();
+  for (const row of aliasRows.value) {
+    views.set(row.key, aliasCapabilityView(
+      row,
+      destinationsStore.destinations,
+      destinationsStore.modelMetadata,
+      destinationsStore.modelMetadataErrors,
+    ));
+  }
+  return views;
+});
+const PENDING_CAPABILITY: AliasCapabilityView = {
+  state: "pending",
+  destination_id: null,
+  source: null,
+  input_modalities: [],
+  output_modalities: [],
+};
+
+function capabilityFor(row: ProviderAliasRow): AliasCapabilityView {
+  return capabilities.value.get(row.key) ?? PENDING_CAPABILITY;
+}
+
+function modalityLabel(modality: string): string {
+  const key = ALIAS_MODALITY_KEYS[modality];
+  return key ? t(key) : modality;
+}
+
+function sourceLabel(source: string | null): string {
+  if (!source) return "";
+  const key = ALIAS_CAPABILITY_SOURCE_KEYS[source];
+  return key ? t(key) : source;
+}
+
+/** One aggregate read covers every destination behind the visible rows. */
+async function loadAliasCapabilities(): Promise<void> {
+  const generation = ++capabilitiesGeneration;
+  try {
+    await destinationsStore.loadAllModelMetadata();
+    if (generation !== capabilitiesGeneration) return;
+    capabilitiesLoadError.value = "";
+  } catch (error) {
+    if (generation !== capabilitiesGeneration) return;
+    capabilitiesLoadError.value = dashboardErrorDetail(error);
+  }
+}
+
+/** Declare deep-link: the provider models tab with the capabilities editor open. */
+function aliasCapabilityTarget(row: ProviderAliasRow): RouteLocationRaw | null {
+  if (row.custom_account_id || !row.provider_id || row.provider_id === CPA_PROVIDER_ID) return null;
+  return appViewRoute("providers", {
+    provider: row.provider_id,
+    tab: "models",
+    model: row.public_model,
+    capabilities: row.public_model,
+  });
+}
+
+function openCapabilityTarget(row: ProviderAliasRow): void {
+  const target = aliasCapabilityTarget(row);
+  if (target) void router.push(target);
+}
+
 // The store owns the write: per-row duplicate guard, optimistic overlay,
 // and overlay-scoped failure reconciliation.
 function setPublished(publicModel: string, published: boolean): void {
@@ -310,12 +452,26 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
   loading.value = true;
   if (!options.retain) {
     loadError.value = "";
+    catalogLoadError.value = "";
+    capabilitiesLoadError.value = "";
     dynamicLoadError.value = "";
+    destinationsLoadError.value = "";
     cpaLoadError.value = "";
     identitiesLoadError.value = "";
   }
   try {
-    const [contractsResult, catalogResult, accountsResult, cpaResult, identitiesResult, destinationsResult] = await Promise.allSettled([
+    // Every slot is named: the publication read (store-owned error) must
+    // never be mistaken for the destination catalog read, and each read
+    // propagates its own failure independently.
+    const [
+      contractsResult,
+      catalogResult,
+      accountsResult,
+      cpaResult,
+      identitiesResult,
+      publicationResult,
+      destinationsResult,
+    ] = await Promise.allSettled([
       providersStore.loadContracts(),
       providersStore.loadCatalog(),
       accountsStore.loadPresented(),
@@ -327,6 +483,8 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
       destinationsStore.load(),
     ]);
     if (generation !== loadGeneration) return;
+    // Alias publication failures surface through the store-owned load error.
+    void publicationResult;
     if (identitiesResult.status === "fulfilled") {
       identitiesLoadError.value = "";
     } else {
@@ -338,6 +496,7 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
       cpaLoadError.value = dashboardErrorDetail(cpaResult.reason);
     }
     if (catalogResult.status === "fulfilled") {
+      catalogLoadError.value = "";
       const enabledProviderIds = new Set(
         (accountsResult.status === "fulfilled" ? accountsResult.value : accounts.value)
           .filter((account) => account.enabled)
@@ -348,23 +507,25 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
       ));
       if (entries.length === 0) {
         dynamicLoadError.value = "";
+        destinationsLoadError.value = "";
       } else {
-        // Destination catalog enablement decides dynamic row routability, so a
-        // projection failure hides those rows and is reported with them.
-        const destinationFailure = destinationsResult.status === "rejected"
+        // Destination catalog enablement decides dynamic row routability, so
+        // its failure hides those rows and is reported apart from definition
+        // failures.
+        destinationsLoadError.value = destinationsResult.status === "rejected"
           ? dashboardErrorDetail(destinationsResult.reason)
           : "";
         const details = await Promise.allSettled(
           entries.map((entry) => providersStore.loadDefinition(entry.provider_id)),
         );
         if (generation !== loadGeneration) return;
-        const failures: string[] = [];
-        if (destinationFailure) failures.push(destinationFailure);
-        details.forEach(result => {
-          if (result.status === "rejected") failures.push(dashboardErrorDetail(result.reason));
-        });
-        dynamicLoadError.value = failures[0] ?? "";
+        const failure = details.find((result) => result.status === "rejected");
+        dynamicLoadError.value = failure?.status === "rejected"
+          ? dashboardErrorDetail(failure.reason)
+          : "";
       }
+    } else {
+      catalogLoadError.value = dashboardErrorDetail(catalogResult.reason);
     }
     if (accountsResult.status === "fulfilled") {
       accountsLoadError.value = "";
@@ -377,6 +538,9 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
     } else {
       loadError.value = dashboardErrorDetail(contractsResult.reason);
     }
+    // Capability tags fan out per destination behind the visible rows; they
+    // render as pending chips instead of holding the table hostage.
+    void loadAliasCapabilities();
   } finally {
     if (generation === loadGeneration) loading.value = false;
   }
@@ -385,11 +549,13 @@ async function loadAliases(options: { retain?: boolean } = {}): Promise<void> {
 watch(() => sessionStore.authenticated, ok => {
   if (ok) return;
   loadGeneration += 1;
+  capabilitiesGeneration += 1;
   aliasesLoadedAt = 0;
   loading.value = false;
-  loadError.value = accountsLoadError.value = dynamicLoadError.value = cpaLoadError.value = identitiesLoadError.value = "";
+  loadError.value = catalogLoadError.value = accountsLoadError.value = dynamicLoadError.value = destinationsLoadError.value = cpaLoadError.value = identitiesLoadError.value = "";
+  capabilitiesLoadError.value = "";
 }, { flush: "sync" });
-onUnmounted(() => { loadGeneration += 1; });
+onUnmounted(() => { loadGeneration += 1; capabilitiesGeneration += 1; });
 onMounted(() => void loadAliases());
 onActivated(() => {
   if (activatedOnce) {
@@ -463,6 +629,16 @@ onActivated(() => {
 }
 .aliases-table .aliases-rank {
   white-space: nowrap;
+  color: var(--ocg-muted);
+}
+.aliases-capability {
+  white-space: nowrap;
+}
+.aliases-capability .n-tag {
+  margin-right: var(--ocg-space-xs);
+}
+.aliases-capability-source,
+.aliases-capability-none {
   color: var(--ocg-muted);
 }
 @media (max-width: 720px) {

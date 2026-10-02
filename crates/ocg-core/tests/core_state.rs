@@ -399,7 +399,7 @@ fn query_forward_logs_filters_before_limit_and_summarizes_all_matches() {
     assert_eq!(first.summary.prompt_tokens, 40);
     assert_eq!(first.summary.completion_tokens, 60);
     assert_eq!(first.summary.cached_tokens, 8);
-    assert!((first.summary.cost - 3.0).abs() < f64::EPSILON);
+    assert_eq!(first.summary.cost, None);
 
     let second = db
         .query_forward_logs(ForwardLogQueryOptions {

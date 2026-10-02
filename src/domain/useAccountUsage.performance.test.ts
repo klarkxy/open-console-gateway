@@ -1,9 +1,20 @@
 import assert from "node:assert/strict";
-import test, { type TestContext } from "node:test";
+import nodeTest, { type TestContext } from "node:test";
+
+// Shared billing client: one test body at a time so session guards stay isolated.
+let lane: Promise<void> = Promise.resolve();
+function test(name: string, body: (t: TestContext) => Promise<void> | void): Promise<void> {
+  return nodeTest(name, (t) => {
+    const run = lane.then(() => body(t));
+    lane = run.then(() => undefined, () => undefined);
+    return run;
+  });
+}
 import { createPinia, setActivePinia } from "pinia";
 import { effectScope, nextTick, ref, watch } from "vue";
 import type { Account } from "../api/dashboard.ts";
 import { billingApi, type BillingStatus } from "../api/billing.ts";
+import type { ProviderCatalogEntry } from "../api/providers.ts";
 import { useBillingStore } from "../stores/billing.ts";
 import { useAccountUsage } from "./useAccountUsage.ts";
 
@@ -22,6 +33,36 @@ function status(accountId: string, used: number): BillingStatus {
         source: "local_estimate", observedAt: null, updatedAt: "2026-09-21T00:00:00Z",
       }],
     },
+  };
+}
+
+function catalogEntry(provider_id: string, manual_usage_calibration: boolean): ProviderCatalogEntry {
+  return {
+    provider_id,
+    origin: "builtin",
+    editable: false,
+    deletable: false,
+    offering: "plan",
+    display_name: provider_id,
+    display_family: provider_id,
+    credential_kind: "api_key",
+    quota_scope: "key",
+    singleton: false,
+    creation_availability: "available",
+    creation_unavailable_reason: null,
+    verification_policy: "not_required",
+    verification_runtime_availability: "not_applicable",
+    routable: true,
+    managed_registration: false,
+    quota_unit: "percent",
+    model_source: "builtin",
+    key_prefix: null,
+    auth_schemes: ["bearer"],
+    upstream_protocols: ["chat_completions"],
+    form_fields: [],
+    model_aliases: [],
+    usage_availability: "available",
+    manual_usage_calibration,
   };
 }
 
@@ -316,4 +357,75 @@ test("warm return fills missing or failed usage without reloading current accoun
   await f.usage.ensureAccountUsage("b");
   assert.deepEqual(f.loads, ["a", "b", "b", "b"]);
   assert.equal(f.usage.usageLoadErrorFor("b").value, null);
+});
+
+test("a first-hand draft does not reload billing or invalidate the other account", async (t) => {
+  setActivePinia(createPinia());
+  const originalStatus = billingApi.status;
+  const loads: string[] = [];
+  const empty = (accountId: string, providerId: string, manual: boolean): BillingStatus => ({
+    accountId,
+    model: "quota",
+    source: "unavailable",
+    unit: "percent",
+    configurableCredits: false,
+    manualCalibration: manual,
+    officialRefresh: providerId !== "ollama",
+    cash: null,
+    credits: null,
+    presets: [],
+    revision: 3,
+    processGeneration: 1,
+    usage: {
+      accountId,
+      providerId,
+      availability: "available",
+      creditBalances: [],
+      experimental: false,
+      freeCooldownUntil: null,
+      pricingRevision: null,
+      processGeneration: 1,
+      revision: 3,
+      syncState: null,
+      quotaWindows: [],
+    },
+  });
+  billingApi.status = async (accountId: string) => {
+    loads.push(accountId);
+    return accountId === "goat"
+      ? empty("goat", "command-code", true)
+      : empty("other", "minimax", false);
+  };
+  t.after(() => { billingApi.status = originalStatus; });
+  const catalog = ref<ProviderCatalogEntry[]>([
+    catalogEntry("command-code", true),
+    catalogEntry("minimax", false),
+  ]);
+  const accounts = ref([
+    account("goat"),
+    account("other"),
+  ]);
+  accounts.value[0]!.provider_id = "command-code";
+  accounts.value[1]!.provider_id = "minimax";
+  const notify = () => ({} as never);
+  const scope = effectScope();
+  const usage = scope.run(() => useAccountUsage(accounts, ref(Date.now()), catalog, {
+    message: { success: notify, warning: notify, error: notify },
+  }))!;
+  t.after(() => scope.stop());
+  await usage.loadAccountUsage("goat");
+  await usage.loadAccountUsage("other");
+  const otherSelector = usage.usageFor("other");
+  const otherValue = otherSelector.value;
+  const goatSelector = usage.usageFor("goat");
+  usage.updateUsageDraft("goat", "window_5h", 42.5);
+  await nextTick();
+  assert.deepEqual(loads, ["goat", "other"]);
+  assert.equal(usage.usageFor("other"), otherSelector);
+  assert.equal(usage.usageFor("goat"), goatSelector);
+  assert.equal(otherSelector.value, otherValue);
+  assert.equal(otherSelector.value.window_5h, null);
+  assert.equal(usage.hasAvailableUsageEditor(accounts.value[1]!), false);
+  assert.equal(usage.providerUsageFor("goat").value?.quota_windows.length, 0);
+  assert.equal(usage.usageEdits.value.goat?.window_5h?.draft, 42.5);
 });

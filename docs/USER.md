@@ -27,7 +27,7 @@ This guide is for people running Open Console Gateway as a desktop app, a headle
 - [Logs And Settings](user/logs-settings.md) — Request logs, settings, and proxy modes.
 - [Gateway Behavior](user/gateway.md) — Endpoints, authentication, and aliases.
 - [Protocol Conversion](user/protocol-conversion.md) — Preferred/supported protocols, passthrough, and conversion limits.
-- [Routing, Cost, And Failover](user/routing.md) — Selection order, sticky/round-robin, cost accounting, circuit breakers, and failover.
+- [Routing And Failover](user/routing.md) — Selection order, sticky/round-robin, usage windows, circuit breakers, and failover.
 - [Temporary Unavailability](user/temporary-unavailability.md) — Global or per-connection Settings rules that skip a Key or model locally after a matching upstream error, then retry on real traffic.
 - [CLI](user/cli.md) — Headless CLI archive, data directory, `serve` / `key` / `status`, and bundled skill sync.
 - [Docker](user/docker.md) — GHCR image, Compose setup, browser sidecar, and source builds.

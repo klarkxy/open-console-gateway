@@ -263,20 +263,42 @@ pub(crate) fn authorize_execution_send(
 
 /// Re-check authorization immediately before send and acquire a one-shot
 /// quota trial when this Key is due.
+///
+/// Split by whether the attempt actually mutates state. Ordinary sends only
+/// re-authorize against live database state, so they take the `db` lock and
+/// never the `settings_update` gate. A quota/credit trial writes a recovery row
+/// and the probe lease, so it escalates to the gate — and only after proving a
+/// trial is required, so the common path never waits on dashboard writes.
 pub(crate) fn confirm_execution_send(
     state: &CoreState,
     selection: &LiveSendSelection,
     spec: &AttemptSpec,
 ) -> Result<Option<QuotaEpisode>, LiveSendAuthError> {
+    let trial_required = {
+        let db = state.db.lock();
+        let snapshot = load_snapshot_with_probes(state, &db)?;
+        let wall = state.sample_gateway_clock().0;
+        let free_available = free_channel_available(&db, &snapshot, wall)?;
+        verify_execution_authorization(&snapshot, selection, spec, wall, free_available)?;
+        // verify_execution_authorization already proved the credential is
+        // present, so this only asks whether a trial is pending for it.
+        snapshot
+            .credentials
+            .iter()
+            .find(|credential| credential.id == selection.account_id)
+            .is_some_and(|credential| credential.quota_recovery.is_some())
+    };
+    if !trial_required {
+        return Ok(None);
+    }
+
+    // Slow path: a real mutation. Keep the gate so a trial cannot interleave
+    // with a dashboard write that is rebuilding the same state.
     let _settings_update = state.settings_update.lock();
     let db = state.db.lock();
     let mut snapshot = load_snapshot_with_probes(state, &db)?;
     let wall = state.sample_gateway_clock().0;
-    let free_available = db
-        .free_channel_cooldown_until_at(wall)
-        .map_err(|e| LiveSendAuthError::unauthorized(e.to_string()))?
-        .is_none()
-        && !crate::destination_projection::free_channel_exhausted(&snapshot.projection, wall);
+    let free_available = free_channel_available(&db, &snapshot, wall)?;
     verify_execution_authorization(&snapshot, selection, spec, wall, free_available)?;
     let Some(credential) = snapshot
         .credentials
@@ -287,11 +309,31 @@ pub(crate) fn confirm_execution_send(
     };
     match acquire_quota_trial_locked(state, &db, credential, wall)? {
         QuotaAcquire::NotInRecovery => Ok(None),
-        QuotaAcquire::Trial(episode) => Ok(Some(episode)),
+        QuotaAcquire::Trial(episode) => {
+            // The trial persisted a recovery row and advanced the settings
+            // revision; republish so the aggregate is not left claiming the
+            // previous generation.
+            if let Err(error) = state.publish_gateway_preparation(&db) {
+                eprintln!("warning: failed to republish the request preparation view: {error}");
+            }
+            Ok(Some(episode))
+        }
         QuotaAcquire::SkipWaiting | QuotaAcquire::SkipProbing => {
             Err(LiveSendAuthError::unauthorized(UNAUTHORIZED_ATTEMPT))
         }
     }
+}
+
+fn free_channel_available(
+    db: &crate::db::Database,
+    snapshot: &crate::routing_snapshot::RoutingSnapshot,
+    wall: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, LiveSendAuthError> {
+    Ok(db
+        .free_channel_cooldown_until_at(wall)
+        .map_err(|e| LiveSendAuthError::unauthorized(e.to_string()))?
+        .is_none()
+        && !crate::destination_projection::free_channel_exhausted(&snapshot.projection, wall))
 }
 
 fn load_snapshot_with_probes(

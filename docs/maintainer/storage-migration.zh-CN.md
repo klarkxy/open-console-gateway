@@ -2,9 +2,9 @@
 
 # 存储与迁移
 
-## Schema v65 — GOAT Key 本地计划窗口
+## Schema v66 — GOAT Key 本地计划窗口
 
-v65 增量增加可空 `credentials.goat_plan_cooldowns_json`。`migrate_to_v65` 要求 schema v64，添加该 TEXT 列，再写入 `schema_version` 65。既有行保持 NULL。已经是 v65 的打开直接返回，不改写该列。不改写 credentials 表，也不写 pre-v65 快照。普通冷却列、凭据 ID、路由顺序和 Key 密文保持原样。
+v66 增量增加可空 `credentials.goat_plan_cooldowns_json`。`migrate_to_v66` 接受 schema v64 或 v65，添加该 TEXT 列，再写入 `schema_version` 66。既有行保持 NULL。已经是 v66 的打开直接返回，不改写该列。不改写 credentials 表，也不写 pre-v66 快照。普通冷却列、凭据 ID、路由顺序和 Key 密文保持原样。
 
 JSON 是只属于收到信号的 GOAT 推理 Key 的封闭映射，值为绝对 UTC 截止时间：`five_hours`、`week`、`month`。未知窗口或无法解析的时间戳 fail closed。具名普通冷却列和汇总列 `cooldown_until` 仍是普通冷却，仍可共享。读投影取本地截止与普通列中较晚的一个，不把映射抄回那些列。Go 通道上，路由跳过该 Key，直到最长的有效阻塞过去。Free 通道不读这份映射。每个窗口各自保留较晚的截止时间。全部有效截止都过去后，Key 恢复资格，到期不会强制重置粘性会话。
 
@@ -14,7 +14,11 @@ JSON 是只属于收到信号的 GOAT 推理 Key 的封闭映射，值为绝对 
 
 当前便携导出是 payload V12，加密 envelope 仍为版本 1。V12 把 `goatPlanCooldowns` 与普通冷却字段分开存放。V4–V11 仍可导入，且只含普通冷却：缺少该字段绝不推断本地来源。同一明文 Key 的导入按窗口取较晚截止；旧包没有该字段时保留本机映射。Key 已更换时先丢掉旧的本机映射，再应用有效的传入映射。同一把 Key 的保留或合并只在传入凭据仍是 GOAT 时成立；把同一 id、同一明文改到非 GOAT 供应商（包括 Custom HTTP）仍是受支持的重映射，只丢掉 GOAT 映射，普通冷却保留。非 GOAT 凭据、观察者凭据、未知窗口或非法时间戳会拒绝整个包。早于 V12 却携带该字段的 payload 会被拒绝，因此该字段不能伪装成旧 payload 版本。V1–V3 以及新于 V12 的 payload 会被拒绝。
 
-旧二进制拒绝 v65 数据库。回退是用更早的二进制完整恢复升级前的数据目录。Schema 65 与 payload V12 是内部存储版本，不是产品发布版本。V12 备份给当前或更新的读取方；更早的二进制请保留更早的备份。
+旧二进制拒绝 v66 数据库。回退是用更早的二进制完整恢复升级前的数据目录。Schema 66 与 payload V12 是内部存储版本，不是产品发布版本。V12 备份给当前或更新的读取方；更早的二进制请保留更早的备份。
+
+## 价格数据在退役之后
+
+价格表、参考价格源、倍率和按价格估算退役后，不改变 `CURRENT_SCHEMA_VERSION`，也不删除价格快照行、转发费用列、`credit_meter_json` 或 `credit_receipt_json`。这些列仍可供历史读取和导出。打开数据库不会结算待处理的积分记录，不会重算已保存费用，也不会把缺失费用写成零。计费读取报告的活动待处理请求为 0。已保存回执的字节保持原样。显式校准不被该回执阻挡，也不会删除它。历史 v22 迁移在插入那些额度行时仍会滚动固定窗口。这次退役不改那次迁移，也不新增破坏性迁移。普通的供应商或目的地删除不会删除历史价格快照。
 
 ## Schema v64 — 预设的对外模型名
 
@@ -36,7 +40,7 @@ v62 增加可空的 `credentials.credit_meter_json` 和 `forward_logs.credit_rec
 
 v61 的控制台登录态列作为历史 schema 保留，升级到 v62 时清空；运行时不再读取或续期这些令牌。配置重写只为同一凭据、目的地和地址保留积分计量。该账号换 Key 不会重置余额。推理授权、冷却和额度恢复保持不变。增量修改在事务中完成，不单独建立 pre-v62 备份。回滚需恢复升级前的整份数据目录；旧版二进制拒绝 schema v62。
 
-`.database-open-gate.lock` 的独占锁串行化初始化，每个打开的数据库另持有 `.database-open.lock` 的共享锁。只有在所有旧数据库句柄关闭、打开者能取得独占锁时，才恢复未完成的积分结算记录；前一个初始化失败后，等待者会重新判断并执行恢复。并发执行 CLI status 不会改动仍在运行的请求。若网关异常退出后还有其他句柄存活，恢复会延后到一次所有句柄均已关闭后的重新打开。目录使用期间不得删除或替换这两个锁文件；升级前须停止不参与此锁的旧版程序。
+`.database-open-gate.lock` 的独占锁串行化初始化，每个打开的数据库另持有 `.database-open.lock` 的共享锁。下面这段恢复描述的是该 schema 交付时的行为：只有在所有旧数据库句柄关闭、打开者能取得独占锁时，才恢复未完成的积分结算记录；前一个初始化失败后，等待者会重新判断并执行恢复。并发执行 CLI status 不会改动仍在运行的请求。若网关异常退出后还有其他句柄存活，恢复会延后到一次所有句柄均已关闭后的重新打开。价格退役之后，这段结算不得再运行。打开、读取和导出都保持历史记录与余额不变。目录使用期间不得删除或替换这两个锁文件；升级前须停止不参与此锁的旧版程序。
 
 ## Schema v60 — 按 Key 额度恢复
 
@@ -85,7 +89,7 @@ GUI 或 CLI 启动时会原地执行 SQLite 迁移。打开新版二进制前：
 
 ## Schema v27 与 pre-v3 快照
 
-`CURRENT_SCHEMA_VERSION = 65`（`crates/ocg-core/src/db.rs`）。下文保留 v1–v57 的历史迁移细节。v58 新增 `destinations.model_resolution`，回填 `adapter_defined` / `public_only` / `public_and_upstream`，把遗留 Custom 目的地改为不限制凭据数量，保留全部目的地与凭据 ID，并在修改非全新规范 v57 源之前写入经校验的 pre-v58 SQLite 备份。v60 增量保存 `credentials.quota_recovery_json`（见上文）。v65 增量保存 `credentials.goat_plan_cooldowns_json`（见上文）。
+`CURRENT_SCHEMA_VERSION = 66`（`crates/ocg-core/src/db.rs`）。下文保留 v1–v57 的历史迁移细节。v58 新增 `destinations.model_resolution`，回填 `adapter_defined` / `public_only` / `public_and_upstream`，把遗留 Custom 目的地改为不限制凭据数量，保留全部目的地与凭据 ID，并在修改非全新规范 v57 源之前写入经校验的 pre-v58 SQLite 备份。v60 增量保存 `credentials.quota_recovery_json`（见上文）。v66 增量保存 `credentials.goat_plan_cooldowns_json`（见上文）。
 
 ## Schema v45 — 身份 / 凭据 / 绑定附属表
 

@@ -13,7 +13,6 @@ use crate::dynamic::DynamicProviderRuntime;
 use crate::models::Account;
 use crate::provider::UpstreamProtocolKind;
 use chrono::{DateTime, Datelike, Timelike, Utc, Weekday};
-use ocg_domain::billing::{BillingTokens, TokenRates, token_charge};
 use ocg_domain::dynamic::DynamicAuthKind;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -158,7 +157,6 @@ pub struct OfficialApiStatus {
     pub kind: OfficialApiKind,
     pub balance_available: bool,
     pub balances: Vec<OfficialBalance>,
-    pub prices: OfficialPriceSheet,
     pub month_started_at: DateTime<Utc>,
     pub month_spend: Vec<OfficialSpend>,
     pub lifetime_spend: Vec<OfficialSpend>,
@@ -207,32 +205,8 @@ pub(crate) struct OfficialAttemptPrice {
 }
 
 impl OfficialAttemptPrice {
-    pub fn amount(&self, prompt: i64, output: i64, cached: i64, created: i64) -> Option<f64> {
-        if self.at < self.sheet.observed_at || self.at >= self.sheet.valid_until || created != 0 {
-            return None;
-        }
-        let tokens = BillingTokens::new(prompt, output, cached, 0);
-        if !tokens.valid() {
-            return None;
-        }
-        let period = if peak_at(self.at) { "peak" } else { "off_peak" };
-        let mut rows =
-            self.sheet.rows.iter().filter(|row| {
-                row.model == self.model && (row.period == "all" || row.period == period)
-            });
-        let row = rows.next()?;
-        if rows.next().is_some() || row.currency != self.sheet.kind.currency() {
-            return None;
-        }
-        token_charge(
-            tokens,
-            TokenRates::per_million(
-                row.input_per_million,
-                row.output_per_million,
-                row.cache_read_per_million,
-                None,
-            ),
-        )
+    pub fn amount(&self, _prompt: i64, _output: i64, _cached: i64, _created: i64) -> Option<f64> {
+        None
     }
 }
 

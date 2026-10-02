@@ -9,7 +9,6 @@
 
 use crate::alias;
 use crate::db::{Database, ForwardLogQueryOptions};
-use crate::kernel::pricing::PricingSnapshot;
 use crate::models::{
     Account, DailyModelTokens, DashboardSummary, ForwardLog, ForwardLogClientKey, ForwardLogPage,
     ForwardLogSummary, GatewayLog, UpstreamChannel,
@@ -120,15 +119,11 @@ pub(crate) fn redacted_latest_gateway_error(
     Some(redact_known_secrets(&message, &secrets))
 }
 
-pub(crate) fn application_models(
-    snapshot: &PricingSnapshot,
-    contracts: Option<&EffectiveContractSet>,
-) -> Vec<String> {
-    application_models_from_snapshot(snapshot, contracts)
+pub(crate) fn application_models(contracts: Option<&EffectiveContractSet>) -> Vec<String> {
+    application_models_from_snapshot(contracts)
 }
 
 pub(crate) fn application_models_from_snapshot(
-    _snapshot: &PricingSnapshot,
     contracts: Option<&EffectiveContractSet>,
 ) -> Vec<String> {
     let Some(contracts) = contracts else {

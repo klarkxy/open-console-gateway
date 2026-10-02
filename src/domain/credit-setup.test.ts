@@ -17,6 +17,9 @@ test("cash setup is opt-in; a preset builds scaled remaining with its original m
   assert.equal(result.input?.initialBuckets[0]?.remaining, 750_500_000);
   assert.equal(result.input?.initialBuckets[0]?.granted, 1_600_000_000);
   assert.equal(result.input?.configuration.monthly?.nextResetAt, "2026-09-30T16:00:00.000Z");
+  assert.equal(result.input?.configuration.monthly?.amount, 1_600_000_000);
+  assert.equal("rates" in (result.input?.configuration ?? {}), false);
+  assert.equal(JSON.stringify(result.input).includes("PerMillion"), false);
 });
 test("preset setup rejects missing or excessive remaining, missing tier and invalid reset", () => {
   for (const patch of [{ remaining: null }, { remaining: -1 }, { remaining: 1601 }, { presetId: "missing" }, { reset: "invalid" }]) {
@@ -24,14 +27,16 @@ test("preset setup rejects missing or excessive remaining, missing tier and inva
   }
   assert.equal(buildCreditSetup({ ...creditSetupDraft(presets, now), remaining: 0 }, presets, now).valid, true);
 });
-test("generic credits retain a separate monthly capacity and reject invalid pricing", () => {
+test("generic credits retain a separate monthly capacity and do not emit token rates", () => {
   const draft = { ...creditSetupDraft([], now), enabled: true, remaining: 40, monthly: true, monthlyAmount: 100 };
   const result = buildCreditSetup(draft, [], now);
+  assert.equal(result.valid, true);
   assert.equal(result.input?.initialBuckets[0]?.granted, 100);
   assert.equal(result.input?.initialBuckets[0]?.remaining, 40);
-  assert.equal(buildCreditSetup({ ...draft, factor: 0 }, [], now).valid, false);
+  assert.equal(result.input?.configuration.monthly?.amount, 100);
+  assert.equal("rates" in (result.input?.configuration ?? {}), false);
+  assert.equal("creditsPerCurrency" in (result.input?.configuration ?? {}), false);
+  assert.equal(JSON.stringify(result.input).includes("PerMillion"), false);
   assert.equal(buildCreditSetup({ ...draft, monthlyAmount: 20 }, [], now).valid, false);
-  const rate = { model: "m", inputPerMillion: 1, outputPerMillion: 2, cacheReadPerMillion: null, cacheWritePerMillion: null };
-  assert.equal(buildCreditSetup({ ...draft, rates: [rate, rate] }, [], now).valid, false);
-  assert.equal(buildCreditSetup({ ...draft, rates: [{ ...rate, inputPerMillion: NaN }] }, [], now).valid, false);
+  assert.equal(buildCreditSetup({ ...draft, remaining: null }, [], now).valid, false);
 });

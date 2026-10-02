@@ -6,7 +6,7 @@
 
 `CoreStateInner`（`state.rs`）由 Gateway、面板与 CLI 共享。
 
-锁顺序：(1) `settings_update`，(2) `db`，(3) `config`，(4) `http_client`， (5) `gateway`，(6) `pricing`，(7) `zen_free_models`，(8) `provider_contracts`，(9) `routing`，(10) `credential_snapshot`。反向获取会造成死锁；持有 `routing` 锁时不应执行 DB 或网络 I/O。异步闸口：设置写同时重绑时， `settings_host_effects`（持久化 → 监听器重绑 → 补偿）先于 `gateway_lifecycle`。这些 await 期间应释放 `parking_lot` 锁。
+锁顺序：(1) `settings_update`，(2) `db`，(3) `config`，(4) `http_client`， (5) `gateway`，(6) `pricing`，(7) `zen_free_models`，(8) `provider_contracts`，(9) `routing`，(10) `credential_snapshot`。反向获取会造成死锁；持有 `routing` 锁时不应执行 DB 或网络 I/O。异步闸口：设置写同时重绑时， `settings_host_effects`（持久化 → 监听器重绑 → 补偿）先于 `gateway_lifecycle`。这些 await 期间应释放 `parking_lot` 锁。启动时不 seed、不修复、不激活价格快照，也不启动取价任务。打开数据库不会结算历史积分记录。计费读取报告的活动 `pendingRequests` 为 0。已保存回执保持原样。显式校准不被该回执阻挡，也不会删除它。已发布的 `GatewayPreparationSnapshot` 没有价格字段。锁序号 (6) `pricing` 仍是 `CoreStateInner` 上的内存价格快照锁。
 
 访问 Key 的权威表是 `access_keys`。两层凭证共用该表（当前 schema 版本，见[存储与迁移](storage-migration.zh-CN.md)）和一份鉴权快照：
 
@@ -63,7 +63,7 @@ Profile 删除先停浏览器，校验账号 ID 防目录穿越，再把新旧 P
 
 ## 持久化
 
-`crates/ocg-core/src/db.rs` 定义 SQLite schema、迁移与查询。当前 schema 是 v65，沿革见 [storage-migration.zh-CN.md](storage-migration.zh-CN.md)。v60 增量保存本机按 Key 额度恢复运行时列 `credentials.quota_recovery_json`，不进入可移植导出。重启保留等待与退避，不保留探测租约。v65 增量保存可空 `credentials.goat_plan_cooldowns_json`：只属于收到信号的 GOAT Key 的封闭映射，键为 `five_hours` / `week` / `month`，值为绝对 UTC 截止时间。既有行空值回填。普通冷却列保持普通冷却。每个窗口保留较晚的截止时间。全部有效截止过去后，Key 恢复资格，到期不会强制重置粘性会话。该列在重启后仍在。同一响应上更长的 `Retry-After` 只留在进程内：不进该列，也不导出。便携 payload V12 把该映射与普通冷却分开携带；envelope 仍为版本 1。Schema 65 与 payload V12 是内部版本，不是产品发布版本。加入额度池、普通共享冷却写入和同级解除都不会复制或清除该映射。对所选 Key 手动解除冷却会清空该 Key 的映射，并挡住更早的在途回复；更换 Key 会清除；同一把 Key 和卡片移动会保留。`provider_contracts.rs` 负责供应商合约范围、按模型/按协议覆盖、effective 合约推导与模型协议证据。`models.rs` 定义共享 serde 类型和 `AppConfig`。本机 Key 存放在 `ocg-infra::crypto`（门面 `ocg_core::crypto`）：AES-256-GCM `v2:` 密文，不是 KMS。旧 XOR 仍可解密；正确的 `open_with_cipher` 会在同一事务里把剩余账号 `key_cipher` / `password_cipher` 改写成 v2。Windows 桌面使用 `MachineBoundCipher`；CLI/Docker 使用来自 `OCG_MANAGER_ENCRYPTION_KEY` 或 `<data-dir>/.encryption-key` 的 `StaticKeyCipher`。生产宿主必须调用 `Database::open_with_cipher`，让密文探测使用已经解析的 cipher。比本构建支持的更新 schema 会 fail closed。
+`crates/ocg-core/src/db.rs` 定义 SQLite schema、迁移与查询。当前 schema 是 v66，沿革见 [storage-migration.zh-CN.md](storage-migration.zh-CN.md)。v60 增量保存本机按 Key 额度恢复运行时列 `credentials.quota_recovery_json`，不进入可移植导出。重启保留等待与退避，不保留探测租约。v66 增量保存可空 `credentials.goat_plan_cooldowns_json`：只属于收到信号的 GOAT Key 的封闭映射，键为 `five_hours` / `week` / `month`，值为绝对 UTC 截止时间。既有行空值回填。普通冷却列保持普通冷却。每个窗口保留较晚的截止时间。全部有效截止过去后，Key 恢复资格，到期不会强制重置粘性会话。该列在重启后仍在。同一响应上更长的 `Retry-After` 只留在进程内：不进该列，也不导出。便携 payload V12 把该映射与普通冷却分开携带；envelope 仍为版本 1。Schema 66 与 payload V12 是内部版本，不是产品发布版本。加入额度池、普通共享冷却写入和同级解除都不会复制或清除该映射。对所选 Key 手动解除冷却会清空该 Key 的映射，并挡住更早的在途回复；更换 Key 会清除；同一把 Key 和卡片移动会保留。`provider_contracts.rs` 负责供应商合约范围、按模型/按协议覆盖、effective 合约推导与模型协议证据。`models.rs` 定义共享 serde 类型和 `AppConfig`。本机 Key 存放在 `ocg-infra::crypto`（门面 `ocg_core::crypto`）：AES-256-GCM `v2:` 密文，不是 KMS。旧 XOR 仍可解密；正确的 `open_with_cipher` 会在同一事务里把剩余账号 `key_cipher` / `password_cipher` 改写成 v2。Windows 桌面使用 `MachineBoundCipher`；CLI/Docker 使用来自 `OCG_MANAGER_ENCRYPTION_KEY` 或 `<data-dir>/.encryption-key` 的 `StaticKeyCipher`。生产宿主必须调用 `Database::open_with_cipher`，让密文探测使用已经解析的 cipher。比本构建支持的更新 schema 会 fail closed。
 
 升级路径上的历史版本：
 

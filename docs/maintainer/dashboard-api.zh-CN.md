@@ -2,15 +2,25 @@
 
 # Dashboard API
 
-## 计费与本地积分估算（V4）
+## 计费（V4）
 
-`GET /dashboard/api/v4/accounts/{id}/billing` 统一返回周期额度、现金或积分，以及数据来源和可用操作。这里的 `id` 对应一个账号（一条 Key）；同一供应商容器内的多个账号仍独立计量。读取不请求上游。已有官方余额和额度刷新接口保留各供应商的观测适配器。
+`GET /dashboard/api/v4/accounts/{id}/billing` 返回已观测的额度窗口、官网余额和已保存的手工积分余额，以及可用操作。这里的 `id` 对应一个账号（一条 Key）；同一供应商容器内的多个账号仍各自独立。读取不请求上游，也不结算、重算或推进已保存余额。已有官方余额和额度刷新接口保留各供应商的观测适配器。
 
-`PUT .../billing/credits` 配置个人积分估算。首次设置填写当前额度，之后修改价格或设置时保留余额。`POST .../billing/credits/calibrate` 校准各笔当前余额，`POST .../billing/credits/grants` 添加额度或加油包，`DELETE .../billing/credits` 停用此估算。修改要求 `expectedRevision` 和 `processGeneration`，并返回更新后的 `BillingStatus`。校准之后开始的请求从新基准扣减；界面保留在途和无法计价请求的提示。估算耗尽不会改变路由资格。
+`PUT .../billing/credits` 记录手工分桶，不接受 token 费率或货币换算。`POST .../billing/credits/calibrate` 改正当前各桶余额，`POST .../billing/credits/grants` 添加一笔授予，`DELETE .../billing/credits` 停用这份手工余额。修改要求 `expectedRevision` 和 `processGeneration`，并返回 `BillingStatus`。只有明确的手工编辑才会改写已保存余额。读取、开库、导出或新的推理请求都不会。读取可以展示一笔已过保存期限的授予，但不会把该过期写回。新请求不扣减个人积分。余额为空或未知不改变路由资格。历史 `credit_meter_json` 与 `credit_receipt_json` 仍可读取。已保存的待处理回执保持字节不变。计费读取报告的活动 `pendingRequests` 为 0。显式校准写入该计量的余额。历史回执不阻挡这次写入，写入也不结算或删除该回执。开库不结算它，导出也不折叠它。这里写入的配置是名称、币种、月度数量和来源 URL。可移植导入为历史兼容保留已存的旧费率。它重建一份已校验的计量，不调用 `CreditMeterState::new` 或 `advance`。绑定 id 与计量 id 是新的。月度到期、已过期分桶、配置、计数器、月度游标、`created_at` 和 `last_calibration_at` 保持原值。保留的扣减尝试不产生扣款。
 
-Step Plan 在官方用量 API 开放前使用上述本地估算与校准方式。原先的私有控制台令牌接口和 `StepFunUsageStatus` 已退役。StepFun 普通 API 余额与 `/step_plan` 通道保持独立。
+Step Plan 保留手工分桶、月度续期、过期和校准。Step 预设是一笔数量和月度续期，不是 token 费率。原先的私有控制台令牌接口和 `StepFunUsageStatus` 已退役。StepFun 普通 API 余额与 `/step_plan` 通道保持独立。
 
-个人积分仅支持 legacy kind 为 `custom_account` 或 `dynamic` 的 `http` 目的地。平台关联 Key、观察凭据和内置 Plan 保留既有计费合约。存在在途请求时拒绝积分校准，不在请求进行中移动基准。
+手工积分仅限 legacy kind 为 `custom_account` 或 `dynamic` 的 `http` 目的地。平台关联 Key、观察凭据和密封内置 Plan 保留已观测的计费视图。
+
+下列价格路由未注册，按普通 V4 404 返回，不为它们新增墓碑登记：
+
+- `GET /dashboard/api/v4/providers/{id}/pricing`
+- `POST /dashboard/api/v4/providers/{id}/pricing/refresh`
+- `PUT /dashboard/api/v4/providers/{id}/pricing/multipliers`
+- `GET /dashboard/api/v4/providers/{id}/official-api/pricing`
+- `POST /dashboard/api/v4/providers/{id}/official-api/pricing`
+
+`/dashboard/api/v3` 仍是 410 墓碑。V3 DTO 契约工具链仍然有效。
 
 ## Dashboard V3
 
@@ -22,15 +32,15 @@ Step Plan 在官方用量 API 开放前使用上述本地估算与校准方式�
 
 - `settings_revision` — `CoreState` 上的内存 `AtomicU64`，成功持久化后 bump。 CAS 令牌本身不存 SQLite。
 - `process_generation` — 每个 `CoreState` 赋值一次，不会持久化。上一进程的 CAS 令牌在重启后不能复用。
-- `pricingRevision` — 不可变快照 id。价格变更还要带 `expectedPricingRevision`。
+- `pricingRevision` — 生成的 `ControlRevision` 仍包含这个遗留读取字符串，Rust `ControlRevision::from_state` 仍会复制内存中的价格快照 revision。它不是 CAS 令牌，也没有被删除。面板活客户端只发布 `revision` 和 `processGeneration`。没有价格写入。不要发送 `expectedPricingRevision`。
 
-`GET /contract` 返回当前进程的 live revision / generation token（`ControlRevision`：`revision`、`processGeneration`、`pricingRevision`）。
+`GET /contract` 返回当前进程的 live revision / generation token（`ControlRevision`：`revision`、`processGeneration`）。
 
 变更要求顶层 `expectedRevision` 与 `processGeneration`，包括 `/auth/register`、`/auth/login`、`/auth/logout` 以及 `POST /accounts/{id}/usage/refresh`。缺少 `expectedRevision` 返回 `400` `missingExpectedRevision`；不匹配返回 `409` `revisionConflict`，错误信封携带 `currentRevision` / `processGeneration`。Vue `controlPlane` store 从每个挂回 V4 的 V3 载荷记录两个令牌。遇到 409 时，客户端会刷新控制令牌与受影响资源，但不会自动重放变更；用户确认当前状态后可再次提交。revision 与 generation 令牌只属于当前进程，不协调共用同一数据目录的多个进程。
 
 非变更操作跳过 CAS 且不 bump revision：诊断类如 `POST /settings/test-proxy`、`POST /custom/models/discover`；更新检查如 `GET /settings/check-update`、`GET /settings/update-status` 捕获令牌但不 bump。`POST /settings/install-update` 需要 CAS，原子启动，不 bump，不持有网络/DB 锁。
 
-明文 Key 不会出现在 `Settings`、供应商、Zen 或合约 DTO 上。`ConnectionInfo`（`GET /connection`）是唯一携带密钥的 V3 响应：返回主 Key 与所有未软删的子 Key 值，包括禁用子 Key，受 dashboard 会话保护。只有启用的 Key 会进入鉴权快照。`CustomModelDiscoveryRequest.apiKey` 只写。账号 list/get 载荷保持无密钥。日志与错误信封脱敏已知密钥。
+明文 Key 不会出现在 `Settings`、供应商、Zen 或合约 DTO 上。`ConnectionInfo`（`GET /connection`）是唯一携带密钥的 V3 响应：返回主 Key 与所有未软删的子 Key 值，包括禁用子 Key，受 dashboard 会话保护。只有启用的 Key 会进入鉴权快照。`CustomModelDiscoveryRequest.apiKey` 只写。账号 list/get 载荷保持无密钥。日志与错误信封脱敏已知密钥。Key 的新建或轮换在确认回执时即已提交，即使随后的 `GET /connection` 失败也是如此。回执不含明文。轮换或吊销之后，原先的明文留空。恢复方式是再发一次 GET。客户端不得重新新建或再次轮换。
 
 冻结契约是 `schema/dashboard-api-v3.schema.json`，由 `dashboard_v3::contract_schema_pretty()` 经 `crates/ocg-core/examples/export_dashboard_v3_schema.rs` 生成。生成的 TypeScript（`src/api/generated/dashboard-v3.ts`）只有类型，没有 HTTP 封装。`dashboard_v3/types.rs` 的 `CATALOG_TYPE_NAMES` 是有序 `$defs` 目录；追加时必须保持既有 definition 对象字节一致。
 
@@ -46,9 +56,9 @@ V4 复用 V3 会话中间件。其列表返回与 V3 CAS 相同的 `ControlRevis
 
 已检入的仅增量 V4 契约是 `schema/dashboard-api-v4.schema.json`，由 `dashboard_v4::contract_schema_pretty()` 经 `crates/ocg-core/examples/export_dashboard_v4_schema.rs` 生成。生成的 TypeScript（`src/api/generated/dashboard-v4.ts`）只有类型，没有 HTTP 封装。`dashboard_v4/types.rs` 的 `CATALOG_TYPE_NAMES` 同样是有序 `$defs` 目录；追加时必须保持既有 definition 对象字节一致。
 
-只读路由为 `GET /contract`、`GET /templates`、`GET /connections`、`GET /accounts`（身份列表）、`GET /account-records`（挂回的 V3 账号列表垫片）、`GET /destinations`、`GET /credentials`、`GET /accounts/{id}/billing`、`GET /accounts/{id}/official-api`、`GET /providers/{id}/official-api/pricing`、`GET /routing/cards`、`GET /applications/dsh`（可选 `profilePath` 与 `runtimeUrl`）、`GET /cpa/models` 与 `GET /alias-publication`。这些读取不会发出出站请求。
+只读路由为 `GET /contract`、`GET /templates`、`GET /connections`、`GET /accounts`（身份列表）、`GET /account-records`（挂回的 V3 账号列表垫片）、`GET /destinations`、`GET /credentials`、`GET /accounts/{id}/billing`、`GET /accounts/{id}/official-api`、`GET /routing/cards`、`GET /applications/dsh`（可选 `profilePath` 与 `runtimeUrl`）、`GET /cpa/models` 与 `GET /alias-publication`。这些读取不会发出出站请求。
 
-official-api 族——`GET /accounts/{id}/official-api`、`POST /accounts/{id}/official-api/balance` 与 `GET|POST /providers/{id}/official-api/pricing`——暴露官网 API 预设的账务依据。GET 是本地投影；带 CAS 的 POST 是唯一的联网路径。详见[官网 API 账务依据](runtime-invariants.zh-CN.md#官网-api-账务依据)。
+official-api 族——`GET /accounts/{id}/official-api` 与 `POST /accounts/{id}/official-api/balance`——暴露匹配预设的官网余额依据。GET 是本地投影；带 CAS 的 POST 是联网路径。价格表路由未注册。详见[官网 API 账务依据](runtime-invariants.zh-CN.md#官网-api-账务依据)。
 
 `GET /templates` 是只读的添加目录：密封内置项（不含 CPA）加上 `custom-http` 手动模板。预设不属于该模板目录。模板没有用户实例或密钥。
 
@@ -101,6 +111,8 @@ V4 不把授权 `unknown` 当作 `valid`。资格是本地投影，不是上游�
 这条流程只描述受 CAS 保护的 Settings 写入；发现、诊断和读取操作可能按上文所述跳过 CAS。客户端提交 `expectedRevision` 与 `processGeneration`。令牌不匹配时返回 `409`；客户端刷新令牌与受影响资源，但不会自动重放写入。
 
 CAS 成功后，Host 先持久化新设置并释放设置锁。只有端口发生变化且监听器正在运行时才会重绑。若重绑失败，请求以 `internal` 代码返回 `500`。补偿逻辑仅在实时配置仍等于本次失败写入的端口时恢复旧端口，避免覆盖随后成功的写入。
+
+设置写入的确认回执表示已经保存。随后的规范读取失败是单独的读取警告。客户端不得把它当成写入失败，也不得再次提交同一次写入。更改 Gateway 端口本身不会跳转。直连 Gateway 时，页面可以提供一条由操作者打开的链接。该链接保留当前的 scheme、主机名、路径、query 和 hash，只改端口。页面不会自动打开这条链接，即使新端口就是面板已经在用的回环端口。反向代理的源地址保持不变。绑定失败返回上文的 `500` `internal`，不是成功，也不会提供这条链接。
 
 ## V2 REST 墓碑
 

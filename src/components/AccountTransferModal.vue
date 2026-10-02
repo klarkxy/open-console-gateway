@@ -93,11 +93,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import { NAlert, NButton, NCheckbox, NForm, NFormItem, NInput, NModal, NSpace } from "naive-ui";
 import { dashboardApi } from "../api/dashboard.ts";
 import type { AccountImportDisposition, AccountImportPreview } from "../api/generated/dashboard-v3.ts";
 import { t } from "../i18n/index.ts";
+import { useBillingStore } from "../stores/billing.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
 
@@ -124,6 +125,13 @@ const importConfirmed = ref(false);
 const busy = ref(false);
 const previewing = ref(false);
 let previewEpoch = 0;
+// Identity of the current open flow. Closing the modal, switching mode, or
+// unmounting bumps it, so an already-issued export/import/preview that settles
+// late cannot trigger an old flow's download, emit, or UI writes. The billing
+// session epoch additionally fences the logout/401 window before the unmount
+// lands (dropSession clears stores synchronously, ahead of view teardown).
+let operationEpoch = 0;
+const billing = useBillingStore();
 const errorText = ref("");
 const resultText = ref("");
 
@@ -162,6 +170,10 @@ watch(() => props.show, (show) => {
   if (!show) clearTransient();
 });
 watch(() => props.mode, clearTransient);
+onUnmounted(() => {
+  operationEpoch += 1;
+  previewEpoch += 1;
+});
 
 function clearPreview(): void {
   previewEpoch += 1;
@@ -174,6 +186,7 @@ function clearPreview(): void {
 }
 
 function clearTransient(): void {
+  operationEpoch += 1;
   clearPreview();
   bundlePassword.value = "";
   bundlePasswordConfirmation.value = "";
@@ -236,12 +249,18 @@ function downloadBundle(bundleText: string, filename: string): void {
 
 async function exportBundle(): Promise<void> {
   if (!canExport.value || busy.value) return;
+  const epoch = operationEpoch;
+  const session = billing.sessionEpoch;
+  const isCurrent = () => epoch === operationEpoch && session === billing.sessionEpoch;
   busy.value = true;
   errorText.value = "";
   try {
     const exported = await dashboardApi.exportAccountTransfer({
       bundlePassword: bundlePassword.value,
     });
+    // A late export receipt after close/mode-switch/unmount/session-drop must
+    // not trigger the old flow's download or touch its UI.
+    if (!isCurrent()) return;
     downloadBundle(exported.bundle, exported.filename);
     resultText.value = t('已下载加密迁移包：导出 {exported} 项，跳过 {skipped} 项。', {
       exported: exported.exportedAccounts,
@@ -250,9 +269,10 @@ async function exportBundle(): Promise<void> {
     bundlePassword.value = "";
     bundlePasswordConfirmation.value = "";
   } catch (error) {
+    if (!isCurrent()) return;
     errorText.value = dashboardErrorDetail(error);
   } finally {
-    busy.value = false;
+    if (epoch === operationEpoch) busy.value = false;
   }
 }
 
@@ -261,6 +281,7 @@ async function previewBundle(): Promise<void> {
   previewing.value = true;
   clearPreview();
   const epoch = previewEpoch;
+  const session = billing.sessionEpoch;
   const requestBundle = bundle.value;
   const requestPassword = bundlePassword.value;
   try {
@@ -270,6 +291,7 @@ async function previewBundle(): Promise<void> {
     });
     if (
       epoch !== previewEpoch
+      || session !== billing.sessionEpoch
       || bundle.value !== requestBundle
       || bundlePassword.value !== requestPassword
     ) return;
@@ -277,7 +299,7 @@ async function previewBundle(): Promise<void> {
     previewBundleSnapshot.value = requestBundle;
     previewPasswordSnapshot.value = requestPassword;
   } catch (error) {
-    if (epoch === previewEpoch) errorText.value = dashboardErrorDetail(error);
+    if (epoch === previewEpoch && session === billing.sessionEpoch) errorText.value = dashboardErrorDetail(error);
   } finally {
     if (epoch === previewEpoch) previewing.value = false;
   }
@@ -285,13 +307,24 @@ async function previewBundle(): Promise<void> {
 
 async function importBundle(): Promise<void> {
   if (!canImport.value || busy.value) return;
+  const epoch = operationEpoch;
+  const session = billing.sessionEpoch;
+  const isCurrent = () => epoch === operationEpoch && session === billing.sessionEpoch;
+  // Capture the immutable request before awaiting; the inputs stay disabled
+  // while busy, but the late completion must not read whatever the refs hold
+  // by then.
+  const requestBundle = bundle.value;
+  const requestPassword = bundlePassword.value;
   busy.value = true;
   errorText.value = "";
   try {
     const result = await dashboardApi.importAccountTransfer({
-      bundle: bundle.value,
-      password: bundlePassword.value,
+      bundle: requestBundle,
+      password: requestPassword,
     });
+    // The committed import only reports into a still-current flow: no stale
+    // result text, no form reset, no imported emit after close/replacement.
+    if (!isCurrent()) return;
     resultText.value = t('节点配置迁移完成：处理 {count} 项账号。', { count: result.importedAccounts });
     bundlePassword.value = "";
     previewEpoch += 1;
@@ -304,9 +337,10 @@ async function importBundle(): Promise<void> {
     if (fileInput.value) fileInput.value.value = "";
     emit("imported", result.importedAccounts);
   } catch (error) {
+    if (!isCurrent()) return;
     errorText.value = dashboardErrorDetail(error);
   } finally {
-    busy.value = false;
+    if (epoch === operationEpoch) busy.value = false;
   }
 }
 </script>

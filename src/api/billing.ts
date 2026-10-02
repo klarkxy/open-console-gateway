@@ -6,9 +6,10 @@ import { requestV4, withExpectation, type WithoutExpectation } from "./dashboard
 import type { MutationExpectation } from "./generated/dashboard-v3.ts";
 import type {
   BillingStatus,
+  CreditBucket,
   CreditCalibrationRequest,
-  CreditConfigureRequest,
   CreditGrantRequest,
+  MonthlyCredits,
 } from "./generated/dashboard-v4.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
 
@@ -20,13 +21,12 @@ export type {
   CreditBucket,
   CreditBucketKind,
   CreditCalibrationRequest,
-  CreditConfigureRequest,
   CreditConfiguration,
   CreditGrantRequest,
+  MonthlyCredits,
   CreditMeterView,
   CreditPreset,
   CreditRate,
-  MonthlyCredits,
   ProviderUsage,
 } from "./generated/dashboard-v4.ts";
 
@@ -36,6 +36,38 @@ function billingPath(id: string): string {
 
 function creditsPath(id: string): string {
   return `${billingPath(id)}/credits`;
+}
+
+/**
+ * Manual credit setup body. Matches `CreditConfigurationWrite`: name, currency,
+ * monthly, and sourceUrl. Historical rates and creditsPerCurrency stay on the
+ * stored meter and are not part of this write.
+ */
+export interface CreditConfigurationWrite {
+  name: string;
+  currency: string;
+  monthly: MonthlyCredits | null;
+  sourceUrl: string | null;
+}
+
+export interface CreditConfigureWrite {
+  configuration: CreditConfigurationWrite;
+  /** Required for initial setup; omitted when a settings edit must keep balances. */
+  initialBuckets?: CreditBucket[] | null;
+}
+
+export function creditConfigurationWrite(input: {
+  name: string;
+  currency: string;
+  monthly: MonthlyCredits | null;
+  sourceUrl: string | null;
+}): CreditConfigurationWrite {
+  return {
+    name: input.name,
+    currency: input.currency,
+    monthly: input.monthly,
+    sourceUrl: input.sourceUrl,
+  };
 }
 
 async function withCas<T>(
@@ -51,13 +83,19 @@ export const billingApi = {
   status: (id: string) => requestV4<BillingStatus>(billingPath(id)),
   configureCredits: (
     id: string,
-    input: WithoutExpectation<CreditConfigureRequest>,
+    input: CreditConfigureWrite,
     expectation?: MutationExpectation,
   ) => withCas(
-    (tokens) => requestV4<BillingStatus>(creditsPath(id), {
-      method: "PUT",
-      body: withExpectation(input, tokens),
-    }),
+    (tokens) => {
+      const body: CreditConfigureWrite = {
+        configuration: creditConfigurationWrite(input.configuration),
+      };
+      if (input.initialBuckets !== undefined) body.initialBuckets = input.initialBuckets;
+      return requestV4<BillingStatus>(creditsPath(id), {
+        method: "PUT",
+        body: withExpectation(body, tokens),
+      });
+    },
     expectation,
   ),
   calibrateCredits: (

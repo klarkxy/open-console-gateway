@@ -9,7 +9,7 @@ Open Console Gateway 出问题，通常先怀疑有别的进程占了 `127.0.0.1
 - **上游返回 `401 Unauthorized`。**Zen Free 会临时冷却匿名通道并尝试下一张兼容卡片。OpenCode Go 只在结构化错误为 `CreditsError` 时换号并记录 `auth_error`；续费后重新保存同一个 Key 即可清除。`ModelError`、未知或畸形的 OpenCode 401 仍原样返回。Custom API 的 `401` 会换到下一张合格卡片并记录 `auth_error`。要确认 OpenCode Go Key 本身是否失效，请执行 `key ping <id>` 或发一次真实客户端请求。托管账号 Key 验证与 Custom **测试连接** 在各自流程里拿到 401 时会记录 `auth_error`。
 - **面板提示页面版本与服务不匹配。**缓存的旧 SPA 命中了 `/dashboard/api` 的 V2 墓碑，收到 HTTP 410。请刷新页面；若仍失败，安装匹配的桌面、CLI 或 Docker 版本。
 - **面板保存失败并提示冲突 / 409。**同一运行进程中的另一个标签页已经先写入。SPA 会根据服务端的 `revisionConflict` 刷新受影响数据，但不会自动重放变更；确认当前值后再次提交。
-- **本地进度条满格但请求依然成功。**这是 **假熔断**——本地估算不是上游账单。继续使用即可，Gateway 会继续转发。
+- **本地进度条满格但请求依然成功。**官方或手工百分比满格只是提示，不会停用账号。继续使用即可，Gateway 会继续转发。
 - **本地进度条满格，Gateway 返回 `429`。**这是 **真熔断**。等 `cooldown_until` 到期，或在 **账号** 视图手动解除冷却。
 - **Gateway 返回 `429` 并提示 "all accounts cooling down"。**所有已启用账号都在冷却。等最近的恢复时间，或新增/启用其他账号。
 - **Gateway 因模型名返回 `400`。**请发送带鉴权的 `GET /v1/models` 公布的别名或合格 Custom ID。含 `/`、`_` 或空白的名称是原始 ID，不是 kebab 别名。未知名称和重叠的原始 ID 会 fail-closed，且不会调用上游。

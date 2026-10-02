@@ -5,7 +5,7 @@ use crate::dashboard_v3::{
 use crate::db::Database;
 use crate::dynamic::DynamicProviderRuntime;
 use crate::models::{Account, AccountSetupStep};
-use crate::official_api::{self, OfficialApiKind, OfficialApiPrices, OfficialApiStatus};
+use crate::official_api::{self, OfficialApiKind, OfficialApiStatus};
 use crate::state::CoreState;
 use axum::{
     Json,
@@ -74,26 +74,10 @@ pub(super) fn status_locked(
         balances: db
             .official_api_balances(&account, &runtime)
             .map_err(V3ApiError::internal)?,
-        prices: db
-            .official_api_prices(&runtime.id, kind)
-            .map_err(V3ApiError::internal)?,
         month_started_at: since,
         month_spend: spend,
         lifetime_spend,
         unpriced_requests: unpriced,
-        revision: state.settings_revision(),
-        process_generation: state.process_generation(),
-    })
-}
-fn prices(state: &CoreState, id: &str) -> Result<OfficialApiPrices, V3ApiError> {
-    let _settings = state.settings_update.lock();
-    let db = state.db.lock();
-    let (_, kind) = runtime(&db, id, state)?;
-    Ok(OfficialApiPrices {
-        provider_id: id.into(),
-        prices: db
-            .official_api_prices(id, kind)
-            .map_err(V3ApiError::internal)?,
         revision: state.settings_revision(),
         process_generation: state.process_generation(),
     })
@@ -104,13 +88,6 @@ pub(super) async fn get_status(
 ) -> Result<Json<OfficialApiStatus>, V3ApiError> {
     status(&state, &id).map(Json)
 }
-pub(super) async fn get_prices(
-    State(state): State<CoreState>,
-    Path(id): Path<String>,
-) -> Result<Json<OfficialApiPrices>, V3ApiError> {
-    prices(&state, &id).map(Json)
-}
-
 /// A billing read uses only a Key whose saved default endpoint and Origin are
 /// both still granted. It does not grant a new billing destination on its own.
 fn require_grant(
@@ -235,48 +212,4 @@ pub(super) async fn refresh_balance(
         }
     }
     status(&state, &id).map(Json)
-}
-
-pub(super) async fn refresh_prices(
-    State(state): State<CoreState>,
-    Path(id): Path<String>,
-    body: Bytes,
-) -> Result<Json<OfficialApiPrices>, V3ApiError> {
-    let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
-    let _refresh = state
-        .pricing_refresh
-        .try_lock()
-        .map_err(|_| V3ApiError::conflict_at(&state, "pricing refresh is already running"))?;
-    let (provider, kind, config) = {
-        let _settings = state.settings_update.lock();
-        check_expectation(&state, &expectation)?;
-        let db = state.db.lock();
-        let (provider, kind) = runtime(&db, &id, &state)?;
-        (provider, kind, state.config())
-    };
-    let fetched = official_api::pricing::fetch(&config, kind, state.process_generation(), || {
-        state.usage_sync.now()
-    })
-    .await;
-    {
-        let _settings = state.settings_update.lock();
-        check_expectation(&state, &expectation)?;
-        let db = state.db.lock();
-        let (current, _) = runtime(&db, &id, &state)?;
-        if current != provider {
-            return Err(V3ApiError::conflict_at(
-                &state,
-                "provider changed during official pricing refresh",
-            ));
-        }
-        let sheet = fetched.map_err(|_| {
-            V3ApiError::outbound_failed(
-                &state,
-                "official pricing refresh failed; previous evidence retained",
-            )
-        })?;
-        db.store_official_api_prices(&current, &sheet)
-            .map_err(V3ApiError::internal)?;
-    }
-    prices(&state, &id).map(Json)
 }

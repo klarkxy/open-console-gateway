@@ -49,15 +49,12 @@ test("custom Keys with a native amount show the estimate, revision or not", () =
   })));
 });
 
-test("zero is a real estimate, never treated as missing", () => {
-  const estimate = forwardLogNativeEstimate(row({
+test("a stored zero stays hidden", () => {
+  assert.equal(forwardLogNativeEstimate(row({
     native_cost_value: 0,
     native_cost_currency: "CNY",
     native_cost_unit: "CNY",
-  }));
-  assert.ok(estimate);
-  assert.equal(estimate.value, 0);
-  assert.equal(formatNativeCostEstimate(estimate, "zh-CN"), "¥0");
+  })), null);
 });
 
 test("tiny per-token totals keep significant digits", () => {

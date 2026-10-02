@@ -398,23 +398,7 @@ impl ForwardAttemptContext {
     }
 
     fn attach_pricing(&mut self, pricing: &RequestPricingSnapshot) {
-        match pricing {
-            RequestPricingSnapshot::Platform(price) => {
-                self.platform_price = Some(price.clone());
-            }
-            RequestPricingSnapshot::OfficialApi(price) => {
-                self.official_price = Some(price.clone());
-            }
-            RequestPricingSnapshot::Credits {
-                attempt,
-                token_pricing_supported,
-                ..
-            } => {
-                self.credit_attempt = Some(attempt.clone());
-                self.credit_token_pricing_supported = *token_pricing_supported;
-            }
-            _ => {}
-        }
+        let _ = pricing;
     }
 
     fn redact_known_secret(&self, text: &str) -> String {
@@ -550,6 +534,39 @@ pub(crate) async fn forward_request(
         None,
     )
     .await
+}
+
+/// Record an upstream 401 against the credential that produced it, and
+/// invalidate the published request-preparation aggregate when it lands.
+///
+/// `credentials.auth_error` is an admission gate inside `RoutingSnapshot`: a
+/// credential that carries one is not selectable. A write here that never
+/// reaches the published aggregate therefore keeps a known-broken key in the
+/// routing set — and, because nothing else necessarily advances the revision,
+/// for as long as the process lives. That is the one writer on this path that
+/// had neither a bump nor a publish.
+///
+/// Request preparation never holds `settings_update`, and taking that gate here
+/// would put a control-plane mutex in front of the failure path of every
+/// request, so this bumps the revision instead. The bump is what the contract
+/// needs: the next `gateway_preparation()` sees the drift and rebuilds under
+/// the gate, so a broken key is skipped from the following request onward
+/// instead of indefinitely.
+///
+/// The bump is conditional on the guarded write actually landing. A late 401
+/// for a key that has since been replaced writes no row, and bumping for that
+/// no-op would hand every later reader a rebuild for nothing.
+fn record_upstream_auth_error(
+    state: &CoreState,
+    db: &Database,
+    account_id: &str,
+    key_cipher: &str,
+    message: &str,
+) -> anyhow::Result<()> {
+    if db.set_account_auth_error_if_key_matches(account_id, key_cipher, Some(message))? {
+        state.bump_settings_revision();
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1044,34 +1061,7 @@ pub(crate) async fn forward_request_with_deadline(
         );
     }
 
-    // Persist the attempt before the upstream can consume it. A process exit or
-    // cancelled header/body read must remain visible to credit calibration.
-    let mut credit_guard = if attempt_context.credit_attempt.is_some() {
-        let id = DbAttemptSink::new(&state.db.lock()).insert(
-            account,
-            &model,
-            "streaming",
-            None,
-            metadata_metrics(
-                &pricing_snapshot,
-                plan.service_tier.as_deref(),
-                "not_applicable",
-            ),
-            None,
-            &attempt_context,
-            None,
-        )?;
-        attempt_context.credit_log_id = Some(id);
-        Some(CreditRequestGuard {
-            state: state.clone(),
-            context: attempt_context.clone(),
-            pricing: pricing_snapshot.clone(),
-            service_tier: plan.service_tier.clone(),
-            armed: true,
-        })
-    } else {
-        None
-    };
+    let mut credit_guard: Option<CreditRequestGuard> = None;
     let sent = forward_once(request, timeouts, plan.stream).await?;
     let upstream_started = sent.started;
     let upstream_resp = match sent.result {
@@ -1735,10 +1725,12 @@ pub(crate) async fn forward_request_with_deadline(
                         Some(failure),
                     )?;
                     if quota_observation.is_current(&db)? {
-                        db.set_account_auth_error_if_key_matches(
+                        record_upstream_auth_error(
+                            state,
+                            &db,
                             &account.id,
                             &account.key_cipher,
-                            Some(&error_message),
+                            &error_message,
                         )?;
                     }
                 }
@@ -2977,6 +2969,16 @@ fn persist_quota_write(
         });
         if persisted || released {
             state.bump_settings_revision();
+            // Cooldown and quota-recovery rows are routing state the next
+            // request re-reads, and this runs once per forwarded attempt that
+            // changes them. Republish while the gate and `db` are still held so
+            // the following request keeps the preparation fast path instead of
+            // paying one gated rebuild per failed attempt. Best-effort: a failed
+            // publish leaves the aggregate one revision behind, which the next
+            // reader detects and rebuilds.
+            if let Err(error) = state.publish_gateway_preparation(&db) {
+                eprintln!("warning: failed to republish the request preparation view: {error}");
+            }
         }
         persisted
     })
@@ -3828,21 +3830,21 @@ fn log_forward(
         http_status,
         failure.as_ref().map(FailureRecord::update).as_ref(),
     );
-    let transaction = context
-        .credit_attempt
-        .as_ref()
-        .map(|_| db.conn.unchecked_transaction())
-        .transpose()?;
-    metrics.scope_to_provider(
-        Some(account.provider_id.as_str()),
-        status.starts_with("success"),
-    );
+    let _ = account;
     let cost_state = match (metrics.cost_state, status) {
-        ("not_applicable", "outcome_unknown") => "outcome_unknown",
-        ("not_applicable", "success_no_usage") => "usage_missing",
-        ("not_applicable", "success_unpriced") => "unpriced",
-        (state, _) => state,
+        ("usage_missing", _) | (_, "success_no_usage") => "usage_missing",
+        ("outcome_unknown", _) | (_, "outcome_unknown") => "outcome_unknown",
+        _ => "unknown",
     };
+    metrics.cost = 0.0;
+    metrics.raw_cost_usd = None;
+    metrics.quota_debit = None;
+    metrics.effective_paid_cost_usd = None;
+    metrics.pricing_revision_id = None;
+    metrics.quota_multiplier = None;
+    metrics.local_adjustment_multiplier = None;
+    metrics.pricing_provider_id = None;
+    metrics.cost_state = cost_state;
     let failure_value = failure
         .as_ref()
         .and_then(|failure| serde_json::from_str(&failure.diagnostic_json).ok());
@@ -3870,13 +3872,13 @@ fn log_forward(
         completion_tokens: metrics.completion_tokens,
         cached_tokens: metrics.cached_tokens,
         cache_creation_tokens: metrics.cache_creation_tokens,
-        cost: (cost_state == "priced").then_some(metrics.cost),
-        raw_cost_usd: metrics.raw_cost_usd,
-        quota_debit: metrics.quota_debit,
-        effective_paid_cost_usd: metrics.effective_paid_cost_usd,
-        pricing_revision_id: metrics.pricing_revision_id,
-        quota_multiplier: metrics.quota_multiplier,
-        local_adjustment_multiplier: metrics.local_adjustment_multiplier,
+        cost: None,
+        raw_cost_usd: None,
+        quota_debit: None,
+        effective_paid_cost_usd: None,
+        pricing_revision_id: None,
+        quota_multiplier: None,
+        local_adjustment_multiplier: None,
         service_tier: metrics.service_tier.clone(),
         cost_state: cost_state.to_string(),
         error_message: error_message.map(|message| context.redact_known_secret(message)),
@@ -3888,15 +3890,6 @@ fn log_forward(
         diagnostic: failure_value,
     })?;
     persist_log_identity(db, id, context, &persist_metrics)?;
-    if let Some(credit) = context.credit_attempt.as_ref() {
-        crate::db::billing::attach_attempt_on(&db.conn, id, credit)?;
-        if status != "streaming" {
-            settle_credit_log(db, id, context, &persist_metrics, status)?;
-        }
-    }
-    if let Some(transaction) = transaction {
-        transaction.commit()?;
-    }
     Ok(id)
 }
 
@@ -3907,40 +3900,8 @@ fn settle_credit_log(
     metrics: &ForwardMetrics,
     status: &str,
 ) -> Result<()> {
-    let Some(credit) = context.credit_attempt.as_ref() else {
-        return Ok(());
-    };
-    let tokens = ocg_domain::billing::BillingTokens::new(
-        metrics.prompt_tokens,
-        metrics.completion_tokens,
-        metrics.cached_tokens,
-        metrics.cache_creation_tokens,
-    );
-    let usable_usage = matches!(metrics.cost_state, "unknown" | "priced" | "free");
-    let settlement_status = if !context.credit_token_pricing_supported
-        && (status.starts_with("success") || usable_usage)
-    {
-        "success_no_usage"
-    } else if usable_usage {
-        "success_unpriced"
-    } else if status == "error" {
-        // A failed decode/transform after upstream acceptance is not proof of
-        // zero usage. Preserve the HTTP/log/retry behavior while settling the
-        // receipt as uncertain. Known token usage above can still be priced.
-        let upstream_status: Option<i32> = db.conn.query_row(
-            "SELECT http_status FROM forward_logs WHERE id = ?1",
-            [id],
-            |row| row.get(0),
-        )?;
-        if upstream_status.is_some_and(|code| (200..300).contains(&code)) {
-            "outcome_unknown"
-        } else {
-            status
-        }
-    } else {
-        status
-    };
-    crate::db::billing::settle_on(&db.conn, id, credit, tokens, settlement_status, Utc::now())
+    let _ = (db, id, context, metrics, status);
+    Ok(())
 }
 
 fn persist_log_identity(
@@ -3976,15 +3937,6 @@ fn finalize_logged_forward(
     diagnostic: Option<&ForwardLogDiagnosticUpdate<'_>>,
     context: &ForwardAttemptContext,
 ) -> Result<()> {
-    let transaction = context
-        .credit_attempt
-        .as_ref()
-        .map(|_| db.conn.unchecked_transaction())
-        .transpose()?;
-    if context.credit_attempt.is_some() && crate::db::billing::settlement_finished_on(&db.conn, id)?
-    {
-        return Ok(());
-    }
     db.update_forward_log(
         id,
         status,
@@ -3994,19 +3946,14 @@ fn finalize_logged_forward(
         diagnostic,
     )?;
     persist_log_identity(db, id, context, &metrics)?;
-    settle_credit_log(db, id, context, &metrics, status)?;
-    if let Some(transaction) = transaction {
-        transaction.commit()?;
-    }
     log_attempt_outcome(db, context, status, http_status, diagnostic);
     Ok(())
 }
 
 fn success_status_for_cost(cost_state: &str) -> &'static str {
     match cost_state {
-        "priced" | "free" => "success",
         "usage_missing" => "success_no_usage",
-        _ => "success_unpriced",
+        _ => "success",
     }
 }
 

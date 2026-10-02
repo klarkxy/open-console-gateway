@@ -41,7 +41,6 @@ pub(crate) fn delete_http_destination_on(db: &Database, destination_id: &str) ->
         count == 0,
         "destination still has {count} referencing credentials"
     );
-    db.conn.execute("DELETE FROM provider_pricing_snapshots WHERE provider_id = (SELECT legacy_id FROM destinations WHERE id = ?1)", [destination_id])?;
     db.conn.execute(
         "DELETE FROM destination_models WHERE destination_id = ?1",
         [destination_id],

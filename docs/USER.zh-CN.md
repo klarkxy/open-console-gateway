@@ -27,7 +27,7 @@
 - [日志与设置](user/logs-settings.zh-CN.md) — 请求日志、设置与代理模式。
 - [Gateway 行为](user/gateway.zh-CN.md) — 端点、鉴权与别名。
 - [协议转换](user/protocol-conversion.zh-CN.md) — 推荐/已验证协议、透传与转换边界。
-- [路由、费用与故障转移](user/routing.zh-CN.md) — 选择顺序、粘性/轮询、费用估算、熔断与故障转移。
+- [路由与故障转移](user/routing.zh-CN.md) — 选择顺序、粘性/轮询、用量窗口、熔断与故障转移。
 - [临时停调](user/temporary-unavailability.zh-CN.md) — 在设置里按全局或连接匹配上游错误后本地跳过 Key 或模型，再用真实流量重试。
 - [CLI](user/cli.zh-CN.md) — 无头 CLI 压缩包、数据目录、`serve` / `key` / `status` 与内置 skill 同步。
 - [Docker](user/docker.zh-CN.md) — GHCR 镜像、Compose 部署、浏览器 Sidecar 与源码构建。

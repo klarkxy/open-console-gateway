@@ -52,7 +52,6 @@ function catalogEntry(provider_id: string, extra: Partial<ProviderCatalogEntry> 
     verification_runtime_availability: "unavailable",
     routable: false,
     managed_registration: false,
-    pricing_availability: "unavailable",
     usage_availability: "unavailable",
     manual_usage_calibration: false,
     quota_unit: "credits",

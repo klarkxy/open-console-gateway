@@ -7,6 +7,7 @@ import {
 } from "../api/dashboard.ts";
 import type { AuthStatus } from "../api/generated/dashboard-v3.ts";
 import { useControlPlaneStore } from "./controlPlane.ts";
+import { dropAllSnapshots } from "./persistence.ts";
 
 export type SessionPhase = "checking" | "login" | "register" | "ready";
 
@@ -20,6 +21,9 @@ export type SessionPhase = "checking" | "login" | "register" | "ready";
  * - A 410 `gone` means the loaded page predates the running service; the
  *   transport dispatches a separate gone event with structured
  *   refresh/upgrade guidance that the shell turns into a banner.
+ * - `sessionEpoch` is the shared invalidation contract: `dropSession`
+ *   increments it synchronously, and every async auth continuation captured
+ *   before the bump must settle without reviving the dropped session.
  */
 export const useSessionStore = defineStore("session", () => {
   const controlPlane = useControlPlaneStore();
@@ -28,6 +32,8 @@ export const useSessionStore = defineStore("session", () => {
   const status = ref<AuthStatus | null>(null);
   /** Mirrors App.vue's legacy flag: suppresses one auth-required dispatch during logout. */
   const suppressAuthRequired = ref(false);
+  // Readonly to the outside; only dropSession advances it.
+  const epoch = ref(0);
 
   const localMode = computed(() => status.value?.local ?? false);
   const authenticated = computed(() => status.value?.authenticated ?? false);
@@ -38,46 +44,85 @@ export const useSessionStore = defineStore("session", () => {
   }
 
   async function loadStatus(): Promise<AuthStatus> {
+    const session = epoch.value;
     phase.value = "checking";
     const next = await dashboardApi.getAuthStatus();
+    // A reset that landed during the await wins: the late response still
+    // reaches its own caller, but it must not re-enter store state.
+    if (session !== epoch.value) return next;
     applyStatus(next);
     suppressAuthRequired.value = false;
     return next;
   }
 
-  /** CAS tokens for auth mutations come from the latest auth status load. */
-  async function authExpectation() {
+  /**
+   * Load tokens when this session has none, then re-check the epoch before
+   * the auth request. A reset during the status read must not borrow the
+   * replacement session's tokens.
+   */
+  async function prepareAuth(session: number) {
     if (!controlPlane.hasTokens()) await loadStatus();
+    if (session !== epoch.value) throw new Error("session ended");
     return controlPlane.expectation();
   }
 
   async function login(username: string, password: string): Promise<void> {
+    const session = epoch.value;
+    const expectation = await prepareAuth(session);
     try {
-      applyStatus(await dashboardApi.loginAdmin(username, password, await authExpectation()));
+      const next = await dashboardApi.loginAdmin(username, password, expectation);
+      if (session !== epoch.value) throw new Error("session ended");
+      applyStatus(next);
+      suppressAuthRequired.value = false;
     } catch (error) {
-      if (error instanceof DashboardConflictError) await loadStatus();
+      if (session !== epoch.value) throw error;
+      if (error instanceof DashboardConflictError) {
+        try {
+          await loadStatus();
+        } catch {
+          // A failed recovery reload never replaces the original conflict.
+        }
+      }
       throw error;
     }
-    suppressAuthRequired.value = false;
   }
 
   async function register(username: string, password: string): Promise<void> {
+    const session = epoch.value;
+    const expectation = await prepareAuth(session);
     try {
-      applyStatus(await dashboardApi.registerAdmin(username, password, await authExpectation()));
+      const next = await dashboardApi.registerAdmin(username, password, expectation);
+      if (session !== epoch.value) throw new Error("session ended");
+      applyStatus(next);
+      suppressAuthRequired.value = false;
     } catch (error) {
-      if (error instanceof DashboardConflictError) await loadStatus();
+      if (session !== epoch.value) throw error;
+      if (error instanceof DashboardConflictError) {
+        try {
+          await loadStatus();
+        } catch {
+          // A failed recovery reload never replaces the original conflict.
+        }
+      }
       throw error;
     }
-    suppressAuthRequired.value = false;
   }
 
   async function logout(): Promise<void> {
+    const session = epoch.value;
+    const expectation = await prepareAuth(session);
+    if (session !== epoch.value) throw new Error("session ended");
     suppressAuthRequired.value = true;
     try {
-      await dashboardApi.logoutAdmin(await authExpectation());
+      await dashboardApi.logoutAdmin(expectation);
     } catch (error) {
+      if (session !== epoch.value) throw error;
       if (error instanceof DashboardConflictError) {
-        await loadStatus();
+        try {
+          await loadStatus();
+        } catch {
+          // A failed recovery reload never replaces the original conflict.
+        }
         suppressAuthRequired.value = false;
         throw error;
       } else if (error instanceof DashboardRequestError && error.status === 401) {
@@ -87,6 +132,7 @@ export const useSessionStore = defineStore("session", () => {
         throw error;
       }
     }
+    if (session !== epoch.value) return;
     dropSession();
   }
 
@@ -106,6 +152,7 @@ export const useSessionStore = defineStore("session", () => {
     identities: "clear",
     destinations: "clear",
     providers: "clear",
+    settings: "clear",
     cpa: "clear",
     billing: "clear",
     dsh: "clear",
@@ -116,6 +163,9 @@ export const useSessionStore = defineStore("session", () => {
 
   /** Local-only teardown: secrets are wiped and the shell returns to login. */
   function dropSession(): void {
+    // Advance the epoch first so every in-flight auth continuation captured
+    // before this point is stale by the time teardown finishes.
+    epoch.value += 1;
     const registry = getActivePinia()?._s;
     for (const [storeId, method] of Object.entries(SESSION_RESETTERS)) {
       const store = registry?.get(storeId) as
@@ -123,6 +173,9 @@ export const useSessionStore = defineStore("session", () => {
         | undefined;
       store?.[method]?.();
     }
+    // Persisted read-model snapshots die with the session too: the next
+    // login must never render the previous session's data.
+    dropAllSnapshots();
     status.value = null;
     phase.value = "login";
   }
@@ -139,6 +192,7 @@ export const useSessionStore = defineStore("session", () => {
     localMode,
     authenticated,
     suppressAuthRequired,
+    sessionEpoch: computed(() => epoch.value),
     applyStatus,
     loadStatus,
     login,

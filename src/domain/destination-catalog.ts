@@ -164,7 +164,6 @@ export function projectDestinationCatalog(
       refresh_supported: refreshSupported,
     },
     models,
-    pricing: { availability: "not_applicable" },
     usage: { availability: "not_applicable" },
     card: {
       fetch_zen_models: false,

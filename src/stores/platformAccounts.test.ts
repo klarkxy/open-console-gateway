@@ -45,6 +45,11 @@ async function waitForCalls(calls: DeferredCall[], count: number): Promise<void>
   assert.equal(calls.length, count, `expected ${count} fetch calls, saw ${calls.length}`);
 }
 
+/** Import returns at the receipt; the list read settles on a later turn. */
+async function drainReads(): Promise<void> {
+  for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve));
+}
+
 function platformLink(accountId: string, parentId: string): PlatformLink {
   return {
     accountId,
@@ -179,7 +184,7 @@ test("platform accounts store: an accepted view containing the pending account's
 
 test("platform accounts store: a committed create reports a destination refresh failure without losing either snapshot", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
   const calls = installDeferredFetch();
   const destinations = useDestinationsStore();
   destinations.commitSnapshot({ destinations: [], credentials: [], cards: [], expectation: { expectedRevision: 7, processGeneration: 99 } });
@@ -206,7 +211,7 @@ test("platform accounts store: a committed create reports a destination refresh 
 
 test("platform rename refreshes the destination revision before a layout write", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: "p1" });
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
   const calls = installDeferredFetch();
   const destinations = useDestinationsStore();
   destinations.commitSnapshot({
@@ -251,7 +256,7 @@ test("platform rename refreshes the destination revision before a layout write",
 
 test("platform edit reports projection refresh failure and retains its last coherent snapshot", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: "p1" });
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
   const calls = installDeferredFetch();
   const destinations = useDestinationsStore();
   destinations.commitSnapshot({
@@ -301,7 +306,7 @@ test("platform refresh: a pending link is not completed by another parent", () =
 
 test("platform refresh: a parent response after session clear cannot repopulate state", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
   const calls = installDeferredFetch();
   const store = usePlatformAccountsStore();
   const pending = store.refreshParent("parent");
@@ -315,7 +320,7 @@ test("platform refresh: a parent response after session clear cannot repopulate 
 
 test("platform import: a committed continuation survives failed list revalidation", async () => {
   setActivePinia(createPinia());
-  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
   const calls = installDeferredFetch();
   const store = usePlatformAccountsStore();
   const first = store.importKeys("parent");
@@ -328,6 +333,7 @@ test("platform import: a committed continuation survives failed list revalidatio
   const result = await first;
   assert.notEqual(typeof result, "string");
   assert.equal(typeof result === "object" ? result.nextPage : null, 2);
+  await drainReads();
   assert.equal(store.error, "list unavailable");
   const second = store.importKeys("parent");
   await waitForCalls(calls, 3);
@@ -337,6 +343,7 @@ test("platform import: a committed continuation survives failed list revalidatio
   await waitForCalls(calls, 4);
   calls[3]!.resolve(listBody("parent", 8, 99));
   await second;
+  await drainReads();
   assert.equal(store.error, "");
   const third = store.importKeys("parent");
   await waitForCalls(calls, 5);

@@ -195,7 +195,7 @@ async fn strict_priority_and_reorder_across_three_upstreams_stops_on_success() {
     assert_eq!(first_logs.len(), 1);
     assert_eq!(first_logs[0].attempt, Some(1));
     assert_eq!(first_logs[0].account_id, ids[0]);
-    assert_eq!(first_logs[0].status, "success_unpriced");
+    assert_eq!(first_logs[0].status, "success");
     evidence(
         "strict-priority-success-stops",
         &["lab-a"],

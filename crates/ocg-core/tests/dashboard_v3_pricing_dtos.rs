@@ -1,10 +1,10 @@
-//! Dashboard V3 pricing DTO catalog: prefix stability, required/optional sets,
-//! T|null responses, request omission, and secrecy.
+//! Retired pricing DTOs stay out of the V3 catalog. Usage and summary costs
+//! that remain are nullable: missing evidence is null, not zero.
 
 use ocg_core::dashboard_v3::{CATALOG_TYPE_NAMES, contract_schema};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
-const PRICING_CATALOG_TYPES: &[&str] = &[
+const RETIRED_PRICING_TYPES: &[&str] = &[
     "PricingSnapshot",
     "PricingLimits",
     "PricingModel",
@@ -19,79 +19,12 @@ const PRICING_CATALOG_TYPES: &[&str] = &[
     "PricingMultiplierWrite",
     "ProviderPricing",
     "PricingAvailability",
+    "ProviderPricingSnapshot",
+    "ProviderPricingValue",
+    "ProviderPricingRefresh",
+    "ProviderPricingRefreshUpdate",
+    "PricingRevision",
 ];
-
-const SECRET_FIELD_NAMES: &[&str] = &[
-    "key",
-    "password",
-    "passwordCipher",
-    "keyCipher",
-    "gatewayKey",
-    "gateway_key",
-    "primaryKey",
-    "primary_key",
-    "referralCode",
-    "referral_code",
-    "cipher",
-    "apiKey",
-    "api_key",
-    "token",
-    "secret",
-    "snapshotJson",
-    "snapshot_json",
-];
-
-fn defs(schema: &Value) -> &Map<String, Value> {
-    schema["$defs"].as_object().expect("catalog $defs")
-}
-
-fn properties<'a>(defs: &'a Map<String, Value>, name: &str) -> &'a Map<String, Value> {
-    defs[name]["properties"]
-        .as_object()
-        .unwrap_or_else(|| panic!("{name}.properties"))
-}
-
-fn required_fields<'a>(defs: &'a Map<String, Value>, name: &str) -> Vec<&'a str> {
-    defs[name]["required"]
-        .as_array()
-        .unwrap_or_else(|| panic!("{name}.required"))
-        .iter()
-        .filter_map(Value::as_str)
-        .collect()
-}
-
-fn enum_values<'a>(defs: &'a Map<String, Value>, name: &str) -> Vec<&'a str> {
-    defs[name]["enum"]
-        .as_array()
-        .unwrap_or_else(|| panic!("{name}.enum"))
-        .iter()
-        .filter_map(Value::as_str)
-        .collect()
-}
-
-fn schema_field_names<'a>(value: &'a Value, acc: &mut Vec<&'a str>) {
-    match value {
-        Value::Object(map) => {
-            if let Some(properties) = map.get("properties").and_then(Value::as_object) {
-                acc.extend(properties.keys().map(String::as_str));
-                for nested in properties.values() {
-                    schema_field_names(nested, acc);
-                }
-            }
-            for (key, nested) in map {
-                if key != "properties" {
-                    schema_field_names(nested, acc);
-                }
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                schema_field_names(item, acc);
-            }
-        }
-        _ => {}
-    }
-}
 
 fn allows_null(schema: &Value) -> bool {
     if schema.get("type").and_then(Value::as_str) == Some("null") {
@@ -102,249 +35,44 @@ fn allows_null(schema: &Value) -> bool {
     {
         return true;
     }
-    if let Some(any_of) = schema.get("anyOf").and_then(Value::as_array) {
-        return any_of.iter().any(allows_null);
-    }
-    false
-}
-
-fn is_numeric(schema: &Value) -> bool {
-    match schema.get("type") {
-        Some(Value::String(kind)) => kind == "number" || kind == "integer",
-        Some(Value::Array(kinds)) => kinds.iter().any(|kind| {
-            kind.as_str()
-                .is_some_and(|kind| kind == "number" || kind == "integer")
-        }),
-        _ => schema
-            .get("anyOf")
-            .and_then(Value::as_array)
-            .is_some_and(|items| items.iter().any(is_numeric)),
-    }
+    schema
+        .get("anyOf")
+        .and_then(Value::as_array)
+        .is_some_and(|items| items.iter().any(allows_null))
 }
 
 #[test]
-fn pricing_schema_registers_required_nulls_and_omittable_requests() {
+fn retired_pricing_dtos_are_absent_and_remaining_costs_are_nullable() {
     let schema = contract_schema();
-    let defs = defs(&schema);
+    let defs = schema["$defs"].as_object().expect("catalog $defs");
     for name in CATALOG_TYPE_NAMES {
         assert!(defs.contains_key(*name), "schema missing {name}");
     }
-
-    assert_eq!(
-        required_fields(defs, "PricingSnapshot"),
-        vec![
-            "revision",
-            "processGeneration",
-            "pricingRevision",
-            "activatedAt",
-            "documentUpdatedAt",
-            "sourceUrl",
-            "contentHash",
-            "adjustmentPolicyVersion",
-            "limits",
-            "models",
-        ]
-    );
-    let snapshot = properties(defs, "PricingSnapshot");
-    assert_eq!(snapshot["revision"]["type"], "integer");
-    assert_eq!(snapshot["pricingRevision"]["type"], "string");
-    assert!(!snapshot.contains_key("snapshotJson"));
-    assert!(!snapshot.contains_key("snapshot_json"));
-
-    assert_eq!(
-        required_fields(defs, "PricingLimits"),
-        vec!["window5h", "windowWeek", "windowMonth"]
-    );
-    let limits = properties(defs, "PricingLimits");
-    for field in ["window5h", "windowWeek", "windowMonth"] {
-        assert!(is_numeric(&limits[field]), "{field} must be numeric");
-        assert!(!allows_null(&limits[field]), "{field} is required number");
-    }
-    assert!(!limits.contains_key("window_5h"));
-    assert!(!limits.contains_key("window_week"));
-    assert!(!limits.contains_key("window_month"));
-
-    assert_eq!(
-        required_fields(defs, "PricingModel"),
-        vec![
-            "modelId",
-            "displayName",
-            "input",
-            "output",
-            "cacheRead",
-            "cacheWrite",
-            "usage",
-            "quotaMultiplier",
-            "minInputTokens",
-            "maxInputTokens",
-            "timeWindow",
-            "adjustments",
-        ]
-    );
-    let model = properties(defs, "PricingModel");
-    for field in ["input", "output", "cacheRead", "usage", "quotaMultiplier"] {
-        assert!(is_numeric(&model[field]), "{field} must be numeric");
-        assert!(!allows_null(&model[field]), "{field} is required number");
-    }
-    for field in ["cacheWrite", "minInputTokens", "maxInputTokens"] {
-        assert!(is_numeric(&model[field]), "{field} must be numeric|null");
+    for name in RETIRED_PRICING_TYPES {
         assert!(
-            allows_null(&model[field]),
-            "{field} must stay required T|null"
+            !CATALOG_TYPE_NAMES.contains(name),
+            "{name} must leave the V3 catalog"
         );
+        assert!(!defs.contains_key(*name), "{name} must leave $defs");
     }
-    assert!(!model.contains_key("model_id"));
-    assert!(!model.contains_key("cache_write"));
 
-    assert_eq!(
-        required_fields(defs, "PricingAdjustment"),
-        vec!["label", "multiplier", "appliesTo"]
-    );
-    assert!(is_numeric(
-        &properties(defs, "PricingAdjustment")["multiplier"]
-    ));
-    assert!(!properties(defs, "PricingAdjustment").contains_key("applies_to"));
-
-    assert_eq!(
-        enum_values(defs, "PricingTimeWindow"),
-        vec!["always", "off_peak", "peak"]
-    );
-
-    assert_eq!(
-        required_fields(defs, "PricingRefresh"),
-        vec![
-            "snapshot",
-            "refreshStatus",
-            "multiplierChanges",
-            "officialContentHash",
-            "error",
-        ]
-    );
-    let refresh = properties(defs, "PricingRefresh");
-    assert!(allows_null(&refresh["officialContentHash"]));
-    assert!(allows_null(&refresh["error"]));
-    assert!(!allows_null(&refresh["snapshot"]));
-    assert!(!refresh.contains_key("refresh_status"));
-    assert!(!refresh.contains_key("models"));
-
-    assert_eq!(
-        enum_values(defs, "PricingRefreshStatus"),
-        vec![
-            "success",
-            "unchanged",
-            "needs_confirmation",
-            "failed_no_change",
-        ]
-    );
-
-    assert_eq!(
-        required_fields(defs, "PricingMultiplierChange"),
-        vec!["modelId", "currentMultiplier", "officialMultiplier"]
-    );
-    let change = properties(defs, "PricingMultiplierChange");
-    assert!(is_numeric(&change["currentMultiplier"]));
-    assert!(is_numeric(&change["officialMultiplier"]));
-    assert!(!change.contains_key("model_id"));
-
-    let refresh_update_required = required_fields(defs, "PricingRefreshUpdate");
-    assert_eq!(
-        refresh_update_required,
-        vec![
-            "expectedRevision",
-            "processGeneration",
-            "expectedPricingRevision",
-        ]
-    );
-    assert!(!refresh_update_required.contains(&"policy"));
-    assert!(!refresh_update_required.contains(&"expectedOfficialContentHash"));
-    let refresh_update = properties(defs, "PricingRefreshUpdate");
-    assert!(refresh_update.contains_key("policy"));
-    assert!(refresh_update.contains_key("expectedOfficialContentHash"));
-    assert!(!refresh_update.contains_key("expected_revision"));
-    assert!(!refresh_update.contains_key("expected_pricing_revision"));
-    assert_eq!(defs["PricingRefreshUpdate"]["additionalProperties"], false);
-
-    assert_eq!(
-        enum_values(defs, "PricingRefreshPolicy"),
-        vec!["keep_current", "use_official"]
-    );
-
-    assert_eq!(
-        required_fields(defs, "PricingMultipliersUpdate"),
-        vec![
-            "expectedRevision",
-            "processGeneration",
-            "expectedPricingRevision",
-            "multipliers",
-        ]
-    );
-    assert_eq!(
-        defs["PricingMultipliersUpdate"]["additionalProperties"],
-        false
-    );
-    assert!(!properties(defs, "PricingMultipliersUpdate").contains_key("expected_revision"));
-
-    assert_eq!(
-        required_fields(defs, "PricingMultiplierWrite"),
-        vec!["modelId", "multiplier"]
-    );
-    assert!(is_numeric(
-        &properties(defs, "PricingMultiplierWrite")["multiplier"]
-    ));
-    assert_eq!(
-        defs["PricingMultiplierWrite"]["additionalProperties"],
-        false
-    );
-
-    assert_eq!(
-        required_fields(defs, "ProviderPricing"),
-        vec![
-            "providerId",
-            "availability",
-            "snapshot",
-            "providerSnapshot",
-            "revision",
-            "processGeneration",
-            "pricingRevision",
-            "providerPricingRevision",
-        ]
-    );
-    let provider = properties(defs, "ProviderPricing");
-    assert!(allows_null(&provider["snapshot"]));
-    assert!(allows_null(&provider["providerSnapshot"]));
-    assert!(!provider.contains_key("snapshotJson"));
-    assert_eq!(provider["revision"]["type"], "integer");
-    assert_eq!(provider["pricingRevision"]["type"], "string");
-
-    assert_eq!(
-        enum_values(defs, "PricingAvailability"),
-        vec!["available", "unavailable", "not_applicable", "unpriced",]
-    );
-}
-
-#[test]
-fn pricing_dto_schema_has_no_secret_or_snapshot_json_fields() {
-    let schema = contract_schema();
-    let defs = defs(&schema);
-    for name in PRICING_CATALOG_TYPES {
-        let mut fields = Vec::new();
-        schema_field_names(&defs[*name], &mut fields);
-        for field in fields {
-            assert!(
-                !SECRET_FIELD_NAMES.contains(&field),
-                "{name} schema leaked secret-bearing field {field}"
-            );
-        }
-        let encoded = defs[*name].to_string();
-        for secret in ["sk-secret", "ocg-secret", "pw-secret", "user:pass@"] {
-            assert!(
-                !encoded.contains(secret),
-                "{name} schema leaked secret sample {secret}"
-            );
-        }
+    let usage = defs["UsageWindow"]["properties"].as_object().unwrap();
+    for field in ["window5h", "windowWeek", "windowMonth", "pricingRevision"] {
+        assert!(allows_null(&usage[field]), "{field} is nullable");
     }
+    let summary = defs["ForwardLogSummary"]["properties"].as_object().unwrap();
+    assert!(allows_null(&summary["cost"]));
+    let home = defs["DashboardSummary"]["properties"].as_object().unwrap();
+    for field in ["todayCost", "weekCost", "monthCost"] {
+        assert!(allows_null(&home[field]), "{field} is nullable");
+    }
+    let models = defs["ApplicationModels"]["properties"].as_object().unwrap();
+    assert_eq!(models["pricingRevision"]["type"], "string");
     assert!(
-        properties(defs, "ConnectionInfo").contains_key("primaryKey"),
-        "ConnectionInfo remains the only secret-bearing V3 DTO"
+        defs["ConnectionInfo"]["properties"]
+            .as_object()
+            .unwrap()
+            .contains_key("primaryKey"),
+        "ConnectionInfo remains the secret-bearing connection DTO"
     );
 }

@@ -12,8 +12,6 @@ import type {
   ForwardLog as V3ForwardLog,
   ForwardLogs as V3ForwardLogs,
   GatewayLog as V3GatewayLog,
-  PricingSnapshot as V3PricingSnapshot,
-  ProviderPricingRefresh as V3ProviderPricingRefresh,
   ProxyTestResponse as V3ProxyTestResponse,
   Settings as V3Settings,
   SettingsUpdate as V3SettingsUpdate,
@@ -158,6 +156,8 @@ export interface ProxySupportedModel {
 
 export interface AppConfig {
   revision: number;
+  /** Backend process identity of this snapshot; paired with `revision` for CAS. */
+  process_generation: number;
   gateway_port: number;
   gateway_port_from_env: boolean;
   proxy_mode: ProxyMode;
@@ -299,7 +299,8 @@ export interface ForwardLogSummary {
   prompt_tokens: number;
   completion_tokens: number;
   cached_tokens: number;
-  cost: number;
+  /** Historical aggregate. Null means the amount was not recorded. */
+  cost: number | null;
 }
 
 export interface ForwardLogPage {
@@ -331,9 +332,10 @@ export interface ForwardLogClientKey {
 
 export interface UsageWindow {
   account_id: string;
-  window_5h: number;
-  window_week: number;
-  window_month: number;
+  /** Observed percent. Null means that window was not observed. */
+  window_5h: number | null;
+  window_week: number | null;
+  window_month: number | null;
   resets_in_5h: string | null;
   resets_in_week: string | null;
   resets_in_month: string | null;
@@ -346,80 +348,13 @@ export interface OfficialUsageRefreshResult {
   next_allowed_at: string;
 }
 
-export interface PricingLimits {
-  window_5h: number;
-  window_week: number;
-  window_month: number;
-}
-
-export interface PricingAdjustment {
-  label: string;
-  multiplier: number;
-  applies_to: string;
-}
-
-export interface PricingModel {
-  model_id: string;
-  display_name: string;
-  input: number;
-  output: number;
-  cache_read: number | null;
-  cache_write: number | null;
-  usage: number;
-  quota_multiplier: number;
-  min_input_tokens?: number | null;
-  max_input_tokens?: number | null;
-  time_window?: "always" | "off_peak" | "peak" | null;
-  adjustments: PricingAdjustment[];
-}
-
-export interface PricingSnapshot {
-  revision: string;
-  control_revision?: number;
-  activated_at: string;
-  document_updated_at: string | null;
-  source_url: string;
-  content_hash: string;
-  adjustment_policy_version: string;
-  limits: PricingLimits;
-  models: PricingModel[];
-}
-
-export interface PricingMultiplierChange {
-  model_id: string;
-  current_multiplier: number;
-  official_multiplier: number;
-}
-
-export interface ProviderPricingRefreshResult {
-  provider_id: string;
-  refresh_status: "success" | "unchanged" | "needs_confirmation" | "failed_no_change";
-  multiplier_changes: PricingMultiplierChange[];
-  official_content_hash: string | null;
-  error: string | null;
-  revision: number;
-  process_generation: number;
-  pricing_revision: string;
-  provider_pricing_revision: string;
-}
-
-export interface ProviderPricingRefreshRequest {
-  policy?: "keep_current" | "use_official";
-  expected_provider_revision?: string;
-  expected_official_content_hash?: string;
-}
-
-export interface PricingMultiplierUpdate {
-  model_id: string;
-  multiplier: number;
-}
-
 export interface DashboardSummary {
   total_accounts: number;
   available_accounts: number;
-  today_cost: number;
-  week_cost: number;
-  month_cost: number;
+  /** Historical spend. Null means that total was not recorded. */
+  today_cost: number | null;
+  week_cost: number | null;
+  month_cost: number | null;
   gateway_running: boolean;
 }
 
@@ -519,6 +454,7 @@ export function accountUpdateInput(value: AccountUpdate): Omit<V3AccountUpdate, 
 export function presentSettings(value: V3Settings): AppConfig {
   return {
     revision: value.revision,
+    process_generation: value.processGeneration,
     gateway_port: value.gatewayPort,
     gateway_port_from_env: value.gatewayPortFromEnv,
     proxy_mode: value.proxyMode,
@@ -565,6 +501,32 @@ export function settingsUpdateInput(value: AppConfig): Omit<V3SettingsUpdate, "e
   return input;
 }
 
+/** Fields a shared control may change without resending the rest of the snapshot. */
+export interface SettingsPatch {
+  routing_mode?: RoutingMode;
+  conversation_sticky?: boolean;
+  opencode_invite_url?: string;
+  auto_start?: boolean;
+  show_dock_icon?: boolean;
+}
+
+/**
+ * Partial settings body. Only fields present on the patch are sent, including
+ * an explicit `false`. Unsupported capability flags are not consulted here;
+ * the control that owns the field decides whether to submit it.
+ */
+export function settingsPatchInput(
+  patch: SettingsPatch,
+): Omit<V3SettingsUpdate, "expectedRevision" | "processGeneration"> {
+  const input: Omit<V3SettingsUpdate, "expectedRevision" | "processGeneration"> = {};
+  if (patch.routing_mode !== undefined) input.routingMode = patch.routing_mode;
+  if (patch.conversation_sticky !== undefined) input.conversationSticky = patch.conversation_sticky;
+  if (patch.opencode_invite_url !== undefined) input.opencodeInviteUrl = patch.opencode_invite_url;
+  if (patch.auto_start !== undefined) input.autoStart = patch.auto_start;
+  if (patch.show_dock_icon !== undefined) input.showDockIcon = patch.show_dock_icon;
+  return input;
+}
+
 export function presentConnection(value: V3ConnectionInfo): ConnectionInfo {
   return {
     gateway_port: value.gatewayPort,
@@ -575,12 +537,22 @@ export function presentConnection(value: V3ConnectionInfo): ConnectionInfo {
   };
 }
 
+/**
+ * Observed percent. A missing or non-finite wire value stays unavailable.
+ * Zero is a real observation. Generated `UsageWindow.window5h`,
+ * `windowWeek`, and `windowMonth` are still `number` until the V3 generator
+ * emits `number | null`; this check keeps a null that arrives early.
+ */
+function observedWindowPercent(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 export function presentUsage(value: V3UsageWindow): UsageWindow {
   return {
     account_id: value.accountId,
-    window_5h: value.window5h,
-    window_week: value.windowWeek,
-    window_month: value.windowMonth,
+    window_5h: observedWindowPercent(value.window5h),
+    window_week: observedWindowPercent(value.windowWeek),
+    window_month: observedWindowPercent(value.windowMonth),
     resets_in_5h: value.resetsIn5h,
     resets_in_week: value.resetsInWeek,
     resets_in_month: value.resetsInMonth,
@@ -593,61 +565,6 @@ export function presentUsageRefresh(value: V3UsageRefresh): OfficialUsageRefresh
     source: value.source,
     last_success_at: value.lastSuccessAt,
     next_allowed_at: value.nextAllowedAt,
-  };
-}
-
-export function presentPricing(value: V3PricingSnapshot): PricingSnapshot {
-  return {
-    revision: value.pricingRevision,
-    control_revision: value.revision,
-    activated_at: value.activatedAt,
-    document_updated_at: value.documentUpdatedAt,
-    source_url: value.sourceUrl,
-    content_hash: value.contentHash,
-    adjustment_policy_version: value.adjustmentPolicyVersion,
-    limits: {
-      window_5h: value.limits.window5h,
-      window_week: value.limits.windowWeek,
-      window_month: value.limits.windowMonth,
-    },
-    models: value.models.map((model) => ({
-      model_id: model.modelId,
-      display_name: model.displayName,
-      input: model.input,
-      output: model.output,
-      cache_read: model.cacheRead,
-      cache_write: model.cacheWrite,
-      usage: model.usage,
-      quota_multiplier: model.quotaMultiplier,
-      min_input_tokens: model.minInputTokens,
-      max_input_tokens: model.maxInputTokens,
-      time_window: model.timeWindow,
-      adjustments: model.adjustments.map((adjustment) => ({
-        label: adjustment.label,
-        multiplier: adjustment.multiplier,
-        applies_to: adjustment.appliesTo,
-      })),
-    })),
-  };
-}
-
-export function presentProviderPricingRefresh(
-  value: V3ProviderPricingRefresh,
-): ProviderPricingRefreshResult {
-  return {
-    provider_id: value.providerId,
-    refresh_status: value.refreshStatus,
-    multiplier_changes: value.multiplierChanges.map((change) => ({
-      model_id: change.modelId,
-      current_multiplier: change.currentMultiplier,
-      official_multiplier: change.officialMultiplier,
-    })),
-    official_content_hash: value.officialContentHash,
-    error: value.error,
-    revision: value.revision,
-    process_generation: value.processGeneration,
-    pricing_revision: value.pricingRevision,
-    provider_pricing_revision: value.providerPricingRevision,
   };
 }
 

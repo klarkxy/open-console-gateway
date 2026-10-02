@@ -88,6 +88,10 @@ function runtimeBody(overrides: Record<string, unknown> = {}): object {
   };
 }
 
+function observedNull(value: unknown): boolean {
+  return value === null;
+}
+
 function resolveCpa(calls: DeferredCall[], integration: object, runtime: object): void {
   for (const call of calls) {
     if (call.url.includes("/external-integrations/cpa/runtime")) call.resolve(runtime);
@@ -144,4 +148,68 @@ test("dropSession clears the CPA snapshot so a later load cannot write back", as
   await pending;
   assert.equal(store.integration, null);
   assert.equal(store.cardStatus, null);
+});
+
+test("a snapshot from before logout cannot overwrite the next CPA session", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore();
+  const store = useCpaStore();
+  const first = installDeferredFetch();
+  const pendingFirst = store.load();
+  await waitForCalls(first, 2);
+  useSessionStore().dropSession();
+  assert.equal(observedNull(store.integration), true);
+  assert.equal(observedNull(store.runtime), true);
+
+  const second = installDeferredFetch();
+  const pendingSecond = store.load();
+  await waitForCalls(second, 2);
+  resolveCpa(
+    second,
+    integrationBody({ revision: 4, runtimeRunning: false }),
+    runtimeBody({ currentVersion: "runtime-next", running: false }),
+  );
+  await pendingSecond;
+  assert.equal(store.cardStatus, "stopped");
+  assert.equal(store.integration?.revision, 4);
+  assert.equal(store.runtime?.currentVersion, "runtime-next");
+
+  resolveCpa(
+    first,
+    integrationBody({ revision: 2, runtimeRunning: true }),
+    runtimeBody({ currentVersion: "runtime-old", running: true }),
+  );
+  await pendingFirst;
+  assert.equal(store.cardStatus, "stopped");
+  assert.equal(store.integration?.revision, 4);
+  assert.equal(store.runtime?.currentVersion, "runtime-next");
+  assert.equal(store.loaded, true);
+});
+
+test("refreshIntegration refuses a replaced session before the integration GET", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore();
+  const store = useCpaStore();
+  const loaded = installDeferredFetch();
+  const pendingLoad = store.load();
+  await waitForCalls(loaded, 2);
+  resolveCpa(loaded, integrationBody({ revision: 3 }), runtimeBody());
+  await pendingLoad;
+  assert.equal(store.integration?.revision, 3);
+
+  const expired = store.currentSession();
+  store.clear();
+  assert.equal(observedNull(store.integration), true);
+  const calls = installDeferredFetch();
+  const refreshIntegration: (
+    expectedSession?: number,
+  ) => Promise<{ revision: number } | null> = store.refreshIntegration;
+  const pending = refreshIntegration(expired);
+  void pending.then(() => undefined, () => undefined);
+  for (let attempt = 0; attempt < 30 && calls.length === 0; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(calls.length, 0, "a replaced session must not start the integration GET");
+  assert.equal(observedNull(store.integration), true);
+  assert.equal(store.loaded, false);
 });

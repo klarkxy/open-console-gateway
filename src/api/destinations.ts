@@ -28,6 +28,7 @@ import type {
   DestinationDto,
   DestinationList,
   DestinationModelMetadata,
+  ModelMetadataCatalog,
   DestinationOnboardingTaskDto,
   DestinationPatchRequest,
   LegacyDestinationRefDto,
@@ -86,7 +87,6 @@ export interface DestinationPlanWindow {
 export interface DestinationPlan {
   expiry_cadence: PlanDto["expiryCadence"];
   manual_calibration: boolean;
-  pricing_source: PlanDto["pricingSource"];
   usage_source: PlanDto["usageSource"];
   windows: DestinationPlanWindow[];
 }
@@ -223,6 +223,12 @@ export interface DestinationModelMetadataSnapshot {
   expectation: MutationExpectation;
 }
 
+/** Every destination's metadata snapshot from one aggregate read. */
+export interface ModelMetadataCatalogSnapshot {
+  destinations: DestinationModelMetadataSnapshot[];
+  expectation: MutationExpectation;
+}
+
 export interface CredentialListSnapshot {
   credentials: DestinationCredential[];
   expectation: MutationExpectation;
@@ -332,7 +338,6 @@ function presentPlan(value: PlanDto | null): DestinationPlan | null {
   return {
     expiry_cadence: value.expiryCadence,
     manual_calibration: value.manualCalibration,
-    pricing_source: value.pricingSource,
     usage_source: value.usageSource,
     windows: value.windows.map((window) => ({ kind: window.kind })),
   };
@@ -742,9 +747,24 @@ export function presentDestinationModelMetadata(
   };
 }
 
+export function presentModelMetadataCatalog(
+  value: ModelMetadataCatalog,
+): ModelMetadataCatalogSnapshot {
+  return {
+    destinations: value.destinations.map(presentDestinationModelMetadata),
+    expectation: {
+      expectedRevision: value.revision.revision,
+      processGeneration: value.revision.processGeneration,
+    },
+  };
+}
+
 export const modelMetadataApi = {
   get: async (id: string): Promise<DestinationModelMetadataSnapshot> =>
     presentDestinationModelMetadata(await dashboardV4.getDestinationModelMetadata(id)),
+  /** One aggregate read covering every destination (alias-page fan-in). */
+  list: async (): Promise<ModelMetadataCatalogSnapshot> =>
+    presentModelMetadataCatalog(await dashboardV4.getModelMetadataCatalog()),
   /**
    * Declare (or with `null`, reset) the full metadata of one exact public
    * model under CAS. The receipt replaces the whole destination entry set.

@@ -1,6 +1,6 @@
 [简体中文](routing.zh-CN.md)
 
-# Routing, Cost, And Failover
+# Routing And Failover
 
 A request resolves model identity from the saved destination catalog, then selects credentials in their global order. Supplier, credential and model enablement, protocol selection, model scope and explicit endpoint grants all constrain sending. Invalid configuration fails explicitly; there is no fallback to reconstructed legacy accounts. Each logical request freezes model mappings and transport configuration, while every send rechecks current authorization, Key version, cooldown and any persisted quota-recovery state. Changes invalidate an old candidate rather than silently redirecting it.
 
@@ -38,6 +38,8 @@ create them.
 ## Account Selection And Failover
 
 On **Aliases**, each mapping row carries a **routing order** column: the global routing ranks of the Keys that can serve that public name at the configuration level (the same order you drag into shape on the Accounts view). Rows within a model are sorted by ascending rank; a plan backed by several eligible Keys lists each rank in turn; "—" means no enabled Key currently serves the mapping. This is the configured order — runtime states such as cooldowns or quota waits are not reflected here, and it is not a delivery guarantee. Custom Keys linked from a platform (new-api/sub-api) also show the platform name as a tag next to the plan name, so rows serving the same model are easy to tell apart by origin.
+
+Each mapping row also carries a **capabilities** column: the effective input modalities of the route behind that mapping (text/image/audio/video) plus their provenance (operator declaration, upstream discovery, or the models.dev catalog). "Unknown" means no source has reported modalities for that route yet; its **Declare** link opens the model capabilities editor on the matching Providers row. Declarations stay route-scoped there — the Aliases page only reads them. CPA rows have no per-route metadata and show "—".
 
 Accounts are tried in **list order**, which you can drag into shape and persist
 from the Accounts view. The selector skips:
@@ -99,52 +101,17 @@ If every account is cooling, waiting on a GOAT plan-window deadline, waiting on 
 `429` with the next known eligibility time. Purely process-local resource waits
 without a known eligibility time, including local-policy waits, return `503`.
 
-## Cost Accounting
+## Usage windows
 
-The 5-hour, weekly, and monthly bars are local estimates, driven by what the
-gateway actually forwards — not by the upstream's authoritative billing. Token
-rates, window limits, and each model's `Usage` (official **Monthly limit**)
-all come from the active OpenCode Go USD snapshot.
+OpenCode Go and GOAT show 5-hour, weekly, and monthly windows from the official percentage and reset when that reading exists. You can also save a manual percentage. The window uses that percentage against a full window of 100. Later requests do not add a price on top. A window with no official reading and no manual percentage stays unavailable. It is not shown as 0.
 
-- The official multiplier defaults to `account monthly window / model monthly
-  limit`. A user can override it for a temporary promotion; subsequent
-  requests use the active persisted value, and refresh never overwrites it
-  without confirmation.
-- Current official examples against the `$60` account monthly window: `$15`
-  models such as `deepseek-v4-pro`, `mimo-v2.5-pro`, and Grok 4.6 use
-  `60 / 15 = 4x`; `$30` models such as `deepseek-v4-flash` use `2x`.
-- The applicable local MiniMax adjustment is applied last. No supplier API
-  price, CNY value, or exchange rate participates in the calculation.
+A full window does not disable the account. Logs still record tokens when the upstream sends them. The gateway does not estimate a price for a new request. A cost that was not recorded stays unknown and is not shown as zero or free. Older log rows keep a previously stored cost and are not recalculated. If the gateway loses the response, the outcome stays unknown and no local price is invented. The only stream retry exception is the bounded pre-output case described above.
 
-Edge cases in the log:
-
-- Without a streaming usage chunk (after the gateway has requested
-  `include_usage` on Chat streams), the row ends with `success_no_usage`.
-- Models absent from the snapshot are still forwarded, but finish as
-  `success_unpriced`, display no quota cost, and do not enter quota totals.
-- Zen free models finish as `success` with `cost_state=free`: tokens are
-  recorded, quota cost stays empty, and they do not enter Go quota totals.
-- Custom API forwards finish with `cost_state=unknown`, display no quota
-  cost, and do not debit any provider quota.
-- Pre-snapshot successful rows retain their old value and are marked as a
-  legacy estimate; they are never recalculated.
-- A manually saved percentage becomes the baseline for that window. Official
-  refresh (manual **Refresh quota** or adaptive sync) on a ready Key or managed
-  account overwrites the baseline with official OpenCode usage percentages.
-  Successful priced costs recorded afterward accumulate until the next manual
-  calibration or official refresh. A real inference `429` does not rewrite the
-  usage baseline, but can queue a later asynchronous official refresh when that
-  adapter supports it.
-- An `outcome_unknown` row means the upstream may have completed and charged
-  the request while the gateway lost the response; its local cost stays unknown. The only stream retry exception is the bounded pre-output case described above.
-
-Each bar is shown next to the account's cooldown state — the next section
-explains what actually stops traffic.
+Each bar is shown next to the account's cooldown state — the next section explains what actually stops traffic.
 
 ## True And False Circuit Breakers
 
-A full local quota bar or zero estimated credit balance never disables an
-account. Calibration changes the display baseline, not routing eligibility.
+A full usage window, an unavailable window, or an empty manual credit balance never disables an account. Calibration changes the displayed baseline, not routing eligibility.
 
 An upstream `429` uses the temporary cooldown above. Existing ordinary
 cooldowns remain effective until their stored deadline or an explicit reset.
@@ -184,8 +151,7 @@ to later compatible cards in saved order.
 An exact `-free` raw pin stays on Free and cannot silently switch to a different
 model. With no other compatible route, the gateway returns a local unavailable
 or rate-limited response. Once SSE output has begun, it cannot switch sources.
-Successful Free rows keep token counts, use `cost_state=free`, and
-do not enter Go quota totals. Free models are promotional and may use request
+Successful Free rows keep token counts. They are not given a local price, and they do not enter Go quota totals. Free models are promotional and may use request
 data to improve models — do not submit confidential content.
 
 ## OpenRouter Free
@@ -203,8 +169,7 @@ name. A `429` instead waits on the receiving Key and honors a valid
 `Retry-After`. These temporary waits do not mark the paid balance exhausted or
 cool Zen Free. An exact `openrouter/free` or `:free` public model remains pinned;
 switching to a paid model requires a shared public alias configured by you.
-Free attempts do not debit a configured local paid Credit estimate. OCG leaves
-their total cost unknown and does not provide an official daily-limit meter;
+Free attempts do not change a manual credit balance. Their cost stays unknown and is not shown as zero. OCG does not provide an official daily-limit meter;
 check OpenRouter's bill for any optional charged features. Once
 streaming output begins, the gateway cannot change providers mid-response.
 

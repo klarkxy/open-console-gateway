@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::billing::{CreditAttempt, CreditMeterState};
 use crate::billing_types::{
-    CreditBalanceCorrection, CreditBucket, CreditConfiguration, CreditMeterView,
-    PortableCreditMeter,
+    CreditBalanceCorrection, CreditBucket, CreditConfiguration, CreditConfigurationWrite,
+    CreditMeterView, PortableCreditMeter,
 };
 
 struct Binding {
@@ -77,7 +77,7 @@ pub(crate) fn save_on(conn: &Connection, state: &CreditMeterState) -> Result<()>
 pub(crate) fn configure_on(
     conn: &Connection,
     account_id: &str,
-    configuration: CreditConfiguration,
+    configuration: CreditConfigurationWrite,
     initial_buckets: Option<Vec<CreditBucket>>,
     now: DateTime<Utc>,
 ) -> Result<()> {
@@ -94,12 +94,20 @@ pub(crate) fn configure_on(
     } else {
         let buckets = initial_buckets
             .ok_or_else(|| anyhow::anyhow!("initial credit buckets are required"))?;
+        let stored = CreditConfiguration {
+            name: configuration.name,
+            currency: configuration.currency,
+            credits_per_currency: 1.0,
+            rates: Vec::new(),
+            monthly: configuration.monthly,
+            source_url: configuration.source_url,
+        };
         let mut state = CreditMeterState::new(
             uuid::Uuid::new_v4().to_string(),
             binding.credential_id,
             binding.destination_id,
             binding.endpoint,
-            configuration,
+            stored,
             buckets,
             now,
         )?;
@@ -116,10 +124,7 @@ pub(crate) fn calibrate_on(
     now: DateTime<Utc>,
 ) -> Result<()> {
     let mut state = required_on(conn, account_id)?;
-    ensure!(
-        pending_count_on(conn, &state.credential_id, &state.meter_id)? == 0,
-        "wait for pending requests before calibrating credits"
-    );
+    // Historical pending receipts are not live price work and do not lock calibration.
     state.advance(now)?;
     state.calibrate(balances, now)?;
     save_on(conn, &state)
@@ -159,8 +164,8 @@ pub(crate) fn read_view_on(
         return Ok(None);
     };
     state.advance(now)?;
-    let pending = pending_count_on(conn, &state.credential_id, &state.meter_id)?;
-    Ok(Some(state.project(now, pending)))
+    // This runtime creates no credit receipts. Stored pending rows stay on disk and are not active.
+    Ok(Some(state.project(now, 0)))
 }
 
 pub(crate) fn capture_on(
@@ -223,21 +228,6 @@ pub(crate) fn settlement_finished_on(conn: &Connection, log_id: i64) -> Result<b
     Ok(receipt_on(conn, log_id)?.is_none_or(|(_, receipt)| receipt.phase != "pending"))
 }
 
-pub(crate) fn pending_count_on(
-    conn: &Connection,
-    credential_id: &str,
-    meter_id: &str,
-) -> Result<u64> {
-    Ok(conn.query_row(
-        "SELECT COUNT(*) FROM forward_logs WHERE credit_receipt_json IS NOT NULL
-         AND json_extract(credit_receipt_json,'$.phase')='pending'
-         AND json_extract(credit_receipt_json,'$.attempt.credentialId')=?1
-         AND json_extract(credit_receipt_json,'$.attempt.meterId')=?2",
-        params![credential_id, meter_id],
-        |row| row.get(0),
-    )?)
-}
-
 pub(crate) fn settle_on(
     conn: &Connection,
     log_id: i64,
@@ -295,28 +285,9 @@ pub(crate) fn settle_on(
 
 /// Cold startup only, under the directory's exclusive lifetime lock and a
 /// transaction: interrupted requests become explicit uncertainty exactly once.
+/// Startup recovery no longer settles or rewrites historic credit receipts.
 pub(crate) fn recover_pending_on(conn: &Connection, now: DateTime<Utc>) -> Result<()> {
-    let has_pending: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM forward_logs WHERE credit_receipt_json IS NOT NULL AND json_extract(credit_receipt_json,'$.phase')='pending')", [], |row| row.get(0))?;
-    if !has_pending {
-        return Ok(());
-    }
-    let mut statement = conn.prepare("SELECT id FROM forward_logs WHERE credit_receipt_json IS NOT NULL AND json_extract(credit_receipt_json,'$.phase')='pending'")?;
-    let ids = statement
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(statement);
-    for id in ids {
-        if let Some((_, receipt)) = receipt_on(conn, id)? {
-            settle_on(
-                conn,
-                id,
-                &receipt.attempt,
-                BillingTokens::new(0, 0, 0, 0),
-                "outcome_unknown",
-                now,
-            )?;
-        }
-    }
+    let _ = (conn, now);
     Ok(())
 }
 
@@ -325,17 +296,15 @@ pub(crate) fn export_on(
     account_id: &str,
     now: DateTime<Utc>,
 ) -> Result<Option<PortableCreditMeter>> {
-    let Some(mut state) = load_on(conn, account_id)? else {
+    let Some(state) = load_on(conn, account_id)? else {
         return Ok(None);
     };
-    state.advance(now)?;
-    let pending = pending_count_on(conn, &state.credential_id, &state.meter_id)?;
     Ok(Some(PortableCreditMeter {
         configuration: state.configuration,
         buckets: state.buckets,
         spent_since_calibration: state.spent_since_calibration,
         overdrawn: state.overdrawn,
-        unpriced_requests: state.unpriced_requests.saturating_add(pending),
+        unpriced_requests: state.unpriced_requests,
         last_calibration_at: state.last_calibration_at,
         created_at: state.created_at,
         monthly_cursor: state.monthly_cursor,
@@ -354,22 +323,22 @@ pub(crate) fn import_on(
     if binding.json.is_some() {
         return Ok(());
     }
-    let mut state = CreditMeterState::new(
-        uuid::Uuid::new_v4().to_string(),
-        binding.credential_id,
-        binding.destination_id,
-        binding.endpoint,
-        portable.configuration.clone(),
-        portable.buckets.clone(),
-        portable.created_at,
-    )?;
-    state.spent_since_calibration = portable.spent_since_calibration;
-    state.overdrawn = portable.overdrawn;
-    state.unpriced_requests = portable.unpriced_requests;
-    state.last_calibration_at = portable.last_calibration_at;
-    state.monthly_cursor = portable.monthly_cursor;
+    let _ = now;
+    let state = CreditMeterState {
+        meter_id: uuid::Uuid::new_v4().to_string(),
+        credential_id: binding.credential_id,
+        destination_id: binding.destination_id,
+        endpoint: binding.endpoint,
+        configuration: portable.configuration.clone(),
+        buckets: portable.buckets.clone(),
+        spent_since_calibration: portable.spent_since_calibration,
+        overdrawn: portable.overdrawn,
+        unpriced_requests: portable.unpriced_requests,
+        last_calibration_at: portable.last_calibration_at,
+        created_at: portable.created_at,
+        monthly_cursor: portable.monthly_cursor,
+    };
     state.validate()?;
-    state.advance(now)?;
     save_on(conn, &state)
 }
 

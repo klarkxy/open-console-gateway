@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ref, type VNode } from "vue";
 import type { Account, ForwardLog, GatewayLog } from "../api/dashboard.ts";
-import { t } from "../i18n/index.ts";
+import { formatNativeCostEstimate } from "../domain/native-cost.ts";
+import { locale, t } from "../i18n/index.ts";
 import { formatCost } from "../utils/format.ts";
 import {
   renderDiagnostic,
@@ -109,6 +110,20 @@ function vnodeText(vnode: VNode): string {
   if (!vnode) return "";
   if (typeof vnode.children === "string") return vnode.children;
   return childrenOf(vnode).map(vnodeText).join("");
+}
+
+/** `<dd>` texts from the provider-cost section, in row order. */
+function providerCostValues(root: VNode): string[] {
+  const section = childrenOf(root).find((node) => (
+    node?.type === "section" && childrenOf(node).some((child) => child?.type === "dl")
+  ));
+  assert.ok(section);
+  const list = childrenOf(section).find((child) => child?.type === "dl");
+  assert.ok(list);
+  const rows = childrenOf(list);
+  const values: string[] = [];
+  for (let index = 1; index < rows.length; index += 2) values.push(vnodeText(rows[index]!));
+  return values;
 }
 
 /** Value of the `<dd>` following the `<dt>` whose text matches `label`. */
@@ -224,8 +239,12 @@ test("renderForwardDetail resolves provider accounts through the injected accoun
   assert.equal(descriptionValue(blank, t("账号")), "—");
 });
 
-test("renderForwardDetail lists the frozen native estimate only for custom-provider rows", () => {
+test("renderForwardDetail lists a positive custom historical native amount with its stored revision", () => {
   const { ctx } = makeContext();
+  const historical = formatNativeCostEstimate(
+    { value: 12, currency: "USD", unit: "token" },
+    locale.value,
+  );
   const custom = forwardRow({
     provider_id: "custom",
     native_cost_value: 12,
@@ -233,13 +252,36 @@ test("renderForwardDetail lists the frozen native estimate only for custom-provi
     native_cost_unit: "token",
     pricing_revision_id: "rev-9",
   });
-  const customTree = renderForwardDetail(custom, ctx) as VNode;
-  assert.equal(descriptionValue(customTree, t("计价来源（冻结）")), "rev-9");
-  assert.equal(descriptionValue(customTree, t("实际平台扣减")), t("未知"));
+  const customValues = providerCostValues(renderForwardDetail(custom, ctx) as VNode);
+  const historicalAt = customValues.indexOf(historical);
+  assert.ok(historicalAt >= 0);
+  assert.equal(customValues[historicalAt + 1], "rev-9");
+  assert.equal(customValues.filter((value) => value === historical).length, 1);
+  assert.equal(customValues.filter((value) => value === "rev-9").length, 1);
 
-  const other = forwardRow({ provider_id: "opencode", native_cost_value: 12, pricing_revision_id: "rev-9" });
-  const otherTree = renderForwardDetail(other, ctx) as VNode;
-  assert.equal(descriptionValue(otherTree, t("计价来源（冻结）")), null);
+  const hiddenRows = [
+    forwardRow({ provider_id: "opencode", native_cost_value: 12, pricing_revision_id: "rev-9" }),
+    forwardRow({
+      provider_id: "custom",
+      native_cost_value: 0,
+      native_cost_currency: "USD",
+      native_cost_unit: "token",
+      pricing_revision_id: "rev-9",
+    }),
+    forwardRow({
+      provider_id: "custom",
+      native_cost_value: null,
+      native_cost_currency: "USD",
+      native_cost_unit: "token",
+      pricing_revision_id: "rev-9",
+    }),
+  ];
+  for (const row of hiddenRows) {
+    const values = providerCostValues(renderForwardDetail(row, ctx) as VNode);
+    assert.equal(values.indexOf(historical), -1);
+    assert.equal(values.indexOf("rev-9"), -1);
+    assert.equal(customValues.length, values.length + 2);
+  }
 });
 
 test("renderDiagnostic stringifies upstream detail blocks and keeps row fields", () => {

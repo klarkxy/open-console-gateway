@@ -227,12 +227,7 @@ fn platform_price_does_not_freeze_a_hosted_tool_request() {
             cache_write: None,
         }));
     let restricted = restrict_platform_to_token_coverage(&plan, pricing);
-    match restricted {
-        RequestPricingSnapshot::Platform(PlatformAttemptPrice::Unknown { provenance }) => {
-            assert_eq!(provenance.as_deref(), Some("platform:hosted_tool_unpriced"));
-        }
-        _ => panic!("hosted tools must not keep a frozen platform price"),
-    }
+    assert!(matches!(restricted, RequestPricingSnapshot::Unpriced));
 }
 
 #[test]
@@ -249,33 +244,17 @@ fn platform_attempt_rejects_old_key_or_endpoint_and_keeps_billed_row() {
     );
     // Linking moves the Key to the parent's configured inference routes.
     // The attempt identity check compares the exact route sent upstream.
-    assert!(matches!(
-        platform_price_for_attempt(
-            &state,
-            &(&account).into(),
-            UPSTREAM,
-            Some("https://api.example.com/v1/chat/completions")
-        ),
-        Some(PlatformAttemptPrice::Frozen(_))
-    ));
-    assert!(matches!(
-        platform_price_for_attempt(
-            &state,
-            &(&account).into(),
-            UPSTREAM,
-            Some("https://api.example.com/v1/other")
-        ),
-        Some(PlatformAttemptPrice::Unknown { .. })
-    ));
-    assert!(matches!(
-        platform_price_for_attempt(
-            &state,
-            &(&account).into(),
-            UPSTREAM,
-            Some("https://old.example/v1/chat/completions")
-        ),
-        Some(PlatformAttemptPrice::Unknown { .. })
-    ));
+    for endpoint in [
+        Some("https://api.example.com/v1/chat/completions"),
+        Some("https://api.example.com/v1/other"),
+        Some("https://old.example/v1/chat/completions"),
+        None,
+    ] {
+        assert!(
+            platform_price_for_attempt(&state, &(&account).into(), UPSTREAM, endpoint).is_none(),
+            "{endpoint:?}"
+        );
+    }
     state
         .db
         .lock()
@@ -286,10 +265,7 @@ fn platform_attempt_rejects_old_key_or_endpoint_and_keeps_billed_row() {
             None,
         )
         .unwrap();
-    assert!(matches!(
-        platform_price_for_attempt(&state, &(&account).into(), UPSTREAM, None),
-        Some(PlatformAttemptPrice::Unknown { .. })
-    ));
+    assert!(platform_price_for_attempt(&state, &(&account).into(), UPSTREAM, None).is_none());
     drop(state);
     let _ = fs::remove_dir_all(dir);
 }
@@ -314,8 +290,9 @@ fn command_code_requests_use_the_verified_provider_price_and_multiplier() {
         None,
     );
     missing_metrics.scope_to_provider(Some(&goat.provider_id), true);
-    assert_eq!(missing_metrics.cost_state, "unpriced");
+    assert_eq!(missing_metrics.cost_state, "unknown");
     assert_eq!(missing_metrics.raw_cost_usd, None);
+    assert_eq!(missing_metrics.cost, 0.0);
     assert_eq!(missing_metrics.pricing_revision_id, None);
 
     let snapshot = crate::pricing::ProviderScopedPricingSnapshot::new(
@@ -365,14 +342,12 @@ fn command_code_requests_use_the_verified_provider_price_and_multiplier() {
     );
     metrics.scope_to_provider(Some(&goat.provider_id), true);
 
-    assert_eq!(metrics.cost_state, "priced");
-    assert!((metrics.raw_cost_usd.unwrap() - 0.286).abs() < 1e-12);
-    assert!((metrics.quota_multiplier.unwrap() - (70.0 / 60.0)).abs() < 1e-12);
-    assert!((metrics.cost - (0.286 * 70.0 / 60.0)).abs() < 1e-12);
-    assert_eq!(
-        metrics.pricing_revision_id.as_deref(),
-        Some("goat-runtime-test")
-    );
+    assert!(matches!(pricing, RequestPricingSnapshot::Unpriced));
+    assert_eq!(metrics.cost_state, "unknown");
+    assert_eq!(metrics.raw_cost_usd, None);
+    assert_eq!(metrics.quota_multiplier, None);
+    assert_eq!(metrics.cost, 0.0);
+    assert_eq!(metrics.pricing_revision_id, None);
 
     drop(state);
     let _ = fs::remove_dir_all(dir);

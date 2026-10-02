@@ -11,10 +11,11 @@ use serde_json::{Map, Value, json};
 
 pub use super::model_metadata::{
     DestinationModelMetadata, DestinationModelMetadataEntry, DestinationModelMetadataUpdate,
+    ModelMetadataCatalog,
 };
 pub use crate::billing_types::{
-    BillingStatus, CreditBalanceCorrection, CreditCalibrationRequest, CreditConfigureRequest,
-    CreditGrantRequest,
+    BillingStatus, CreditBalanceCorrection, CreditCalibrationRequest, CreditConfigurationWrite,
+    CreditConfigureRequest, CreditGrantRequest,
 };
 pub use crate::byok_application::{ByokClient, ByokInspection, ByokStatus};
 pub use crate::db::routing_cards::RoutingCard;
@@ -142,6 +143,7 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "DestinationModelMetadata",
     "DestinationModelMetadataEntry",
     "DestinationModelMetadataUpdate",
+    "ModelMetadataCatalog",
     "DestinationCatalogModelUpdate",
     "DestinationModelTestRequest",
     "DestinationModelTestResult",
@@ -165,16 +167,14 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "CatalogModelDto",
     "DestinationProjectionRefusedError",
     "OfficialApiKind",
-    "OfficialPriceRow",
-    "OfficialPriceSheet",
     "OfficialBalance",
     "OfficialSpend",
     "OfficialApiStatus",
-    "OfficialApiPrices",
     "BillingModel",
     "BillingSource",
     "BillingStatus",
     "CreditRate",
+    "CreditConfigurationWrite",
     "MonthlyCredits",
     "CreditConfiguration",
     "CreditBucketKind",
@@ -1911,6 +1911,7 @@ pub fn contract_schema() -> Value {
     include_type::<ModelMetadata>(&mut serialize);
     include_type::<DestinationModelMetadata>(&mut serialize);
     include_type::<DestinationModelMetadataEntry>(&mut serialize);
+    include_type::<ModelMetadataCatalog>(&mut serialize);
     include_type::<DestinationDto>(&mut serialize);
     include_type::<ModelResolutionDto>(&mut serialize);
     include_type::<DestinationPatchResult>(&mut serialize);
@@ -1931,8 +1932,8 @@ pub fn contract_schema() -> Value {
     include_type::<CatalogModelDto>(&mut serialize);
     include_type::<DestinationProjectionRefusedError>(&mut serialize);
     include_type::<crate::official_api::OfficialApiStatus>(&mut serialize);
-    include_type::<crate::official_api::OfficialApiPrices>(&mut serialize);
     include_type::<BillingStatus>(&mut serialize);
+    include_type::<CreditConfigurationWrite>(&mut serialize);
     include_type::<CreditBalanceCorrection>(&mut serialize);
     include_type::<RoutingMode>(&mut serialize);
     include_type::<RoutingClientProtocol>(&mut serialize);

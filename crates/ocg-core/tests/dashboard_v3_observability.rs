@@ -504,7 +504,7 @@ async fn v3_observability_stays_camel_case_after_v2_retirement() {
     let parsed: DashboardSummary = serde_json::from_value(v3_summary).unwrap();
     assert!(parsed.total_accounts >= 2);
     assert!(parsed.available_accounts >= 2);
-    assert!((parsed.today_cost - 1.25).abs() < 1e-9);
+    assert!(parsed.today_cost.is_none());
 
     harness
         .assert_v2_path_removed(
@@ -603,8 +603,9 @@ async fn dashboard_v3_summary_and_daily_cost_match_seeded_logs() {
         .get_json(&format!("{}/dashboard/summary", harness.v3_base))
         .await;
     assert_eq!(v3_status, StatusCode::OK, "{v3_summary}");
-    assert!((v3_summary["todayCost"].as_f64().unwrap() - 3.0).abs() < 1e-9);
-    assert!((v3_summary["weekCost"].as_f64().unwrap() - 6.0).abs() < 1e-9);
+    assert!(v3_summary["todayCost"].is_null(), "{v3_summary}");
+    assert!(v3_summary["weekCost"].is_null(), "{v3_summary}");
+    assert!(v3_summary["monthCost"].is_null(), "{v3_summary}");
 
     let (status, daily) = harness
         .get_json(&format!(

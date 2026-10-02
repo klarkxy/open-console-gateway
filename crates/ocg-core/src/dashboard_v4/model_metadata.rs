@@ -29,6 +29,43 @@ pub struct DestinationModelMetadata {
     pub models: Vec<DestinationModelMetadataEntry>,
 }
 
+/// Every destination's effective metadata in one payload. The alias page
+/// renders per-mapping capabilities from this single read; fanning the
+/// per-destination endpoint out across rows would serialize N full routing
+/// snapshots behind the settings lock.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelMetadataCatalog {
+    pub revision: ControlRevision,
+    pub destinations: Vec<DestinationModelMetadata>,
+}
+
+pub(super) async fn list(
+    State(state): State<CoreState>,
+) -> Result<Json<ModelMetadataCatalog>, V3ApiError> {
+    let _settings = state.settings_update.lock();
+    let modelsdev = state.modelsdev_catalog();
+    let db = state.db.lock();
+    let snapshot =
+        crate::routing_snapshot::RoutingSnapshot::load(&db).map_err(V3ApiError::internal)?;
+    let records = model_metadata::load(&db).map_err(V3ApiError::internal)?;
+    let revision = ControlRevision::from_state(&state);
+    let destinations = snapshot
+        .projection
+        .destinations
+        .iter()
+        .map(|destination| DestinationModelMetadata {
+            revision: revision.clone(),
+            destination_id: destination.id.clone(),
+            models: entries(&records, &modelsdev, destination),
+        })
+        .collect();
+    Ok(Json(ModelMetadataCatalog {
+        revision,
+        destinations,
+    }))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DestinationModelMetadataUpdate {
@@ -102,12 +139,25 @@ fn payload(state: &CoreState, id: &str) -> Result<DestinationModelMetadata, V3Ap
         .find(|d| d.id == id)
         .ok_or_else(|| V3ApiError::not_found_at(state, "destination not found"))?;
     let records = model_metadata::load(&db).map_err(V3ApiError::internal)?;
-    let models = destination
+    let models = entries(&records, &modelsdev, destination);
+    Ok(DestinationModelMetadata {
+        revision: ControlRevision::from_state(state),
+        destination_id: id.to_string(),
+        models,
+    })
+}
+
+fn entries(
+    records: &[model_metadata::Record],
+    modelsdev: &crate::modelsdev::ModelsDevCatalog,
+    destination: &ocg_domain::destination::Destination,
+) -> Vec<DestinationModelMetadataEntry> {
+    destination
         .catalog
         .iter()
         .map(|model| {
-            let (metadata, source) =
-                model_metadata::effective_with_catalog(&records, &modelsdev, destination, model);
+            let (metadata, source, _) =
+                model_metadata::effective_with_catalog(records, modelsdev, destination, model);
             DestinationModelMetadataEntry {
                 public_model: model.public_model.clone(),
                 upstream_model: model.upstream_model.clone(),
@@ -115,10 +165,8 @@ fn payload(state: &CoreState, id: &str) -> Result<DestinationModelMetadata, V3Ap
                 source: source.to_string(),
             }
         })
-        .collect();
-    Ok(DestinationModelMetadata {
-        revision: ControlRevision::from_state(state),
-        destination_id: id.to_string(),
-        models,
-    })
+        .collect()
 }
+
+#[cfg(test)]
+mod tests;

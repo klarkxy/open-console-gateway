@@ -5,7 +5,7 @@ import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import { installFetchMock, setupControlPlane } from "../test-helpers/dashboard-v3-fetch.ts";
 
 test("dynamic Provider update 409 refreshes catalog and provider without replaying PATCH", async () => {
-  setupControlPlane(4, 11, "p1");
+  setupControlPlane(4, 11);
   let patchCalls = 0;
   const requests = installFetchMock(({ url, method }) => {
     if (url.endsWith("/providers/lab-id") && method === "PATCH") {
@@ -63,8 +63,8 @@ test("dynamic Provider update 409 refreshes catalog and provider without replayi
 });
 
 test("dynamic Provider update uses a captured definition pair even after the store advances", async () => {
-  setupControlPlane(4, 11, "p1");
-  useControlPlaneStore().sync({ revision: 8, processGeneration: 11, pricingRevision: "p1" });
+  setupControlPlane(4, 11);
+  useControlPlaneStore().sync({ revision: 8, processGeneration: 11 });
   const requests = installFetchMock(({ url, method }) => {
     if (url.endsWith("/providers/lab-id") && method === "PATCH") {
       return {
@@ -105,7 +105,7 @@ test("dynamic Provider update uses a captured definition pair even after the sto
 });
 
 test("dynamic Provider discover and test never persist a Key in the presented result", async () => {
-  setupControlPlane(4, 11, "p1");
+  setupControlPlane(4, 11);
   installFetchMock(({ url }) => {
     if (url.endsWith("/providers/models/discover")) {
       return { models: ["vendor/opus"], truncated: false, revision: 4, processGeneration: 11 };
@@ -136,7 +136,7 @@ test("dynamic Provider discover and test never persist a Key in the presented re
 });
 
 test("Go protocol probe sends only provider, model, and protocol intent", async () => {
-  setupControlPlane(12, 42, "p1");
+  setupControlPlane(12, 42);
   const requests = installFetchMock(({ url }) => {
     if (url.endsWith("/providers/opencode/protocol-probes")) {
       return {
@@ -172,7 +172,7 @@ test("Go protocol probe sends only provider, model, and protocol intent", async 
 });
 
 test("unified catalog refresh sends only the selected contract scope and CAS tokens", async () => {
-  setupControlPlane(12, 42, "p1");
+  setupControlPlane(12, 42);
   const requests = installFetchMock(({ url, method }) => {
     if (url.endsWith("/provider-contracts/provider/opencode/catalog/refresh") && method === "POST") {
       return {
@@ -196,7 +196,7 @@ test("unified catalog refresh sends only the selected contract scope and CAS tok
 });
 
 test("provider protocol override sends only selected Key grants with its captured CAS pair", async () => {
-  setupControlPlane(12, 42, "p1");
+  setupControlPlane(12, 42);
   const requests = installFetchMock(({ url, method }) => {
     if (url.endsWith("/provider-contracts/provider/opencode/model-protocol-overrides") && method === "PUT") {
       return {
@@ -230,8 +230,38 @@ test("provider protocol override sends only selected Key grants with its capture
   }]);
 });
 
-test("catalog remove posts V4 model ids then reloads contracts", async () => {
-  setupControlPlane(12, 42, "p1");
+test("catalog remove resolves the direct receipt without reading contracts", async () => {
+  setupControlPlane(12, 42);
+  const requests = installFetchMock(({ url, method }) => {
+    if (url.endsWith("/provider-contracts/provider/opencode/catalog/remove") && method === "POST") {
+      return {
+        revision: { revision: 13, processGeneration: 42, pricingRevision: "p1" },
+        removedIds: ["drop-me"],
+        catalogModels: ["keep-me"],
+      };
+    }
+    throw new Error(`unexpected request ${method} ${url}`);
+  });
+
+  const result = await providerApi.removeContractCatalogModels("provider", "opencode", ["drop-me"]);
+
+  assert.deepEqual(result, {
+    removed_ids: ["drop-me"],
+    catalog_models: ["keep-me"],
+    revision: 13,
+    process_generation: 42,
+  });
+  assert.deepEqual(requests, [
+    {
+      url: "/dashboard/api/v4/provider-contracts/provider/opencode/catalog/remove",
+      method: "POST",
+      body: { modelIds: ["drop-me"], expectedRevision: 12, processGeneration: 42 },
+    },
+  ]);
+});
+
+test("catalog remove still returns the receipt when a contracts read would fail", async () => {
+  setupControlPlane(12, 42);
   const requests = installFetchMock(({ url, method }) => {
     if (url.endsWith("/provider-contracts/provider/opencode/catalog/remove") && method === "POST") {
       return {
@@ -241,35 +271,21 @@ test("catalog remove posts V4 model ids then reloads contracts", async () => {
       };
     }
     if (url.endsWith("/provider-contracts") && method === "GET") {
-      return {
-        revision: 13,
-        processGeneration: 42,
-        pricingRevision: "p1",
-        providers: [],
-        customEndpoints: [],
-      };
+      throw new Error("F09_CONTRACTS_READ");
     }
     throw new Error(`unexpected request ${method} ${url}`);
   });
 
-  await providerApi.removeContractCatalogModels("provider", "opencode", ["drop-me"]);
+  const result = await providerApi.removeContractCatalogModels("provider", "opencode", ["drop-me"]);
 
-  assert.deepEqual(requests, [
-    {
-      url: "/dashboard/api/v4/provider-contracts/provider/opencode/catalog/remove",
-      method: "POST",
-      body: { modelIds: ["drop-me"], expectedRevision: 12, processGeneration: 42 },
-    },
-    {
-      url: "/dashboard/api/v4/provider-contracts",
-      method: "GET",
-      body: null,
-    },
-  ]);
+  assert.deepEqual(result.removed_ids, ["drop-me"]);
+  assert.deepEqual(result.catalog_models, ["keep-me"]);
+  assert.equal(requests.filter((request) => request.method === "POST").length, 1);
+  assert.equal(requests.filter((request) => request.method === "GET").length, 0);
 });
 
 test("Custom endpoint protocol probe stays blocked while overrides use the model-protocol-overrides route", async () => {
-  setupControlPlane(8, 42, "p1");
+  setupControlPlane(8, 42);
   const requests = installFetchMock(({ url, method }) => {
     if (url.endsWith("/accounts/custom-1")) {
       return { id: "custom-1", providerId: "custom", revision: 8, processGeneration: 42 };
@@ -355,7 +371,7 @@ function zenFreeAccountDto(overrides: Record<string, unknown> = {}) {
 }
 
 test("Zen Free provider settings reject non-Zen accounts before the dedicated write", async () => {
-  setupControlPlane(12, 42, "p1");
+  setupControlPlane(12, 42);
   const requests = installFetchMock(({ url }) => {
     if (url.endsWith("/accounts/go-account-2")) {
       return { id: "go-account-2", providerId: "opencode", revision: 12, processGeneration: 42 };
@@ -373,7 +389,7 @@ test("Zen Free provider settings reject non-Zen accounts before the dedicated wr
 });
 
 test("Zen Free enable switch writes the catalog provider through PATCH /providers/zen-free", async () => {
-  setupControlPlane(12, 42, "p1");
+  setupControlPlane(12, 42);
   let enabled = true;
   const requests = installFetchMock(({ url, method }) => {
     if (url.endsWith(`/accounts/${ZEN_FREE_ACCOUNT_ID}`)) {

@@ -1,7 +1,20 @@
-import type { Account, UsageWindow } from "../api/dashboard";
+import type { Account } from "../api/dashboard";
 import type { ProviderQuotaWindow, ProviderUsageResponse } from "../api/providers.ts";
 
 export type UsageKey = "window_5h" | "window_week" | "window_month";
+
+/** Observed percent windows. A missing kind stays null. */
+export interface ObservedUsageWindow {
+  account_id: string;
+  window_5h: number | null;
+  window_week: number | null;
+  window_month: number | null;
+  resets_in_5h: string | null;
+  resets_in_week: string | null;
+  resets_in_month: string | null;
+}
+
+type UsageResets = Pick<ObservedUsageWindow, "resets_in_5h" | "resets_in_week" | "resets_in_month">;
 
 const PROVIDER_WINDOW_KIND: Record<UsageKey, string> = {
   window_5h: "five_hours",
@@ -12,10 +25,12 @@ const PROVIDER_WINDOW_KIND: Record<UsageKey, string> = {
 export function mergeCalibratedProviderUsage(
   current: ProviderUsageResponse | undefined,
   key: UsageKey,
-  usage: UsageWindow,
+  usage: ObservedUsageWindow,
   updatedAt: string,
 ): ProviderUsageResponse | undefined {
   if (!current) return undefined;
+  const used = usage[key];
+  if (typeof used !== "number" || !Number.isFinite(used)) return current;
   const windowKind = PROVIDER_WINDOW_KIND[key];
   const resetsAt = key === "window_5h"
     ? usage.resets_in_5h
@@ -24,16 +39,100 @@ export function mergeCalibratedProviderUsage(
       : usage.resets_in_month;
   let matched = false;
   const quotaWindows = current.quota_windows.map((window) => {
-    if (window.window_kind !== windowKind) return window;
+    if (!providerWindowMatches(window.window_kind, windowKind)) return window;
     matched = true;
     return {
       ...window,
-      used: usage[key],
+      used,
       resets_at: resetsAt,
       updated_at: updatedAt,
     };
   });
-  return matched ? { ...current, quota_windows: quotaWindows } : current;
+  if (!matched) {
+    quotaWindows.push({
+      account_id: current.account_id,
+      window_kind: windowKind,
+      used,
+      limit_value: 100,
+      started_at: null,
+      resets_at: resetsAt,
+      calibration_offset: 0,
+      unit: "percent",
+      source: "manual",
+      observed_at: updatedAt,
+      updated_at: updatedAt,
+    });
+  }
+  return { ...current, quota_windows: quotaWindows };
+}
+
+function providerWindowMatches(actual: string, kind: string): boolean {
+  return actual === kind || (kind === "month" && actual === "monthly");
+}
+
+/** Destination plan slice that decides which windows a manual editor may offer. */
+export interface ManualCalibrationPlan {
+  manual_calibration: boolean;
+  windows: readonly { kind: string }[];
+}
+
+/**
+ * Allowed editor window kinds when calibration metadata permits an edit and
+ * the loaded plan has not listed windows. OpenCode Go, GOAT, and Ollama only.
+ */
+const SEALED_MANUAL_WINDOW_KINDS: Record<string, readonly string[]> = {
+  opencode: ["five_hours", "week", "month"],
+  "command-code": ["five_hours", "week", "month"],
+  ollama: ["month"],
+};
+
+const EDITOR_WINDOW_KIND_ORDER = ["five_hours", "week", "month"] as const;
+
+const EDITOR_WINDOW_KEY: Record<(typeof EDITOR_WINDOW_KIND_ORDER)[number], UsageKey> = {
+  five_hours: "window_5h",
+  week: "window_week",
+  month: "window_month",
+};
+
+/**
+ * Window kinds a manual editor may offer. Observed quota rows are not an input.
+ * An explicit false plan denies every provider. A true plan contributes its
+ * listed kinds; otherwise the sealed kinds are the legacy fallback.
+ */
+export function manualEditorWindowKeys(
+  providerId: string,
+  plan: ManualCalibrationPlan | null | undefined,
+): UsageKey[] {
+  const sealed = SEALED_MANUAL_WINDOW_KINDS[providerId] ?? [];
+  if (sealed.length === 0) return [];
+  if (plan?.manual_calibration === false) return [];
+  const listed = plan && plan.windows.length > 0
+    ? plan.windows.map((window) => window.kind)
+    : sealed;
+  const allowed = new Set(sealed.map((kind) => kind === "monthly" ? "month" : kind));
+  const kinds = new Set(listed.map((kind) => kind === "monthly" ? "month" : kind));
+  return EDITOR_WINDOW_KIND_ORDER.flatMap((kind) => (
+    allowed.has(kind) && kinds.has(kind) ? [EDITOR_WINDOW_KEY[kind]] : []
+  ));
+}
+
+/**
+ * Percent-editor capability from catalog, billing, or destination-plan metadata.
+ * Explicit false denies every provider. A true plan permits a blank draft.
+ * A personal credit meter keeps its own editor.
+ */
+export function manualUsageEditorEnabled(input: {
+  providerId: string;
+  plan: ManualCalibrationPlan | null | undefined;
+  reportedManual: boolean;
+  hasCreditMeter: boolean;
+}): boolean {
+  if (input.hasCreditMeter) return false;
+  if (input.plan?.manual_calibration === false) return false;
+  if (input.plan?.manual_calibration === true) {
+    return manualEditorWindowKeys(input.providerId, input.plan).length > 0;
+  }
+  return input.reportedManual;
 }
 
 export interface ProviderWindowLabels {
@@ -94,8 +193,9 @@ export function isMiniMaxVideoQuotaWindow(
 }
 
 export type UsageEditState = {
-  draft: number;
-  saved: number;
+  /** Null is an untouched blank. Zero is an entered percent. */
+  draft: number | null;
+  saved: number | null;
   saving: boolean;
   error: string | null;
   /// 手动校准的"距上游重置还剩多少分钟"。仅 5h/周窗口使用；月窗口始终为 null。
@@ -114,7 +214,7 @@ export const WINDOW_FULL_MINUTES: Record<UsageKey, number | null> = {
 
 /// 根据当前 `resets_in_*` 推断手动校准的默认剩余分钟数。
 /// `resets_in_*` 为 null（窗口未开始）时返回满窗分钟数。
-export function defaultResetsInMinutes(usage: Pick<UsageWindow, "resets_in_5h" | "resets_in_week" | "resets_in_month">, key: UsageKey, now = Date.now()): number | null {
+export function defaultResetsInMinutes(usage: UsageResets, key: UsageKey, now = Date.now()): number | null {
   const full = WINDOW_FULL_MINUTES[key];
   if (full === null) return null;
   const until = windowResetsAt(usage, key);
@@ -147,7 +247,7 @@ const cooldownFields: Record<UsageKey, keyof Pick<Account, "cooldown_5h_until" |
   window_month: "cooldown_month_until",
 };
 
-const resetsFields: Record<UsageKey, keyof Pick<UsageWindow, "resets_in_5h" | "resets_in_week" | "resets_in_month">> = {
+const resetsFields: Record<UsageKey, keyof UsageResets> = {
   window_5h: "resets_in_5h",
   window_week: "resets_in_week",
   window_month: "resets_in_month",
@@ -171,7 +271,7 @@ export function resetTimeForWindow(
 
 /// 固定窗口的清零时刻（来自后端 `resets_in_*`）；`null` 表示窗口尚未开始（无成功请求）或月窗口无购买日期。
 export function windowResetsAt(
-  usage: Pick<UsageWindow, "resets_in_5h" | "resets_in_week" | "resets_in_month">,
+  usage: UsageResets,
   key: UsageKey,
 ): string | null {
   return usage[resetsFields[key]];
@@ -207,10 +307,6 @@ export function isUsageLimitReached(
 
 export function normalizeUsagePercent(value: number): number {
   return Math.min(100, Math.max(0, Math.round(value * 10) / 10));
-}
-
-export function usagePercentFromCost(cost: number, limit: number): number {
-  return normalizeUsagePercent((cost / limit) * 100);
 }
 
 export function mergeUsageEdit(

@@ -77,6 +77,7 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             "/destinations/{id}/catalog",
             axum::routing::put(destination_catalog::update),
         )
+        .route("/model-metadata", get(model_metadata::list))
         .route(
             "/destinations/{id}/model-metadata",
             get(model_metadata::get).put(model_metadata::put),
@@ -107,10 +108,6 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route(
             "/accounts/{id}/official-api/balance",
             post(official_api::refresh_balance),
-        )
-        .route(
-            "/providers/{id}/official-api/pricing",
-            get(official_api::get_prices).post(official_api::refresh_prices),
         )
         .route(
             "/applications/dsh",

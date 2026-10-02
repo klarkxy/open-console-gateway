@@ -21,7 +21,6 @@ function row(provider_id: string, extra: Partial<ProviderCatalogEntry> = {}): Pr
     verification_runtime_availability: "available",
     routable: true,
     managed_registration: false,
-    pricing_availability: "available",
     usage_availability: "available",
     manual_usage_calibration: false,
     quota_unit: "tokens",
@@ -54,7 +53,7 @@ test("an invented builtin row automatically drives order, form fields, name and 
         { id: "key", kind: "secret", required: true, immutable_after_create: false },
       ],
     }),
-    row("custom", { offering: "api", display_name: "Custom API", pricing_availability: "unpriced" }),
+    row("custom", { offering: "api", display_name: "Custom API" }),
   ];
   const options = buildPlanOptions(catalog);
   assert.deepEqual(options.map((option) => option.optionId), ["future-plan", "custom"]);

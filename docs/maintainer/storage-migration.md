@@ -4,9 +4,9 @@
 
 Operator contract for upgrades, backups, and rollback. Schema details are in [Persistence](state-and-lifecycle.md#persistence).
 
-## Schema v65 — GOAT Key-local plan windows
+## Schema v66 — GOAT Key-local plan windows
 
-v65 additively adds nullable `credentials.goat_plan_cooldowns_json`. `migrate_to_v65` requires schema v64, adds the TEXT column, then writes `schema_version` 65. Existing rows stay NULL. An already-v65 open returns without rewriting the column. There is no credentials-table rewrite and no pre-v65 snapshot. Ordinary cooldown columns, credential IDs, routing order, and Key ciphertext stay as stored.
+v66 additively adds nullable `credentials.goat_plan_cooldowns_json`. `migrate_to_v66` accepts schema v64 or v65, adds the TEXT column, then writes `schema_version` 66. Existing rows stay NULL. An already-v66 open returns without rewriting the column. There is no credentials-table rewrite and no pre-v66 snapshot. Ordinary cooldown columns, credential IDs, routing order, and Key ciphertext stay as stored.
 
 The JSON is a closed map of absolute UTC deadlines for the receiving GOAT inference Key only: `five_hours`, `week`, and `month`. Unknown windows or unparseable timestamps fail closed. Named ordinary columns and the aggregate `cooldown_until` stay ordinary and may still be shared. Read projections use the later of the local deadline and the ordinary column and do not copy the map back. On the Go channel the router skips the Key until the longest active blocker has passed. The Free channel does not read this map. Each window keeps its own later deadline. When every active deadline has passed, the Key is eligible again, and expiry does not force a sticky reset.
 
@@ -16,7 +16,11 @@ A longer valid `Retry-After` on the same response is a separate process-local bl
 
 Current portable export is payload V12 inside the unchanged version-1 envelope. V12 stores `goatPlanCooldowns` separately from ordinary cooldown fields. V4–V11 remain importable and are ordinary-only: a missing field never invents local provenance. Import of the same plaintext Key merges the later deadline in each window and, when the payload omits the field, keeps the host map. A changed Key drops the old host map, then applies a valid incoming map. Same-Key preservation keeps or merges that map only while the incoming credential is still GOAT; moving the same id and the same plaintext to a non-GOAT provider, including Custom HTTP, remains a supported remap and discards only the GOAT map while ordinary cooldowns stay. A non-GOAT credential, an observer credential, an unknown window, or a bad timestamp rejects the package. A payload older than V12 that carries the field is rejected, so the field cannot masquerade as an older payload version. V1–V3 and any payload newer than V12 are rejected.
 
-Older binaries refuse a v65 database. Rollback is a complete restore of the pre-upgrade data directory, opened with the earlier binary. Schema 65 and payload V12 are internal storage versions, not the product release version. A V12 backup is for a current or newer reader; keep an earlier backup for an earlier binary.
+Older binaries refuse a v66 database. Rollback is a complete restore of the pre-upgrade data directory, opened with the earlier binary. Schema 66 and payload V12 are internal storage versions, not the product release version. A V12 backup is for a current or newer reader; keep an earlier backup for an earlier binary.
+
+## Pricing data after retirement
+
+Retiring price tables, reference-price feeds, multipliers, and price-based estimates does not change `CURRENT_SCHEMA_VERSION` and does not delete price-snapshot rows, forward cost columns, `credit_meter_json`, or `credit_receipt_json`. Those columns stay readable for history and export. Opening the database does not settle a pending credit receipt, reprice a stored cost, or write a missing cost as zero. A billing read reports active pending requests as 0. The stored receipt bytes stay exact. Explicit calibration is not blocked by that receipt and does not delete it. The historical v22 migration still rolls fixed windows when it inserts those quota rows. This retirement does not change that migration and does not add a destructive migration. An ordinary provider or destination delete does not delete historical price snapshots.
 
 ## Schema v64 — preset public model names
 
@@ -37,13 +41,15 @@ v62 adds nullable `credentials.credit_meter_json` and `forward_logs.credit_recei
 The earlier v61 console-session column is retained as historical schema but cleared when upgrading to v62; no runtime code reads or renews those tokens. Configuration rewrites preserve a credit meter only for the same credential, destination, and endpoint. Key rotation on that account does not reset its balance. Inference grants, cooldowns, and quota recovery are unchanged. These additive changes are transactional and create no separate pre-v62 backup. Rollback requires restoring the whole pre-upgrade data directory; older binaries refuse schema v62.
 
 An exclusive `.database-open-gate.lock` serializes initialization. Each open
-database holds a shared lock on `.database-open.lock`. Pending credit
-receipts are recovered only by an opener that can first acquire the exclusive
-lock, after all previous database handles have closed. A concurrent CLI status
-read therefore leaves active receipts untouched. If another handle survives a
-gateway crash, recovery waits for a later cold open. Do not remove or replace
-either lock file while the directory is in use; upgrades must stop older binaries
-that do not participate in this lock.
+database holds a shared lock on `.database-open.lock`. The following recovery
+describes the schema as it shipped: pending credit receipts were recovered only
+by an opener that could first acquire the exclusive lock, after all previous
+database handles had closed. A concurrent CLI status read therefore left active
+receipts untouched. If another handle survived a gateway crash, recovery waited
+for a later cold open. After pricing retirement that settlement must not run.
+Open, read, and export leave historical receipts and balances unchanged. Do not
+remove or replace either lock file while the directory is in use; upgrades must
+stop older binaries that do not participate in this lock.
 
 ## Schema v60 — per-Key quota recovery
 
@@ -92,7 +98,7 @@ Downgrades are not supported: never point an older binary at a migrated database
 
 ## Schema v27 and the pre-v3 snapshot
 
-`CURRENT_SCHEMA_VERSION = 65` (`crates/ocg-core/src/db.rs`). Historical migrations v1–v57 remain described below. v58 adds `destinations.model_resolution`, backfills `adapter_defined` / `public_only` / `public_and_upstream`, changes legacy Custom destinations to unbounded credential capacity, preserves every destination and credential ID, and writes a verified pre-v58 SQLite backup for a non-fresh canonical v57 source before mutation. v60 additively stores `credentials.quota_recovery_json` (see above). v65 additively stores `credentials.goat_plan_cooldowns_json` (see above).
+`CURRENT_SCHEMA_VERSION = 66` (`crates/ocg-core/src/db.rs`). Historical migrations v1–v57 remain described below. v58 adds `destinations.model_resolution`, backfills `adapter_defined` / `public_only` / `public_and_upstream`, changes legacy Custom destinations to unbounded credential capacity, preserves every destination and credential ID, and writes a verified pre-v58 SQLite backup for a non-fresh canonical v57 source before mutation. v60 additively stores `credentials.quota_recovery_json` (see above). v66 additively stores `credentials.goat_plan_cooldowns_json` (see above).
 
 ## Schema v45 — identity / credential / binding satellites
 

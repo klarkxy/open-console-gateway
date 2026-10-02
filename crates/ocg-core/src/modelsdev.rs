@@ -1,8 +1,9 @@
 //! models.dev public catalog as the lowest-priority model metadata source.
 //!
-//! When a route has neither an operator declaration nor upstream-observed
-//! metadata, facts from <https://models.dev> fill the gap so downstream
-//! clients (DSH) still see verified context windows and modalities. The
+//! Fields a route never learned — no operator declaration, and no
+//! upstream-observed value for that field — are filled from
+//! <https://models.dev> so downstream clients (DSH) still see verified context
+//! windows and modalities; operator declarations stay untouched. The
 //! catalog is cached in a local setting and refreshed in the background; a
 //! failed refresh keeps the previous cache and never blocks `/v1/models`.
 //! Matching is exact upstream id, then its last path segment, then the exact
@@ -97,6 +98,7 @@ pub(crate) fn parse_api(bytes: &[u8]) -> BTreeMap<String, ModelMetadata> {
                 let mut row = object.clone();
                 row.entry("id").or_insert_with(|| json!(id));
                 trim_modalities(&mut row);
+                translate_reasoning_options(&mut row);
                 rows.push(Value::Object(row));
             }
         }
@@ -125,6 +127,37 @@ fn trim_modalities(row: &mut serde_json::Map<String, Value>) {
         if list.is_empty() {
             modalities.remove(key);
         }
+    }
+}
+
+/// models.dev expresses thinking levels as `reasoning_options`; translate the
+/// effort variant into the contract's level → wire-spelling map that
+/// `parse_catalog_limit` already reads as `reasoningEfforts`. The OpenAI-family
+/// wire spelling `none` fills the DSH `off` selector; values outside the
+/// selector table are dropped, never invention. Toggle-only and budget-token
+/// options carry no selectable wire level, so they leave efforts unknown
+/// rather than fabricating a spelling.
+fn translate_reasoning_options(row: &mut serde_json::Map<String, Value>) {
+    let Some(options) = row.get("reasoning_options").and_then(Value::as_array) else {
+        return;
+    };
+    let mut efforts = BTreeMap::new();
+    for option in options {
+        if option.get("type").and_then(Value::as_str) != Some("effort") {
+            continue;
+        }
+        let Some(values) = option.get("values").and_then(Value::as_array) else {
+            continue;
+        };
+        for value in values.iter().filter_map(Value::as_str) {
+            let level = if value == "none" { "off" } else { value };
+            if crate::model_metadata::EFFORTS.contains(&level) {
+                efforts.insert(level.to_string(), value.to_string());
+            }
+        }
+    }
+    if !efforts.is_empty() {
+        row.insert("reasoningEfforts".to_string(), json!(efforts));
     }
 }
 

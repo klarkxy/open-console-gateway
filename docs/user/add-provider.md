@@ -26,7 +26,7 @@ The **Adapter Registry** stays static and sealed. User-defined Providers are typ
 
 Edit replaces the whole Provider configuration through `PATCH /dashboard/api/v4/providers/{id}`. The Provider id is immutable. Changing no-auth to keyed auth requires an explicit replacement Key, written only to that singleton account. An already-keyed Provider rejects any Key on the Provider update; rotate Keys on **Accounts**. Delete is allowed only after every referencing account is removed; there is no cascade.
 
-Provider-owned fields stay on **Providers**. Account **Key**, enablement, order, notes, cooldown, and tests stay on **Accounts**. User-defined Providers are always unpriced: no official usage, quota estimate, or pricing rows. Request logs still attribute provider, account, and model.
+Provider-owned fields stay on **Providers**. Account **Key**, enablement, order, notes, cooldown, and tests stay on **Accounts**. A user-defined Provider does not estimate a request price or show a price table. Request logs still attribute provider, account, and model. A missing cost stays unknown and is not shown as zero or free.
 
 Node backups export the current payload with destinations and credentials, model-resolution policy, and per-model route overrides. Imports accept V4 through the current export version. See [Upgrade and backup](upgrade-backup.md) for the current payload and schema versions. The current SQLite schema stores configurable HTTP Providers on destinations and `destination_models`; legacy Custom connections remain distinct and may hold multiple Keys. Sealed builtins stay compiled-in.
 
@@ -81,16 +81,16 @@ Each usable row needs a non-empty string `id`. For pagination, set `has_more: tr
 
 ## Add a built-in Provider
 
-A built-in integration is appropriate only when the Provider needs product-owned identity, catalog, account lifecycle, routing, pricing/usage, or other semantics that Custom API cannot express. Start from the current code.
+A built-in integration is appropriate only when the Provider needs product-owned identity, catalog, account lifecycle, routing, official usage, or other semantics that Custom API cannot express. Start from the current code.
 
 1. Define one stable `provider_id`, its Provider row, credential/quota semantics, and an exhaustive `ProviderAdapterKind` mapping in `crates/ocg-domain/src/ids.rs` and `provider.rs`. Provider and Plan share `provider_id`.
 2. Add only verified protocol facts to `crates/ocg-domain/src/protocol.rs`. Request routing uses the saved contract.
 3. Add code-owned client Alias mappings in `crates/ocg-gateway/src/alias.rs`. Preserve exact upstream IDs and reject ambiguous raw IDs; a discovered row must not silently invent a public Alias.
 4. Implement the host route resolver in `ocg-core`. The adapter returns an `AttemptSpec`; database access, Key decryption, proxy selection, and outbound HTTP remain host-owned.
-5. Add the account and **Providers** control-plane/UI workflow, including catalog refresh, enablement, verification, errors, cooldown, pricing, and usage only where the Provider actually supports them. All dashboard writes use CAS on `/dashboard/api/v4`: user-defined Provider creation goes through the onboarding commit; Provider definition edits, account operations, Key rotation, binding edits, and additional identity credentials use remounted or native V4 routes. `/dashboard/api/v3` is a 410 tombstone.
+5. Add the account and **Providers** control-plane/UI workflow, including catalog refresh, enablement, verification, errors, cooldown, and official usage only where the Provider actually supports them. All dashboard writes use CAS on `/dashboard/api/v4`: user-defined Provider creation goes through the onboarding commit; Provider definition edits, account operations, Key rotation, binding edits, and additional identity credentials use remounted or native V4 routes. `/dashboard/api/v3` is a 410 tombstone.
 6. Update the paired user guides and tests. Run the checks in [Development](../maintainer/development.md) for the crates and UI you touched.
 
-Before opening a contribution, write down the upstream origin, auth scheme, catalog source, supported model/protocol pairs, streaming behavior, error semantics, quota/price source, and a non-billable validation plan. Keep the new family fail-closed until its complete routing and control-plane path exists.
+Before opening a contribution, write down the upstream origin, auth scheme, catalog source, supported model/protocol pairs, streaming behavior, error semantics, quota or balance source, and a non-billable validation plan. Keep the new family fail-closed until its complete routing and control-plane path exists.
 
 For repository architecture details, continue with [Extending Open Console Gateway](../maintainer/extending.md) and [Runtime invariants](../maintainer/runtime-invariants.md).
 

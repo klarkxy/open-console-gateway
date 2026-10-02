@@ -108,9 +108,14 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
   async function recoverConflict(): Promise<"conflict"> {
     const session = sessionEpoch;
     const epoch = refreshEpoch;
+    const requestProcess = view.value?.processGeneration;
     try {
       const next = await platformAccountsApi.list();
-      if (session === sessionEpoch && epoch === refreshEpoch) acceptView(next);
+      if (
+        session === sessionEpoch
+        && epoch === refreshEpoch
+        && view.value?.processGeneration === requestProcess
+      ) acceptView(next);
     } catch {
       // The next explicit action retries; the caller still surfaces conflict.
     }
@@ -209,17 +214,15 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
         });
       }
       if (pendingLink.value?.parentId === parentId) pendingLink.value = null;
-      // Revalidation is read-only. Its failure cannot undo a confirmed DELETE
-      // or cause a second destructive request; the removed row stays removed.
-      await Promise.allSettled([
-        load(),
-        useDestinationsStore().refreshAfterMutation().then(() => {
-          if (session === sessionEpoch) destinationRefreshError.value = "";
-        }, (e: unknown) => {
-          if (session === sessionEpoch) destinationRefreshError.value = dashboardErrorDetail(e);
-        }),
-      ]);
-      return session === sessionEpoch ? "ok" : "error";
+      // The confirmed DELETE is the result: the mutation lock releases in
+      // finally and the caller closes its confirmation now. Revalidation is
+      // read-only and runs off the lock; its failure surfaces on the load /
+      // destination refresh error states, never retries the destructive
+      // write, and cannot resurrect the removed row (acceptView rejects older
+      // revisions and a cleared session invalidates the commit).
+      void load().catch(() => undefined);
+      void refreshDestinationProjection();
+      return "ok";
     } catch (e) {
       if (session !== sessionEpoch) return "error";
       if (isRevisionConflict(e)) return recoverConflict();
@@ -240,20 +243,24 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
     ))) return Promise.resolve("error");
     const session = sessionEpoch;
     const epoch = refreshEpoch;
+    // Process ids are opaque. A refresh may commit only while the store is
+    // still on the process that started it; a link under another process
+    // must survive this body. Same-process revision order stays in acceptView.
+    const requestProcess = view.value?.processGeneration;
     const isCurrent = () => session === sessionEpoch && epoch === refreshEpoch;
     refreshing.value[key] = true;
     const request = Promise.resolve().then(async (): Promise<PlatformWriteOutcome> => {
       try {
         if (!isCurrent()) return "error";
         const next = await platformAccountsApi.refresh(parentId, accountId);
-        if (!isCurrent()) return "error";
+        if (!isCurrent() || view.value?.processGeneration !== requestProcess) return "error";
         acceptView(next);
         return "ok";
       } catch (e) {
-        if (!isCurrent()) return "error";
+        if (!isCurrent() || view.value?.processGeneration !== requestProcess) return "error";
         if (isRevisionConflict(e)) {
           await recoverConflict();
-          return isCurrent() ? "conflict" : "error";
+          return isCurrent() && view.value?.processGeneration === requestProcess ? "conflict" : "error";
         }
         throw e;
       } finally {
@@ -279,11 +286,15 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
   async function commitRefresh(parentId: string, accountId: string): Promise<void> {
     const session = sessionEpoch;
     const epoch = refreshEpoch;
+    const requestProcess = view.value?.processGeneration;
+    const stillHere = () => session === sessionEpoch
+      && epoch === refreshEpoch
+      && view.value?.processGeneration === requestProcess;
     try {
       const next = await platformAccountsApi.refresh(parentId, accountId);
-      if (session === sessionEpoch && epoch === refreshEpoch) acceptView(next);
+      if (stillHere()) acceptView(next);
     } catch (e) {
-      if (session === sessionEpoch && epoch === refreshEpoch) throw e;
+      if (stillHere()) throw e;
     }
   }
 
@@ -295,17 +306,15 @@ export const usePlatformAccountsStore = defineStore("platformAccounts", () => {
     try {
       const result = await platformAccountsApi.importKeys(parentId, nextImportPage.value[parentId]);
       if (session !== sessionEpoch) return "error";
+      // The committed result and the next-page continuation settle at the
+      // receipt; the lock releases in finally before the read follow-up. The
+      // list revalidation runs off the lock under load's own generation guard
+      // and reports a failure on the load error state alone — it never hides
+      // the committed result or invites a duplicate write.
       if (result.nextPage != null) nextImportPage.value[parentId] = result.nextPage;
       else delete nextImportPage.value[parentId];
-      try {
-        const next = await platformAccountsApi.list();
-        if (session === sessionEpoch) acceptView(next);
-      } catch (e) {
-        // Import already committed. A failed revalidation must not hide its
-        // result or lose the page continuation and invite a duplicate write.
-        if (session === sessionEpoch) error.value = dashboardErrorDetail(e);
-      }
-      return session === sessionEpoch ? result : "error";
+      void load().catch(() => undefined);
+      return result;
     } catch (e) {
       if (session !== sessionEpoch) return "error";
       if (isRevisionConflict(e)) return recoverConflict();

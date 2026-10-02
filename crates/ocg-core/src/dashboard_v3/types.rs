@@ -45,7 +45,6 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "ControlRevision",
     "MutationAck",
     "MutationExpectation",
-    "PricingRevision",
     "V3Error",
     "ConnectionInfo",
     "ConnectionSubKey",
@@ -94,20 +93,6 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "ProtocolProbeRequest",
     "ProtocolProbeResult",
     "ProtocolProbeResponse",
-    "PricingSnapshot",
-    "PricingLimits",
-    "PricingModel",
-    "PricingAdjustment",
-    "PricingTimeWindow",
-    "PricingRefresh",
-    "PricingRefreshStatus",
-    "PricingMultiplierChange",
-    "PricingRefreshUpdate",
-    "PricingRefreshPolicy",
-    "PricingMultipliersUpdate",
-    "PricingMultiplierWrite",
-    "ProviderPricing",
-    "PricingAvailability",
     "GatewayStatus",
     "ApplicationModels",
     "DashboardSummary",
@@ -155,10 +140,6 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "UsageRefreshThrottleError",
     "ProviderModelsRefreshUpdate",
     "ProviderModels",
-    "ProviderPricingSnapshot",
-    "ProviderPricingValue",
-    "ProviderPricingRefresh",
-    "ProviderPricingRefreshUpdate",
     "AccountExportRequest",
     "AccountExport",
     "AccountImportPreviewRequest",
@@ -2122,9 +2103,9 @@ pub struct DashboardSummary {
     pub total_accounts: u64,
     pub available_accounts: u64,
     pub gateway_running: bool,
-    pub today_cost: f64,
-    pub week_cost: f64,
-    pub month_cost: f64,
+    pub today_cost: Option<f64>,
+    pub week_cost: Option<f64>,
+    pub month_cost: Option<f64>,
     pub revision: u64,
     pub process_generation: u64,
     pub pricing_revision: String,
@@ -2237,7 +2218,7 @@ pub struct ForwardLogSummary {
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
     pub cached_tokens: i64,
-    pub cost: f64,
+    pub cost: Option<f64>,
 }
 
 /// GET `/logs/forward` envelope.
@@ -2346,16 +2327,18 @@ pub struct DailyTokensQuery {
 
 /// GET `/accounts/{id}/usage` body. Distinct from `models::UsageWindow`.
 ///
-/// `revision` is the settings CAS token and is not advanced by calibration.
-/// `pricingRevision` is present when the projection uses the live Go snapshot.
+/// Window fields are observed percent used against a limit of 100.
+/// `None` means no official or manual percent evidence. `revision` is the
+/// settings CAS token and is not advanced by calibration. `pricingRevision`
+/// is always absent: usage is no longer a pricing CAS token.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UsageWindow {
     pub account_id: String,
-    pub window_5h: f64,
-    pub window_week: f64,
-    pub window_month: f64,
+    pub window_5h: Option<f64>,
+    pub window_week: Option<f64>,
+    pub window_month: Option<f64>,
     pub resets_in_5h: Option<String>,
     pub resets_in_week: Option<String>,
     pub resets_in_month: Option<String>,
@@ -2392,8 +2375,7 @@ pub struct AccountUsageUpdate {
 
 /// GET `/accounts/{id}/provider-usage` body. Distinct from stored quota rows.
 ///
-/// `pricingRevision` is present when live Go quota windows use one captured
-/// pricing snapshot.
+/// `pricingRevision` is always absent. Usage is no longer a pricing CAS token.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
@@ -3176,7 +3158,6 @@ pub fn contract_schema() -> Value {
         .into_generator();
     include_type::<ControlRevision>(&mut serialize);
     include_type::<MutationAck>(&mut serialize);
-    include_type::<PricingRevision>(&mut serialize);
     include_type::<V3Error>(&mut serialize);
     include_type::<ConnectionInfo>(&mut serialize);
     include_type::<ConnectionSubKey>(&mut serialize);
@@ -3212,20 +3193,7 @@ pub fn contract_schema() -> Value {
     include_type::<CardCapabilitySummary>(&mut serialize);
     include_type::<ProtocolProbeResult>(&mut serialize);
     include_type::<ProtocolProbeResponse>(&mut serialize);
-    include_type::<PricingSnapshot>(&mut serialize);
-    include_type::<PricingLimits>(&mut serialize);
-    include_type::<PricingModel>(&mut serialize);
-    include_type::<PricingAdjustment>(&mut serialize);
-    include_type::<PricingTimeWindow>(&mut serialize);
-    include_type::<PricingRefresh>(&mut serialize);
-    include_type::<PricingRefreshStatus>(&mut serialize);
-    include_type::<PricingMultiplierChange>(&mut serialize);
-    include_type::<ProviderPricing>(&mut serialize);
-    include_type::<ProviderPricingSnapshot>(&mut serialize);
-    include_type::<ProviderPricingValue>(&mut serialize);
-    include_type::<ProviderPricingRefresh>(&mut serialize);
     include_type::<ProviderModels>(&mut serialize);
-    include_type::<PricingAvailability>(&mut serialize);
     include_type::<GatewayStatus>(&mut serialize);
     include_type::<ApplicationModels>(&mut serialize);
     include_type::<DashboardSummary>(&mut serialize);
@@ -3312,11 +3280,6 @@ pub fn contract_schema() -> Value {
     include_type::<ZenFreeSettingsUpdate>(&mut deserialize);
     include_type::<ModelProtocolOverridesUpdate>(&mut deserialize);
     include_type::<ProtocolProbeRequest>(&mut deserialize);
-    include_type::<PricingRefreshUpdate>(&mut deserialize);
-    include_type::<PricingRefreshPolicy>(&mut deserialize);
-    include_type::<ProviderPricingRefreshUpdate>(&mut deserialize);
-    include_type::<PricingMultipliersUpdate>(&mut deserialize);
-    include_type::<PricingMultiplierWrite>(&mut deserialize);
     include_type::<GatewayLogQuery>(&mut deserialize);
     include_type::<ForwardLogQuery>(&mut deserialize);
     include_type::<DailyTokensQuery>(&mut deserialize);

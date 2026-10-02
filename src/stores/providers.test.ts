@@ -215,3 +215,222 @@ test("logout clears publication state and a late receipt cannot commit", async (
   assert.equal(fixture.store.aliasPublicationReady, false);
   assert.deepEqual(fixture.store.aliasUnpublished, []);
 });
+
+function contractModel(id: string): object {
+  return {
+    alias: id,
+    modelId: id,
+    preferredProtocol: "chat_completions",
+    protocols: {
+      chat_completions: {
+        protocol: "chat_completions",
+        available: true,
+        enabled: true,
+        source: "static",
+        verifiedAt: null,
+        observedAt: null,
+        lastProbeResult: null,
+        lastProbeAt: null,
+        lastProbeError: null,
+        override: "auto",
+      },
+      responses: null,
+      messages: null,
+    },
+    routable: true,
+    disabledReasons: [],
+  };
+}
+
+function contractScope(providerId: string, modelIds: string[]): object {
+  return {
+    scopeKind: "provider",
+    scopeId: providerId,
+    providerId,
+    staticProtocolSnapshotDate: null,
+    accounts: [],
+    catalog: {
+      source: "static",
+      sourceUrl: "",
+      refreshedAt: null,
+      models: modelIds,
+      refreshSupported: false,
+    },
+    models: modelIds.map(contractModel),
+    pricing: { availability: "not_applicable" },
+    usage: { availability: "unavailable" },
+    card: {
+      fetchZenModels: false,
+      discoverModels: false,
+      protocolProbe: true,
+      catalogRefresh: false,
+    },
+    catalogRoutable: true,
+    productionInference: true,
+    disabledReasons: [],
+    revision: 12,
+  };
+}
+
+function contractsDocument(): object {
+  return {
+    revision: 12,
+    processGeneration: 42,
+    pricingRevision: "p1",
+    customEndpoints: [],
+    providers: [
+      contractScope("opencode", ["drop-me", "keep-me"]),
+      contractScope("other-lab", ["stay-me"]),
+    ],
+  };
+}
+
+function removalReceipt(): object {
+  return {
+    revision: { revision: 13, processGeneration: 42, pricingRevision: "p1" },
+    removedIds: ["drop-me"],
+    catalogModels: ["keep-me"],
+  };
+}
+
+function modelIds(store: ReturnType<typeof useProvidersStore>, providerId: string): string[] {
+  return store.contracts?.providers.find((scope) => scope.provider_id === providerId)?.models.map((model) => model.model_id) ?? [];
+}
+
+test("model removal projects one provider in place when the contracts read fails", async () => {
+  setupControlPlane(12, 42);
+  let contractReads = 0;
+  const requests = installFetchMock(({ url, method }) => {
+    if (url.endsWith("/provider-contracts/provider/opencode/catalog/remove") && method === "POST") {
+      return removalReceipt();
+    }
+    if (url.endsWith("/provider-contracts") && method === "GET") {
+      contractReads += 1;
+      if (contractReads > 1) throw new Error("F09_CONTRACTS_READ");
+      return contractsDocument();
+    }
+    throw new Error(`unexpected request ${method} ${url}`);
+  });
+  const store = useProvidersStore();
+  await store.loadContracts();
+
+  await store.removeContractCatalogModels("provider", "opencode", ["drop-me"]);
+
+  assert.deepEqual(modelIds(store, "opencode"), ["keep-me"]);
+  assert.deepEqual(modelIds(store, "other-lab"), ["stay-me"]);
+  assert.equal(requests.filter((request) => request.method === "POST").length, 1);
+  await assert.rejects(store.loadContracts(), /F09_CONTRACTS_READ/);
+  assert.equal(requests.filter((request) => request.method === "POST").length, 1);
+  assert.deepEqual(modelIds(store, "opencode"), ["keep-me"]);
+  assert.deepEqual(modelIds(store, "other-lab"), ["stay-me"]);
+});
+
+test("an older contracts read cannot restore models removed by a later receipt", async () => {
+  setupControlPlane(12, 42);
+  let contractReads = 0;
+  const stale = deferred<object>();
+  installFetchMock(({ url, method }) => {
+    if (url.endsWith("/provider-contracts/provider/opencode/catalog/remove") && method === "POST") {
+      return removalReceipt();
+    }
+    if (url.endsWith("/provider-contracts") && method === "GET") {
+      contractReads += 1;
+      if (contractReads === 1) return contractsDocument();
+      return stale.promise;
+    }
+    throw new Error(`unexpected request ${method} ${url}`);
+  });
+  const store = useProvidersStore();
+  await store.loadContracts();
+  const pending = store.loadContracts();
+  await flush();
+  assert.equal(contractReads, 2);
+
+  await store.removeContractCatalogModels("provider", "opencode", ["drop-me"]);
+  stale.resolve(contractsDocument());
+  await pending;
+
+  assert.deepEqual(modelIds(store, "opencode"), ["keep-me"]);
+  assert.deepEqual(modelIds(store, "other-lab"), ["stay-me"]);
+});
+
+test("clearing the session drops a late catalog-removal receipt", async () => {
+  setupControlPlane(12, 42);
+  const gate = deferred<object>();
+  installFetchMock(({ url, method }) => {
+    if (url.endsWith("/provider-contracts/provider/opencode/catalog/remove") && method === "POST") {
+      return gate.promise.then(() => removalReceipt());
+    }
+    if (url.endsWith("/provider-contracts") && method === "GET") return contractsDocument();
+    throw new Error(`unexpected request ${method} ${url}`);
+  });
+  const store = useProvidersStore();
+  await store.loadContracts();
+  assert.deepEqual(modelIds(store, "opencode"), ["drop-me", "keep-me"]);
+
+  const pending = store.removeContractCatalogModels("provider", "opencode", ["drop-me"]);
+  await flush();
+  store.clear();
+  gate.resolve({});
+  await pending;
+
+  assert.equal(store.contracts, null);
+  assert.deepEqual(modelIds(store, "opencode"), []);
+});
+
+test("an in-flight catalog read still commits while a model removal is applied", async () => {
+  setupControlPlane(12, 42);
+  const catalogGate = deferred<object>();
+  installFetchMock(({ url, method }) => {
+    if (url.endsWith("/provider-contracts/provider/opencode/catalog/remove") && method === "POST") {
+      return removalReceipt();
+    }
+    if (url.endsWith("/provider-contracts") && method === "GET") return contractsDocument();
+    if (url.endsWith("/providers") && method === "GET") return catalogGate.promise;
+    throw new Error(`unexpected request ${method} ${url}`);
+  });
+  const store = useProvidersStore();
+  await store.loadContracts();
+  const pendingCatalog = store.loadCatalog();
+  await flush();
+
+  await store.removeContractCatalogModels("provider", "opencode", ["drop-me"]);
+  catalogGate.resolve({
+    entries: [{
+      providerId: "catalog-sentinel",
+      origin: "builtin",
+      editable: false,
+      deletable: false,
+      offering: "api",
+      displayName: "Catalog sentinel",
+      displayFamily: "Catalog",
+      credentialKind: "api_key",
+      quotaScope: "key",
+      singleton: false,
+      creationAvailability: "unavailable",
+      creationUnavailableReason: null,
+      verificationPolicy: "not_required",
+      verificationRuntimeAvailability: "not_applicable",
+      routable: true,
+      managedRegistration: false,
+      pricingAvailability: "not_applicable",
+      usageAvailability: "unavailable",
+      manualUsageCalibration: false,
+      quotaUnit: "tokens",
+      modelSource: "static",
+      keyPrefix: null,
+      authSchemes: ["bearer"],
+      upstreamProtocols: ["chat_completions"],
+      formFields: [],
+      modelAliases: [],
+    }],
+    revision: 12,
+    processGeneration: 42,
+    pricingRevision: "p1",
+  });
+  await pendingCatalog;
+
+  assert.equal(store.catalog?.[0]?.provider_id, "catalog-sentinel");
+  assert.deepEqual(modelIds(store, "opencode"), ["keep-me"]);
+  assert.deepEqual(modelIds(store, "other-lab"), ["stay-me"]);
+});

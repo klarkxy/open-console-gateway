@@ -27,6 +27,16 @@ import {
 
 type StoreCall = { method: "load" | "refreshCash"; accountId: string; binding: string };
 
+interface BillingHarnessApi {
+  slot: ShallowRef<BillingSlot | undefined>;
+  load: (accountId: string, binding: string) => Promise<void>;
+  refreshCash: (accountId: string, binding: string) => Promise<null>;
+}
+
+interface BillingHarnessGlobal {
+  __billingHarness?: BillingHarnessApi;
+}
+
 interface Harness {
   slot: ShallowRef<BillingSlot | undefined>;
   calls: StoreCall[];
@@ -74,7 +84,19 @@ function harnessPlugin() {
     `,
     quotaSummary: `
       import { defineComponent, h } from "vue";
-      export default defineComponent({ inheritAttrs: false, setup: () => () => h("div", { class: "stub-quota-summary" }) });
+      export default defineComponent({
+        inheritAttrs: false,
+        props: { usage: { default: null }, now: { default: 0 } },
+        setup(props) {
+          return () => h("div", { class: "stub-quota-summary" },
+            (props.usage?.quota_windows ?? []).map((window) => h("span", {
+              class: "stub-quota-window",
+              "data-kind": window.window_kind,
+              "data-used": String(window.used),
+              "data-resets": window.resets_at ?? "",
+            })));
+        },
+      });
     `,
     accountCredential: `
       export const endpointMatchesSavedGrant = () => true;
@@ -159,13 +181,31 @@ function slotForBinding(binding: string, patch: Partial<BillingSlot> = {}): Bill
     boundVersion: binding,
     generation: 1,
     resyncBeforeMutate: false,
+    manualReceipt: null,
     ...patch,
+  };
+}
+
+const RECEIPT_RESET = "2026-10-01T00:30:00.000Z";
+
+function coldManualReceipt(used = 42.5): NonNullable<BillingSlot["manualReceipt"]> {
+  return {
+    windows: [{
+      windowKind: "five_hours",
+      used,
+      limitValue: 100,
+      unit: "percent",
+      source: "manual",
+      observedAt: "2026-10-01T00:00:01.000Z",
+      resetsAt: RECEIPT_RESET,
+      updatedAt: "2026-10-01T00:00:01.000Z",
+    }],
   };
 }
 
 function createHarness(): Harness {
   const harness: Harness = { slot: shallowRef(undefined), calls: [] };
-  (globalThis as { __billingHarness?: unknown }).__billingHarness = {
+  (globalThis as BillingHarnessGlobal).__billingHarness = {
     slot: harness.slot,
     load: async (accountId: string, binding: string) => {
       harness.calls.push({ method: "load", accountId, binding });
@@ -203,6 +243,10 @@ function loadingIndicators(root: HostNode): HostNode[] {
   return walkHostNodes(root).filter((node) => node.props.role === "status");
 }
 
+function quotaWindows(root: HostNode): HostNode[] {
+  return walkHostNodes(root).filter((node) => node.props.class === "stub-quota-window");
+}
+
 function actionButtons(root: HostNode): HostNode[] {
   return walkHostNodes(root).filter((node) => node.type === "button");
 }
@@ -228,7 +272,7 @@ before(async () => {
     },
   });
   BillingPanel = (await import(pathToFileURL(path.join(buildDir, "billing-panel.mjs")).href)).default;
-});
+}, { timeout: 180_000 });
 
 after(async () => { await rm(buildDir, { force: true, recursive: true }); });
 
@@ -330,4 +374,83 @@ test("the cash refresh action refreshes through the store with the current bindi
   await settle();
   assert.deepEqual(harness.calls, [{ method: "refreshCash", accountId: "acc-1", binding }]);
   mounted.app.unmount();
+});
+
+test("a matched cold slot renders the quota receipt while the billing read is still loading", { timeout: 5_000 }, async () => {
+  const harness = createHarness();
+  const binding = billingBinding(VERSION_A, ENDPOINT);
+  harness.slot.value = slotForBinding(binding, {
+    loading: true,
+    loaded: false,
+    status: null,
+    manualReceipt: coldManualReceipt(),
+  });
+  const mounted = await mountPanel(shallowRef(makeAccount(VERSION_A)));
+  assert.equal(loadingIndicators(mounted.root).length, 1);
+  assert.equal(nodesWithClass(mounted.root, "stub-cash-panel").length, 0);
+  assert.equal(nodesWithClass(mounted.root, "stub-credit-meter").length, 0);
+  const windows = quotaWindows(mounted.root);
+  assert.equal(windows.length, 1);
+  assert.equal(windows[0]?.props["data-kind"], "five_hours");
+  assert.equal(windows[0]?.props["data-used"], "42.5");
+  assert.equal(windows[0]?.props["data-resets"], RECEIPT_RESET);
+  assert.equal(windows.some((node) => node.props["data-used"] === "0"), false);
+  assert.equal(harness.calls.length, 0);
+  mounted.app.unmount();
+});
+
+test("a matched cold slot renders the quota receipt when the initial read failed", { timeout: 5_000 }, async () => {
+  const harness = createHarness();
+  const binding = billingBinding(VERSION_A, ENDPOINT);
+  harness.slot.value = slotForBinding(binding, {
+    loading: false,
+    loaded: false,
+    status: null,
+    error: "load_failed",
+    manualReceipt: coldManualReceipt(),
+  });
+  const mounted = await mountPanel(shallowRef(makeAccount(VERSION_A)));
+  assert.equal(loadingIndicators(mounted.root).length, 0);
+  assert.equal(walkHostNodes(mounted.root).some((node) => node.props.role === "alert"), true);
+  const windows = quotaWindows(mounted.root);
+  assert.equal(windows.length, 1);
+  assert.equal(windows[0]?.props["data-kind"], "five_hours");
+  assert.equal(windows[0]?.props["data-used"], "42.5");
+  assert.equal(windows[0]?.props["data-resets"], RECEIPT_RESET);
+  assert.equal(windows.some((node) => node.props["data-used"] === "0"), false);
+  const retry = actionButtons(mounted.root);
+  assert.equal(retry.length, 1);
+  (retry[0]!.props.onClick as () => void)();
+  await settle();
+  assert.deepEqual(harness.calls, [{ method: "load", accountId: "acc-1", binding }]);
+  assert.equal(quotaWindows(mounted.root).length, 1);
+  mounted.app.unmount();
+});
+
+test("canonical cash and credit meters render without a fake zero quota window", { timeout: 5_000 }, async () => {
+  const harness = createHarness();
+  const binding = billingBinding(VERSION_A, ENDPOINT);
+  harness.slot.value = slotForBinding(binding, { status: cashStatus(), loaded: true });
+  const cash = await mountPanel(shallowRef(makeAccount(VERSION_A)));
+  assert.equal(nodesWithClass(cash.root, "stub-cash-panel").length, 1);
+  assert.equal(nodesWithClass(cash.root, "stub-credit-meter").length, 0);
+  assert.equal(quotaWindows(cash.root).length, 0);
+  cash.app.unmount();
+
+  harness.slot.value = slotForBinding(binding, {
+    status: {
+      revision: 4,
+      processGeneration: 2,
+      model: "credits",
+      credits: { remaining: 12 },
+      cash: null,
+    } as unknown as BillingStatus,
+    loaded: true,
+    manualReceipt: null,
+  });
+  const credits = await mountPanel(shallowRef(makeAccount(VERSION_A)));
+  assert.equal(nodesWithClass(credits.root, "stub-credit-meter").length, 1);
+  assert.equal(nodesWithClass(credits.root, "stub-cash-panel").length, 0);
+  assert.equal(quotaWindows(credits.root).length, 0);
+  credits.app.unmount();
 });

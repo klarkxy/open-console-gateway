@@ -37,10 +37,15 @@ export function isLocalMutationBusy(error: unknown): error is LocalMutationBusyE
 }
 
 /**
- * Control-plane identity tokens (`revision` / `processGeneration` /
- * `pricingRevision`). Every V3 payload carries them; the client transport
- * forwards each observed pair here through the revision sink, so mutations
- * always start from the freshest tokens the session has seen.
+ * Control-plane identity tokens (`revision` / `processGeneration`). The
+ * client transport forwards each published pair here through the revision
+ * sink, so mutations always start from the freshest tokens the session has
+ * seen. This store remains the owner: the transport only reads the current
+ * process. It withholds a response that still names the process captured at
+ * dispatch after a different process became current. A published different
+ * process is adopted as an opaque identity, and a lower revision of the same
+ * process is ignored. A historical `pricingRevision` on the same payload is
+ * not a CAS token and is not stored.
  *
  * 409 recovery deliberately does not replay mutations. A conflict refreshes
  * the tokens from `GET /contract` and then surfaces the original error so the
@@ -51,7 +56,6 @@ export function isLocalMutationBusy(error: unknown): error is LocalMutationBusyE
 export const useControlPlaneStore = defineStore("controlPlane", () => {
   const revision = ref<number | null>(null);
   const processGeneration = ref<number | null>(null);
-  const pricingRevision = ref<string | null>(null);
 
   let backendEpoch = 0;
 
@@ -72,30 +76,35 @@ export const useControlPlaneStore = defineStore("controlPlane", () => {
     }
     revision.value = tokens.revision;
     processGeneration.value = tokens.processGeneration;
-    if (typeof tokens.pricingRevision === "string") {
-      pricingRevision.value = tokens.pricingRevision;
-    }
   }
 
-  // The V3 transport calls this for every response that carries tokens.
-  setControlRevisionSink(sync);
+  function currentProcess(): number | null {
+    return processGeneration.value;
+  }
+
+  // The transport calls `sync` for a response it is willing to publish, and
+  // reads the live process through `currentProcess` without writing it.
+  setControlRevisionSink(sync, currentProcess);
 
   function clearTokens(): void {
     revision.value = null;
     processGeneration.value = null;
-    pricingRevision.value = null;
   }
 
-  /** Fresh CAS tokens from `GET /contract`. */
+  /**
+   * Fresh CAS tokens from `GET /contract`. The transport is the sole publisher
+   * of that body: it has already applied the pair, or withheld an origin
+   * process that is no longer current. Re-applying the raw contract would
+   * put the withheld process back.
+   */
   async function refresh(): Promise<MutationExpectation> {
     const session = localSession;
-    const contract = await dashboardV3.getContract();
+    await dashboardV3.getContract();
     // A reset that landed during the await wins: its response must not
     // repopulate the new session's tokens, and waiters must not dispatch.
     if (session !== localSession) {
       throw new LocalMutationCancelledError();
     }
-    sync(contract);
     return expectation();
   }
 
@@ -212,14 +221,13 @@ export const useControlPlaneStore = defineStore("controlPlane", () => {
     localSession += 1;
     localTargets.clear();
     localLane = Promise.resolve();
-    setControlRevisionSink(sync);
+    setControlRevisionSink(sync, currentProcess);
     clearTokens();
   }
 
   return {
     revision: computed(() => revision.value),
     processGeneration: computed(() => processGeneration.value),
-    pricingRevision: computed(() => pricingRevision.value),
     sync,
     refresh,
     hasTokens,

@@ -25,6 +25,7 @@ import type {
   ForwardLogQuery as V3ForwardLogQuery,
   GatewayLogQuery,
   KeyUpdate,
+  MutationAck,
   MutationExpectation,
   ProxyTestRequest,
 } from "./generated/dashboard-v3.ts";
@@ -54,10 +55,9 @@ import {
   presentDashboardSummary,
   presentForwardLogs,
   presentGatewayLog,
-  presentPricing,
-  presentProviderPricingRefresh,
   presentProxyTest,
   presentSettings,
+  settingsPatchInput,
   settingsUpdateInput,
   presentUpdateCheck,
   presentUpdateStatus,
@@ -70,13 +70,12 @@ import {
   type AccountModelTestResponse,
   type AccountUpdate,
   type AppConfig,
+  type SettingsPatch,
   type BrowserTarget,
   type ConnectionInfo,
   type CustomModelDiscoveryInput,
   type ForwardLogQuery,
   type ManagedAccountInput,
-  type PricingMultiplierUpdate,
-  type ProviderPricingRefreshRequest,
 } from "./dashboard-presenters.ts";
 
 export {
@@ -116,6 +115,18 @@ async function mutatedAccount(result: Promise<{ account: Parameters<typeof prese
   const mutation = await result;
   if (mutation.account === null) throw new Error("account mutation returned no account");
   return presentAccount(mutation.account);
+}
+
+const SETTINGS_PATCH_FIELDS = [
+  "auto_start",
+  "conversation_sticky",
+  "opencode_invite_url",
+  "routing_mode",
+  "show_dock_icon",
+] as const satisfies readonly (keyof SettingsPatch)[];
+
+function settingsPatchFields(patch: SettingsPatch): string[] {
+  return SETTINGS_PATCH_FIELDS.filter((field) => patch[field] !== undefined);
 }
 
 function forwardLogQuery(value: ForwardLogQuery): V3ForwardLogQuery {
@@ -280,10 +291,24 @@ export const dashboardApi = {
     presentUsageRefresh(await withCas((expectation) => dashboardV3.refreshAccountUsage(id, expectation))),
 
   getSettings: async () => presentSettings(await dashboardV3.getSettings()),
-  updateSettings: async (settings: AppConfig) => {
-    await withCas((expectation) => dashboardV3.putSettings(settingsUpdateInput(settings), expectation));
-    return presentSettings(await dashboardV3.getSettings());
-  },
+  // Receipt-only: the PUT ack carries just the CAS revision. The submitted
+  // draft is the caller's local projection, never the canonical resource;
+  // canonical fields come from a separate GET owned by the caller.
+  // `captured` is the editor baseline. Omit it to send the revision and
+  // process generation already stored on the snapshot — never the live
+  // global tokens, which may have moved since the editor loaded.
+  updateSettings: (settings: AppConfig, captured?: MutationExpectation): Promise<MutationAck> =>
+    dashboardV3.putSettings(settingsUpdateInput(settings), captured ?? {
+      expectedRevision: settings.revision,
+      processGeneration: settings.process_generation,
+    }),
+  // Explicit partial intent on the local CAS lane. The lane reads the
+  // current expectation at dispatch and does not replay a conflict.
+  patchSettings: (patch: SettingsPatch): Promise<MutationAck> =>
+    withLocalCas(
+      `settings-patch:${settingsPatchFields(patch).join("+")}`,
+      (expectation) => dashboardV3.putSettings(settingsPatchInput(patch), expectation),
+    ),
   testProxy: async (input: {
     proxy_mode: AppConfig["proxy_mode"];
     proxy_url?: string;
@@ -293,48 +318,6 @@ export const dashboardApi = {
     proxyUrl: input.proxy_url,
     proxyListDirection: input.proxy_list_direction,
   } satisfies ProxyTestRequest)),
-
-  getPricing: async () => {
-    const result = await dashboardV3.getProviderPricing("opencode");
-    if (!result.snapshot) throw new Error("OpenCode Go pricing is not available");
-    return presentPricing(result.snapshot);
-  },
-  refreshProviderPricing: async (
-    providerId: string,
-    refresh: ProviderPricingRefreshRequest = {},
-  ) => {
-    const controlPlane = useControlPlaneStore();
-    if (!controlPlane.hasTokens()) await controlPlane.refresh();
-    const expectedProviderPricingRevision = refresh.expected_provider_revision;
-    if (!expectedProviderPricingRevision) {
-      throw new Error("provider pricing revision is not loaded yet");
-    }
-    const result = await controlPlane.runMutation((expectation) => (
-      dashboardV3.refreshProviderPricing(providerId, {
-        expectedProviderPricingRevision,
-        policy: refresh.policy,
-        expectedOfficialContentHash: refresh.expected_official_content_hash,
-      }, expectation)
-    ));
-    return presentProviderPricingRefresh(result);
-  },
-  updatePricingMultipliers: async (expectedPricingRevision: string, multipliers: PricingMultiplierUpdate[]) => {
-    const controlPlane = useControlPlaneStore();
-    if (!controlPlane.hasTokens()) await controlPlane.refresh();
-    const result = await controlPlane.runMutation((expectation) => dashboardV3.putProviderPricingMultipliers(
-      "opencode",
-      {
-        expectedPricingRevision,
-        multipliers: multipliers.map((multiplier) => ({
-          modelId: multiplier.model_id,
-          multiplier: multiplier.multiplier,
-        })),
-      },
-      expectation,
-    ));
-    if (!result.snapshot) throw new Error("OpenCode Go pricing snapshot is not available");
-    return presentPricing(result.snapshot);
-  },
 
   checkForUpdate: async () => presentUpdateCheck(await dashboardV3.checkForUpdate()),
   getUpdateStatus: async () => presentUpdateStatus(await dashboardV3.getUpdateStatus()),

@@ -344,7 +344,7 @@ pub const PRE_V48_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v48.";
 pub const PRE_V58_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v58.";
 pub const PRE_V59_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v59.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
-pub const CURRENT_SCHEMA_VERSION: i32 = 65;
+pub const CURRENT_SCHEMA_VERSION: i32 = 66;
 pub const V57_SCHEMA_VERSION: i32 = 57;
 /// Canonical source schema for the v48 inert-column / empty-table cleanup.
 pub const V47_SCHEMA_VERSION: i32 = 47;
@@ -3537,15 +3537,17 @@ fn migrate_to_v64(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn migrate_to_v65(conn: &Connection) -> Result<()> {
-    let version = schema_version_on(conn)?;
-    if version >= 65 {
+// v65 is reserved for the operation-ledger migration under development on main.
+// This additive migration supports either canonical v64 or that v65 database.
+fn migrate_to_v66(conn: &Connection) -> Result<()> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let version = schema_version_on(&tx)?;
+    if version >= 66 {
         return Ok(());
     }
-    anyhow::ensure!(version == 64, "v65 requires schema v64");
-    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    anyhow::ensure!(matches!(version, 64 | 65), "v66 requires schema v64 or v65");
     ensure_column(&tx, "credentials", "goat_plan_cooldowns_json", "TEXT")?;
-    tx.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (65);")?;
+    tx.execute_batch("INSERT OR REPLACE INTO schema_version(version) VALUES (66);")?;
     tx.commit()?;
     Ok(())
 }
@@ -4926,12 +4928,7 @@ impl Database {
         migrate_to_v62(&db.conn)?;
         migrate_to_v63(&db.conn)?;
         migrate_to_v64(&db.conn)?;
-        migrate_to_v65(&db.conn)?;
-        if db.open_guard.can_recover_pending() {
-            let tx = db.conn.unchecked_transaction()?;
-            billing::recover_pending_on(&tx, Utc::now())?;
-            tx.commit()?;
-        }
+        migrate_to_v66(&db.conn)?;
         if let Some(cipher) = cipher {
             repair_legacy_account_ciphertext(&db.conn, cipher)?;
         }
@@ -7542,10 +7539,6 @@ impl Database {
             "dynamic provider still has {count} referencing account(s)"
         );
         dynamic_store::delete_dynamic_provider_on(&tx, &existing.id)?;
-        tx.execute(
-            "DELETE FROM provider_pricing_snapshots WHERE provider_id = ?1",
-            [&existing.id],
-        )?;
         let snapshot = list_dynamic_providers_on(&tx)?;
         routing_cards::reconcile_on(&tx)?;
         tx.commit()?;
@@ -8153,7 +8146,6 @@ impl Database {
             Some(value) => normalize_purchase_date(value)?,
             None => existing.purchase_date.clone(),
         };
-        let purchase_date_changed = purchase_date != existing.purchase_date;
         let notes = match &update.notes {
             Some(s) if s.is_empty() => None,
             Some(s) => Some(s.clone()),
@@ -8199,13 +8191,12 @@ impl Database {
         }
         tx.execute(
             "UPDATE credentials SET name = ?1, username = ?2, password_cipher = ?3, key_cipher = ?4,
-             enabled = CASE WHEN ?10 AND ?14 THEN 0 ELSE ?5 END, referral_code = ?6, purchase_date = ?7, notes = ?8,
-             usage_month_window_cost_offset = CASE WHEN ?9 THEN 0 ELSE usage_month_window_cost_offset END,
-             auth_error = CASE WHEN ?10 THEN NULL ELSE auth_error END,
-             verification_status = CASE WHEN ?10 AND ?13 THEN 'pending' ELSE verification_status END,
-             connection_verified_at = CASE WHEN ?10 AND ?13 THEN NULL ELSE connection_verified_at END,
-             verification_error = CASE WHEN ?10 AND ?13 THEN NULL ELSE verification_error END,
-             updated_at = ?11 WHERE legacy_account_id = ?12",
+             enabled = CASE WHEN ?9 AND ?13 THEN 0 ELSE ?5 END, referral_code = ?6, purchase_date = ?7, notes = ?8,
+             auth_error = CASE WHEN ?9 THEN NULL ELSE auth_error END,
+             verification_status = CASE WHEN ?9 AND ?12 THEN 'pending' ELSE verification_status END,
+             connection_verified_at = CASE WHEN ?9 AND ?12 THEN NULL ELSE connection_verified_at END,
+             verification_error = CASE WHEN ?9 AND ?12 THEN NULL ELSE verification_error END,
+             updated_at = ?10 WHERE legacy_account_id = ?11",
             params![
                 name,
                 username,
@@ -8215,7 +8206,6 @@ impl Database {
                 referral_code,
                 purchase_date,
                 notes,
-                purchase_date_changed,
                 key_replaced,
                 Utc::now().to_rfc3339(),
                 id,
@@ -9378,7 +9368,7 @@ impl Database {
                 SELECT 1 FROM forward_logs
                 WHERE account_id = ?1
                   AND status IN ('success', 'success_no_usage', 'success_unpriced')
-                  AND cost_state IN ('priced', 'legacy_estimate', 'unpriced', 'usage_missing')
+                  AND cost_state IN ('priced', 'legacy_estimate', 'unpriced', 'usage_missing', 'unknown')
                   AND julianday(timestamp) >= julianday(?2)
                 LIMIT 1
              )",
@@ -9433,8 +9423,6 @@ impl Database {
             "UPDATE credentials
              SET setup_step = ?1, enabled = 0,
                  purchase_date = CASE WHEN ?5 IS NULL THEN purchase_date ELSE ?5 END,
-                 usage_month_window_cost_offset = CASE WHEN ?5 IS NULL
-                     THEN usage_month_window_cost_offset ELSE 0 END,
                  updated_at = ?2
              WHERE legacy_account_id = ?3 AND account_type = 'managed' AND setup_step = ?4",
             params![
@@ -9844,14 +9832,54 @@ impl Database {
         Ok(())
     }
 
+    fn retired_status_and_cost_state(status: &str, cost_state: &str) -> (String, String) {
+        if status == "outcome_unknown" || cost_state == "outcome_unknown" {
+            let kept = if status.starts_with("success") {
+                "success"
+            } else {
+                status
+            };
+            return (kept.to_string(), "outcome_unknown".to_string());
+        }
+        if status == "success_no_usage" || cost_state == "usage_missing" {
+            let kept = if status.starts_with("success") {
+                "success_no_usage"
+            } else {
+                status
+            };
+            return (kept.to_string(), "usage_missing".to_string());
+        }
+        if status.starts_with("success") {
+            return ("success".to_string(), "unknown".to_string());
+        }
+        (status.to_string(), "unknown".to_string())
+    }
+
+    fn strip_retired_forward_price(log: &mut ForwardLog) {
+        let (status, cost_state) =
+            Self::retired_status_and_cost_state(&log.status, &log.cost_state);
+        log.status = status;
+        log.cost_state = cost_state;
+        log.cost = None;
+        log.raw_cost_usd = None;
+        log.quota_debit = None;
+        log.effective_paid_cost_usd = None;
+        log.pricing_revision_id = None;
+        log.quota_multiplier = None;
+        log.local_adjustment_multiplier = None;
+    }
+
     /// Insert a forward_logs row. Returns the auto-assigned row id.
+    /// New rows never store a priced, free, or native cost.
     pub fn log_forward(&self, log: &ForwardLog) -> Result<i64> {
+        let mut log = log.clone();
+        Self::strip_retired_forward_price(&mut log);
         let diagnostic_json = log
             .diagnostic
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
-        let attribution = ForwardLogNativeAttribution::inferred_from_forward_log(log);
+        let attribution = ForwardLogNativeAttribution::inferred_from_forward_log(&log);
         let timestamp = log.timestamp.to_rfc3339();
         Ok(ocg_infra::sqlite_logs::insert_forward_log(
             &self.conn,
@@ -9907,69 +9935,33 @@ impl Database {
         id: i64,
         status: &str,
         http_status: Option<i32>,
-        mut metrics: ForwardMetrics,
+        metrics: ForwardMetrics,
         error_message: Option<&str>,
         diagnostic: Option<&ForwardLogDiagnosticUpdate<'_>>,
     ) -> Result<()> {
-        let binding = self
-            .conn
-            .query_row(
-                "SELECT provider_id FROM forward_logs WHERE id = ?1",
-                [id],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()?;
-        if let Some(provider_id) = binding.as_ref() {
-            metrics.scope_to_provider(provider_id.as_deref(), status.starts_with("success"));
-        }
-        let cost_state = match (metrics.cost_state, status) {
-            ("not_applicable", "outcome_unknown") => "outcome_unknown",
-            ("not_applicable", "success_no_usage") => "usage_missing",
-            ("not_applicable", "success_unpriced") => "unpriced",
-            (state, _) => state,
-        };
-        let stored_status = if status.starts_with("success") {
-            match cost_state {
-                "priced" | "free" => "success",
-                "usage_missing" => "success_no_usage",
-                _ => "success_unpriced",
-            }
-        } else {
-            status
-        };
-        let stored_cost = if cost_state == "priced" {
-            metrics.cost
-        } else {
-            0.0
-        };
-        // Stream inserts dual-write native USD from the preliminary row. Finalize
-        // native_cost_* from the same cost/raw_cost_usd/cost_state tuple written
-        // here so Go/Zen cannot keep a 0/NULL native snapshot after success.
+        let (stored_status, cost_state) =
+            Self::retired_status_and_cost_state(status, metrics.cost_state);
         let (native_cost_value, native_cost_unit, native_cost_currency) =
-            ForwardLogNativeAttribution::usd_fields_from_cost(
-                metrics.raw_cost_usd,
-                (cost_state == "priced").then_some(metrics.cost),
-                cost_state,
-            );
+            ForwardLogNativeAttribution::usd_fields_from_cost(None, None, &cost_state);
         ocg_infra::sqlite_logs::update_forward_log(
             &self.conn,
             &ForwardLogUpdateRow {
                 id,
-                status: stored_status,
+                status: &stored_status,
                 http_status,
                 prompt_tokens: metrics.prompt_tokens,
                 completion_tokens: metrics.completion_tokens,
                 cached_tokens: metrics.cached_tokens,
                 cache_creation_tokens: metrics.cache_creation_tokens,
-                cost: stored_cost,
-                raw_cost_usd: metrics.raw_cost_usd,
-                quota_debit: metrics.quota_debit,
-                effective_paid_cost_usd: metrics.effective_paid_cost_usd,
-                pricing_revision_id: metrics.pricing_revision_id.as_deref(),
-                quota_multiplier: metrics.quota_multiplier,
-                local_adjustment_multiplier: metrics.local_adjustment_multiplier,
+                cost: 0.0,
+                raw_cost_usd: None,
+                quota_debit: None,
+                effective_paid_cost_usd: None,
+                pricing_revision_id: None,
+                quota_multiplier: None,
+                local_adjustment_multiplier: None,
                 service_tier: metrics.service_tier.as_deref(),
-                cost_state,
+                cost_state: &cost_state,
                 error_message,
                 error_source: diagnostic.map(|diagnostic| diagnostic.error_source),
                 error_stage: diagnostic.map(|diagnostic| diagnostic.error_stage),
@@ -10087,7 +10079,7 @@ impl Database {
                     COALESCE(SUM(prompt_tokens), 0),
                     COALESCE(SUM(completion_tokens), 0),
                     COALESCE(SUM(cached_tokens), 0),
-                    COALESCE(SUM(cost), 0.0)
+                    SUM(CASE WHEN cost_state IN ('priced', 'legacy_estimate') THEN cost END)
              FROM forward_logs{filter}"
         );
         let summary = self.conn.query_row(
@@ -10661,10 +10653,8 @@ impl Database {
     }
 
     // Usage
-    /// 手动校准一个固定窗口的"当前已用百分比"与"距上游重置还剩多久"。
-    /// `percent` = 当前已用百分比（0-100），`resets_in_minutes` = 距上游重置还剩多少分钟
-    /// （None 表示从 now 起算满窗口时长；月窗口忽略此参数——窗口由 purchase_date/expires_on 决定）。
-    /// `limit` = 当前窗口的限额（从 PricingSnapshot 读取，避免硬编码）。
+    /// Store a manual percent window. `limit` is ignored: the window limit is 100.
+    /// Credential cost-offset columns are not updated.
     pub fn calibrate_account_usage(
         &self,
         account_id: &str,
@@ -10673,69 +10663,59 @@ impl Database {
         resets_in_minutes: Option<i64>,
         limit: f64,
     ) -> Result<bool> {
-        calibrate_account_usage_on(
+        let _ = limit;
+        upsert_percent_window_on(
             &self.conn,
             account_id,
             window,
             percent,
             resets_in_minutes,
-            limit,
             Utc::now(),
+            "manual-percent",
         )
     }
 
-    /// Atomically calibrate rolling, weekly, and monthly Go usage windows.
-    /// Any input, SQL, or missing-account error rolls the whole transaction back.
+    /// Atomically store rolling, weekly, and monthly percent windows.
     pub fn calibrate_account_usage_snapshot(
         &self,
         account_id: &str,
         snapshot: &AccountUsageCalibrationSnapshot,
         limits: &PricingLimits,
     ) -> Result<UsageWindow> {
+        let _ = limits;
         let tx = self.conn.unchecked_transaction()?;
         let now = Utc::now();
-        if !calibrate_account_usage_on(
-            &tx,
-            account_id,
-            UsageWindowKind::FiveHours,
-            snapshot.rolling_percent,
-            Some(snapshot.rolling_resets_in_minutes),
-            limits.window_5h,
-            now,
-        )? {
-            anyhow::bail!("account {account_id} not found");
-        }
-        if !calibrate_account_usage_on(
-            &tx,
-            account_id,
-            UsageWindowKind::Week,
-            snapshot.weekly_percent,
-            Some(snapshot.weekly_resets_in_minutes),
-            limits.window_week,
-            now,
-        )? {
-            anyhow::bail!("account {account_id} not found");
-        }
-        if !calibrate_account_usage_on(
-            &tx,
-            account_id,
-            UsageWindowKind::Month,
-            snapshot.monthly_percent,
-            None,
-            limits.window_month,
-            now,
-        )? {
-            anyhow::bail!("account {account_id} not found");
+        for (window, percent, resets) in [
+            (
+                UsageWindowKind::FiveHours,
+                snapshot.rolling_percent,
+                Some(snapshot.rolling_resets_in_minutes),
+            ),
+            (
+                UsageWindowKind::Week,
+                snapshot.weekly_percent,
+                Some(snapshot.weekly_resets_in_minutes),
+            ),
+            (UsageWindowKind::Month, snapshot.monthly_percent, None),
+        ] {
+            if !upsert_percent_window_on(
+                &tx,
+                account_id,
+                window,
+                percent,
+                resets,
+                now,
+                "manual-percent",
+            )? {
+                anyhow::bail!("account {account_id} not found");
+            }
         }
         tx.commit()?;
         self.account_usage_with_limits(account_id, limits)
     }
 
-    /// Atomically CAS the credential/setup state, calibrate all three official
-    /// usage windows, persist sync-success metadata, and compute the returned
-    /// usage. `None` means the account disappeared or changed while the
-    /// network request was in flight. Any SQL/read failure rolls everything
-    /// back, so a failed refresh never exposes a partially updated baseline.
+    /// Persist official percent windows without converting token cost.
+    /// `limits` is ignored. Cost-offset columns are not updated.
     pub fn commit_official_usage_sync_success(
         &self,
         account_id: &str,
@@ -10744,6 +10724,7 @@ impl Database {
         limits: &PricingLimits,
         metadata: AccountUsageSyncSuccessMetadata,
     ) -> Result<Option<UsageWindow>> {
+        let _ = limits;
         let tx = self.conn.unchecked_transaction()?;
         let matches: i64 = tx.query_row(
             "SELECT EXISTS(
@@ -10759,50 +10740,66 @@ impl Database {
         if matches == 0 {
             return Ok(None);
         }
-
-        if !calibrate_account_usage_on(
-            &tx,
-            account_id,
-            UsageWindowKind::FiveHours,
-            snapshot.rolling_percent,
-            Some(snapshot.rolling_resets_in_minutes),
-            limits.window_5h,
-            metadata.now,
-        )? {
-            anyhow::bail!("account {account_id} disappeared during official usage sync");
+        let provider_id: String = tx.query_row(
+            "SELECT provider_id FROM credentials WHERE legacy_account_id = ?1",
+            [account_id],
+            |row| row.get(0),
+        )?;
+        let source = if provider_id == OPENCODE_PROVIDER_ID {
+            "opencode-go-official"
+        } else if provider_id == COMMAND_CODE_PROVIDER_ID {
+            "command-code-goat-official"
+        } else if provider_id == OLLAMA_PROVIDER_ID {
+            "ollama-official-percent"
+        } else {
+            "official-percent"
+        };
+        let now = metadata.now;
+        for (window, percent, resets) in [
+            (
+                UsageWindowKind::FiveHours,
+                snapshot.rolling_percent,
+                Some(snapshot.rolling_resets_in_minutes),
+            ),
+            (
+                UsageWindowKind::Week,
+                snapshot.weekly_percent,
+                Some(snapshot.weekly_resets_in_minutes),
+            ),
+            (UsageWindowKind::Month, snapshot.monthly_percent, None),
+        ] {
+            if !upsert_percent_window_on(&tx, account_id, window, percent, resets, now, source)? {
+                anyhow::bail!("account {account_id} disappeared during official usage sync");
+            }
         }
-        if !calibrate_account_usage_on(
-            &tx,
-            account_id,
-            UsageWindowKind::Week,
-            snapshot.weekly_percent,
-            Some(snapshot.weekly_resets_in_minutes),
-            limits.window_week,
-            metadata.now,
-        )? {
-            anyhow::bail!("account {account_id} disappeared during official usage sync");
-        }
-        if !calibrate_account_usage_on(
-            &tx,
-            account_id,
-            UsageWindowKind::Month,
-            snapshot.monthly_percent,
-            None,
-            limits.window_month,
-            metadata.now,
-        )? {
-            anyhow::bail!("account {account_id} disappeared during official usage sync");
-        }
-
         record_account_usage_sync_success_on(&tx, account_id, metadata)?;
-        let usage = account_usage_with_limits_on(&tx, account_id, limits, metadata.now)?;
+        let usage = UsageWindow {
+            account_id: account_id.to_string(),
+            window_5h: snapshot.rolling_percent,
+            window_week: snapshot.weekly_percent,
+            window_month: snapshot.monthly_percent,
+            resets_in_5h: percent_reset_at(
+                &tx,
+                account_id,
+                UsageWindowKind::FiveHours,
+                Some(snapshot.rolling_resets_in_minutes),
+                now,
+            )?,
+            resets_in_week: percent_reset_at(
+                &tx,
+                account_id,
+                UsageWindowKind::Week,
+                Some(snapshot.weekly_resets_in_minutes),
+                now,
+            )?,
+            resets_in_month: percent_reset_at(&tx, account_id, UsageWindowKind::Month, None, now)?,
+        };
         tx.commit()?;
         Ok(Some(usage))
     }
 
-    /// OpenCode Go windows. Uses the latest Go pricing snapshot, or
-    /// [`SEED_LIMITS`] when none is stored. Other plans pass their own limits
-    /// to [`Self::account_usage_with_limits`].
+    /// Scheduler projection. Missing percent windows are `0.0` internally and
+    /// must not be shown to the dashboard as an observed zero.
     pub fn opencode_go_account_usage(&self, account_id: &str) -> Result<UsageWindow> {
         let limits = self
             .latest_pricing_snapshot()?
@@ -10816,81 +10813,51 @@ impl Database {
         account_id: &str,
         limits: &PricingLimits,
     ) -> Result<UsageWindow> {
-        account_usage_with_limits_on(&self.conn, account_id, limits, Utc::now())
+        let _ = limits;
+        let observed = observed_percent_usage_on(&self.conn, account_id)?;
+        Ok(usage_window_from_percent(account_id, &observed))
     }
 
-    /// Project the canonical legacy Go accounting windows into the provider
-    /// API shape. The v22 `quota_windows` rows are migration/interoperability
-    /// storage, not a second Go accounting authority: local forward logs and
-    /// calibration offsets continue to advance between official syncs.
+    pub fn observed_percent_usage(&self, account_id: &str) -> Result<ObservedPercentUsage> {
+        observed_percent_usage_on(&self.conn, account_id)
+    }
+
+    /// Observed percent rows only. An empty vec means no official or manual evidence.
     pub fn live_opencode_go_quota_windows(
         &self,
         account_id: &str,
         limits: &PricingLimits,
     ) -> Result<Vec<QuotaWindow>> {
-        let observed_at = self
-            .account_usage_sync_state(account_id)?
-            .and_then(|sync| sync.last_success_at);
-        self.live_fixed_quota_windows(account_id, limits, "opencode-go-live", observed_at)
+        let _ = limits;
+        observed_percent_quota_windows_on(&self.conn, account_id, None)
     }
 
-    /// Project locally priced request logs plus manual calibration into the
-    /// provider-neutral quota window shape. This is the single read authority
-    /// for plans such as GOAT that have no machine-readable upstream usage API.
     pub fn live_local_quota_windows(
         &self,
         account_id: &str,
         limits: &PricingLimits,
         source: &str,
     ) -> Result<Vec<QuotaWindow>> {
-        self.live_fixed_quota_windows(account_id, limits, source, None)
+        let _ = (limits, source);
+        observed_percent_quota_windows_on(&self.conn, account_id, None)
     }
 
-    /// One monthly USD-credit window from locally priced request logs plus
-    /// calibration. Used credit is not clamped to the soft limit. 5h/week
-    /// windows are not published.
     pub fn live_ollama_month_quota_window(
         &self,
         account_id: &str,
         month_limit: f64,
     ) -> Result<Vec<QuotaWindow>> {
-        let now = Utc::now();
-        let (offset, purchase_date): (f64, String) = self.conn.query_row(
-            "SELECT usage_month_window_cost_offset, purchase_date FROM credentials WHERE legacy_account_id = ?1",
-            [account_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        let (used, resets_at) =
-            compute_ollama_month_window(&self.conn, account_id, &purchase_date, offset)?;
-        Ok(vec![QuotaWindow {
-            account_id: account_id.to_string(),
-            window_kind: QUOTA_WINDOW_MONTH.to_string(),
-            used,
-            limit_value: Some(month_limit),
-            started_at: month_window_start_utc(&purchase_date).ok(),
-            resets_at,
-            calibration_offset: offset,
-            unit: "usd_credits".to_string(),
-            source: "ollama-cloud-local".to_string(),
-            observed_at: None,
-            updated_at: now,
-        }])
+        let _ = month_limit;
+        observed_percent_quota_windows_on(&self.conn, account_id, Some(QUOTA_WINDOW_MONTH))
     }
 
-    /// Unclamped Ollama month used credit and reset instant.
-    pub fn ollama_month_usage(&self, account_id: &str) -> Result<(f64, Option<DateTime<Utc>>)> {
-        let Some((offset, purchase_date)) = self
-            .conn
-            .query_row(
-                "SELECT usage_month_window_cost_offset, purchase_date FROM credentials WHERE legacy_account_id = ?1",
-                [account_id],
-                |row| Ok((row.get::<_, f64>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()?
-        else {
-            return Ok((0.0, None));
-        };
-        compute_ollama_month_window(&self.conn, account_id, &purchase_date, offset)
+    /// Observed monthly percent. `None` means no percent evidence, not zero.
+    pub fn ollama_month_usage(
+        &self,
+        account_id: &str,
+    ) -> Result<(Option<f64>, Option<DateTime<Utc>>)> {
+        let observed = observed_percent_usage_on(&self.conn, account_id)?;
+        Ok((observed.window_month, observed.resets_in_month))
     }
 
     pub fn calibrate_ollama_month_usage(
@@ -10900,106 +10867,19 @@ impl Database {
         limit: f64,
         now: DateTime<Utc>,
     ) -> Result<bool> {
-        let purchase_date: String = match self
-            .conn
-            .query_row(
-                "SELECT purchase_date FROM credentials WHERE legacy_account_id = ?1",
-                [account_id],
-                |row| row.get(0),
-            )
-            .optional()?
-        {
-            Some(value) => value,
-            None => return Ok(false),
-        };
-        let actual_cost = sum_ollama_month_cost_on(&self.conn, account_id, &purchase_date)?;
-        let offset = limit * percent / 100.0 - actual_cost;
-        let changed = self.conn.execute(
-            "UPDATE credentials
-             SET usage_month_window_cost_offset = ?2,
-                 updated_at = ?3
-             WHERE legacy_account_id = ?1",
-            params![account_id, offset, now.to_rfc3339()],
-        )?;
-        Ok(changed > 0)
+        let _ = limit;
+        upsert_percent_window_on(
+            &self.conn,
+            account_id,
+            UsageWindowKind::Month,
+            percent,
+            None,
+            now,
+            "ollama-manual-percent",
+        )
     }
 
-    fn live_fixed_quota_windows(
-        &self,
-        account_id: &str,
-        limits: &PricingLimits,
-        source: &str,
-        observed_at: Option<DateTime<Utc>>,
-    ) -> Result<Vec<QuotaWindow>> {
-        let now = Utc::now();
-        let usage = account_usage_with_limits_on(&self.conn, account_id, limits, now)?;
-        let metadata = self
-            .conn
-            .query_row(
-                "SELECT usage_5h_window_started_at, usage_5h_window_cost_offset,
-                        usage_week_window_started_at, usage_week_window_cost_offset,
-                        usage_month_window_cost_offset, purchase_date
-                 FROM credentials WHERE legacy_account_id = ?1",
-                [account_id],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, f64>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, f64>(3)?,
-                        row.get::<_, f64>(4)?,
-                        row.get::<_, String>(5)?,
-                    ))
-                },
-            )
-            .optional()?
-            .ok_or_else(|| anyhow::anyhow!("account {account_id} not found"))?;
-        let month_started_at = month_window_start_utc(&metadata.5).ok();
-
-        Ok(vec![
-            QuotaWindow {
-                account_id: account_id.to_string(),
-                window_kind: QUOTA_WINDOW_FIVE_HOURS.to_string(),
-                used: usage.window_5h,
-                limit_value: Some(limits.window_5h),
-                started_at: metadata.0.map(parse_datetime),
-                resets_at: usage.resets_in_5h,
-                calibration_offset: metadata.1,
-                unit: "usd".to_string(),
-                source: source.to_string(),
-                observed_at,
-                updated_at: now,
-            },
-            QuotaWindow {
-                account_id: account_id.to_string(),
-                window_kind: QUOTA_WINDOW_WEEK.to_string(),
-                used: usage.window_week,
-                limit_value: Some(limits.window_week),
-                started_at: metadata.2.map(parse_datetime),
-                resets_at: usage.resets_in_week,
-                calibration_offset: metadata.3,
-                unit: "usd".to_string(),
-                source: source.to_string(),
-                observed_at,
-                updated_at: now,
-            },
-            QuotaWindow {
-                account_id: account_id.to_string(),
-                window_kind: QUOTA_WINDOW_MONTH.to_string(),
-                used: usage.window_month,
-                limit_value: Some(limits.window_month),
-                started_at: month_started_at,
-                resets_at: usage.resets_in_month,
-                calibration_offset: metadata.4,
-                unit: "usd".to_string(),
-                source: source.to_string(),
-                observed_at,
-                updated_at: now,
-            },
-        ])
-    }
-
-    pub fn total_usage(&self) -> Result<(f64, f64, f64)> {
+    pub fn total_usage(&self) -> Result<(Option<f64>, Option<f64>, Option<f64>)> {
         let now = Utc::now();
         let today_start = now
             .date_naive()
@@ -11009,23 +10889,14 @@ impl Database {
             .to_rfc3339();
         let week_ago = (now - Duration::days(7)).to_rfc3339();
         let month_ago = (now - Duration::days(30)).to_rfc3339();
-
-        let today: f64 = self.conn.query_row(
-            "SELECT COALESCE(SUM(cost), 0) FROM forward_logs WHERE cost_state IN ('priced', 'legacy_estimate') AND timestamp > ?1",
-            [&today_start],
-            |row| row.get(0),
-        )?;
-        let week: f64 = self.conn.query_row(
-            "SELECT COALESCE(SUM(cost), 0) FROM forward_logs WHERE cost_state IN ('priced', 'legacy_estimate') AND timestamp > ?1",
-            [&week_ago],
-            |row| row.get(0),
-        )?;
-        let month: f64 = self.conn.query_row(
-            "SELECT COALESCE(SUM(cost), 0) FROM forward_logs WHERE cost_state IN ('priced', 'legacy_estimate') AND timestamp > ?1",
-            [&month_ago],
-            |row| row.get(0),
-        )?;
-
+        let priced = "SELECT SUM(cost) FROM forward_logs WHERE cost_state IN ('priced', 'legacy_estimate') AND timestamp > ?1";
+        let today: Option<f64> = self
+            .conn
+            .query_row(priced, [&today_start], |row| row.get(0))?;
+        let week: Option<f64> = self.conn.query_row(priced, [&week_ago], |row| row.get(0))?;
+        let month: Option<f64> = self
+            .conn
+            .query_row(priced, [&month_ago], |row| row.get(0))?;
         Ok((today, week, month))
     }
 
@@ -11125,6 +10996,227 @@ fn record_account_usage_sync_success_on(
         anyhow::bail!("account {account_id} disappeared while recording usage sync success");
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObservedPercentUsage {
+    pub window_5h: Option<f64>,
+    pub window_week: Option<f64>,
+    pub window_month: Option<f64>,
+    pub resets_in_5h: Option<DateTime<Utc>>,
+    pub resets_in_week: Option<DateTime<Utc>>,
+    pub resets_in_month: Option<DateTime<Utc>>,
+}
+
+impl Default for ObservedPercentUsage {
+    fn default() -> Self {
+        Self {
+            window_5h: None,
+            window_week: None,
+            window_month: None,
+            resets_in_5h: None,
+            resets_in_week: None,
+            resets_in_month: None,
+        }
+    }
+}
+
+fn percent_window_is_observed(window: &QuotaWindow) -> bool {
+    window.unit == "percent"
+        && window.limit_value == Some(100.0)
+        && window.used.is_finite()
+        && window.observed_at.is_some()
+}
+
+fn usage_window_from_percent(account_id: &str, observed: &ObservedPercentUsage) -> UsageWindow {
+    UsageWindow {
+        account_id: account_id.to_string(),
+        window_5h: observed.window_5h.unwrap_or(0.0),
+        window_week: observed.window_week.unwrap_or(0.0),
+        window_month: observed.window_month.unwrap_or(0.0),
+        resets_in_5h: observed.resets_in_5h,
+        resets_in_week: observed.resets_in_week,
+        resets_in_month: observed.resets_in_month,
+    }
+}
+
+fn map_quota_window_row(row: &Row<'_>) -> rusqlite::Result<QuotaWindow> {
+    Ok(QuotaWindow {
+        account_id: row.get(0)?,
+        window_kind: row.get(1)?,
+        used: row.get(2)?,
+        limit_value: row.get(3)?,
+        started_at: row.get::<_, Option<String>>(4)?.map(parse_datetime),
+        resets_at: row.get::<_, Option<String>>(5)?.map(parse_datetime),
+        calibration_offset: row.get(6)?,
+        unit: row.get(7)?,
+        source: row.get(8)?,
+        observed_at: row.get::<_, Option<String>>(9)?.map(parse_datetime),
+        updated_at: parse_datetime(row.get::<_, String>(10)?),
+    })
+}
+
+fn observed_percent_usage_on(conn: &Connection, account_id: &str) -> Result<ObservedPercentUsage> {
+    let windows = load_quota_windows_on(conn, account_id)?;
+    let mut observed = ObservedPercentUsage::default();
+    for window in windows {
+        if !percent_window_is_observed(&window) {
+            continue;
+        }
+        match window.window_kind.as_str() {
+            QUOTA_WINDOW_FIVE_HOURS => {
+                observed.window_5h = Some(window.used);
+                observed.resets_in_5h = window.resets_at;
+            }
+            QUOTA_WINDOW_WEEK => {
+                observed.window_week = Some(window.used);
+                observed.resets_in_week = window.resets_at;
+            }
+            QUOTA_WINDOW_MONTH => {
+                observed.window_month = Some(window.used);
+                observed.resets_in_month = window.resets_at;
+            }
+            _ => {}
+        }
+    }
+    Ok(observed)
+}
+
+fn observed_percent_quota_windows_on(
+    conn: &Connection,
+    account_id: &str,
+    only_kind: Option<&str>,
+) -> Result<Vec<QuotaWindow>> {
+    let mut windows = load_quota_windows_on(conn, account_id)?;
+    windows.retain(|window| {
+        percent_window_is_observed(window)
+            && only_kind.is_none_or(|kind| window.window_kind == kind)
+    });
+    Ok(windows)
+}
+
+fn load_quota_windows_on(conn: &Connection, account_id: &str) -> Result<Vec<QuotaWindow>> {
+    let mut stmt = conn.prepare(
+        "SELECT account_id, window_kind, used, limit_value, started_at,
+                resets_at, calibration_offset, unit, source, observed_at, updated_at
+         FROM quota_windows WHERE account_id = ?1 ORDER BY window_kind ASC",
+    )?;
+    let rows = stmt.query_map([account_id], map_quota_window_row)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+fn credential_exists_on(conn: &Connection, account_id: &str) -> Result<bool> {
+    let exists: i64 = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM credentials WHERE legacy_account_id = ?1)",
+        [account_id],
+        |row| row.get(0),
+    )?;
+    Ok(exists != 0)
+}
+
+fn percent_reset_at(
+    conn: &Connection,
+    account_id: &str,
+    window: UsageWindowKind,
+    resets_in_minutes: Option<i64>,
+    now: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>> {
+    match window {
+        UsageWindowKind::Free => {
+            anyhow::bail!("free promo quota cannot be calibrated as a Go usage window")
+        }
+        UsageWindowKind::Month => {
+            let purchase_date = conn
+                .query_row(
+                    "SELECT purchase_date FROM credentials WHERE legacy_account_id = ?1",
+                    [account_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten();
+            let Some(purchase_date) = purchase_date.filter(|value| !value.is_empty()) else {
+                return Ok(None);
+            };
+            let Ok(expires) = purchase_expires_on(&purchase_date) else {
+                return Ok(None);
+            };
+            let Ok(date) = NaiveDate::parse_from_str(&expires, "%Y-%m-%d") else {
+                return Ok(None);
+            };
+            Ok(date.and_hms_opt(0, 0, 0).map(|time| time.and_utc()))
+        }
+        UsageWindowKind::FiveHours | UsageWindowKind::Week => {
+            let minutes = resets_in_minutes.unwrap_or(match window {
+                UsageWindowKind::FiveHours => 5 * 60,
+                _ => 7 * 24 * 60,
+            });
+            if minutes < 0 {
+                anyhow::bail!("resets_in_minutes must be >= 0");
+            }
+            let seconds = minutes.checked_mul(60).ok_or_else(|| {
+                anyhow::anyhow!("resets_in_minutes is outside the supported range")
+            })?;
+            let delta = Duration::try_seconds(seconds).ok_or_else(|| {
+                anyhow::anyhow!("resets_in_minutes is outside the supported range")
+            })?;
+            now.checked_add_signed(delta)
+                .map(Some)
+                .ok_or_else(|| anyhow::anyhow!("resets_in_minutes is outside the supported range"))
+        }
+    }
+}
+
+fn upsert_percent_window_on(
+    conn: &Connection,
+    account_id: &str,
+    window: UsageWindowKind,
+    percent: f64,
+    resets_in_minutes: Option<i64>,
+    now: DateTime<Utc>,
+    source: &str,
+) -> Result<bool> {
+    if !percent.is_finite() {
+        anyhow::bail!("usage percent must be finite");
+    }
+    if !credential_exists_on(conn, account_id)? {
+        return Ok(false);
+    }
+    let kind = match window {
+        UsageWindowKind::FiveHours => QUOTA_WINDOW_FIVE_HOURS,
+        UsageWindowKind::Week => QUOTA_WINDOW_WEEK,
+        UsageWindowKind::Month => QUOTA_WINDOW_MONTH,
+        UsageWindowKind::Free => {
+            anyhow::bail!("free promo quota cannot be calibrated as a Go usage window")
+        }
+    };
+    let resets_at = percent_reset_at(conn, account_id, window, resets_in_minutes, now)?;
+    conn.execute(
+        "INSERT INTO quota_windows (
+            account_id, window_kind, used, limit_value, started_at, resets_at,
+            calibration_offset, unit, source, observed_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, 0, 'percent', ?6, ?7, ?7)
+         ON CONFLICT(account_id, window_kind) DO UPDATE SET
+            used = excluded.used,
+            limit_value = excluded.limit_value,
+            started_at = excluded.started_at,
+            resets_at = excluded.resets_at,
+            calibration_offset = excluded.calibration_offset,
+            unit = excluded.unit,
+            source = excluded.source,
+            observed_at = excluded.observed_at,
+            updated_at = excluded.updated_at",
+        params![
+            account_id,
+            kind,
+            percent,
+            100.0,
+            resets_at.map(|value| value.to_rfc3339()),
+            source,
+            now.to_rfc3339(),
+        ],
+    )?;
+    Ok(true)
 }
 
 fn account_usage_with_limits_on(
@@ -11229,8 +11321,9 @@ fn account_usage_with_limits_on(
     })
 }
 
-/// 计算固定窗口的当前用量与清零时刻。`started_at_str` 为 `None` 表示账号从未使用过该窗口；
-/// 窗口已过期时从 `forward_logs` lazy 重建新起点。
+/// v22 migration helper. Live reads no longer call this. An expired window still
+/// rewrites that migration's account offset so the inserted quota row matches
+/// the rolled used amount.
 struct FixedWindowSpec {
     length: Duration,
     started_col: &'static str,
@@ -11248,9 +11341,6 @@ fn compute_fixed_window(
 ) -> Result<(f64, Option<DateTime<Utc>>)> {
     let mut started_at = match started_at_str {
         None => {
-            // ponytail: lazy 初始化——查 forward_logs 第一条计费请求作为窗口起点。
-            // 计费行 = cost_state IN ('priced', 'legacy_estimate')，
-            // 与下方 SUM(cost) 的过滤保持一致，确保迁移后的 legacy error 也能触发窗口。
             let first: Option<String> = conn
                 .query_row(
                     "SELECT MIN(timestamp) FROM forward_logs
@@ -11262,7 +11352,7 @@ fn compute_fixed_window(
                 .optional()?
                 .flatten();
             match first {
-                None => return Ok((0.0, None)), // 真的没用过
+                None => return Ok((0.0, None)),
                 Some(s) => {
                     let source = account_store::account_row_source(conn)?;
                     conn.execute(
@@ -11279,14 +11369,11 @@ fn compute_fixed_window(
         }
         Some(s) => parse_rfc3339(s)?,
     };
-    // 第一次进入循环时使用调用方传入的 offset（来自手动校准）；任何一次前进后，
-    // offset 都被清零（`offset_col = 0` 已写入 DB），用 effective_offset 跟踪。
     let mut effective_offset = offset;
 
     loop {
         let ends_at = started_at + spec.length;
         if now < ends_at {
-            // 窗口仍有效：用量 = effective_offset + SUM(cost WHERE ts >= started_at)
             let cost: f64 = conn.query_row(
                 "SELECT COALESCE(SUM(cost), 0) FROM forward_logs
                  WHERE account_id = ?1
@@ -11298,11 +11385,6 @@ fn compute_fixed_window(
             return Ok(((effective_offset + cost).min(limit), Some(ends_at)));
         }
 
-        // 窗口已过期：找 forward_logs 中第一条 timestamp >= ends_at 的计费请求作为新起点。
-        // 关键修复：旧实现只前进一次就 return，遇到多条稀疏日志（间隔 > 5h）时每次刷新
-        // 只前进一个窗口，造成前端可见的"用量从 60 → 30 → 13 → 5.8 → 0"递减幻觉；
-        // 当 next=None 清空后下次刷新又 lazy-init 回最旧日志，循环重启。
-        // 用 loop 在一次调用内连过所有过期窗口，直到落在有效窗口或彻底无新请求。
         let next: Option<String> = conn
             .query_row(
                 "SELECT MIN(timestamp) FROM forward_logs
@@ -11316,7 +11398,6 @@ fn compute_fixed_window(
             .flatten();
         match next {
             None => {
-                // 过期后无新请求：清空窗口，等待下次请求触发新窗口。
                 let source = account_store::account_row_source(conn)?;
                 conn.execute(
                     &format!(
@@ -11340,69 +11421,9 @@ fn compute_fixed_window(
                     ),
                     params![account_id, &s],
                 )?;
-                // 继续循环：新起点对应的窗口可能也已过期，需要再判一次。
             }
         }
     }
-}
-
-/// Ollama month window: `[purchase_date 00:00 local, next-month-same-day 00:00 local)`.
-/// Used credit is `offset + cost` and is not clamped to the soft limit.
-fn compute_ollama_month_window(
-    conn: &Connection,
-    account_id: &str,
-    purchase_date: &str,
-    offset: f64,
-) -> Result<(f64, Option<DateTime<Utc>>)> {
-    if purchase_date.trim().is_empty() {
-        return Ok((0.0, None));
-    }
-    let (start, end) = ollama_month_bounds(purchase_date)?;
-    let cost = sum_priced_cost_between(conn, account_id, start, end)?;
-    Ok((offset + cost, Some(end)))
-}
-
-fn ollama_month_bounds(purchase_date: &str) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
-    let start = month_window_start_utc(purchase_date)?;
-    let expires = purchase_expires_on(purchase_date)?;
-    let end_naive = NaiveDate::parse_from_str(&expires, "%Y-%m-%d")?
-        .and_hms_opt(0, 0, 0)
-        .unwrap();
-    let end = Local
-        .from_local_datetime(&end_naive)
-        .single()
-        .ok_or_else(|| anyhow::anyhow!("ambiguous local datetime for expires_on"))?
-        .with_timezone(&Utc);
-    Ok((start, end))
-}
-
-fn sum_ollama_month_cost_on(
-    conn: &Connection,
-    account_id: &str,
-    purchase_date: &str,
-) -> Result<f64> {
-    if purchase_date.trim().is_empty() {
-        return Ok(0.0);
-    }
-    let (start, end) = ollama_month_bounds(purchase_date)?;
-    sum_priced_cost_between(conn, account_id, start, end)
-}
-
-fn sum_priced_cost_between(
-    conn: &Connection,
-    account_id: &str,
-    start: DateTime<Utc>,
-    end: DateTime<Utc>,
-) -> Result<f64> {
-    Ok(conn.query_row(
-        "SELECT COALESCE(SUM(cost), 0) FROM forward_logs
-         WHERE account_id = ?1
-           AND cost_state IN ('priced', 'legacy_estimate')
-           AND timestamp >= ?2
-           AND timestamp < ?3",
-        params![account_id, start.to_rfc3339(), end.to_rfc3339()],
-        |row| row.get(0),
-    )?)
 }
 
 /// 月窗口：从 `purchase_date 00:00 本地时区` 累计到 `purchase_expires_on(purchase_date) 00:00 本地时区`，不重置。
@@ -11438,133 +11459,6 @@ fn compute_month_window(
     )?;
     // ponytail: 月窗口已过期也照常返回终点，前端按"已到期"显示。
     Ok(((offset + cost).min(limit), Some(end)))
-}
-
-fn calibrate_account_usage_on(
-    conn: &Connection,
-    account_id: &str,
-    window: UsageWindowKind,
-    percent: f64,
-    resets_in_minutes: Option<i64>,
-    limit: f64,
-    now: DateTime<Utc>,
-) -> Result<bool> {
-    // (started_at, offset_col, started_col_or_empty)
-    // started_col 为空字符串表示月窗口——不写 started_at 列（起点固定为 purchase_date）。
-    let (started_at, started_col, offset_col): (Option<DateTime<Utc>>, &str, &str) = match window {
-        UsageWindowKind::FiveHours => {
-            let window_len = Duration::hours(5);
-            let started_at = calibrated_window_start(now, window_len, resets_in_minutes, "5-hour")?;
-            (
-                Some(started_at),
-                "usage_5h_window_started_at",
-                "usage_5h_window_cost_offset",
-            )
-        }
-        UsageWindowKind::Week => {
-            let window_len = Duration::days(7);
-            let started_at = calibrated_window_start(now, window_len, resets_in_minutes, "weekly")?;
-            (
-                Some(started_at),
-                "usage_week_window_started_at",
-                "usage_week_window_cost_offset",
-            )
-        }
-        UsageWindowKind::Month => {
-            // 月窗口的起点/终点由 purchase_date 决定，不写 started_at 列。
-            // resets_in_minutes 被忽略——窗口已由账号购买日期固定。
-            (None, "", "usage_month_window_cost_offset")
-        }
-        UsageWindowKind::Free => {
-            anyhow::bail!("free promo quota cannot be calibrated as a Go usage window")
-        }
-    };
-
-    // 计算 actual_cost：窗口内已有 forward_logs 的 cost 总和。
-    // 5h/周窗口的起点是刚算出的 started_at；月窗口的起点是 purchase_date 00:00 本地时区。
-    let actual_cost: f64 = match started_at {
-        Some(started) => conn.query_row(
-            "SELECT COALESCE(SUM(cost), 0) FROM forward_logs
-             WHERE account_id = ?1
-               AND cost_state IN ('priced', 'legacy_estimate')
-               AND timestamp >= ?2",
-            params![account_id, started.to_rfc3339()],
-            |row| row.get(0),
-        )?,
-        None => {
-            let purchase_date: String = conn
-                .query_row(
-                    "SELECT purchase_date FROM credentials WHERE legacy_account_id = ?1",
-                    [account_id],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .ok_or_else(|| anyhow::anyhow!("account not found"))?;
-            let started = month_window_start_utc(&purchase_date)?;
-            conn.query_row(
-                "SELECT COALESCE(SUM(cost), 0) FROM forward_logs
-                 WHERE account_id = ?1
-                   AND cost_state IN ('priced', 'legacy_estimate')
-                   AND timestamp >= ?2",
-                params![account_id, started.to_rfc3339()],
-                |row| row.get(0),
-            )?
-        }
-    };
-
-    let target_cost = limit * percent / 100.0;
-    // Bug 1.5 修复：去掉 max(0, ...) 钳制，允许负 offset。
-    // 之前 max(0, target - actual) 配合 schema CHECK (offset >= 0) 让向左拉
-    // 滑块时被锁死在实际 cost 对应的百分比。现在 offset 可以为负，
-    // compute_fixed_window 返回 offset + actual = target_cost，与用户输入一致。
-    let offset = target_cost - actual_cost;
-
-    let changed = if started_col.is_empty() {
-        // 月窗口：只更新 cost_offset（started_at 由 purchase_date 派生，不存储）
-        conn.execute(
-            "UPDATE credentials
-             SET usage_month_window_cost_offset = ?2,
-                 updated_at = ?3
-             WHERE legacy_account_id = ?1",
-            params![account_id, offset, now.to_rfc3339()],
-        )?
-    } else {
-        let started = started_at.unwrap();
-        conn.execute(
-            &format!(
-                "UPDATE credentials
-                 SET {started_col} = ?2,
-                     {offset_col} = ?3,
-                     updated_at = ?4
-                 WHERE legacy_account_id = ?1"
-            ),
-            params![account_id, started.to_rfc3339(), offset, now.to_rfc3339()],
-        )?
-    };
-    Ok(changed > 0)
-}
-
-fn calibrated_window_start(
-    now: DateTime<Utc>,
-    window_len: Duration,
-    resets_in_minutes: Option<i64>,
-    window_name: &str,
-) -> Result<DateTime<Utc>> {
-    let max_minutes = window_len.num_minutes();
-    let remaining_minutes = resets_in_minutes.unwrap_or(max_minutes);
-    if !(0..=max_minutes).contains(&remaining_minutes) {
-        return Err(anyhow::anyhow!(
-            "{window_name} resets_in_minutes must be between 0 and {max_minutes}"
-        ));
-    }
-    let remaining = Duration::try_minutes(remaining_minutes)
-        .ok_or_else(|| anyhow::anyhow!("resets_in_minutes is out of range"))?;
-    let ends_at = now
-        .checked_add_signed(remaining)
-        .ok_or_else(|| anyhow::anyhow!("usage window end is out of range"))?;
-    ends_at
-        .checked_sub_signed(window_len)
-        .ok_or_else(|| anyhow::anyhow!("usage window start is out of range"))
 }
 
 /// 把 `purchase_date`（YYYY-MM-DD）解释为本时区 00:00，转 UTC。
@@ -11822,7 +11716,6 @@ fn set_ollama_cloud_billing_tier_on(
     account_id: &str,
     tier: Option<OllamaBillingTier>,
 ) -> Result<()> {
-    let current = ollama_cloud_billing_tier_on(conn, account_id)?;
     match tier {
         None => {
             conn.execute(
@@ -11838,12 +11731,6 @@ fn set_ollama_cloud_billing_tier_on(
                 params![account_id, tier.as_str()],
             )?;
         }
-    }
-    if current != tier {
-        conn.execute(
-            "UPDATE credentials SET usage_month_window_cost_offset = 0 WHERE legacy_account_id = ?1",
-            [account_id],
-        )?;
     }
     Ok(())
 }

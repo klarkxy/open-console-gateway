@@ -4,7 +4,7 @@
 
 ## Saving and continuing work
 
-A confirmed account or Key save closes its editor without waiting for account lists, model catalogs, or usage to reload. These follow-up reads run in the background. If a read fails, the saved change remains saved; use the affected section's retry action instead of submitting the change again. When local credit setup is part of creating an account, a failed credit setup remains attached to that same account so retrying does not create another.
+A confirmed account or Key save closes its editor without waiting for account lists, model catalogs, or usage to reload. These follow-up reads run in the background. If a read fails, the saved change remains saved; use the affected section's retry action instead of submitting the change again. Creating or rotating a Key is complete when the gateway confirms it. If the following read fails, the Key stays saved and a replaced secret is left blank. Read it again; do not create or rotate it again.
 
 Background platform observation refreshes do not invalidate an unrelated open configuration editor. A real configuration conflict still keeps the draft for review and never silently retries the write.
 

@@ -59,8 +59,9 @@ Inference is implemented under `crates/ocg-core/src/gateway/`:
 
 1. `handler.rs` assigns the request id, authenticates a client Key, parses the
    client protocol, and resolves model identity.
-2. `GatewayExecutor` captures one request-entry snapshot for pricing, proxy
-   routes, contracts, and Alias resolution. Fallback iterations re-read live
+2. `GatewayExecutor` captures one request-entry snapshot for proxy
+   routes, contracts, and Alias resolution. It does not capture a price
+   snapshot for a new request. Fallback iterations re-read live
    account state, eligible Custom runtimes, and Zen Free cooldown. Protocol
    selection uses that saved contract.
 3. Candidate materialization applies adapter ceilings and effective
@@ -100,8 +101,8 @@ The Vue SPA calls remounted operational handlers through
 `src/api/dashboard-v3.ts` (HTTP base `/dashboard/api/v4`) and native V4 routes
 through `src/api/dashboard-v4.ts` (presenters in `src/api/connections.ts`).
 `/dashboard/api/v3` is a 410 tombstone. Live dashboard JSON is V4 only.
-CAS-protected mutations carry `expectedRevision` and `processGeneration`;
-pricing writes also carry `expectedPricingRevision`. Operational reads and
+CAS-protected mutations carry `expectedRevision` and `processGeneration`.
+There is no pricing write and no `expectedPricingRevision`. Operational reads and
 diagnostics that do not mutate state skip CAS.
 
 The CLI calls the same HTTP-neutral services without an argv CAS token. Shared

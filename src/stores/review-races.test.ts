@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import { createPinia, setActivePinia } from "pinia";
 import { toRaw } from "vue";
 import { installWindowDashboard, v3AccountDto } from "../test-helpers/dashboard-v3-fetch.ts";
 import { DashboardConflictError, type Account } from "../api/dashboard.ts";
 import { useAccountsStore } from "./accounts.ts";
-import { useConnectionStore } from "./connection.ts";
+import { useConnectionStore, type CommittedKeyWrite } from "./connection.ts";
 import { useControlPlaneStore } from "./controlPlane.ts";
 import { useProvidersStore } from "./providers.ts";
 import { useSessionStore } from "./session.ts";
@@ -25,25 +25,37 @@ interface DeferredCall {
   reject: (error: unknown) => void;
 }
 
+let openCalls: DeferredCall[] = [];
+
 function installDeferredFetch(): DeferredCall[] {
   installWindowDashboard();
   const calls: DeferredCall[] = [];
+  openCalls = calls;
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,
-    value: (input: string, init: RequestInit = {}) => new Promise<Response>((resolvePromise, rejectPromise) => {
-      calls.push({
-        url: String(input),
-        method: init.method ?? "GET",
-        resolve: (body) => resolvePromise(new Response(
-          JSON.stringify(body),
-          { headers: { "Content-Type": "application/json" } },
-        )),
-        reject: (error) => rejectPromise(error),
+    value: (input: string, init: RequestInit = {}) => {
+      const promise = new Promise<Response>((resolvePromise, rejectPromise) => {
+        calls.push({
+          url: String(input),
+          method: init.method ?? "GET",
+          resolve: (body) => resolvePromise(new Response(
+            JSON.stringify(body),
+            { headers: { "Content-Type": "application/json" } },
+          )),
+          reject: (error) => rejectPromise(error),
+        });
       });
-    }),
+      void promise.catch(() => undefined);
+      return promise;
+    },
   });
   return calls;
 }
+
+afterEach(() => {
+  for (const call of openCalls) call.reject(new Error("unsettled fetch"));
+  openCalls = [];
+});
 
 async function waitForCalls(calls: DeferredCall[], count: number): Promise<void> {
   for (let i = 0; i < 200 && calls.length < count; i++) {
@@ -194,7 +206,7 @@ test("accounts store: a pending load cannot clobber an in-place mutation", async
 
 test("connection store: a pending load cannot clobber post-mutation state", async () => {
   freshPinia();
-  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
   const calls = installDeferredFetch();
   const store = useConnectionStore();
 
@@ -204,22 +216,30 @@ test("connection store: a pending load cannot clobber post-mutation state", asyn
   await waitForCalls(calls, 2);
   assert.equal(calls[1]!.method, "PATCH");
   calls[1]!.resolve({ revision: 8, processGeneration: 99 });
-  await waitForCalls(calls, 3);
+  const receipt: CommittedKeyWrite = await mutation;
+  assert.equal(receipt.committed, true);
+  assert.equal(receipt.value, undefined);
+  assert.equal(calls.length, 3, "the ack starts one read-back");
+  assert.equal(calls[2]!.method, "GET");
+  const infoAtAck = store.info;
+  assert.equal(infoAtAck, null, "the read-back stays deferred at the ack");
+
   calls[2]!.resolve(connectionBody("new-primary", 9));
-  await mutation;
+  assert.equal(await receipt.revalidation, "loaded");
   assert.equal(store.info?.primary_key, "new-primary");
 
   calls[0]!.resolve(connectionBody("old-primary", 7));
   const stale = await pendingLoad;
   assert.equal(stale.primary_key, "old-primary", "stale caller still gets its own payload");
   assert.equal(store.info?.primary_key, "new-primary");
+  assert.equal(calls.length, 3, "the old GET must not add another request");
   assert.equal(store.loading, false);
   assert.equal(store.error, "");
 });
 
 test("connection store: regeneratePrimaryKey commits the rotated key despite a pending old load", async () => {
   freshPinia();
-  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
   const calls = installDeferredFetch();
   const store = useConnectionStore();
 
@@ -229,23 +249,77 @@ test("connection store: regeneratePrimaryKey commits the rotated key despite a p
   await waitForCalls(calls, 2);
   assert.equal(calls[1]!.method, "POST");
   calls[1]!.resolve({ revision: 8, processGeneration: 99 });
-  // The rotation reads the connection once for the value it commits…
-  await waitForCalls(calls, 3);
-  calls[2]!.resolve(connectionBody("new-primary", 8));
-  // No cached connection exists yet, so the store performs its guarded reload.
-  await waitForCalls(calls, 4);
-  calls[3]!.resolve(connectionBody("new-primary", 8));
-  const rotated = await rotation;
+  const receipt: CommittedKeyWrite<string> = await rotation;
+  assert.equal(receipt.committed, true);
+  assert.equal(receipt.value, undefined, "plaintext is not on the ack");
+  assert.equal(calls.length, 3, "uncached rotation is the original GET, the POST, and one read-back");
+  assert.equal(calls[0]!.method, "GET");
+  assert.equal(calls[2]!.method, "GET");
+  const infoAtAck = store.info;
+  assert.equal(infoAtAck, null, "the read-back stays deferred at the ack");
 
-  assert.equal(rotated, "new-primary");
+  calls[2]!.resolve(connectionBody("new-primary", 8));
+  assert.equal(await receipt.revalidation, "loaded");
+  assert.equal(receipt.value, "new-primary");
   assert.equal(store.info?.primary_key, "new-primary");
 
   calls[0]!.resolve(connectionBody("old-primary", 7));
   const stale = await pendingLoad;
   assert.equal(stale.primary_key, "old-primary", "stale caller still gets its own payload");
-  assert.equal(store.info?.primary_key, "new-primary", "pending old load must not overwrite the rotated key");
+  assert.equal(store.info?.primary_key, "new-primary", "pending old load must not restore the revoked key");
+  assert.equal(calls.length, 3, "the old GET must not add another POST or GET");
   assert.equal(store.loading, false);
   assert.equal(store.error, "");
+});
+
+test("connection store: cached primary rotation keeps the new key when an older GET arrives last", async () => {
+  freshPinia();
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
+  const calls = installDeferredFetch();
+  const store = useConnectionStore();
+
+  const initial = store.load();
+  await waitForCalls(calls, 1);
+  calls[0]!.resolve(connectionBody("old-primary", 7));
+  await initial;
+  assert.equal(store.info?.primary_key, "old-primary");
+
+  const delayedOld = store.load();
+  await waitForCalls(calls, 2);
+  const rotation = store.regeneratePrimaryKey();
+  await waitForCalls(calls, 3);
+  assert.equal(calls[2]!.method, "POST");
+  calls[2]!.resolve({ revision: 8, processGeneration: 99 });
+  const rotated = await rotation;
+  assert.equal(
+    typeof rotated === "object" && rotated !== null && "committed" in rotated && rotated.committed,
+    true,
+    "cached rotation fulfills at the write ack",
+  );
+  assert.equal(
+    typeof rotated === "object" && rotated !== null && "value" in rotated ? rotated.value : undefined,
+    undefined,
+    "plaintext is not on the ack; it arrives through revalidation",
+  );
+  assert.equal(store.info?.primary_key, "", "the receipt blanks the revoked secret immediately");
+
+  for (let i = 0; i < 200 && calls.length < 4; i++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const rotationRead = calls.slice(3).find((call) => call.method === "GET");
+  assert.ok(rotationRead, "rotation still reads the new plaintext");
+  rotationRead.resolve(connectionBody("new-primary", 8));
+  const revalidation = typeof rotated === "object" && rotated !== null && "revalidation" in rotated
+    ? await rotated.revalidation
+    : "loaded";
+  assert.equal(revalidation, "loaded");
+  assert.equal(store.info?.primary_key, "new-primary");
+
+  calls[1]!.resolve(connectionBody("old-primary", 7));
+  const stale = await delayedOld;
+  assert.equal(stale.primary_key, "old-primary", "stale caller still gets its own payload");
+  assert.equal(store.info?.primary_key, "new-primary", "cached rotation must not let the older GET restore the revoked key");
+  assert.equal(store.loading, false);
 });
 
 test("connection store: clearSecrets invalidates a load that resolves after logout", async () => {
@@ -266,7 +340,7 @@ test("connection store: clearSecrets invalidates a load that resolves after logo
 
 test("connection store: regeneratePrimaryKey does not refetch plaintext after logout", async () => {
   freshPinia();
-  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
   const calls = installDeferredFetch();
   const store = useConnectionStore();
 
@@ -316,27 +390,59 @@ test("connection store: a slow mutation refresh still commits when the session i
   assert.equal(store.error, "");
 });
 
-test("connection store: a rejected mutation reload still releases the superseded load", async () => {
+test("connection store: a failed revalidation after an acknowledged write cannot be overwritten by a stale load", async () => {
   freshPinia();
-  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
   const calls = installDeferredFetch();
   const store = useConnectionStore();
 
-  const pendingLoad = store.load();
+  const initial = store.load();
   await waitForCalls(calls, 1);
-  const mutation = store.updateKey("k1", { enabled: false });
-  await waitForCalls(calls, 2);
-  calls[1]!.resolve({ revision: 8, processGeneration: 99 });
-  await waitForCalls(calls, 3);
-  calls[2]!.reject(new Error("reload failed"));
-  await assert.rejects(mutation, /reload failed/);
+  calls[0]!.resolve({
+    gatewayPort: 9042,
+    clientRootUrl: "",
+    primaryKey: "primary-live",
+    subKeys: [{ id: "k1", name: "Laptop", enabled: true, value: "sub-live" }],
+    revision: 7,
+    processGeneration: 99,
+  });
+  await initial;
 
-  calls[0]!.resolve(connectionBody("old-primary", 7));
+  const pendingLoad = store.load();
+  await waitForCalls(calls, 2);
+  const mutation = store.updateKey("k1", { enabled: false });
+  await waitForCalls(calls, 3);
+  assert.equal(calls[2]!.method, "PATCH");
+  calls[2]!.resolve({ revision: 8, processGeneration: 99 });
+
+  let settled: "pending" | "fulfilled" | "rejected" = "pending";
+  void mutation.then(
+    () => { settled = "fulfilled"; },
+    () => { settled = "rejected"; },
+  );
+  for (let i = 0; i < 24 && settled === "pending"; i++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(settled, "fulfilled", "write ack completes independently of revalidation");
+
+  if (calls.length > 3) {
+    calls[3]!.reject(new Error("reload failed"));
+  }
+  await mutation.catch(() => undefined);
+
+  calls[1]!.resolve({
+    gatewayPort: 9042,
+    clientRootUrl: "",
+    primaryKey: "primary-live",
+    subKeys: [{ id: "k1", name: "Laptop", enabled: true, value: "sub-live" }],
+    revision: 7,
+    processGeneration: 99,
+  });
   await pendingLoad;
 
-  assert.equal(store.loading, false, "rejected latest reload must release the flag");
-  assert.equal(store.error, "reload failed");
-  assert.equal(store.info, null, "stale load must not overwrite state after the failure");
+  assert.equal(store.loading, false, "revalidation still releases the load flag");
+  assert.equal(store.info?.sub_keys.find((entry) => entry.id === "k1")?.enabled, false);
+  assert.equal(store.info?.primary_key, "primary-live");
 });
 
 test("settings store: a stale load failure does not overwrite a fresh success", async () => {
@@ -360,7 +466,7 @@ test("settings store: a stale load failure does not overwrite a fresh success", 
 
 test("providers store: a stale contracts load cannot clobber a mutation result", async () => {
   freshPinia();
-  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
   const calls = installDeferredFetch();
   const store = useProvidersStore();
 
@@ -462,7 +568,7 @@ test("providers store owns definition invalidation, refresh, and session guards"
 
 test("providers store: a contract refresh resolving after clear returns to its caller without restoring cache", async () => {
   freshPinia();
-  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
   const calls = installDeferredFetch();
   const store = useProvidersStore();
 
@@ -480,7 +586,7 @@ test("providers store: a contract refresh resolving after clear returns to its c
 
 test("providers store: a successful mutation wins over a load started after it", async () => {
   freshPinia();
-  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
   const calls = installDeferredFetch();
   const store = useProvidersStore();
 
@@ -501,7 +607,7 @@ test("providers store: a successful mutation wins over a load started after it",
 
 test("providers store: a failed mutation releases the load it invalidated", async () => {
   freshPinia();
-  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
   const calls = installDeferredFetch();
   const store = useProvidersStore();
 
@@ -520,7 +626,7 @@ test("providers store: a failed mutation releases the load it invalidated", asyn
 
 test("providers store: a later failed mutation does not discard an earlier successful receipt", async () => {
   freshPinia();
-  useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
   const calls = installDeferredFetch();
   const store = useProvidersStore();
 
@@ -544,7 +650,7 @@ test("providers store: a later failed mutation does not discard an earlier succe
 test("providers store: a new backend generation accepts its lower mutation revision", async () => {
   freshPinia();
   const control = useControlPlaneStore();
-  control.sync({ revision: 900, processGeneration: 99, pricingRevision: null });
+  control.sync({ revision: 900, processGeneration: 99 });
   const calls = installDeferredFetch();
   const store = useProvidersStore();
 
@@ -555,7 +661,7 @@ test("providers store: a new backend generation accepts its lower mutation revis
   assert.equal(store.contracts?.revision, 900);
   assert.equal(store.contracts?.process_generation, 99);
 
-  control.sync({ revision: 10, processGeneration: 100, pricingRevision: null });
+  control.sync({ revision: 10, processGeneration: 100 });
   const mutation = store.refreshContractCatalog("provider", "opencode");
   await waitForCalls(calls, 2);
   calls[1]!.resolve(contractsBody(11, 100));
@@ -582,7 +688,7 @@ test("providers store: stale mutation conflicts after clear do not trigger a con
 
   for (const mutation of mutations) {
     freshPinia();
-    useControlPlaneStore().sync({ revision: 7, processGeneration: 99, pricingRevision: null });
+    useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
     const calls = installDeferredFetch();
     const store = useProvidersStore();
 
@@ -637,19 +743,16 @@ test("control plane sync never regresses the revision within one process generat
   freshPinia();
   const control = useControlPlaneStore();
 
-  control.sync({ revision: 5, processGeneration: 99, pricingRevision: "p1" });
-  control.sync({ revision: 3, processGeneration: 99, pricingRevision: "p2" });
+  control.sync({ revision: 5, processGeneration: 99 });
+  control.sync({ revision: 3, processGeneration: 99 });
   assert.equal(control.revision, 5, "delayed older GET must be ignored");
-  assert.equal(control.pricingRevision, "p1");
 
-  control.sync({ revision: 6, processGeneration: 99, pricingRevision: null });
+  control.sync({ revision: 6, processGeneration: 99 });
   assert.equal(control.revision, 6);
-  assert.equal(control.pricingRevision, "p1", "absent pricing revision keeps the previous value");
 
-  control.sync({ revision: 1, processGeneration: 100, pricingRevision: "p3" });
+  control.sync({ revision: 1, processGeneration: 100 });
   assert.equal(control.revision, 1, "a new generation is adopted without ordering assumptions");
   assert.equal(control.processGeneration, 100);
-  assert.equal(control.pricingRevision, "p3");
 });
 
 

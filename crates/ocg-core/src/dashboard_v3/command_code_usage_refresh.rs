@@ -11,7 +11,8 @@ use crate::state::CoreState;
 use crate::usage_sync::{CalibrationOutcome, ControlRevision, MANUAL_THROTTLE, refresh_coalesced};
 
 use super::types::{MutationExpectation, UsageRefresh};
-use super::usage_refresh::{RefreshApiError, usage_window_from_model};
+use super::usage::usage_window_from_observed;
+use super::usage_refresh::RefreshApiError;
 use super::{V3ApiError, check_expectation};
 
 pub(super) async fn refresh(
@@ -105,8 +106,8 @@ pub(super) async fn refresh(
         let _settings_update = state.settings_update.lock();
         check_expectation(state, expectation)?;
         let db = state.db.lock();
-        let usage = db
-            .account_usage_with_limits(id, &crate::command_code_usage::goat_quota_limits())
+        let observed = db
+            .observed_percent_usage(id)
             .map_err(V3ApiError::internal)?;
         let sync = db
             .account_usage_sync_state(id)
@@ -127,7 +128,7 @@ pub(super) async fn refresh(
             .next_eligible_at
             .unwrap_or_else(|| now + MANUAL_THROTTLE);
         UsageRefresh {
-            usage: usage_window_from_model(state, usage, None),
+            usage: usage_window_from_observed(state, id, &observed),
             source: COMMAND_CODE_GOAT_USAGE_SOURCE.to_string(),
             last_success_at: now.to_rfc3339(),
             next_allowed_at: next_allowed_at.to_rfc3339(),

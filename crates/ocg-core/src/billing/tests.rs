@@ -192,6 +192,15 @@ fn config(monthly: Option<MonthlyCredits>, rates: Vec<CreditRate>) -> CreditConf
     }
 }
 
+fn write_from(configuration: &CreditConfiguration) -> CreditConfigurationWrite {
+    CreditConfigurationWrite {
+        name: configuration.name.clone(),
+        currency: configuration.currency.clone(),
+        monthly: configuration.monthly.clone(),
+        source_url: configuration.source_url.clone(),
+    }
+}
+
 fn bucket(
     id: &str,
     kind: CreditBucketKind,
@@ -238,7 +247,7 @@ fn meter(
 }
 
 #[test]
-fn charge_weights_four_groups_and_converts_to_credits() {
+fn charge_never_converts_tokens_even_when_a_historic_rate_decodes() {
     let attempt = CreditAttempt {
         credential_id: "cred-1".into(),
         meter_id: "meter-1".into(),
@@ -252,8 +261,7 @@ fn charge_weights_four_groups_and_converts_to_credits() {
         at: at("2026-09-21T00:00:00Z"),
     };
     let tokens = BillingTokens::new(100, 5, 20, 10);
-    // uncached 70*2 + output 5*3 + read 20*0.5 + write 10*4 = 205 currency units / 1e6 * 1e6
-    assert_eq!(attempt.charge(tokens), Some(205.0));
+    assert_eq!(attempt.charge(tokens), None);
 }
 
 #[test]
@@ -278,7 +286,7 @@ fn charge_unknown_or_malformed_is_none_never_zero() {
     assert_eq!(attempt.charge(BillingTokens::new(-1, 0, 0, 0)), None);
 
     attempt.rate = Some(rate("step-5-preview", 2.0, Some(0.5), 3.0, Some(4.0)));
-    assert_eq!(attempt.charge(BillingTokens::new(0, 0, 0, 0)), Some(0.0));
+    assert_eq!(attempt.charge(BillingTokens::new(0, 0, 0, 0)), None);
 }
 
 #[test]
@@ -483,10 +491,12 @@ fn frozen_attempt_rate_survives_configuration_edits() {
         vec![rate("step-5-preview", 7.0, Some(0.35), 20.0, Some(7.0))],
     );
     let attempt = state.capture_attempt("acc-1".into(), "step-5-preview", now);
+    let stored_rates = state.configuration.rates.clone();
     let mut edited = state.configuration.clone();
     edited.rates = vec![rate("step-5-preview", 1.0, Some(1.0), 1.0, Some(1.0))];
     edited.monthly = Some(monthly(1_600_000_000.0, "2026-09-30T16:00:00Z", 480));
-    state.configure(edited, now).unwrap();
+    state.configure(write_from(&edited), now).unwrap();
+    assert_eq!(state.configuration.rates, stored_rates);
     assert_eq!(state.meter_id, "meter-1");
     assert_eq!(state.project(now, 0).remaining, 250.0);
     assert_eq!(
@@ -499,9 +509,9 @@ fn frozen_attempt_rate_survives_configuration_edits() {
         400.0
     );
     let tokens = BillingTokens::new(1_000_000, 0, 0, 0);
-    assert_eq!(attempt.charge(tokens), Some(7.0 * 1_000_000.0));
+    assert_eq!(attempt.charge(tokens), None);
     let live = state.capture_attempt("acc-1".into(), "step-5-preview", now);
-    assert_eq!(live.charge(tokens), Some(1.0 * 1_000_000.0));
+    assert_eq!(live.charge(tokens), None);
 }
 
 #[test]
@@ -720,7 +730,7 @@ fn billing_model_classifier_and_stepfun_plan_detector() {
 }
 
 #[test]
-fn stepfun_presets_use_published_cny_rates_and_next_china_month() {
+fn stepfun_presets_keep_grant_amounts_without_token_rates() {
     let at_now = at("2026-09-21T07:00:00Z");
     let presets = stepfun_plan_credits("https://api.stepfun.com/step_plan", at_now).unwrap();
     assert_eq!(presets.len(), 4);
@@ -732,43 +742,11 @@ fn stepfun_presets_use_published_cny_rates_and_next_china_month() {
     let monthly = presets[0].configuration.monthly.as_ref().unwrap();
     assert_eq!(monthly.next_reset_at, at("2026-09-30T16:00:00Z"));
     assert_eq!(monthly.timezone_offset_minutes, 480);
-    assert_eq!(presets[0].configuration.credits_per_currency, 1_000_000.0);
+    assert_eq!(presets[0].configuration.credits_per_currency, 1.0);
+    assert!(presets[0].configuration.rates.is_empty());
     assert_eq!(
         presets[0].configuration.source_url.as_deref(),
         Some(STEPFUN_PRESETS.source_url.as_str())
-    );
-
-    let by_model = |model: &str| {
-        presets[0]
-            .configuration
-            .rates
-            .iter()
-            .find(|rate| rate.model == model)
-            .unwrap()
-    };
-    let preview = by_model("step-5-preview");
-    assert_eq!(preview.input_per_million, 7.0);
-    assert_eq!(preview.cache_read_per_million, Some(0.35));
-    assert_eq!(preview.output_per_million, 20.0);
-    assert_eq!(preview.cache_write_per_million, Some(7.0));
-    let flash = by_model("step-3.7-flash");
-    assert_eq!(flash.input_per_million, 1.35);
-    assert_eq!(flash.cache_read_per_million, Some(0.27));
-    assert_eq!(flash.output_per_million, 8.1);
-    assert_eq!(flash.cache_write_per_million, Some(1.35));
-    for model in ["step-3.5-flash", "step-3.5-flash-2603"] {
-        let row = by_model(model);
-        assert_eq!(row.input_per_million, 0.7);
-        assert_eq!(row.cache_read_per_million, Some(0.14));
-        assert_eq!(row.output_per_million, 2.1);
-        assert_eq!(row.cache_write_per_million, Some(0.7));
-    }
-    assert!(
-        presets[0]
-            .configuration
-            .rates
-            .iter()
-            .all(|rate| !rate.model.contains("router") && !rate.model.contains("audio"))
     );
     assert!(stepfun_plan_credits("https://api.stepfun.com/v1/chat/completions", at_now).is_none());
 }
@@ -900,13 +878,13 @@ fn configure_preserves_current_grant_until_next_real_boundary() {
 
     let mut same_rates = state.configuration.clone();
     same_rates.name = "Mini".to_string();
-    state.configure(same_rates, now).unwrap();
+    state.configure(write_from(&same_rates), now).unwrap();
     assert_eq!(remaining_of(&state, "monthly"), 250.0);
     assert_eq!(state.meter_id, "meter-1");
 
     let mut moved = state.configuration.clone();
     moved.monthly = Some(monthly(1_600.0, "2026-09-21T00:00:00Z", 480));
-    state.configure(moved, now).unwrap();
+    state.configure(write_from(&moved), now).unwrap();
     state.advance(now).unwrap();
     assert_eq!(remaining_of(&state, "monthly"), 250.0);
     assert_eq!(
@@ -946,12 +924,12 @@ fn configure_preserves_current_grant_until_next_real_boundary() {
 
     let mut off = state.configuration.clone();
     off.monthly = None;
-    state.configure(off, next).unwrap();
+    state.configure(write_from(&off), next).unwrap();
     assert_eq!(active_monthly_remaining(&state, next), 1_600.0);
 
     let mut on = state.configuration.clone();
     on.monthly = Some(monthly(400.0, "2026-10-21T00:00:00Z", 480));
-    state.configure(on, next).unwrap();
+    state.configure(write_from(&on), next).unwrap();
     state.advance(next).unwrap();
     assert_eq!(active_monthly_remaining(&state, next), 1_600.0);
     assert_eq!(

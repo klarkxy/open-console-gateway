@@ -124,12 +124,23 @@ async fn platform_refresh_fallback_stream_and_stale_price_end_to_end() {
             .unwrap();
         assert_eq!(link["snapshot"]["stale"], false, "{link}");
         assert!(
-            link["snapshot"]["prices"]
+            link["snapshot"]["models"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|price| price["model"] == "platform-e2e-model"
-                    && price["unavailableReason"].is_null()),
+                .any(|model| model["id"] == "platform-e2e-model"),
+            "{link}"
+        );
+        assert!(
+            link["snapshot"]["quotas"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|quota| quota["kind"] == "key_limit"),
+            "{link}"
+        );
+        assert!(
+            link["snapshot"]["prices"].as_array().unwrap().is_empty(),
             "{link}"
         );
         keys.push(key_id);
@@ -158,11 +169,13 @@ async fn platform_refresh_fallback_stream_and_stale_price_end_to_end() {
     );
     let rows = logs["items"].as_array().expect("forward log items");
     let successful = rows.iter().find(|l| l["accountId"] == keys[1]).unwrap();
-    assert_eq!(successful["nativeCostCurrency"], "USD", "{successful}");
-    assert!(
-        (successful["nativeCostValue"].as_f64().unwrap() - 0.00024).abs() < 1e-12,
-        "{successful}"
-    );
+    assert!(successful["nativeCostCurrency"].is_null(), "{successful}");
+    assert!(successful["nativeCostValue"].is_null(), "{successful}");
+    assert!(successful["nativeCostUnit"].is_null(), "{successful}");
+    assert!(successful["cost"].is_null(), "{successful}");
+    assert_eq!(successful["costState"], json!("unknown"), "{successful}");
+    assert_eq!(successful["promptTokens"], json!(10), "{successful}");
+    assert_eq!(successful["completionTokens"], json!(5), "{successful}");
     assert!(successful["rawCostUsd"].is_null() && successful["quotaDebit"].is_null());
     mock.fail_prices.store(true, Ordering::SeqCst);
     let (_, stale) = send(
@@ -178,8 +191,25 @@ async fn platform_refresh_fallback_stream_and_stale_price_end_to_end() {
         .iter()
         .find(|l| l["accountId"] == keys[1])
         .unwrap();
-    assert_eq!(link["snapshot"]["stale"], true);
-    assert!(!link["snapshot"]["prices"].as_array().unwrap().is_empty());
+    assert_eq!(link["snapshot"]["stale"], false, "{link}");
+    assert!(
+        link["snapshot"]["prices"].as_array().unwrap().is_empty(),
+        "{link}"
+    );
+    assert!(
+        link["snapshot"]["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|model| model["id"] == "platform-e2e-model"),
+        "{link}"
+    );
+    let calls = mock.calls.lock().unwrap();
+    assert!(
+        calls.iter().all(|(path, _)| path != "/api/pricing"),
+        "{calls:?}"
+    );
+    drop(calls);
     server.abort();
 }
 

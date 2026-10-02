@@ -49,16 +49,13 @@ pub(super) async fn get_application_models(
     State(state): State<CoreState>,
 ) -> Json<ApplicationModels> {
     let _settings_update = state.settings_update.lock();
-    let pricing = state.pricing_snapshot();
-    Json(application_models_from_pricing_snapshot(&state, &pricing))
+    Json(application_models_from_state(&state))
 }
 
-fn application_models_from_pricing_snapshot(
-    state: &CoreState,
-    pricing: &crate::kernel::pricing::PricingSnapshot,
-) -> ApplicationModels {
+fn application_models_from_state(state: &CoreState) -> ApplicationModels {
+    let pricing = state.pricing_snapshot();
     ApplicationModels {
-        models: observability::application_models(pricing, Some(&state.provider_contracts())),
+        models: observability::application_models(Some(&state.provider_contracts())),
         revision: state.settings_revision(),
         process_generation: state.process_generation(),
         pricing_revision: pricing.revision.clone(),
@@ -311,7 +308,7 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn application_models_keeps_revision_and_models_on_the_captured_pricing_snapshot() {
+    fn application_models_keep_the_loaded_revision_when_activation_is_inert() {
         let dir = std::env::temp_dir().join(format!(
             "ocg-v3-observability-pricing-snapshot-{}",
             uuid::Uuid::new_v4()
@@ -323,8 +320,7 @@ mod tests {
         let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
 
         let captured = state.pricing_snapshot();
-        let expected_models =
-            observability::application_models(&captured, Some(&state.provider_contracts()));
+        let expected_models = observability::application_models(Some(&state.provider_contracts()));
         let mut concurrent = captured.as_ref().clone();
         concurrent
             .models
@@ -333,10 +329,10 @@ mod tests {
         concurrent.activated_at = "2099-01-01T00:00:00Z".into();
         state.activate_pricing_snapshot(concurrent).unwrap();
 
-        let response = application_models_from_pricing_snapshot(&state, &captured);
+        let response = application_models_from_state(&state);
         assert_eq!(response.pricing_revision, captured.revision);
         assert_eq!(response.models, expected_models);
-        assert_ne!(response.pricing_revision, state.pricing_snapshot().revision);
+        assert_eq!(response.pricing_revision, state.pricing_snapshot().revision);
 
         drop(state);
         let _ = std::fs::remove_dir_all(dir);

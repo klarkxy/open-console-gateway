@@ -1,8 +1,6 @@
 //! Public financial endpoints: fixed source, selected Key, CAS and old evidence retention.
 use chrono::{DateTime, Duration, Utc};
-use ocg_core::official_api::{
-    BALANCE_URL, DEEPSEEK_PRICING_URL, ZHIPU_PRICING_URL, install_official_api_endpoint_for_test,
-};
+use ocg_core::official_api::{BALANCE_URL, install_official_api_endpoint_for_test};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
@@ -15,8 +13,7 @@ use fake_upstream::{FakeReply, start_fake_upstream, start_fake_upstream_with_del
 use harness::{V3Harness, start_loopback, start_public};
 const KEY: &str = "sk-official-test-only";
 const BALANCE: &str = r#"{"is_available":true,"balance_infos":[{"currency":"CNY","total_balance":"12.5","granted_balance":"2.5","topped_up_balance":"10"},{"currency":"USD","total_balance":"2","granted_balance":"0","topped_up_balance":"2"}]}"#;
-const DS_PRICES: &str = include_str!("fixtures/official-api/deepseek-pricing.html");
-const GLM_PRICES: &str = include_str!("fixtures/official-api/zhipu-pricing.md");
+
 fn now() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-09-17T01:00:00Z")
         .unwrap()
@@ -172,62 +169,31 @@ async fn official_api_balance_refresh_is_selected_key_only_and_retains_evidence_
 }
 
 #[tokio::test]
-async fn official_api_price_refresh_is_keyless_scoped_and_failure_keeps_previous_snapshot() {
-    for (kind, source, fixture, currency) in [
-        ("deepseek", DEEPSEEK_PRICING_URL, DS_PRICES, "USD"),
-        ("zhipu", ZHIPU_PRICING_URL, GLM_PRICES, "CNY"),
-    ] {
-        let h = start_loopback("official-prices").await;
-        clock(&h, now());
-        let (provider, id) = create(&h, kind).await;
-        let (base, calls, _stop) = start_fake_upstream(HashMap::from([(
-            "".into(),
-            VecDeque::from([
-                FakeReply {
-                    status: 200,
-                    body: fixture,
-                },
-                FakeReply {
-                    status: 200,
-                    body: "schema changed",
-                },
-            ]),
-        )]))
-        .await;
-        let _guard = install_official_api_endpoint_for_test(
-            h.state.process_generation(),
-            source,
-            &format!("{base}/pricing"),
-        )
-        .unwrap();
-        let path = format!("/providers/{provider}/official-api/pricing");
-        let (_, seed) = send(&h, Method::GET, &path, json!({})).await;
-        assert_eq!(seed["prices"]["rows"][0]["currency"], currency);
-        assert!(calls.lock().unwrap().is_empty());
-        let (status, fresh) = send(&h, Method::POST, &path, cas(&h)).await;
-        assert_eq!(status, StatusCode::OK, "{fresh}");
-        assert_safe(&fresh);
-        assert_eq!(fresh["prices"]["sourceUrl"], source);
-        assert_ne!(fresh["prices"]["revision"], seed["prices"]["revision"]);
-        assert!(calls.lock().unwrap()[0].authorization.is_none());
-        assert!(calls.lock().unwrap()[0].cookie.is_none());
-        let (status, failed) = send(&h, Method::POST, &path, cas(&h)).await;
-        assert_eq!(status, StatusCode::BAD_GATEWAY, "{failed}");
-        let (_, persisted) = send(&h, Method::GET, &path, json!({})).await;
-        assert_eq!(persisted["prices"], fresh["prices"]);
-        if kind == "zhipu" {
-            let (status, body) = send(
-                &h,
-                Method::POST,
-                &format!("/accounts/{id}/official-api/balance"),
-                cas(&h),
-            )
-            .await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-            assert_eq!(calls.lock().unwrap().len(), 2);
+async fn official_api_pricing_routes_are_unmatched() {
+    let h = start_loopback("official-prices-retired").await;
+    for provider in ["deepseek", "zhipu"] {
+        for method in [Method::GET, Method::POST] {
+            let response = h
+                .client
+                .request(
+                    method.clone(),
+                    format!(
+                        "http://127.0.0.1:{}/dashboard/api/v4/providers/{provider}/official-api/pricing",
+                        h.handle.port
+                    ),
+                )
+                .json(&cas(&h))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{method} {provider}"
+            );
         }
-        h.stop();
     }
+    h.stop();
 }
 
 #[tokio::test]
@@ -345,12 +311,26 @@ async fn official_api_financial_routes_require_dashboard_session() {
     for (method, path) in [
         (Method::GET, "/accounts/id/official-api"),
         (Method::POST, "/accounts/id/official-api/balance"),
-        (Method::GET, "/providers/id/official-api/pricing"),
-        (Method::POST, "/providers/id/official-api/pricing"),
     ] {
         let (status, body) = send(&h, method, path, cas(&h)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
         assert_safe(&body);
+    }
+    for (method, path) in [
+        (Method::GET, "/providers/id/official-api/pricing"),
+        (Method::POST, "/providers/id/official-api/pricing"),
+    ] {
+        let response = h
+            .client
+            .request(
+                method.clone(),
+                format!("http://127.0.0.1:{}/dashboard/api/v4{path}", h.handle.port),
+            )
+            .json(&cas(&h))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
     }
     h.stop();
 }

@@ -34,7 +34,7 @@ rounded:
 
 A calm local operations workspace, not a promotional landing page or a chat clone. The visual reference is the official MoonshotAI Kimi Web UI before its source migration, not a community desktop fork. Keep Vue 3, Naive UI, Pinia, Tauri, OCG branding, and all existing service contracts.
 
-This file is the current **appearance authority**. The previous specification is retained byte-for-byte in [DESIGN.product.md](DESIGN.product.md) so its detailed account, Provider, catalog, Key, CPA, pricing and routing interaction requirements are not lost. Those product requirements remain in effect; its old palette, pure-black/tint requirements, typography, decorative hero and layout styling are superseded here. Treat working source as authoritative where an old description has drifted.
+This file is the current **appearance authority**. [DESIGN.product.md](DESIGN.product.md) preserves the account, Provider, catalog, Key, CPA, and routing requirements as updated for pricing retirement. Its old palette, pure-black/tint requirements, typography, decorative hero and layout styling are superseded here. Treat working source as authoritative where an old description has drifted.
 
 Reference provenance, implementation map and regression checklist: [English](docs/maintainer/ui-design.md) / [简体中文](docs/maintainer/ui-design.zh-CN.md).
 
@@ -78,7 +78,7 @@ Icon utilities retain accessible names and tooltips. Commit and destructive acti
 - Keep Provider/Plan/Custom API/CPA ownership, static adapters, catalog refresh and routing behavior unchanged.
 - Use semantic tokens, shared dimensions and component overrides rather than another trailing CSS override layer.
 - Keep keyboard focus, reduced motion and native input behavior. Do not remount pages to change appearance.
-- Do not automatically refresh upstream catalogs/pricing, probe accounts or check releases as part of a visual change.
+- Do not automatically refresh upstream catalogs, probe accounts, or check releases as part of a visual change.
 
 ## Responsive
 

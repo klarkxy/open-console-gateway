@@ -26,7 +26,7 @@
         :aria-label="t('账号路由')"
         :placeholder="t('加载中…')"
         :disabled="disabled"
-        :loading="saving || settingsStore.loading"
+        :loading="saving"
         :consistent-menu-width="false"
         size="small"
         @update:value="save({ routing_mode: $event })"
@@ -74,6 +74,7 @@ import { computed, ref } from "vue";
 import { NAlert, NButton, NIcon, NSelect, NSwitch, NTooltip, useMessage } from "naive-ui";
 import { QuestionCircleOutlined } from "@vicons/antd";
 import { isRevisionConflict, type AppConfig, type RoutingMode } from "../api/dashboard.ts";
+import { dashboardErrorDetail } from "../utils/errors.ts";
 import { ROUTING_MODE_KEYS, ROUTING_MODE_DESCRIPTION_KEYS } from "../domain/routing-explain.ts";
 import { t } from "../i18n/index.ts";
 import { useSettingsStore } from "../stores/settings.ts";
@@ -83,7 +84,7 @@ const message = useMessage();
 const saving = ref(false);
 const routingHelpFocused = ref(false);
 const stickyHelpFocused = ref(false);
-const disabled = computed(() => saving.value || settingsStore.loading || !settingsStore.settings || !!settingsStore.error);
+const disabled = computed(() => saving.value || !settingsStore.settings);
 const routingOptions = computed(() => (Object.keys(ROUTING_MODE_KEYS) as RoutingMode[]).map((value) => ({
   value, label: t(ROUTING_MODE_KEYS[value]),
 })));
@@ -98,13 +99,14 @@ async function save(update: Partial<Pick<AppConfig, "routing_mode" | "conversati
   if (Object.entries(update).every(([key, value]) => current[key as keyof AppConfig] === value)) return;
   saving.value = true;
   try {
-    await settingsStore.putPresented({ ...current, ...update });
+    await settingsStore.patchPresented(update);
     message.success(t("设置已保存；运行时路由状态已重置"));
   } catch (error) {
     if (isRevisionConflict(error)) {
       message.warning(t("状态已变化，请刷新后重试。"));
     } else {
-      message.error(t("保存失败：{error}", { error: String(error) }));
+      const detail = error instanceof Error ? dashboardErrorDetail(error) : "";
+      message.error(t("保存失败：{error}", { error: detail }));
     }
   } finally {
     saving.value = false;

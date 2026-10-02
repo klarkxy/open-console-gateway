@@ -307,6 +307,22 @@ pub trait UsageSyncHost: Clone + Send + Sync + 'static {
     where
         F: FnOnce(&Self::Store) -> R;
 
+    /// Record that a reconciler commit changed rows the published request
+    /// preparation aggregate reads.
+    ///
+    /// Official Go usage reconciliation rewrites
+    /// `credentials.quota_recovery_json`, which `RoutingSnapshot` loads: a
+    /// refresh that lands without this leaves every later request preparing
+    /// against the pre-refresh recovery state until some unrelated writer
+    /// happens to advance the revision. Hosts that publish a preparation
+    /// aggregate map this to their revision counter, which is all the contract
+    /// needs — the next reader detects the drift and rebuilds.
+    ///
+    /// Deliberately not "republish": `with_authorized_sync_store` only holds
+    /// `settings_update` for the guarded (`ControlRevision`) variant, so a
+    /// publish is not available to every caller of the commit path this backs.
+    fn note_preparation_rows_changed(&self);
+
     /// Runs a persistence operation under the caller-owned commit guard.
     /// Hosts that support guarded commits override this method and keep the
     /// authorization check atomic with the store operation. The default keeps
@@ -489,16 +505,11 @@ pub fn manual_next_allowed_at(
 }
 
 pub fn max_go_usage_percent(usage: &UsageWindow, limits: &PricingLimits) -> f64 {
-    let pct = |cost: f64, limit: f64| {
-        if limit <= 0.0 {
-            0.0
-        } else {
-            ((cost / limit) * 100.0).clamp(0.0, 100.0)
-        }
-    };
-    pct(usage.window_5h, limits.window_5h)
-        .max(pct(usage.window_week, limits.window_week))
-        .max(pct(usage.window_month, limits.window_month))
+    let _ = limits;
+    [usage.window_5h, usage.window_week, usage.window_month]
+        .into_iter()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .fold(0.0, f64::max)
 }
 
 pub fn account_is_auto_sync_candidate(enabled: bool, setup_ready: bool, key_present: bool) -> bool {
@@ -1140,7 +1151,7 @@ async fn execute_official_usage_refresh(
                 Ok(usage)
             })
             .map_err(|_| commit_authorization_conflict())?;
-        match committed {
+        let usage = match committed {
             Ok(Some(usage)) => usage,
             Ok(None) => {
                 record_current_attempt_failure(
@@ -1164,7 +1175,13 @@ async fn execute_official_usage_refresh(
                 )?;
                 return Err(OfficialUsageRefreshError::Internal(error.to_string()));
             }
-        }
+        };
+        // The commit above rewrote `credentials.quota_recovery_json`, which the
+        // published preparation aggregate reads. Only a landed commit is
+        // announced: `None` means the account or its key changed underneath the
+        // request and nothing was written.
+        state.note_preparation_rows_changed();
+        usage
     };
 
     Ok(OfficialUsageRefreshSuccess {

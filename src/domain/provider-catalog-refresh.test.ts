@@ -29,7 +29,6 @@ function contracts(providerId: string, supported: boolean): ProviderContractsRes
         refresh_supported: supported,
       },
       models: [],
-      pricing: { availability: "available" },
       usage: { availability: "available" },
       card: {
         fetch_zen_models: false,

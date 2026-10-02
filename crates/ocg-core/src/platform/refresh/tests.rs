@@ -111,6 +111,40 @@ fn failed_component_partial_rows_do_not_replace_the_last_complete_component() {
 }
 
 #[test]
+fn empty_incoming_prices_keep_the_stored_sheet() {
+    let price = PlatformPrice {
+        model: "stored-model".into(),
+        group_id: Some("first".into()),
+        currency: "USD".into(),
+        input: Some(1e-6),
+        output: Some(2e-6),
+        cache_read: None,
+        cache_write: None,
+        source: "new_api.pricing".into(),
+        official_reference: false,
+        unavailable_reason: None,
+        valid_until: 50,
+    };
+    let old = PlatformSnapshot {
+        observed_at: 1,
+        prices: vec![price],
+        ..Default::default()
+    };
+    let new = PlatformSnapshot {
+        observed_at: 2,
+        quotas: vec![quota("new_api.token_usage", 0.002)],
+        ..Default::default()
+    };
+    let saved = merge_snapshot(Some(&old), &new);
+    assert_eq!(saved.observed_at, 2);
+    assert!(!saved.stale);
+    assert_eq!(saved.prices.len(), 1);
+    assert_eq!(saved.prices[0].model, "stored-model");
+    assert_eq!(saved.prices[0].valid_until, 50);
+    assert_eq!(saved.quotas[0].remaining, Some(0.002));
+}
+
+#[test]
 fn retained_price_expiry_is_never_renewed() {
     let price = PlatformPrice {
         model: "model".into(),

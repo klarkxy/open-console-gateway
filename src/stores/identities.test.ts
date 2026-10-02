@@ -154,7 +154,7 @@ test("identities store applies identities and the GET pair atomically and ignore
   assert.deepEqual(store.snapshotExpectation, { expectedRevision: 8, processGeneration: 99 });
   assert.equal(store.byAccountId.get("acc-b")?.legacy.id, "acc-b");
 
-  control.sync({ revision: 12, processGeneration: 99, pricingRevision: "p9" });
+  control.sync({ revision: 12, processGeneration: 99 });
   assert.deepEqual(store.snapshotExpectation, { expectedRevision: 8, processGeneration: 99 });
   assert.equal(control.revision, 12);
 

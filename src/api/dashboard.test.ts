@@ -69,3 +69,19 @@ test("writes for different accounts are not busy: they serialize on fresh CAS to
   assert.deepEqual(requests.map((req) => req.method), ["PATCH", "POST"]);
   assert.deepEqual(requests[1]?.body, { expectedRevision: 8, processGeneration: 99 });
 });
+
+test("a single shared settings patch sends that field and the dispatch CAS only", async () => {
+  setupControlPlane(9, 100);
+  const requests = installFetchMock(({ url, method }) => {
+    assert.equal(method, "PUT");
+    assert.match(url, /\/dashboard\/api\/v4\/settings$/);
+    return { revision: 10, processGeneration: 100 };
+  });
+  await dashboardApi.patchSettings({ conversation_sticky: false });
+  assert.equal(requests.length, 1);
+  assert.deepEqual(requests[0]?.body, {
+    conversationSticky: false,
+    expectedRevision: 9,
+    processGeneration: 100,
+  });
+});

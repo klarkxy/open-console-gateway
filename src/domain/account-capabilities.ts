@@ -25,7 +25,10 @@ export interface AccountCapabilities {
   externalIntegration: boolean;
   /** Destination needs no credential and permits only one account. */
   keylessSingleton: boolean;
-  /** Usage cannot display until a billing tier is chosen (Ollama Cloud). */
+  /**
+   * Copied from destination capabilities. A true value is metadata, not a
+   * reason to hide an observed or unknown percent.
+   */
   billingTierRequired: boolean;
   /** Which vendor site the overflow menu may open, if any. */
   consoleLink: "opencode" | "ollama" | null;
@@ -62,19 +65,6 @@ export function isLegacyGoFallbackPlan(
   catalog: readonly ProviderCatalogEntry[] | null | undefined,
 ): boolean {
   return catalog == null && plan.legacy && plan.provider_id === DEFAULT_PROVIDER_ID;
-}
-
-/**
- * True for the OpenCode Go plan whose pricing revision may come from the
- * legacy Go pricing snapshot even after a later catalog load succeeds (the
- * snapshot is not cleared on catalog success). Kept separate from the
- * catalog-failed fallback so both truth tables stay exactly as before.
- */
-export function usesLegacyGoPricingSnapshot(
-  plan: Pick<ProviderSurface, "provider_id">,
-): boolean {
-  // RFC stage 4: move to catalog/connection capability
-  return plan.provider_id === DEFAULT_PROVIDER_ID;
 }
 
 /** The single capability input consumed by both V4 and the legacy boundary. */
@@ -139,7 +129,6 @@ function legacyCapabilitySource(
       expiry_cadence: monthly ? "monthly" : null,
       windows: [{ kind: zen ? "free" : "month" }],
       manual_calibration: false,
-      pricing_source: "unpriced",
       usage_source: "none",
     } : null,
   };

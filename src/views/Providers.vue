@@ -185,6 +185,7 @@
               :title="t('连接测试失败：{error}', { error: probeError })"
             />
             <ProviderModelMatrix
+              ref="modelMatrix"
               :key="activeScope.key"
               :scope="activeScope"
               :target-model="targetModel"
@@ -418,6 +419,7 @@
                   :title="t('连接测试失败：{error}', { error: probeError })"
                 />
                 <ProviderModelMatrix
+                  ref="modelMatrix"
                   :key="activeScope.key"
                   :scope="activeScope"
                   :target-model="targetModel"
@@ -449,11 +451,6 @@
               <div v-else-if="definitionLoading && !selectedDefinition && !selectedDestination" class="providers-state" role="status">
                 <n-spin size="small" />
               </div>
-            </n-tab-pane>
-
-            <n-tab-pane v-if="detailTabs.includes('pricing')" name="pricing" :tab="t('模型价格')">
-              <OfficialApiPanel v-if="selectedEntry.model_source === 'official_api_preset'" :provider-id="selectedEntry.provider_id" />
-              <PricingCatalog v-else :provider-id="selectedEntry.provider_id" />
             </n-tab-pane>
 
             <n-tab-pane v-if="detailTabs.includes('settings')" name="settings" :tab="t('设置')">
@@ -683,8 +680,6 @@ import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
 // Detail panes and modals load on demand instead of inflating the view chunk.
 const ProviderModelMatrix = defineAsyncComponent(() => import("../components/ProviderModelMatrix.vue"));
 const ProviderSettingsPanel = defineAsyncComponent(() => import("../components/ProviderSettingsPanel.vue"));
-const PricingCatalog = defineAsyncComponent(() => import("../components/PricingCatalog.vue"));
-const OfficialApiPanel = defineAsyncComponent(() => import("../components/OfficialApiPanel.vue"));
 const DynamicProviderModal = defineAsyncComponent(() => import("../components/DynamicProviderModal.vue"));
 const DestinationEditModal = defineAsyncComponent(() => import("../components/DestinationEditModal.vue"));
 const AccountFormModal = defineAsyncComponent(() => import("../components/AccountFormModal.vue"));
@@ -1139,6 +1134,10 @@ function currentUrlIsProvidersView(): boolean {
 const targetModel = computed(() => currentUrlIsProvidersView()
   ? readProviderPageQuery(routeQuerySearch("providers", route.query)).model : null);
 
+const modelMatrix = ref<InstanceType<typeof ProviderModelMatrix> | null>(null);
+/** One-shot deep-link target: open the capabilities editor for this model. */
+const pendingCapabilitiesOpen = ref<string | null>(null);
+
 function selectionProjectionReady(): boolean {
   return providersSelectionProjectionReady({
     destinationsLoaded: destinationsStore.loaded,
@@ -1223,6 +1222,8 @@ function applyFromQuery(
   }
   if (action === "defer") return action;
   applySelection(resolved, fellBackNotice);
+  // Capture the one-shot capabilities target before writeUrl strips it.
+  if (query.capabilities) pendingCapabilitiesOpen.value = query.capabilities;
   const candidate = query.model ? "models" : query.tab ?? activeTab.value;
   activeTab.value = candidate;
   writeUrl();
@@ -1650,6 +1651,7 @@ async function deleteSelected(): Promise<void> {
 async function removeCatalogModels(payload: { modelIds: string[] }) {
   const scope = activeScope.value;
   if (!scope || catalogRemoving.value || payload.modelIds.length === 0) return;
+  const session = providerViewSession;
   catalogRemoving.value = true;
   matrixError.value = "";
   try {
@@ -1659,25 +1661,56 @@ async function removeCatalogModels(payload: { modelIds: string[] }) {
         removeModels: payload.modelIds,
       });
     } else {
+      // The store commits the V4 removal receipt in place; the confirmed
+      // delete is complete here even if the revalidation below fails.
       await providersStore.removeContractCatalogModels(
         scope.scope_kind,
         scope.scope_id,
         payload.modelIds,
       );
     }
+    if (session !== providerViewSession) return;
     actionLive.value = t("已从目录删除模型");
     message.success(t("已从目录删除模型"));
+    void revalidateAfterCatalogRemoval(session);
   } catch (error) {
+    if (session !== providerViewSession) return;
     if (error instanceof DashboardRequestError && error.status === 409) {
-      await loadAll({ retain: true });
-      actionLive.value = t("供应商设置已在其他位置更新并重新加载，重试");
-      message.warning(t("供应商设置已在其他位置更新并重新加载，重试"));
+      const loaded = await loadAll({ retain: true });
+      if (session !== providerViewSession) return;
+      if (loaded.ok) {
+        actionLive.value = t("供应商设置已在其他位置更新并重新加载，重试");
+        message.warning(actionLive.value);
+      } else {
+        // The conflict stands and the recovery read failed or was superseded:
+        // keep the read error visible and never claim the page reloaded.
+        if (loaded.error) matrixError.value = loaded.error;
+        actionLive.value = t("数据已更新，检查后再保存；不会自动重试。");
+        message.warning(actionLive.value);
+      }
     } else {
       matrixError.value = dashboardErrorDetail(error);
       message.error(t("删除模型失败：{error}", { error: matrixError.value }));
     }
   } finally {
-    catalogRemoving.value = false;
+    if (session === providerViewSession) catalogRemoving.value = false;
+  }
+}
+
+async function revalidateAfterCatalogRemoval(session: number): Promise<void> {
+  // Deferred read-only revalidation: the receipt's in-place commit is already
+  // rendered, these reads only refine the contracts and destination/catalog
+  // projections. A failure is a standalone warning and never replays the
+  // removal.
+  const results = await Promise.allSettled([
+    providersStore.loadContracts(),
+    providersStore.loadCatalog(),
+    destinationsStore.load(),
+  ]);
+  if (session !== providerViewSession) return;
+  const failed = results.find((result) => result.status === "rejected");
+  if (failed?.status === "rejected") {
+    message.warning(t("已删除，但列表刷新失败：{error}", { error: dashboardErrorDetail(failed.reason) }));
   }
 }
 
@@ -2065,21 +2098,18 @@ async function runModelProbe(payload: { modelId: string }) {
         scope_id: scope.scope_id,
       }, response.contract);
     }
-    const loaded = await loadAll({ retain: true });
-    if (!ownsProbe()) return;
-    if (!loaded.ok) {
-      probeError.value = loaded.error;
-      message.error(t("连接测试失败：{error}", { error: probeError.value }));
-      return;
-    }
+    // The probe receipt alone decides the reported outcome. The projection
+    // revalidation is independent: a failed page read never rewrites a
+    // successful probe into a failure nor the other way around.
     const failures = response.results.filter((result) => !result.success);
     if (failures.length > 0) {
       actionLive.value = t("连接测试失败");
       message.warning(actionLive.value);
-      return;
+    } else {
+      actionLive.value = t("连接测试成功");
+      message.success(t("连接测试成功"));
     }
-    actionLive.value = t("连接测试成功");
-    message.success(t("连接测试成功"));
+    void revalidateAfterProbe(sequence);
   } catch (error) {
     if (!ownsProbe()) return;
     probeError.value = dashboardErrorDetail(error);
@@ -2099,6 +2129,19 @@ async function runModelProbe(payload: { modelId: string }) {
     const next = new Set(probingModels.value);
     next.delete(payload.modelId);
     probingModels.value = next;
+  }
+}
+
+async function revalidateAfterProbe(sequence: number): Promise<void> {
+  // The receipt already reported the outcome; this only re-syncs page
+  // projections. A concurrent load revalidates the same resources, so an
+  // early return from loadAll is not a failure and earns no warning, and a
+  // failed read never touches probeError or the probe receipt.
+  const alreadyLoading = loading.value;
+  const loaded = await loadAll({ retain: true });
+  if (sequence !== probeSequence) return;
+  if (!loaded.ok && !alreadyLoading) {
+    message.warning(t("已保存，但列表刷新失败。手动刷新，不要再次提交。"));
   }
 }
 
@@ -2186,7 +2229,12 @@ function probeResultUrl(error: string | null): string {
 // the Accounts add deep link) is not ours to apply. Same-view query changes
 // (history back/forward) arrive here instead of onActivated.
 watch(() => route.query, () => {
-  if (!currentUrlIsProvidersView()) return;
+  if (!currentUrlIsProvidersView()) {
+    // A pending one-shot target dies with its route instead of firing on a
+    // later unrelated visit.
+    pendingCapabilitiesOpen.value = null;
+    return;
+  }
   freshRequiredLoadSucceeded = false;
   const action = applyFromQuery();
   // Same-view history to an unresolved target has no onActivated; refresh so
@@ -2199,6 +2247,15 @@ watch(() => route.query, () => {
 watch([selectedConnectionId, selectedDestinationId], () => {
   catalogRefreshError.value = "";
   if (!addKeyBusy.value) showAddKeyModal.value = false;
+});
+
+// The capabilities deep link opens the editor once the selected scope's
+// matrix has mounted; applyFromQuery captured the one-shot parameter and
+// writeUrl has since stripped it from the URL.
+watch([pendingCapabilitiesOpen, () => activeScope.value?.key, modelMatrix], ([model]) => {
+  if (!model || !activeScope.value || !modelMatrix.value) return;
+  pendingCapabilitiesOpen.value = null;
+  modelMatrix.value.openMetadataEditor(model);
 });
 
 watch(selectedConnection, (connection) => {

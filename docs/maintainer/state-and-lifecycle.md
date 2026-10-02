@@ -13,7 +13,11 @@ Never acquire in reverse. Do not hold the routing lock across DB or
 network I/O. Async gates: `settings_host_effects` (persist → listener
 rebind → compensation) is acquired before `gateway_lifecycle` when a
 settings write also rebinds. Never hold a `parking_lot` lock across those
-awaits.
+awaits. Startup does not seed, repair, or activate price snapshots and does not
+start a price-fetch task. Opening the database does not settle historical
+credit receipts. A billing read reports active `pendingRequests` as 0. The stored receipt stays exact. Explicit calibration is not blocked by that receipt and does not delete it. The published `GatewayPreparationSnapshot` has no price
+field. Lock ordinal (6) `pricing` remains the in-memory pricing snapshot
+lock on `CoreStateInner`.
 
 The authoritative table for access keys is `access_keys`. Two credential
 tiers share that table (current schema; see [storage migration](storage-migration.md)) and one auth snapshot:
@@ -160,11 +164,11 @@ and profile are removed.
 
 `crates/ocg-core/src/db.rs` defines the SQLite schema, migrations, and
 queries. The current schema version and its history live in
-[storage-migration.md](storage-migration.md). The current schema is v65.
+[storage-migration.md](storage-migration.md). The current schema is v66.
 v60 additively stores the
 local per-Key recovery runtime column `credentials.quota_recovery_json`;
 portable export excludes it. Restart retains wait and backoff, not the
-probe lease. v65 additively stores nullable
+probe lease. v66 additively stores nullable
 `credentials.goat_plan_cooldowns_json`: a closed `five_hours` / `week` /
 `month` map of absolute UTC deadlines for the receiving GOAT Key. Existing
 rows backfill NULL. Ordinary cooldown columns stay ordinary. Each window
@@ -173,7 +177,7 @@ is eligible again; expiry does not force a sticky reset. The column
 survives restart. A longer `Retry-After` on that response stays
 process-local: it is not in the column and is not exported. Portable
 payload V12 carries the map separately from ordinary cooldowns; the
-envelope stays version 1. Schema 65 and payload V12 are internal versions,
+envelope stays version 1. Schema 66 and payload V12 are internal versions,
 not the product release version. Pool joins, shared ordinary cooldown
 writes, and a sibling reset do not copy or clear the map. Manual cooldown
 reset of the selected Key clears that Key's map and fences an older
