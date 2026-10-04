@@ -86,11 +86,35 @@ async function writePluginRuntime(root) {
           globalThis.__ocgProfile = { api: profile.api ?? null, baseURL: profile.baseURL };
           return profile.piProvider.models.map((model) => ({ provider, id: model.id, name: model.name, api: model.api, inputModalities: model.input }));
         }
+        modelInfo(provider, model) {
+          const profile = this.config.profiles().get(provider);
+          const resolved = profile.piProvider.models.find((item) => item.id === model);
+          const levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"].filter((level) => {
+            if (!resolved?.reasoning) return false;
+            const mapped = resolved.thinkingLevelMap?.[level];
+            if (mapped === null) return false;
+            if (level === "xhigh" || level === "max") return mapped !== undefined;
+            return true;
+          });
+          const reasoning = resolved?.reasoning ? {
+            efforts: levels.map((level) => ({ id: level, name: level.charAt(0).toUpperCase() + level.slice(1) })),
+          } : null;
+          globalThis.__ocgPiModelInfo ??= {};
+          globalThis.__ocgPiModelInfo[model] = reasoning;
+          return {
+            provider,
+            id: model,
+            name: resolved?.name ?? model,
+            inputModalities: resolved?.input ? [...resolved.input] : ["text"],
+            ...(resolved?.contextWindow ? { context: { contextWindow: resolved.contextWindow } } : {}),
+            ...(reasoning ? { reasoning } : {}),
+          };
+        }
         async resolveModel(provider, model) {
           const profile = this.config.profiles().get(provider);
           const failure = profile.modelErrors.get(model);
           if (failure !== undefined) throw new Error(failure);
-          return { provider, id: model, name: model };
+          return this.modelInfo(provider, model);
         }
         async prepareCall(provider, model) { return { model: await this.resolveModel(provider, model) }; }
       }
@@ -205,6 +229,16 @@ test("generated DSH plugin dispatches v2 protocols and does not send rejected mo
             reasoningEfforts: { high: "high" },
           },
         },
+        {
+          id: "minimax-m3.1",
+          ocg: {
+            schemaVersion: 2,
+            protocols: { preferred: "messages", supported: ["messages"] },
+            inputModalities: ["text"],
+            reasoning: true,
+            contextWindow: 204800,
+          },
+        },
       ],
     };
     const result = await runEntry(
@@ -217,6 +251,7 @@ test("generated DSH plugin dispatches v2 protocols and does not send rejected mo
         const requests = [];
         globalThis.__ocgSent = [];
         globalThis.__ocgProviders = [];
+        globalThis.__ocgPiModelInfo = {};
         globalThis.fetch = async (url) => {
           requests.push(String(url));
           return { ok: true, status: 200, async json() { return ${JSON.stringify(catalog)}; } };
@@ -243,6 +278,9 @@ test("generated DSH plugin dispatches v2 protocols and does not send rejected mo
           };
           try {
             routes[provider].prepared = await adapter.prepareCall(provider, "model-a");
+            routes[provider].responsesModel = await adapter.prepareCall(provider, "org/model-b");
+            routes[provider].mimo = await adapter.prepareCall(provider, "mimo-v2.6-flash");
+            routes[provider].minimax = await adapter.prepareCall(provider, "minimax-m3.1");
           } catch (error) {
             prepareErrors.modelA = error instanceof Error ? error.message : String(error);
           }
@@ -293,6 +331,7 @@ test("generated DSH plugin dispatches v2 protocols and does not send rejected mo
           messagesLevel,
           sent: globalThis.__ocgSent,
           requests,
+          piMenus: globalThis.__ocgPiModelInfo,
         }));
       `,
     );
@@ -313,13 +352,23 @@ test("generated DSH plugin dispatches v2 protocols and does not send rejected mo
     assert.ok(result.requests.every((url) => url.endsWith("/v1/models")));
     const models = result.routes.ocg.models;
     assert.deepEqual(models.map(({ id }) => id), [
-      "legacy-model", "schema-1", "model-a", "org/model-b", "mimo-v2.6-flash",
+      "legacy-model", "schema-1", "model-a", "org/model-b", "mimo-v2.6-flash", "minimax-m3.1",
     ]);
     assert.equal(models.find(({ id }) => id === "model-a").api, "openai-completions");
     assert.equal(models.find(({ id }) => id === "org/model-b").api, "openai-responses");
     assert.equal(models.find(({ id }) => id === "mimo-v2.6-flash").api, "anthropic-messages");
     assert.equal(models.find(({ id }) => id === "mimo-v2.6-flash").ocg.reasoning, true);
     assert.deepEqual(models.find(({ id }) => id === "mimo-v2.6-flash").ocg.reasoningEfforts, { high: "high" });
+    assert.deepEqual(result.piMenus["mimo-v2.6-flash"].efforts, []);
+    assert.deepEqual(result.piMenus["minimax-m3.1"].efforts, []);
+    assert.equal(Object.hasOwn(result.routes.ocg.mimo.model, "reasoning"), false);
+    assert.equal(result.routes.ocg.mimo.model.ocg.reasoning, true);
+    assert.deepEqual(result.routes.ocg.mimo.model.ocg.reasoningEfforts, { high: "high" });
+    assert.equal(Object.hasOwn(result.routes.ocg.minimax.model, "reasoning"), false);
+    assert.equal(result.routes.ocg.minimax.model.ocg.reasoning, true);
+    assert.equal(Object.hasOwn(result.routes.ocg.minimax.model.ocg, "reasoningEfforts"), false);
+    assert.deepEqual(result.piMenus["org/model-b"].efforts, [{ id: "high", name: "High" }]);
+    assert.deepEqual(result.routes.ocg.responsesModel.model.reasoning, result.piMenus["org/model-b"]);
     assert.deepEqual(models.find(({ id }) => id === "model-a").inputModalities, ["text"]);
     assert.equal(result.routes.ocg.prepared.model.ocg.status, "declared");
     assert.equal(result.routes.ocg.prepared.model.ocg.protocols.preferred, "chat_completions");

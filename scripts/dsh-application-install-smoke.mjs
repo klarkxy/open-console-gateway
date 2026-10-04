@@ -166,8 +166,15 @@ function assertWire(records) {
   assert.equal(JSON.stringify(plain[0].body.input).includes("portable-note"), false);
   assert.equal(JSON.stringify(plain[1].body.input).includes("portable-note"), true);
 
-  const messages = records.filter((record) => record.pathname === "/ocg/v1/messages");
+  const messages = records.filter((record) => record.pathname === "/ocg/v1/messages" && record.body?.model === "smoke-messages");
+  const minimaxMessages = records.filter((record) => record.pathname === "/ocg/v1/messages" && record.body?.model === "minimax-m3.1");
   assert.equal(messages.length, 2);
+  assert.equal(minimaxMessages.length, 2);
+  for (const record of minimaxMessages) {
+    assert.equal(Object.hasOwn(record.body, "thinking"), false, record.body.model);
+    assert.equal(Object.hasOwn(record.body, "output_config"), false, record.body.model);
+    assert.equal(Object.hasOwn(record.body, "reasoning_effort"), false, record.body.model);
+  }
   for (const record of messages) {
     assert.equal(record.search, "?beta=true");
     assert.equal(record.body.model, "smoke-messages");
@@ -187,6 +194,22 @@ function assertWire(records) {
   assert.equal(records.some((record) => record.pathname === "/ocg/v1/messages" && record.body?.model === "smoke-chat"), false);
 }
 
+function servedCatalog(generation) {
+  const payload = catalogPayload(generation);
+  payload.data.push({
+    id: "minimax-m3.1",
+    ocg: {
+      schemaVersion: 2,
+      contextWindow: 204800,
+      maxOutputTokens: 8192,
+      inputModalities: ["text"],
+      reasoning: true,
+      protocols: { preferred: "messages", supported: ["messages"] },
+    },
+  });
+  return payload;
+}
+
 function runnerSource(bin, installedIndex, flipUrl) {
   return `
     process.argv[1] = ${JSON.stringify(bin)};
@@ -201,9 +224,25 @@ function runnerSource(bin, installedIndex, flipUrl) {
       async set(ref, value) { stored = { ref, value }; },
       async resolve(ref) { return ref === stored?.ref ? { value: stored.value } : undefined; },
     };
-    const ctx = {
-      get(name) { return name === "credentials" ? credentials : undefined; },
-      llm: { registerAdapter(_providers, value) { adapter = value; } },
+    const { findPackageJSON } = await import("node:module");
+    const { dirname: pathDirname, join: pathJoin } = await import("node:path");
+    const { pathToFileURL: toFileUrl } = await import("node:url");
+    function loadDsh(name, entry) {
+      const manifest = findPackageJSON(name, toFileUrl(process.argv[1]).href);
+      if (!manifest) throw new Error("missing " + name);
+      return import(toFileUrl(pathJoin(pathDirname(manifest), entry)).href);
+    }
+    const [{ Context }, dshLlm] = await Promise.all([
+      loadDsh("@deepseek-ai/cordis", "lib/index.js"),
+      loadDsh("@deepseek-ai/dsh-llm", "lib/index.js"),
+    ]);
+    const ctx = new Context();
+    new dshLlm.LlmRuntime(ctx);
+    ctx.provide("credentials", credentials);
+    const registerAdapter = ctx.llm.registerAdapter.bind(ctx.llm);
+    ctx.llm.registerAdapter = (providers, value) => {
+      adapter = value;
+      return registerAdapter(providers, value);
     };
     function user(id, text) {
       return { id, role: "user", content: [{ type: "text", text }], source: { kind: "user" } };
@@ -279,12 +318,54 @@ function runnerSource(bin, installedIndex, flipUrl) {
     }
     const plugin = await import(${JSON.stringify(pathToFileURL(installedIndex).href)});
     await plugin.apply(ctx);
-    const listed = await adapter.listModels("ocg");
+    const listed = await ctx.llm.listModels("ocg");
+    const catalogRows = await adapter.listModels("ocg");
+    const gateIds = ["smoke-chat", "smoke-responses", "smoke-messages", "smoke-responses-plain", "minimax-m3.1"];
+    const resolved = {};
+    const resolveErrors = {};
+    for (const model of listed) {
+      try {
+        resolved[model.id] = await ctx.llm.resolveModelInfo("ocg", model.id);
+        await ctx.llm.prepareCall({ provider: "ocg", model: model.id });
+      } catch (error) {
+        resolveErrors[model.id] = { code: error?.code ?? null, message: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    let posts = 0;
+    const baseFetch = globalThis.fetch.bind(globalThis);
+    globalThis.fetch = async (input, init) => {
+      if ((init?.method ?? "GET") !== "GET") posts += 1;
+      return baseFetch(input, init);
+    };
+    async function undeclared(id) {
+      const before = posts;
+      try {
+        await ctx.llm.prepareCall({ provider: "ocg", model: id, reasoningEffort: "high" });
+        return { threw: false, code: null, posts: posts - before };
+      } catch (error) {
+        return {
+          threw: true,
+          code: error?.code ?? null,
+          message: error instanceof Error ? error.message : String(error),
+          posts: posts - before,
+        };
+      }
+    }
+    const undeclaredMinimax = await undeclared("minimax-m3.1");
+    const undeclaredMessages = await undeclared("smoke-messages");
+    function effortView(info) {
+      if (!info || !Object.hasOwn(info, "reasoning")) return null;
+      return {
+        efforts: info.reasoning.efforts.map((effort) => ({ id: effort.id, name: effort.name })),
+        defaultEffort: info.reasoning.defaultEffort ?? null,
+      };
+    }
     async function prepare(id) { return adapter.prepareCall("ocg", id); }
     const chatPrepared = await prepare("smoke-chat");
     const responsesPrepared = await prepare("smoke-responses");
     const messagesPrepared = await prepare("smoke-messages");
     const plainPrepared = await prepare("smoke-responses-plain");
+    const minimaxPrepared = await prepare("minimax-m3.1");
     async function turn(prepared, id, messages, reasoningEffort) {
       return collect(prepared.stream({
         provider: "ocg",
@@ -312,6 +393,12 @@ function runnerSource(bin, installedIndex, flipUrl) {
       user("u-msg", "use echo"),
       assistant("a-msg", "smoke-messages", messagesFirst),
       toolMessage(messagesFirst),
+    ]), "stop");
+    const minimaxFirst = expectKind("minimax tool", await turn(minimaxPrepared, "minimax-m3.1", [user("u-mini", "use echo")]), "tool-calls");
+    const minimaxSecond = expectKind("minimax final", await turn(minimaxPrepared, "minimax-m3.1", [
+      user("u-mini", "use echo"),
+      assistant("a-mini", "minimax-m3.1", minimaxFirst),
+      toolMessage(minimaxFirst),
     ]), "stop");
     const plain = expectKind("responses plain", await turn(plainPrepared, "smoke-responses-plain", [user("u-plain", "say smoke-ok")]), "stop");
     const malformed = await turn(chatPrepared, "smoke-chat", [
@@ -390,10 +477,31 @@ function runnerSource(bin, installedIndex, flipUrl) {
       storedRef: stored?.ref,
       storedValueMatches: stored?.value === ${JSON.stringify(secret)},
       ids: listed.map((model) => model.id),
+      catalogIds: catalogRows.map((model) => model.id),
+      gate: {
+        ids: gateIds.map((id) => ({
+          id,
+          menu: effortView(resolved[id]),
+          context: resolved[id]?.context?.contextWindow ?? null,
+          error: resolveErrors[id]?.code ?? null,
+        })),
+        legacy: resolveErrors["legacy-model"] ?? null,
+        chat: effortView(resolved["smoke-chat"]),
+        responses: effortView(resolved["smoke-responses"]),
+        messages: effortView(resolved["smoke-messages"]),
+        plain: effortView(resolved["smoke-responses-plain"]),
+        minimax: effortView(resolved["minimax-m3.1"]),
+        minimaxContext: resolved["minimax-m3.1"]?.context?.contextWindow ?? null,
+        undeclaredMinimax,
+        undeclaredMessages,
+      },
       chatContext: chatPrepared.model.context?.contextWindow ?? null,
       chatEfforts: chatPrepared.model.reasoning?.efforts?.map((effort) => effort.id) ?? null,
       messagesReasoning: messagesPrepared.model.ocg?.reasoning ?? null,
       messagesEfforts: messagesPrepared.model.reasoning?.efforts?.map((effort) => effort.id) ?? null,
+      minimaxCapability: minimaxPrepared.model.ocg?.reasoning ?? null,
+      minimaxDeclaresEfforts: Object.hasOwn(minimaxPrepared.model.ocg ?? {}, "reasoningEfforts"),
+      minimaxPublicReasoning: Object.hasOwn(minimaxPrepared.model, "reasoning"),
       messagesDeclaresEfforts: Object.hasOwn(messagesPrepared.model.ocg ?? {}, "reasoningEfforts"),
       messagesEffortMap: messagesPrepared.model.ocg?.reasoningEfforts ?? null,
       plainReasoning: plainPrepared.model.ocg?.reasoning ?? null,
@@ -402,6 +510,7 @@ function runnerSource(bin, installedIndex, flipUrl) {
         chat: [chatFirst.finishKind, chatSecond.finishKind, frozen.finishKind],
         responses: [responsesFirst.finishKind, responsesSecond.finishKind, plain.finishKind, plainNote.finishKind],
         messages: [messagesFirst.finishKind, messagesSecond.finishKind],
+        minimax: [minimaxFirst.finishKind, minimaxSecond.finishKind],
       },
       legacy,
       messagesLevel: outcome(messagesLevel),
@@ -454,7 +563,7 @@ async function main() {
     if (request.method === "GET" && url.pathname === "/ocg/v1/models") {
       record.generation = generation;
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify(catalogPayload(generation)));
+      response.end(JSON.stringify(servedCatalog(generation)));
       return;
     }
     if (request.method === "POST" && url.pathname === FLIP_PATH) {
@@ -526,16 +635,40 @@ async function main() {
     assert.equal(runtime.storedRef, "OCG_GATEWAY_KEY");
     assert.equal(runtime.storedValueMatches, true);
     assert.deepEqual(runtime.ids, [
-      "smoke-chat", "smoke-responses", "smoke-messages", "smoke-responses-plain", "legacy-model",
+      "smoke-chat", "smoke-responses", "smoke-messages", "smoke-responses-plain", "legacy-model", "minimax-m3.1",
     ]);
+    assert.deepEqual(runtime.catalogIds, runtime.ids);
+    const menu = [
+      { id: "low", name: "Low" },
+      { id: "high", name: "High" },
+      { id: "xhigh", name: "Xhigh" },
+    ];
+    assert.deepEqual(runtime.gate.chat, { efforts: menu, defaultEffort: null });
+    assert.deepEqual(runtime.gate.responses, { efforts: menu, defaultEffort: null });
+    assert.equal(runtime.gate.messages, null);
+    assert.equal(runtime.gate.plain, null);
+    assert.equal(runtime.gate.minimax, null);
+    assert.equal(runtime.gate.minimaxContext, 204800);
+    assert.equal(runtime.gate.legacy?.code, "INVALID_CONFIG");
+    assert.equal(runtime.gate.ids.some((row) => row.error === "INVALID_MODEL_REASONING"), false);
+    assert.equal(runtime.gate.undeclaredMinimax.threw, true);
+    assert.equal(runtime.gate.undeclaredMinimax.code, "UNSUPPORTED_REASONING_EFFORT");
+    assert.equal(runtime.gate.undeclaredMinimax.posts, 0);
+    assert.equal(runtime.gate.undeclaredMessages.threw, true);
+    assert.equal(runtime.gate.undeclaredMessages.code, "UNSUPPORTED_REASONING_EFFORT");
+    assert.equal(runtime.gate.undeclaredMessages.posts, 0);
     assert.equal(runtime.chatContext, 262144);
     assert.deepEqual(runtime.chatEfforts, ["low", "high", "xhigh"]);
     assert.equal(runtime.messagesReasoning, true);
     assert.equal(runtime.messagesDeclaresEfforts, true);
     assert.deepEqual(runtime.messagesEffortMap, EFFORTS);
-    assert.deepEqual(runtime.messagesEfforts, []);
+    assert.equal(runtime.messagesEfforts, null);
     assert.equal(runtime.plainReasoning, true);
-    assert.deepEqual(runtime.plainEfforts, []);
+    assert.equal(runtime.plainEfforts, null);
+    assert.equal(runtime.minimaxCapability, true);
+    assert.equal(runtime.minimaxDeclaresEfforts, false);
+    assert.equal(runtime.minimaxPublicReasoning, false);
+    assert.deepEqual(runtime.finishes.minimax, ["tool-calls", "stop"]);
     assert.equal(runtime.legacy.threw, true);
     assert.match(runtime.legacy.message, /schema/i);
     assert.equal(runtime.messagesLevel.code, "UNSUPPORTED_REASONING_EFFORT");
@@ -575,6 +708,9 @@ async function main() {
         messagesEfforts: runtime.messagesEfforts,
         plainReasoning: runtime.plainReasoning,
         plainEfforts: runtime.plainEfforts,
+        gate: runtime.gate,
+        minimaxCapability: runtime.minimaxCapability,
+        minimaxPublicReasoning: runtime.minimaxPublicReasoning,
         finishes: runtime.finishes,
         legacy: runtime.legacy,
         messagesLevel: runtime.messagesLevel,

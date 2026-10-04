@@ -213,8 +213,20 @@ export function parseModelCatalog(value, { providerId, baseUrl }) {
   return { models, modelErrors, metadata };
 }
 
+function explicitEffortMenu(reasoning) {
+  return object(reasoning) && Array.isArray(reasoning.efforts) && reasoning.efforts.length > 0;
+}
+
 export function describeOcgModel(info, metadata) {
-  if (metadata === undefined) return info;
+  // DSH's public reasoning object is the effort menu. Empty efforts are invalid
+  // metadata there. Omit that object. The pi-ai boolean and ocg.reasoning stay
+  // the capability, and a Messages categorical map is not copied into the menu.
+  if (metadata === undefined) {
+    if (!object(info.reasoning) || explicitEffortMenu(info.reasoning)) return info;
+    const result = { ...info };
+    delete result.reasoning;
+    return result;
+  }
   const result = { ...info, ocg: structuredClone(metadata) };
   // DSH permits an absent context, but requires a positive contextWindow when
   // the object is present. Keep pi-ai's numeric fallback internal and report
@@ -222,6 +234,7 @@ export function describeOcgModel(info, metadata) {
   if (metadata.contextWindow === undefined) {
     delete result.context;
   }
+  if (!explicitEffortMenu(result.reasoning)) delete result.reasoning;
   return result;
 }
 

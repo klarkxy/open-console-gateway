@@ -187,6 +187,69 @@ test("unknown reasoning controls stay distinguishable from an explicit empty off
   assert.equal(empty.models[0].reasoning, true);
 });
 
+function piDescriptor(id, efforts) {
+  return {
+    provider: "ocg",
+    id,
+    name: "Private model",
+    inputModalities: ["text"],
+    context: { contextWindow: 262144 },
+    ...(efforts === undefined ? {} : { reasoning: { efforts } }),
+  };
+}
+
+test("an empty public effort menu is omitted and no level is guessed", () => {
+  for (const preferred of ["messages", "chat_completions", "responses"]) {
+    for (const reasoningEfforts of [undefined, {}]) {
+      const parsed = parse(declared({
+        protocols: protocols(preferred),
+        reasoningEfforts,
+      }, "menu-model"));
+      const metadata = parsed.metadata.get("menu-model");
+      const source = piDescriptor("menu-model", []);
+      const shown = describeOcgModel(source, metadata);
+      assert.equal(parsed.models[0].reasoning, true, preferred);
+      assert.ok(Object.values(parsed.models[0].thinkingLevelMap).every((value) => value === null), preferred);
+      assert.equal(Object.hasOwn(shown, "reasoning"), false, `${preferred} public menu`);
+      assert.equal(shown.ocg.reasoning, true, preferred);
+      assert.deepEqual(shown.ocg.reasoningEfforts, reasoningEfforts);
+      assert.equal(JSON.stringify(shown).includes("\"efforts\""), false, preferred);
+      assert.equal(source.reasoning.efforts.length, 0);
+    }
+  }
+  const legacy = parse(declared({ protocols: protocols("messages") }, "legacy-messages"));
+  const metadata = legacy.metadata.get("legacy-messages");
+  const shown = describeOcgModel(piDescriptor("legacy-messages", []), metadata);
+  assert.equal(Object.hasOwn(shown, "reasoning"), false);
+  assert.equal(shown.ocg.reasoning, true);
+  assert.deepEqual(shown.ocg.reasoningEfforts, { low: "low", high: "high", xhigh: "max" });
+  assert.deepEqual(legacy.models[0].thinkingLevelMap, Object.fromEntries(THINKING_LEVELS.map((level) => [level, null])));
+  const listed = parse(declared({ reasoningEfforts: [] }, "listed-empty"));
+  assert.ok(Object.values(listed.models[0].thinkingLevelMap).every((value) => value === null));
+  assert.deepEqual(listed.metadata.get("listed-empty").reasoningEfforts, {});
+  const listedShown = describeOcgModel(piDescriptor("listed-empty", []), listed.metadata.get("listed-empty"));
+  assert.equal(Object.hasOwn(listedShown, "reasoning"), false);
+});
+
+test("a nonempty public effort menu stays exact, including a malformed menu", () => {
+  const menu = {
+    efforts: [
+      { id: "low", name: "Low" },
+      { id: "high", name: "High" },
+      { id: "xhigh", name: "Xhigh" },
+    ],
+    defaultEffort: "high",
+  };
+  const { metadata } = parse(declared());
+  const source = { provider: "ocg", id: "private-alias", name: "Private model", reasoning: menu };
+  const shown = describeOcgModel(source, metadata.get("private-alias"));
+  assert.equal(shown.reasoning, menu);
+  const malformed = { efforts: [{ id: "high" }] };
+  const passed = describeOcgModel({ ...source, reasoning: malformed }, metadata.get("private-alias"));
+  assert.equal(passed.reasoning, malformed);
+  assert.equal(parse(declared({ reasoningEfforts: { ultra: "ultra" } })).models[0].api, REJECTED_MODEL_API);
+});
+
 test("unknown context is omitted from the public descriptor", () => {
   const row = declared({ contextWindow: undefined, inputModalities: undefined });
   const { models: [model], metadata } = parse(row);

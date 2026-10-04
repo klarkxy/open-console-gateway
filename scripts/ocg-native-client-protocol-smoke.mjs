@@ -915,7 +915,26 @@ function runnerSource(bin, renderedIndex, stress = false, interleaved = false) {
       async set(ref, value) { stored = { ref, value }; },
       async resolve(ref) { return ref === stored?.ref ? { value: stored.value } : undefined; },
     };
-    const ctx = { get(name) { return name === "credentials" ? credentials : undefined; }, llm: { registerAdapter(_providers, value) { ctx.adapter = value; } } };
+    const { findPackageJSON } = await import("node:module");
+    const { dirname: pathDirname, join: pathJoin } = await import("node:path");
+    const { pathToFileURL: toFileUrl } = await import("node:url");
+    function loadDsh(name, entry) {
+      const manifest = findPackageJSON(name, toFileUrl(process.argv[1]).href);
+      if (!manifest) throw new Error("missing " + name);
+      return import(toFileUrl(pathJoin(pathDirname(manifest), entry)).href);
+    }
+    const [{ Context }, dshLlm] = await Promise.all([
+      loadDsh("@deepseek-ai/cordis", "lib/index.js"),
+      loadDsh("@deepseek-ai/dsh-llm", "lib/index.js"),
+    ]);
+    const ctx = new Context();
+    new dshLlm.LlmRuntime(ctx);
+    ctx.provide("credentials", credentials);
+    const registerAdapter = ctx.llm.registerAdapter.bind(ctx.llm);
+    ctx.llm.registerAdapter = (providers, value) => {
+      ctx.adapter = value;
+      return registerAdapter(providers, value);
+    };
     function user(id, text) { return { id, role: "user", content: [{ type: "text", text }], source: { kind: "user" } }; }
     function projectChunk(chunk) {
       const row = { type: chunk?.type ?? null };
@@ -1119,7 +1138,49 @@ function runnerSource(bin, renderedIndex, stress = false, interleaved = false) {
     const plugin = await import(${JSON.stringify(pathToFileURL(renderedIndex).href)});
     await plugin.apply(ctx);
     const adapter = ctx.adapter;
+    const serviceListed = await ctx.llm.listModels("ocg");
     const listed = await adapter.listModels("ocg");
+    const resolved = {};
+    const resolveErrors = {};
+    for (const model of serviceListed) {
+      try {
+        resolved[model.id] = await ctx.llm.resolveModelInfo("ocg", model.id);
+        await ctx.llm.prepareCall({ provider: "ocg", model: model.id });
+      } catch (error) {
+        resolveErrors[model.id] = error?.code ?? null;
+      }
+    }
+    if (Object.values(resolveErrors).includes("INVALID_MODEL_REASONING")) {
+      throw new Error("public model load rejected an empty effort menu: " + JSON.stringify(resolveErrors));
+    }
+    function effortView(info) {
+      if (!info || !Object.hasOwn(info, "reasoning")) return null;
+      return info.reasoning.efforts.map((effort) => ({ id: effort.id, name: effort.name }));
+    }
+    let posts = 0;
+    const baseFetch = globalThis.fetch.bind(globalThis);
+    globalThis.fetch = async (input, init) => {
+      if ((init?.method ?? "GET") !== "GET") posts += 1;
+      return baseFetch(input, init);
+    };
+    const messagesMenu = effortView(resolved["native-messages"]);
+    const undeclaredEffort = messagesMenu ? "not-a-level" : "high";
+    const postsBeforeUndeclared = posts;
+    let undeclared = { threw: false, code: null, message: null };
+    try {
+      await ctx.llm.prepareCall({ provider: "ocg", model: "native-messages", reasoningEffort: undeclaredEffort });
+    } catch (error) {
+      undeclared = { threw: true, code: error?.code ?? null, message: error instanceof Error ? error.message : String(error) };
+    }
+    const undeclaredPosts = posts - postsBeforeUndeclared;
+    const gate = {
+      serviceIds: serviceListed.map((model) => model.id),
+      menus: Object.fromEntries(${JSON.stringify(models)}.map((id) => [id, effortView(resolved[id]) ?? null])),
+      resolveErrors,
+      undeclaredEffort,
+      undeclared,
+      undeclaredPosts,
+    };
     async function prepare(id) { return adapter.prepareCall("ocg", id); }
     const prepared = {};
     for (const id of ${JSON.stringify(models)}) prepared[id] = await prepare(id);
@@ -1280,6 +1341,7 @@ function runnerSource(bin, renderedIndex, stress = false, interleaved = false) {
       }
     }
     const report = {
+      gate,
       credentialRef: stored?.ref ?? null,
       models: listed.map((model) => ({ id: model.id, descriptorApi: model.api ?? null, schemaVersion: model.ocg?.schemaVersion ?? null, preferred: model.ocg?.protocols?.preferred ?? null })),
       captured: { chat: captured(chat.first), responses: captured(responses.first), messages: captured(messages.first) },
@@ -1300,6 +1362,16 @@ function runnerSource(bin, renderedIndex, stress = false, interleaved = false) {
 
 function assertSdk(runtime) {
   assert.equal(runtime.credentialRef, "OCG_GATEWAY_KEY");
+  for (const [, , , publicModel] of ROUNDS) {
+    assert.ok(runtime.gate.serviceIds.includes(publicModel), publicModel);
+    assert.equal(runtime.gate.resolveErrors[publicModel] ?? null, null, publicModel);
+    const menu = runtime.gate.menus[publicModel];
+    assert.ok(menu === null || (Array.isArray(menu) && menu.length > 0 && menu.every((effort) => effort.id && effort.name)), publicModel);
+  }
+  assert.equal(Object.values(runtime.gate.resolveErrors).includes("INVALID_MODEL_REASONING"), false);
+  assert.equal(runtime.gate.undeclared.threw, true);
+  assert.equal(runtime.gate.undeclared.code, "UNSUPPORTED_REASONING_EFFORT");
+  assert.equal(runtime.gate.undeclaredPosts, 0);
   assert.equal(runtime.missing.threw, true);
   assert.equal(runtime.wrongTuple.code, "OCG_PROTOCOL_REPLAY_REFUSED");
   for (const [name, protocol, , publicModel] of ROUNDS) {
@@ -1470,6 +1542,14 @@ async function main() {
         ordinaryText: runtime.ordinaryText,
         wrongTuple: runtime.wrongTuple.code,
         missingModelRejected: runtime.missing.threw,
+        modelGate: {
+          serviceIds: runtime.gate.serviceIds,
+          menus: runtime.gate.menus,
+          resolveErrors: runtime.gate.resolveErrors,
+          undeclaredEffort: runtime.gate.undeclaredEffort,
+          undeclaredCode: runtime.gate.undeclared.code,
+          undeclaredPosts: runtime.gate.undeclaredPosts,
+        },
         sawEnvelopes: true,
       },
       gateway: {

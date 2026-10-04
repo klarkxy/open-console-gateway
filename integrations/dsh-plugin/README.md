@@ -59,7 +59,10 @@ catalog does not declare is an explicit incompatibility in this plugin. A protoc
 menu or guarantee a feature. A Responses vendor still applies its own
 contract to a historical Chat spelling. An explicit level-to-wire mapping is
 required before the selector offers those efforts; model names and a bare
-`reasoning: true` never manufacture a level list. Unknown limits remain
+`reasoning: true` never manufacture a level list. DSH's public `reasoning`
+descriptor is that effort menu. This package omits the descriptor when the
+menu is empty. The pi-ai capability flag and raw `ocg.reasoning` stay true,
+and a Messages categorical map stays catalog metadata. Unknown limits remain
 marked as fallback values, not upstream specifications. Maximum output
 capability is distinct from the default per-request budget.
 
