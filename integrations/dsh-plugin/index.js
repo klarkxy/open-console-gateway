@@ -1,4 +1,10 @@
-import { parseModelCatalog, describeOcgModel } from "./model-catalog.js";
+import {
+  parseModelCatalog,
+  describeOcgModel,
+  refuseCrossProtocolReplay,
+  refuseDegradingReplay,
+  refuseUndeclaredMessagesReasoning,
+} from "./model-catalog.js";
 import { randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { chmod, copyFile, readFile, readdir, rename, unlink } from "node:fs/promises";
@@ -20,17 +26,45 @@ async function importFromDsh(packageName, entry) {
   return import(pathToFileURL(join(dirname(manifest), entry)).href);
 }
 
-const [piAi, openAiApi, dshLlm, dshPiAi] = await Promise.all([
+const [piAi, completionsApi, responsesApi, messagesApi, dshLlm, dshPiAi] = await Promise.all([
   importFromDsh("@earendil-works/pi-ai", "dist/index.js"),
   importFromDsh("@earendil-works/pi-ai", "dist/api/openai-completions.lazy.js"),
+  importFromDsh("@earendil-works/pi-ai", "dist/api/openai-responses.lazy.js"),
+  importFromDsh("@earendil-works/pi-ai", "dist/api/anthropic-messages.lazy.js"),
   importFromDsh("@deepseek-ai/dsh-llm", "lib/index.js"),
   importFromDsh("@deepseek-ai/dsh-llm-pi-ai", "lib/index.js"),
 ]);
 
 const { InMemoryCredentialStore, createProvider } = piAi;
-const { openAICompletionsApi } = openAiApi;
+const { openAICompletionsApi } = completionsApi;
+const { openAIResponsesApi } = responsesApi;
+const { anthropicMessagesApi } = messagesApi;
 const { LlmError, assertUsableApiKey, resolveRetryPolicy } = dshLlm;
 const { PiAiAdapter } = dshPiAi;
+
+function wrapApi(base, prepare) {
+  const invoke = (method, model, context, options) => {
+    refuseCrossProtocolReplay(model, context);
+    return base[method](model, context, prepare ? prepare(model, context, options) : options);
+  };
+  return {
+    stream: (model, context, options) => invoke("stream", model, context, options),
+    streamSimple: (model, context, options) => invoke("streamSimple", model, context, options),
+  };
+}
+
+// The Messages SDK already sends the ordinary Gateway Key as x-api-key, plus
+// anthropic-version. Leave those headers alone.
+function messagesStreamOptions(model, _context, options) {
+  refuseUndeclaredMessagesReasoning(model, options);
+  return options;
+}
+
+const providerApis = {
+  "openai-completions": wrapApi(openAICompletionsApi()),
+  "openai-responses": wrapApi(openAIResponsesApi()),
+  "anthropic-messages": wrapApi(anthropicMessagesApi(), messagesStreamOptions),
+};
 
 export const name = "open-console-gateway-dsh";
 export const inject = ["llm", "credentials"];
@@ -226,13 +260,12 @@ export async function apply(ctx) {
             },
           },
           models,
-          api: openAICompletionsApi(),
+          api: providerApis,
         });
         return [providerId, {
           provider: providerId,
           displayName,
           apiKeyEnv: credentialRef,
-          api: "openai-completions",
           baseURL: baseUrl,
           streamIdleTimeoutMs: 300_000,
           maxRequestImageBytes: 20 * 1024 * 1024,
@@ -278,6 +311,14 @@ export async function apply(ctx) {
       const metadata = profiles.get(provider)?.ocgMetadata.get(model);
       const prepared = await super.prepareCall(provider, model, signal);
       return { ...prepared, model: describeOcgModel(prepared.model, metadata) };
+    }
+
+    // prepareCall's stream and Adapter.stream both enter here. Reject unusable
+    // native replay before the base adapter can turn it into unsigned text.
+    async *streamWithSnapshot(options, snapshot) {
+      const model = this.modelOf(snapshot, options.provider, options.model);
+      refuseDegradingReplay(model, options.messages);
+      yield* super.streamWithSnapshot(options, snapshot);
     }
   }
 

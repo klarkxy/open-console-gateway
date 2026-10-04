@@ -33,8 +33,9 @@ const models = createServer((request, response) => {
       { id: "http-smoke-model" }, { id: "mimo-v2.6-flash" }, { id: "deepseek-flash" },
       { id: "output-only", maxTokens: 262144 },
       { id: "metadata-without-context", ocg: { schemaVersion: 1, inputModalities: ["text"] } },
-      { id: "declared-model", ocg: { schemaVersion: 1, contextWindow: 262144,
-        maxOutputTokens: 32768, reasoning: true, reasoningEfforts: { high: "high" } } },
+      { id: "declared-model", ocg: { schemaVersion: 2, contextWindow: 262144,
+        maxOutputTokens: 32768, reasoning: true, reasoningEfforts: { high: "high" },
+        protocols: { preferred: "chat_completions", supported: ["chat_completions"] } } },
     ] }));
   } else response.writeHead(404).end();
 });

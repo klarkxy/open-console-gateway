@@ -28,14 +28,42 @@ async function writePluginRuntime(root) {
     "dist/index.js": `
       export class InMemoryCredentialStore {}
       export function createProvider(input) {
-        if (!input.auth?.apiKey || input.models.some((model) => model.provider !== input.id || !model.api || !model.baseUrl)) {
+        const apis = input.api ?? {};
+        const single = typeof apis.streamSimple === "function";
+        if (!input.auth?.apiKey || single || !input.models.every((model) => model.provider === input.id && model.api && model.baseUrl)) {
           throw new Error("invalid pi-ai provider contract");
         }
-        return input;
+        const provider = {
+          ...input,
+          getModels: () => input.models,
+          streamSimple(model, context, options) {
+            const implementation = apis[model.api];
+            if (!implementation?.streamSimple) {
+              const error = new Error("no API implementation for " + model.api);
+              error.code = "NO_API";
+              throw error;
+            }
+            return implementation.streamSimple(model, context, options);
+          },
+        };
+        globalThis.__ocgProviders.push(provider);
+        return provider;
       }
     `,
     "dist/api/openai-completions.lazy.js": `
-      export function openAICompletionsApi() { return {}; }
+      export function openAICompletionsApi() {
+        return { stream() {}, streamSimple(model) { globalThis.__ocgSent.push(model.api); return { api: model.api }; } };
+      }
+    `,
+    "dist/api/openai-responses.lazy.js": `
+      export function openAIResponsesApi() {
+        return { stream() {}, streamSimple(model) { globalThis.__ocgSent.push(model.api); return { api: model.api }; } };
+      }
+    `,
+    "dist/api/anthropic-messages.lazy.js": `
+      export function anthropicMessagesApi() {
+        return { stream() {}, streamSimple(model) { globalThis.__ocgSent.push(model.api); return { api: model.api }; } };
+      }
     `,
   });
   await writePackage(root, "@deepseek-ai/dsh-llm", {
@@ -55,7 +83,8 @@ async function writePluginRuntime(root) {
         }
         async listModels(provider) {
           const profile = this.config.profiles().get(provider);
-          return profile.piProvider.models.map((model) => ({ provider, id: model.id, name: model.name, inputModalities: model.input }));
+          globalThis.__ocgProfile = { api: profile.api ?? null, baseURL: profile.baseURL };
+          return profile.piProvider.models.map((model) => ({ provider, id: model.id, name: model.name, api: model.api, inputModalities: model.input }));
         }
         async resolveModel(provider, model) {
           const profile = this.config.profiles().get(provider);
@@ -135,14 +164,49 @@ function applyOnlySource(plugin, bootstrap, extra = "") {
   `;
 }
 
-for (const explicitMetadata of [false, true]) {
-test(`generated DSH plugin prepares the ocg provider with ${explicitMetadata ? "explicit metadata" : "no explicit metadata"}`, async () => {
+test("generated DSH plugin dispatches v2 protocols and does not send rejected models", async () => {
   const root = await mkdtemp(join(tmpdir(), "ocg-dsh-plugin-"));
   try {
     const bootstrap = join(root, "credential-handoff");
     await writeFile(bootstrap, "ocg-test-key");
     const plugin = await writeRenderedPlugin(root, bootstrap);
     await writePluginRuntime(root);
+    const catalog = {
+      object: "list",
+      data: [
+        { id: 42 },
+        { id: "legacy-model" },
+        { id: "schema-1", ocg: { schemaVersion: 1, protocols: { preferred: "chat_completions", supported: ["chat_completions"] } } },
+        {
+          id: "model-a",
+          ocg: {
+            schemaVersion: 2,
+            status: "declared",
+            protocols: { preferred: "chat_completions", supported: ["chat_completions", "responses"] },
+            inputModalities: ["text"],
+          },
+        },
+        {
+          id: "org/model-b",
+          ocg: {
+            schemaVersion: 2,
+            protocols: { preferred: "responses", supported: ["responses"] },
+            reasoning: true,
+            reasoningEfforts: { high: "high" },
+          },
+        },
+        {
+          id: "mimo-v2.6-flash",
+          ocg: {
+            schemaVersion: 2,
+            protocols: { preferred: "messages", supported: ["messages"] },
+            inputModalities: ["text"],
+            reasoning: true,
+            reasoningEfforts: { high: "high" },
+          },
+        },
+      ],
+    };
     const result = await runEntry(
       root,
       `
@@ -150,17 +214,13 @@ test(`generated DSH plugin prepares the ocg provider with ${explicitMetadata ? "
         let stored;
         let adapter;
         let registeredProviders;
-        globalThis.fetch = async (url, init) => ({
-          ok: true,
-          status: 200,
-          async json() {
-            return { object: "list", data: [{ id: 42 }, { id: "model-a" }, { id: "org/model-b" }, ${JSON.stringify({
-              id: "mimo-v2.6-flash",
-              ...(explicitMetadata ? { ocg: { schemaVersion: 1, inputModalities: ["text"], reasoning: true, reasoningEfforts: { medium: "medium" } } } : {}),
-            })}] };
-          },
-          requested: { url, init },
-        });
+        const requests = [];
+        globalThis.__ocgSent = [];
+        globalThis.__ocgProviders = [];
+        globalThis.fetch = async (url) => {
+          requests.push(String(url));
+          return { ok: true, status: 200, async json() { return ${JSON.stringify(catalog)}; } };
+        };
         const credentials = {
           async set(ref, value) { stored = { ref, value }; },
           async resolve(ref) { return ref === stored?.ref ? { value: stored.value } : undefined; },
@@ -175,63 +235,99 @@ test(`generated DSH plugin prepares the ocg provider with ${explicitMetadata ? "
         const plugin = await import(${JSON.stringify(fileUrl(plugin))});
         await plugin.apply(ctx);
         const routes = {};
+        const prepareErrors = {};
         for (const provider of registeredProviders) {
           routes[provider] = {
             info: adapter.providerInfo(provider),
             models: await adapter.listModels(provider),
-            prepared: await adapter.prepareCall(provider, "model-a"),
           };
+          try {
+            routes[provider].prepared = await adapter.prepareCall(provider, "model-a");
+          } catch (error) {
+            prepareErrors.modelA = error instanceof Error ? error.message : String(error);
+          }
+          try {
+            await adapter.prepareCall(provider, "legacy-model");
+            prepareErrors.legacy = "";
+          } catch (error) {
+            prepareErrors.legacy = error instanceof Error ? error.message : String(error);
+          }
+          try {
+            await adapter.prepareCall(provider, "schema-1");
+            prepareErrors.schema1 = "";
+          } catch (error) {
+            prepareErrors.schema1 = error instanceof Error ? error.message : String(error);
+          }
+        }
+        const piProvider = globalThis.__ocgProviders.at(-1);
+        const rejected = piProvider.getModels().find((model) => model.id === "legacy-model");
+        const messages = piProvider.getModels().find((model) => model.id === "mimo-v2.6-flash");
+        let rejectedStream = "";
+        try {
+          piProvider.streamSimple(rejected, { messages: [] }, {});
+        } catch (error) {
+          rejectedStream = error instanceof Error ? error.code ?? error.message : String(error);
+        }
+        const sentBeforeMessages = globalThis.__ocgSent.slice();
+        const messagesCall = piProvider.streamSimple(messages, { messages: [] }, {});
+        let messagesLevel = "";
+        try {
+          piProvider.streamSimple(messages, { messages: [] }, { reasoning: "high" });
+        } catch (error) {
+          messagesLevel = error instanceof Error ? error.code ?? error.message : String(error);
         }
         let bootstrapExists = true;
         try { await access(${JSON.stringify(bootstrap)}); } catch { bootstrapExists = false; }
-        process.stdout.write(JSON.stringify({ stored, registeredProviders, routes, bootstrapExists }));
+        process.stdout.write(JSON.stringify({
+          stored,
+          registeredProviders,
+          routes,
+          prepareErrors,
+          bootstrapExists,
+          profile: globalThis.__ocgProfile,
+          apiKeys: Object.keys(piProvider.api).sort(),
+          apiIsSingleStream: typeof piProvider.api.streamSimple === "function",
+          rejectedStream,
+          sentBeforeMessages,
+          messagesCall,
+          messagesLevel,
+          sent: globalThis.__ocgSent,
+          requests,
+        }));
       `,
     );
-    assert.deepEqual(result.stored, {
-      ref: "OCG_GATEWAY_KEY",
-      value: "ocg-test-key",
-    });
+    assert.deepEqual(result.stored, { ref: "OCG_GATEWAY_KEY", value: "ocg-test-key" });
     assert.deepEqual(result.registeredProviders, ["ocg"]);
-    for (const provider of result.registeredProviders) {
-      assert.deepEqual(result.routes[provider].info, {
-        id: provider,
-        name: "Open Console Gateway",
-      });
-      assert.deepEqual(
-        result.routes[provider].models.map(({ id }) => id),
-        ["model-a", "org/model-b", "mimo-v2.6-flash"],
-      );
-      // No model-id exceptions: undeclared models are text-only until the
-      // gateway reports verified modalities.
-      assert.deepEqual(
-        result.routes[provider].models.find(({ id }) => id === "mimo-v2.6-flash").inputModalities,
-        ["text"],
-      );
-      if (explicitMetadata) {
-        assert.deepEqual(
-          result.routes[provider].models.find(({ id }) => id === "mimo-v2.6-flash").ocg.reasoningEfforts,
-          { medium: "medium" },
-        );
-      }
-      assert.deepEqual(
-        result.routes[provider].models.find(({ id }) => id === "model-a").inputModalities,
-        ["text"],
-      );
-      assert.equal(result.routes[provider].prepared.model.ocg.status, "legacy");
-      const { ocg: _metadata, ...preparedModel } = result.routes[provider].prepared.model;
-      assert.deepEqual(preparedModel, {
-        provider,
-        id: "model-a",
-        name: "model-a",
-      });
-    }
+    assert.equal(result.profile.api, null);
+    assert.equal(result.profile.baseURL, "http://127.0.0.1:9042/v1");
+    assert.deepEqual(result.apiKeys, ["anthropic-messages", "openai-completions", "openai-responses"]);
+    assert.equal(result.apiIsSingleStream, false);
+    assert.equal(result.prepareErrors.modelA, undefined);
+    assert.match(result.prepareErrors.legacy, /schema/i);
+    assert.match(result.prepareErrors.schema1, /schema/i);
+    assert.equal(result.rejectedStream, "NO_API");
+    assert.deepEqual(result.sentBeforeMessages, []);
+    assert.equal(result.messagesCall.api, "anthropic-messages");
+    assert.equal(result.messagesLevel, "OCG_MESSAGES_REASONING_UNDECLARED");
+    assert.deepEqual(result.sent, ["anthropic-messages"]);
+    assert.ok(result.requests.every((url) => url.endsWith("/v1/models")));
+    const models = result.routes.ocg.models;
+    assert.deepEqual(models.map(({ id }) => id), [
+      "legacy-model", "schema-1", "model-a", "org/model-b", "mimo-v2.6-flash",
+    ]);
+    assert.equal(models.find(({ id }) => id === "model-a").api, "openai-completions");
+    assert.equal(models.find(({ id }) => id === "org/model-b").api, "openai-responses");
+    assert.equal(models.find(({ id }) => id === "mimo-v2.6-flash").api, "anthropic-messages");
+    assert.equal(models.find(({ id }) => id === "mimo-v2.6-flash").ocg.reasoning, true);
+    assert.deepEqual(models.find(({ id }) => id === "mimo-v2.6-flash").ocg.reasoningEfforts, { high: "high" });
+    assert.deepEqual(models.find(({ id }) => id === "model-a").inputModalities, ["text"]);
+    assert.equal(result.routes.ocg.prepared.model.ocg.status, "declared");
+    assert.equal(result.routes.ocg.prepared.model.ocg.protocols.preferred, "chat_completions");
     assert.equal(result.bootstrapExists, false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
-
-}
 
 test("an older consumer does not delete a newer handoff written during credentials.set", async () => {
   const root = await mkdtemp(join(tmpdir(), "ocg-dsh-plugin-race-"));

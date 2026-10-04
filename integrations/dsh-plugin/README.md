@@ -1,15 +1,19 @@
+[简体中文](README.zh-CN.md)
+
 # Open Console Gateway for DSH
 
 This package is generated and installed by the Open Console Gateway Desktop
 application. It registers `ocg` in the selected DSH profile and reads the
-current authenticated `GET /v1/models` catalog from the local Gateway,
-forwarding model calls through the OpenAI-compatible Chat Completions
-endpoint.
+current authenticated `GET /v1/models` catalog from the local Gateway.
+Each model is called through the API named by that model's published
+preferred protocol: `openai-completions`, `openai-responses`, or
+`anthropic-messages`.
 
-Runtime libraries are loaded from the active DSH installation. This package
-does not declare or install private copies of DSH/pi-ai peer dependencies;
-upgrading DSH must not pull an older runtime into the profile. Installation
-is not gated by a version allowlist.
+Runtime libraries, including those three pi-ai APIs, are loaded from the
+active DSH installation. DSH 0.2.0-rc.2 with pi-ai 0.87.1 provides them.
+This package does not declare or install private copies of DSH/pi-ai peer
+dependencies; upgrading DSH must not pull an older runtime into the profile.
+Installation is not gated by a version allowlist.
 
 The installer hands the selected Gateway Key to DSH through a private,
 one-time live file. This package is activated once per DSH runtime. On
@@ -24,12 +28,40 @@ the **Applications > DSH** page when repair is required.
 
 ## Model details and reasoning levels
 
-`model-catalog.js` translates OCG's versioned metadata into the active DSH
-runtime's native context, text/image input and reasoning-level descriptors.
-An explicit level-to-wire mapping is required to offer reasoning controls;
-model names and a bare `reasoning: true` never manufacture a level list.
-Unknown limits remain marked as fallback values, not upstream specifications.
-Maximum output capability is distinct from the default per-request budget.
+`model-catalog.js` requires `ocg.schemaVersion` 2 and a `protocols.preferred`
+value listed in `protocols.supported`. It maps `chat_completions` to
+`openai-completions`, `responses` to `openai-responses`, and `messages` to
+`anthropic-messages`, one API per model. A row that fails those checks is an
+`ocg-rejected` placeholder and is reported in that model's errors. It is not
+registered as Chat.
+
+Chat Completions and Responses keep the published `/v1` base. Messages drops
+a trailing `/v1` and keeps a deployment subpath. The Messages SDK sends the
+Gateway Key as `x-api-key` plus `anthropic-version`. This package does not
+rewrite those headers.
+
+A prepared call freezes the catalog metadata captured for that model before
+the prepare await returns. Signed assistant history is sent only when the
+provider, API, and model id all match the model being called. Before the
+base adapter can turn a foreign signed assistant message into plain text,
+the Harness checks a present pi-ai envelope: kind `pi-ai`, version 2, aligned
+with the assistant content, and the same tuple when that envelope carries
+opaque native data. Missing replay metadata leaves ordinary text and tools
+portable. This preflight belongs to the plugin and runs before the base
+adapter. The gateway cannot apply it to a field the client already dropped.
+
+`reasoningEfforts` is the Chat selector-to-wire map of exact categorical
+spellings. The same map may be carried unchanged on Chat Completions and on
+Responses. It is never a Messages thinking budget or an adaptive effort. OCG writes an
+empty Messages level map even when `reasoning` is true, and that flag does
+not manufacture a menu or a budget. Selecting a Messages reasoning level the
+catalog does not declare is an explicit incompatibility in this plugin. A protocol listed in `supported` does not by itself add a
+menu or guarantee a feature. A Responses vendor still applies its own
+contract to a historical Chat spelling. An explicit level-to-wire mapping is
+required before the selector offers those efforts; model names and a bare
+`reasoning: true` never manufacture a level list. Unknown limits remain
+marked as fallback values, not upstream specifications. Maximum output
+capability is distinct from the default per-request budget.
 
 Upgrade OCG, reinstall this package through **Applications > DSH**, and reload
 the selected runtime once to replace an older installed plugin. Refresh the
@@ -52,4 +84,3 @@ The smoke creates temporary profiles and a loopback mock gateway. It checks
 plugin installation, credential handoff, the native context and level list,
 stream completion, and `xhigh` being sent as the declared `max` wire value.
 It does not touch a real user's DSH home or call a production upstream.
-The scenario was verified with official DSH `0.1.7-rc.2`.
