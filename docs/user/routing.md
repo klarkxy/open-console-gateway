@@ -97,10 +97,13 @@ from the Accounts view. The selector skips:
   sibling Key on the same connection keeps its own allow-list.
 - For an otherwise eligible Key, the gateway chooses one upstream protocol
   from those that are enabled, have a configured route, and are granted to
-  that Key. It prefers the client protocol when that path is granted and the
-  request can be converted, then the saved preference, then the other granted
-  protocols. It does not send a request to discover which protocol is
-  authorized. The pre-send check still re-reads the current grants.
+  that Key. It tries the saved preference first, then the client protocol,
+  then the other granted protocols in saved order. A candidate that cannot
+  preserve the required request fields yields locally to the next granted
+  protocol. The kept protocol is the one sent on that attempt. An upstream
+  HTTP 400 is returned to the client and does not switch protocol. Credential
+  and provider retries keep their existing policy. The pre-send check still
+  re-reads the current grants.
 
 Keys that share a **declared quota pool** can share stored ordinary cooldowns.
 The temporary cooldown created by a `429` remains on the receiving Key. A declared GOAT plan window

@@ -24,7 +24,7 @@
 
 每个用户定义供应商使用遗留默认路由，或使用一到三条显式协议路由。模型没有覆盖时继承对应协议的路由；模型显式设置单一上游覆盖时优先使用覆盖，清除覆盖即恢复继承。鉴权归路由所有。每条带 Key 的路由都要求选定 Key 已保存对应的端点和 Origin 授权。修改路由或模型覆盖不会授权新目标。同一上游模型的多个公开别名必须解析到相同路由。
 
-路由在客户端协议已启用时透传；否则转到模型首选协议，再按适配器顺序回退到其余已启用协议。CPA 保持 Chat、Responses、Messages 客户端格式，Gemini 转为 Chat。
+每一次尝试先使用已启用、已配置且已授权的已保存首选协议，再使用同样可用的客户端协议，然后按已保存顺序使用其余已授权协议。能否保留请求字段在发送前于本地检查。Gateway 不探测另一种协议，收到上游 HTTP 400 后也不换协议。凭据与供应商重试仍沿用既有策略。CPA 在 Chat、Responses 和 Messages 上使用同一套已保存顺序。Gemini 仍是客户端格式。
 
 官方预设按文档初始化或显式更新完整路由组。手动配置只声明操作者保存的路由；不自动扫描其他协议，模板更新不改写已经保存的选择。New API、Sub2API 是可包含多个独立实例的站点类型，其站点与管理凭据边界不变。
 
@@ -80,7 +80,7 @@
 - MiniMax CN 与 Kimi Code CN 在 OCG 内不为请求定价，但账号卡可手工读取官方订阅窗口（`/token_plan/remains` 与 `/usages`）。这些快照只用于展示，不影响推理资格。
 - Custom API 与用户定义 Provider 账号，若保存的 Endpoint 主机恰好是 `api.deepseek.com`、`api.moonshot.cn` 或 `api.moonshot.ai`，可手工读取官方当前余额。其他 Custom 主机不会被探测。
 
-请求时流程：别名 → 账号资格 → 适配器上限 → 已保存合约 → 按模型/按协议 effective 状态 → 透传或转换。协议选择使用已保存的合约。带鉴权的 `GET /v1/models` 与受保护的 `GET /dashboard/api/v4/application-models` 只公布当前可路由且 effective 协议已启用的公开名称。`application-models` 列出已保存目录中可解析且协议已启用的 Go 名称。它不查阅价格快照，也不含 Custom。
+每次尝试的请求流程：别名 → 账号资格 → 适配器上限 → 已保存合约 → 按模型/按协议 effective 状态 → 发送前的一次本地协议选择。该选择依次是已保存首选、客户端协议，然后是其余已授权协议。这次选择不取代凭据或供应商重试，HTTP 400 也不换协议。带鉴权的 `GET /v1/models` 与受保护的 `GET /dashboard/api/v4/application-models` 只公布当前可路由且 effective 协议已启用的公开名称。`application-models` 列出已保存目录中可解析且协议已启用的 Go 名称。它不查阅价格快照，也不含 Custom。
 
 ---
 

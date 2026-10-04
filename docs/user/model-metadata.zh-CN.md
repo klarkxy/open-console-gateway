@@ -6,9 +6,43 @@
 
 ## 传递哪些信息
 
-鉴权后的 `GET /v1/models` 保留 OpenAI 兼容结构和公开模型 ID，已知容量增加为 `contextWindow` 与 `maxTokens`。版本化的 `ocg` 对象包含名称、上下文、最大输出、输入与输出模态、推理支持、显式 `reasoningEfforts`、工具调用事实、来源和状态。字段缺失表示未知，不等于不支持。这个 GET 不访问上游。
+鉴权后的 `GET /v1/models` 保留 OpenAI 兼容结构和公开模型 ID，已知容量增加为 `contextWindow` 与 `maxTokens`。版本化的 `ocg` 对象使用 `schemaVersion` 2。它包含名称、上下文、最大输出、输入与输出模态、推理支持、显式 `reasoningEfforts`、工具调用事实、来源和状态。有合格路由能承载该模型时，还会包含 `protocols`。能力字段缺失表示未知，不等于不支持。这个 GET 不访问上游。
 
-DSH 插件将上下文和文本/图片输入映射到原生模型描述，将可选档位转换为 pi-ai 的 `thinkingLevelMap`，并显式使用 OpenAI Chat Completions 格式。后续协议转换仍由 OCG 的现有配置负责。例如 `{"low":"low","high":"high","xhigh":"max"}` 仅提供 Low、High、Xhigh，并按声明发送对应参数。未声明档位全部禁用，包括 Off。只有 `reasoning: true` 不会凭空生成档位菜单；`off: "none"` 是明确的协议声明，不是自动默认值。
+`protocols` 只在这次响应里推导，不写入元数据记录。`preferred` 取 `chat_completions`、`responses` 或 `messages`。`supported` 按这个固定顺序列出已授权的上游协议。一条协议出现在列表中，表示有合格路由可以发送它：目的地和模型已启用，名称解析到该映射，并且有一把已启用、ready、绑定已启用、范围允许该模型、在路由需要时持有 Key、并持有端点授权的凭据。多条映射按 routing rank、目的地 id、上游模型排序。`preferred` 是第一条映射里已授权的已保存首选；该首选未授权时，是第一条已保存且已授权的协议。冷却、探测标记、鉴权错误和上次胜出的凭据不改变这个对象。`supported` 只命名这些上游协议。它不表示每种协议都保留全部能力，也不指定调用方使用哪一个客户端 URL。`protocols` 缺失，或者 `preferred` 缺失、非法、或不在 `supported` 中时，结果是未知或无效。这两种结果都不是 Chat Completions。
+
+`reasoning` 与 `reasoningEfforts` 彼此独立。`reasoning` 记录是否支持推理。`reasoningEfforts` 把选择器档位映射到精确的分类 `reasoning_effort` 拼写。同一映射可以原样出现在 Chat Completions 和 Responses 上。它不会变成 Messages 的思考预算或自适应强度。某个 Responses 供应商是否接受历史 Chat 拼写，仍以该后端合约为准。
+
+```json
+{
+  "id": "my-model",
+  "object": "model",
+  "ocg": {
+    "schemaVersion": 2,
+    "name": "My model",
+    "contextWindow": 262144,
+    "maxOutputTokens": 32768,
+    "inputModalities": ["text", "image"],
+    "outputModalities": ["text"],
+    "reasoning": true,
+    "reasoningEfforts": {"low": "low", "high": "high", "xhigh": "max"},
+    "toolCalling": true,
+    "sources": ["operator"],
+    "status": "declared",
+    "protocols": {
+      "preferred": "messages",
+      "supported": ["chat_completions", "messages"]
+    }
+  }
+}
+```
+
+上面的数字和 Messages 首选只说明形状，不是某个真实模型的规格。能力记录里有事实时 `status` 为 `declared`，能力记录为空时为 `unknown`。没有合格路由能承载该模型时省略 `protocols`。
+
+DSH 插件要求 `ocg.schemaVersion` 为 2，并且 `protocols.preferred` 出现在 `protocols.supported` 中。它从当前 DSH 运行时加载 `openai-completions`、`openai-responses` 和 `anthropic-messages` 三种 API，并按该模型的首选协议各选一种。DSH 0.2.0-rc.2 与 pi-ai 0.87.1 提供这三种 API。插件包不自带这些库，安装也不按版本允许列表拦截。Chat Completions 与 Responses 保留公布的 `/v1` 基址。Messages 去掉末尾的 `/v1`，并保留部署子路径。Messages 客户端把 Gateway Key 放在 `x-api-key` 中，并带上 `anthropic-version`；插件不改写这些请求头。准备好的调用会在 `prepare` 的等待返回之前，冻结当时为该模型采集的目录元数据。配置缺失或无效的行保留为 `ocg-rejected` 占位，并记入该模型的错误。它不会被注册成可执行的 Chat 模型。
+
+`reasoningEfforts` 把这些精确的分类拼写带到 Chat Completions 和 Responses。`reasoning` 为 true 时，Messages 仍保留原生推理能力。OCG 不从该标志写入 Messages 档位菜单或思考预算：这些拼写不会变成 Messages 的预算或自适应强度。原生 SDK 可以套用自己的预设或默认控件。省去 OCG 菜单并不描述该控件，也不表示供应商接受 SDK 的默认值。在 DSH 插件中，选择目录未声明的 Messages 推理档位是明确的不兼容。`supported` 里列出一种协议，并不因此增加菜单或保证某项能力。某个 Responses 供应商是否接受历史 Chat 拼写，仍以该后端合约为准。例如 `{"low":"low","high":"high","xhigh":"max"}` 只提供 Low、High、Xhigh，并在 Chat Completions 和 Responses 上发送这些分类拼写。未声明档位保持禁用，包括 Off。只有 `reasoning: true` 不会凭空生成可选档位。`off: "none"` 是明确的协议声明，不是自动默认值。
+
+已签名的 assistant 历史只有在 provider、API 和模型 id 都与即将调用的模型一致时才会发送。在基础适配器把外来的已签名 assistant 消息变成纯文本之前，Harness 会检查已经出现的 pi-ai 信封：种类为 `pi-ai`、版本为 2、与 assistant 内容对齐；信封带有不透明原生数据时，provider、API 和模型也必须相同。缺少回放元数据时，普通文本和工具调用仍然可以携带。请求到达 Gateway 之后的转换仍按[协议转换](protocol-conversion.zh-CN.md)中的已保存路由执行。
 
 DSH 现有原生接口并不使用所有能力。额外事实保留在 Adapter 模型描述的 `ocg` 字段中，不代表新增了音视频传输、托管工具或任意能力展示页面。最大输出能力不会被写入 `configuredMaxTokens`，因此不会悄悄变成每次请求的默认输出额度。
 
@@ -64,7 +98,7 @@ GET /dashboard/api/v4/destinations/{id}/model-metadata
 
 ## 别名与路由安全
 
-一个别名对应多个启用映射时，容量取共同已知的下限，模态取交集，档位只有在所有映射的协议参数一致时才保留。存在未知候选就不能宣称完整保证。同一模型启用了多条协议路由时同样处理：每条路由贡献已核实供应商的事实；路由没有匹配供应商时贡献通用基线。两者都没有的路由视为未知，并撤回正面保证。此策略优先避免误报，不会简单宣传最强后端的容量；本版未增加按能力筛选后端的回退调度。
+一个别名对应多个启用映射时，容量取共同已知的下限，模态取交集，档位只有在所有映射的协议参数一致时才保留。存在未知候选就不能宣称完整保证。`ocg.protocols` 使用同一组合格映射，并按 routing rank、目的地 id 和上游模型排序。同一模型启用了多条协议路由时同样处理：每条路由贡献已核实供应商的事实；路由没有匹配供应商时贡献通用基线。两者都没有的路由视为未知，并撤回正面保证。此策略优先避免误报，不会简单宣传最强后端的容量；本版未增加按能力筛选后端的回退调度。
 
 元数据与人工声明绑定连接路由、协议及精确模型映射；改变这些配置会使旧绑定失效。对单模型配置的独立上游地址，不会套用另一个连接地址的发现结果。路由不变时刷新不会覆盖人工声明。不会将上游原始正文或回显凭据保存为模型元数据。
 

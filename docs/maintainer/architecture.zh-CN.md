@@ -53,7 +53,7 @@ SPA 始终是 HTTP 客户端。Desktop capability 注册进 `CoreState`。
 推理实现位于 `crates/ocg-core/src/gateway/`：
 
 1. `handler.rs` 分配 request id、验证客户端 Key、解析客户端协议并解析模型身份。
-2. `GatewayExecutor` 在请求入口捕获一次代理路由、合约与 Alias 解析快照，不为新请求捕获价格快照。fallback 每轮重读实时账号状态、合格 Custom runtime 与 Zen Free 冷却。协议选择使用该次保存的合约。
+2. `GatewayExecutor` 在请求入口捕获一次代理路由、合约与 Alias 解析快照，不为新请求捕获价格快照。fallback 每轮重读实时账号状态、合格 Custom runtime 与 Zen Free 冷却。协议选择按每次尝试重新进行，使用该次保存的合约：已保存首选、已启用的客户端协议，然后是其余已授权协议。本地保留检查在该次尝试发送前从这些候选里留下一个。HTTP 400 不换协议。凭据与供应商重试仍在下面的外层循环中。
 3. 候选物化先应用适配器上限和 effective 模型/协议状态，再由无 I/O selector 选择账号卡。
 4. `provider_adapter.rs` 对密封 `ProviderAdapterKind` 做穷尽映射并返回纯数据 `AttemptSpec`；不解密 Key、不打开 SQLite，也不构造 HTTP client。
 5. Host 解析所选账号凭据；`forward_once` 每次只调用一次上游 `.send()`，重试与 fallback 策略留在外层循环。

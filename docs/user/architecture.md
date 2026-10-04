@@ -69,13 +69,15 @@ that collides with a published built-in Alias is excluded from publication.
 ## Protocol Conversion
 
 Clients may use OpenAI Chat Completions, OpenAI Responses, Anthropic Messages,
-or Gemini `generateContent` / `streamGenerateContent` entry points. A supported
-and enabled client/upstream pair passes through; otherwise
-the whole request and response are converted to and from the model's effective
-upstream protocol. Gemini is a client format: the gateway converts it to the
-selected Plan's Chat Completions or Messages upstream.
+or Gemini `generateContent` / `streamGenerateContent` entry points. Each
+attempt chooses one upstream protocol locally before the send: the saved
+preferred protocol, then the enabled client protocol, then the remaining
+granted protocols. The request and response are converted when that choice
+differs from the client protocol. Gemini is a client format and is never an
+upstream protocol. Credential and provider retries keep their existing
+policy. An HTTP 400 does not switch protocol.
 
-The complete preferred/supported matrix and conversion limits live in
+Selection, native opaque history, and conversion limits live in
 [Protocol conversion](protocol-conversion.md).
 
 ## Where To Read Next

@@ -33,7 +33,7 @@ This guide is for people running Open Console Gateway as a desktop app, a headle
 
 - [Gateway Behavior](user/gateway.md) — Endpoints, authentication, and aliases.
 - [Routing And Failover](user/routing.md) — Selection order, sticky/round-robin, usage windows, circuit breakers, and failover.
-- [Protocol Conversion](user/protocol-conversion.md) — Preferred/supported protocols, passthrough, and conversion limits.
+- [Protocol Conversion](user/protocol-conversion.md) — Per-attempt saved preferred protocol, then the client protocol, then granted protocols; native opaque history; conversion limits.
 - [Temporary Unavailability](user/temporary-unavailability.md) — Global or per-connection Settings rules that skip a Key or model locally after a matching upstream error, then retry on real traffic.
 - [Logs And Settings](user/logs-settings.md) — Request logs, settings, and proxy modes.
 

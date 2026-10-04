@@ -10,38 +10,80 @@ the per-model/per-protocol effective state, and only then passthroughs or
 converts. Explicit upstream protocol disablement takes precedence over
 baseline support.
 
-Protocol selection uses the saved provider contract. An explicit catalog
-refresh imports the official model list and protocol baseline: Go and Zen use
-the Go documentation, Command Code uses its provider documentation, and
-MiniMax CN / Kimi Code CN use their documented Chat and Messages family. Go,
-Zen, and Command Code fall back to Chat when the document omits a model or
-cannot be fetched. Saved overrides and probe evidence remain constrained by
-the sealed adapter. See [Providers](providers.md) for refresh and enablement
-controls; inference never refreshes a catalog or tries another upstream
-protocol to discover support.
+Protocol selection uses the saved per-model preferred protocol and the
+protocols that are already enabled, configured, and granted to the selected
+Key. `MODEL_PROTOCOLS` stays an offline seed and shared-alias reference. The
+tables below are that reference. They are not the live selector.
 
-If the client protocol is enabled in the current model contract, request and
-response pass through. Otherwise the gateway converts the **request body** to
-the enabled preferred protocol, or the first remaining enabled protocol in
-adapter fallback order, and the **response body** — or SSE stream — back to
-the client protocol. Gemini always converts to an enabled upstream protocol.
-This rule
-applies to every Providers-catalog supplier, including user-defined
-Configurable HTTP mappings (one protocol per mapping). Custom API
-does the same to the account's declared upstream protocol, then honors that
-endpoint's contract and per-model overrides. A New API or Sub2API linked Key
-is the exception: those sites already convert Chat Completions, Messages, and
-Responses, so OCG stores the site root and passes a matching client format
-through (Gemini still converts to Chat Completions). CPA is not
-part of this conversion-default control. Conversion covers text, system
-instructions, images, tool calls and results, reasoning content, completion
-status, errors, and usage fields. SSE usage, errors, and terminal state are
-parsed in event order, including responses that mix LF and CRLF event
-separators.
+An explicit catalog refresh imports the official model list and protocol
+baseline: Go and Zen use the Go documentation, Command Code uses its provider
+documentation, and MiniMax CN / Kimi Code CN use their documented Chat and
+Messages family. A failed fetch, or a model the document omits, adds no
+protocol evidence and leaves the saved preference in place. Saved overrides
+and probe evidence remain constrained by the sealed adapter. See
+[Providers](providers.md) for refresh and enablement controls. Inference does
+not refresh a catalog or send a request to discover another protocol.
 
-The tables below describe code-owned alias profiles, not current provider
-availability. Refresh-written official baselines and saved enablement determine
-the actual default and available protocols shown on **Providers**.
+For each attempt the gateway walks three local candidates before the send,
+in this order: the saved preferred protocol when it is in the enabled,
+configured, and granted set; then the client protocol when that protocol is
+also in the set; then the remaining granted protocols in the saved model
+order. Gemini is a client format and is never one of those upstream
+protocols. A candidate whose conversion cannot preserve the required request
+fields yields to the next candidate. The first candidate that preserves those
+fields is the protocol for that attempt. The gateway does not negotiate the
+protocol over HTTP, probe another protocol, or switch protocol after an
+upstream HTTP 400. Credential and provider retries keep their existing
+policy, and a later attempt makes its own local choice before it sends. The
+**response body**, or the SSE stream, is converted back to the client
+protocol when the upstream protocol differs. Without a saved preference, the
+authorized client protocol is checked first; if it cannot preserve the
+request or is not authorized, selection continues in the saved authorized
+order. It is not rewritten to Chat Completions.
+
+The same order covers every Providers-catalog supplier, including
+user-defined Configurable HTTP mappings, Custom API, New API and Sub2API
+linked Keys, and CPA. A site that can accept several upstream protocols still
+uses the protocols saved and granted for that model. The gateway does not add
+a protocol, a grant, or an endpoint to match the client. Conversion covers
+text, system instructions, images, tool calls and results, reasoning content,
+completion status, errors, and usage fields. SSE usage, errors, and terminal
+state are parsed in event order, including responses that mix LF and CRLF
+event separators.
+
+The published profile on `GET /v1/models` is described in
+[Model metadata](model-metadata.md). `ocg.protocols` names authorized upstream
+protocols for eligible routes. It is derived for that response and is not a
+stored negotiation table.
+
+## Native opaque history
+
+Signed Messages thinking, redacted thinking `data`, and encrypted Responses
+content keep a stateless marker. The prefix is 79 ASCII bytes:
+`ocg-replay-v1:`, 64 hexadecimal characters, and `:`. The original opaque
+bytes follow and are not rewritten. The gateway hashes the exact observed
+route with SHA-256: adapter, upstream protocol, upstream model, actual
+request URL, credential id, credential version, destination, authorization
+connection, binding, and authentication scheme. The marker contains no Key,
+no other secret, no database record, and no HMAC. The marker establishes
+equality with that configured observed route. The upstream still validates
+the signed or encrypted content.
+
+The gateway checks the marker before the HTTP request. A wrong route,
+unmarked opaque history that is not empty, an unknown version, or a nested
+or malformed marker is rejected. The gateway does not delete those fields to
+let the request continue, and it does not guess a compatible reading of an
+older conversation. Ordinary text and tool calls remain portable. On a
+Messages request that stays on Messages, thinking whose signature is missing,
+null, or empty stays in the same block after validation and system-role
+hoisting. That native history is not silently deleted. A legacy helper that
+converts without the route marker still removes those unsigned blocks. A
+native client may turn unsigned thinking into plain text through its own
+SDK. JSON and SSE both keep the signed field with the route that produced
+it. If redaction would corrupt signed native content, the gateway returns an
+error instead of a history that was rewritten and still succeeds.
+
+The marker protects that opaque history only when the native client forwards it. External clients own conversation serialization. Their SDK can turn a native opaque field into plain text, or drop it, when the provider, API, or model identity changes. OCG cannot recover a missing field that never arrived, and it cannot detect that drop. Only the DSH plugin has a strict preflight that stops the base adapter from rewriting a foreign signed assistant message. Switching protocol group or client configuration does not migrate an old conversation. A new conversation, or history that has already been resolved, is required when that native identity changes. For marked history that does arrive, the same configured route is the bound of the guarantee: a direct change of upstream model, endpoint, or credential version is rejected before HTTP.
 
 | Reference alias preference | Models |
 | --- | --- |
@@ -149,7 +191,7 @@ Gemini is a client format: the gateway converts `contents`,
 text-only `systemInstruction`, supported `inlineData` images,
 `functionDeclarations`, function calls/results, JSON-schema output,
 generation options, Google error envelopes, usage metadata, and SSE frames to
-and from the known model's native Chat Completions or Messages protocol. Both
+and from the upstream protocol chosen for that attempt. Both
 the `v1beta` and `v1` URL forms are accepted.
 
 Unconvertible fields return `400`:
@@ -158,10 +200,8 @@ Unconvertible fields return `400`:
   different upstream protocol cannot preserve their safety semantics.
   Omitted, `null`, and `[]` are accepted. Do not treat `safetySettings` as a
   hint the upstream will enforce.
-- `generationConfig.topK` and `generationConfig.thinkingConfig` are accepted
-  as cross-protocol compatibility hints only; sampling, reasoning budgets,
-  and thought display are not guaranteed equivalent to a native Gemini
-  backend and depend on the selected OpenCode-Go model.
+- A non-null `generationConfig.topK` or `generationConfig.thinkingConfig`
+  is rejected before HTTP. Conversion has no exact form for either value.
 - Other non-null generation options that cannot be preserved — including
   `seed`, presence/frequency penalties, log-probability controls, and media
   resolution — return `400` instead of being silently discarded.

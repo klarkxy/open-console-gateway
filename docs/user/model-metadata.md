@@ -6,9 +6,43 @@ Use **Applications → DSH** to install the OCG provider. After upgrading OCG to
 
 ## What Is Reported
 
-Authenticated `GET /v1/models` retains its OpenAI-compatible envelope and public IDs. Known capacities are added as `contextWindow` and `maxTokens`. The versioned `ocg` object contains the model name, context window, maximum output tokens, input/output modalities, reasoning support, explicit `reasoningEfforts`, tool-call facts, sources and status. Missing fields mean unknown, not false. This GET never contacts an upstream.
+Authenticated `GET /v1/models` retains its OpenAI-compatible envelope and public IDs. Known capacities are added as `contextWindow` and `maxTokens`. The versioned `ocg` object uses `schemaVersion` 2. It contains the model name, context window, maximum output tokens, input/output modalities, reasoning support, explicit `reasoningEfforts`, tool-call facts, sources, and status. When eligible routes can carry the model, it also contains `protocols`. Missing capability fields mean unknown, not false. This GET never contacts an upstream.
 
-The DSH plugin maps context and text/image input to native model descriptors, and translates every offered reasoning level into pi-ai's `thinkingLevelMap`. The wire format is explicitly OpenAI Chat Completions; OCG remains responsible for its configured protocol conversion. For example, `{"low":"low","high":"high","xhigh":"max"}` offers exactly Low, High and Xhigh and sends the declared spellings. Absent levels are disabled, including Off. Declaring only `reasoning: true` does not invent selectable levels. `off: "none"` is an explicit wire declaration, not an implicit default.
+`protocols` is derived for that response. It is not saved with the metadata record. `preferred` is `chat_completions`, `responses`, or `messages`. `supported` lists authorized upstream protocols in that fixed order. A protocol is listed when an eligible route can send it: the destination and model are enabled, the name resolves to that mapping, and a credential is enabled, ready, and binding-enabled, allows the model, has a Key when the route requires one, and holds the endpoint grant. Several mappings sort by routing rank, then destination id, then upstream model. `preferred` is the first mapping's saved preferred protocol when that protocol is authorized; otherwise it is the first saved protocol that is authorized. Cooldown, a probe flag, an auth error, and which credential last won do not change the object. `supported` names those upstream protocols. It does not promise every feature on every protocol, and it does not choose the caller's client URL. A missing `protocols` value, or a value whose `preferred` is absent, illegal, or outside `supported`, stays unknown or invalid. Neither result is Chat Completions.
+
+`reasoning` and `reasoningEfforts` stay separate. `reasoning` records support. `reasoningEfforts` maps a selector level to an exact categorical `reasoning_effort` spelling. The same map may be carried unchanged on Chat Completions and on Responses. It is never a Messages thinking budget or an adaptive effort. A Responses vendor still applies its own contract to a historical Chat spelling.
+
+```json
+{
+  "id": "my-model",
+  "object": "model",
+  "ocg": {
+    "schemaVersion": 2,
+    "name": "My model",
+    "contextWindow": 262144,
+    "maxOutputTokens": 32768,
+    "inputModalities": ["text", "image"],
+    "outputModalities": ["text"],
+    "reasoning": true,
+    "reasoningEfforts": {"low": "low", "high": "high", "xhigh": "max"},
+    "toolCalling": true,
+    "sources": ["operator"],
+    "status": "declared",
+    "protocols": {
+      "preferred": "messages",
+      "supported": ["chat_completions", "messages"]
+    }
+  }
+}
+```
+
+The numbers and the Messages preference above illustrate the shape. They are not a specification for a real model. `status` is `declared` when any capability fact is present and `unknown` when the capability record is empty. `protocols` is omitted when no eligible route can carry the model.
+
+The DSH plugin requires `ocg.schemaVersion` 2 and a `protocols.preferred` value listed in `protocols.supported`. It loads three APIs from the active DSH runtime — `openai-completions`, `openai-responses`, and `anthropic-messages` — and selects one per model from that preferred protocol. DSH 0.2.0-rc.2 with pi-ai 0.87.1 provides those APIs. The package does not vendor them, and installation is not gated by a version allowlist. Chat Completions and Responses keep the published `/v1` base. Messages drops a trailing `/v1` and keeps a deployment subpath. The Messages client sends the Gateway Key as `x-api-key` with `anthropic-version`; the plugin leaves those headers unchanged. A prepared call freezes the catalog metadata captured for that model before the prepare await returns. A row whose profile is missing or invalid stays an `ocg-rejected` placeholder and is reported on that model. It is not registered as an executable Chat model.
+
+`reasoningEfforts` carries those exact categorical spellings on Chat Completions and on Responses. Messages keeps native reasoning support when `reasoning` is true. OCG does not write a Messages level menu or a thinking budget from that flag: those spellings are never a Messages budget or an adaptive effort. A native SDK may apply its own preset or default control. Omitting the OCG menu does not describe that control, and it does not mean the vendor accepts the SDK default. In the DSH plugin, selecting a Messages reasoning level the catalog does not declare is an explicit incompatibility. A protocol named in `supported` does not add a menu or guarantee a feature. A Responses vendor still applies its own contract to a historical Chat spelling. For example, `{"low":"low","high":"high","xhigh":"max"}` offers exactly Low, High, and Xhigh and sends those categorical spellings on Chat Completions and on Responses. Absent levels stay disabled, including Off. Declaring only `reasoning: true` does not invent selectable levels. `off: "none"` is an explicit wire declaration, not an implicit default.
+
+Signed assistant history is sent only when the provider, API, and model id all match the model about to be called. Before the base adapter can turn a foreign signed assistant message into plain text, the Harness checks a present pi-ai envelope: kind `pi-ai`, version 2, aligned with the assistant content, and the same provider, API, and model when the envelope carries opaque native data. Missing replay metadata leaves ordinary text and tools portable. Gateway conversion of the request still follows the saved route described in [Protocol conversion](protocol-conversion.md).
 
 DSH's existing native interface does not consume every capability. Additional facts are retained on the adapter descriptor under `ocg`; this does not add audio/video transports, hosted tools or an arbitrary-capability UI. Maximum output capability is not inserted into `configuredMaxTokens`, so it does not silently become a deployment's default per-request output budget.
 
@@ -98,7 +132,7 @@ Only declare effective capabilities supported by the actual gateway path. The op
 
 ## Alias And Route Safety
 
-For an alias that may use several enabled mappings, capacities are the minimum known limit, modalities are the intersection and tiers are retained only when every mapping agrees on the same wire spelling. Any unknown candidate prevents a positive guarantee. A model enabled on more than one protocol route is held to the same rule: each route contributes its verified provider facts or, when the route matches no provider, the generic baseline. A route with neither is unknown and withdraws positive claims. This deliberately favors safety over advertising the largest backend's capacity; capability-aware fallback routing is not added here.
+For an alias that may use several enabled mappings, capacities are the minimum known limit, modalities are the intersection and tiers are retained only when every mapping agrees on the same wire spelling. Any unknown candidate prevents a positive guarantee. `ocg.protocols` uses this same eligible set, ordered by routing rank, destination id, and upstream model. A model enabled on more than one protocol route is held to the same rule: each route contributes its verified provider facts or, when the route matches no provider, the generic baseline. A route with neither is unknown and withdraws positive claims. This deliberately favors safety over advertising the largest backend's capacity; capability-aware fallback routing is not added here.
 
 Facts and declarations bind to the destination's route, protocols and exact model mapping. Changing these invalidates the old binding. Model-specific upstream overrides are not populated from discovery of a different destination route. Operator declarations survive refresh of the unchanged route. Raw upstream payloads and credential echoes are not stored as metadata.
 

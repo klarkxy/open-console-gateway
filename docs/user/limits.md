@@ -19,10 +19,8 @@ supported protocol matrix lives in
   schemas/behavior, `VALIDATED` function calling, candidate counts other than
   one, and response modalities other than `TEXT` return `400`. Use base64
   `inlineData` for PNG, JPEG, GIF, or WebP images.
-- Gemini `topK` and `thinkingConfig` are accepted only as cross-protocol
-  compatibility hints. A native Chat Completions or Messages upstream may
-  ignore them or implement different semantics; exact Gemini-equivalent
-  sampling and thinking behavior is not guaranteed.
+- A non-null Gemini `generationConfig.topK` or `generationConfig.thinkingConfig`
+  is rejected before HTTP. Conversion has no exact form for either value.
 - Other non-null generation options that cannot be preserved, including
   `seed`, presence/frequency penalties, log-probability controls, and media
   resolution, return `400` instead of being silently discarded.

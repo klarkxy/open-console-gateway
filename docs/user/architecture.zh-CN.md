@@ -61,12 +61,9 @@ Custom ID 不会进入公布列表。
 ## 协议转换
 
 客户端可以使用 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 或
-Gemini `generateContent` / `streamGenerateContent` 入口。客户端与
-上游协议组合同时受支持且启用时直接透传；否则整份请求与响应会转换到模型的 effective
-上游协议，再转换回来。Gemini 是客户端格式：Gateway 把它转换到所选 Plan 的
-Chat Completions 或 Messages 上游。
+Gemini `generateContent` / `streamGenerateContent` 入口。每一次尝试在发送前于本地选择一种上游协议：已保存首选、已启用的客户端协议，然后是其余已授权协议。该选择与客户端协议不同时，请求和响应会做转换。Gemini 是客户端格式，从不是上游协议。凭据与供应商重试仍沿用既有策略。HTTP 400 不换协议。
 
-完整推荐/支持矩阵和转换限制见[协议转换](protocol-conversion.zh-CN.md)。
+选择规则、原生不透明历史和转换限制见[协议转换](protocol-conversion.zh-CN.md)。
 
 ## 继续阅读
 

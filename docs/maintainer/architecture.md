@@ -64,7 +64,11 @@ Inference is implemented under `crates/ocg-core/src/gateway/`:
    routes, contracts, and Alias resolution. It does not capture a price
    snapshot for a new request. Fallback iterations re-read live
    account state, eligible Custom runtimes, and Zen Free cooldown. Protocol
-   selection uses that saved contract.
+   selection is made again for each attempt from that saved contract: the
+   saved preferred protocol, then the enabled client protocol, then the
+   remaining granted protocols. Local preservation picks one of those
+   candidates before that attempt's send. An HTTP 400 does not switch
+   protocol. Credential and provider retries stay in the outer loop below.
 3. Candidate materialization applies adapter ceilings and effective
    model/protocol state before the no-I/O selector chooses a card.
 4. `provider_adapter.rs` exhaustively maps the sealed `ProviderAdapterKind` to

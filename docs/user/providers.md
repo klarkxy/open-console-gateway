@@ -72,7 +72,7 @@ An empty draft can be removed with **Delete Provider**. If it already has accoun
 
 Each user-defined Provider has a legacy default route or one to three explicit protocol routes. A model inherits the route for its protocol unless its mapping has a single explicit upstream override. Clearing the override restores inheritance. Authentication remains route-owned. Each keyed route requires the selected Key's saved endpoint and Origin grants. Editing a route or model override does not grant access to the new destination. Different public aliases for one upstream model must resolve to the same route.
 
-Routing passes the client protocol through when that protocol is enabled. Otherwise the gateway converts to the model's preferred protocol, then to the first remaining enabled protocol in adapter fallback order. CPA preserves its supported Chat, Responses and Messages client formats; Gemini clients are converted to Chat.
+Each attempt uses the saved preferred protocol when it is enabled, configured, and granted, then the same client protocol when that protocol is also available, then the remaining granted protocols in saved order. Preservation is checked locally before the send. The gateway does not probe another protocol or switch protocol after an upstream HTTP 400. Credential and provider retries keep their existing policy. CPA uses that same saved order across Chat, Responses, and Messages. Gemini remains a client format.
 
 Official presets initialize or explicitly update their documented route set. Manual configuration declares only the routes the operator saves; there is no automatic protocol scan, and template updates never rewrite saved choices. New API and Sub2API remain independently managed site types; their site and management-credential boundary is unchanged.
 
@@ -177,9 +177,12 @@ There is no price table on this page. The gateway does not fetch a provider pric
 - MiniMax CN and Kimi Code CN do not price requests in OCG, but their account cards can manually read the official subscription windows (`/token_plan/remains` and `/usages`). These snapshots are display-only and do not gate inference.
 - Custom API and user-defined Provider cards whose stored Endpoint host is exactly `api.deepseek.com`, `api.moonshot.cn`, or `api.moonshot.ai` can manually read that official current balance. Other Custom hosts are not probed.
 
-Request-time flow: Alias → account eligibility → adapter ceiling → saved
-contract → per-model/per-protocol effective state → passthrough or conversion.
-Protocol selection uses the saved contract. Authenticated `GET /v1/models` and
+Request-time flow, for each attempt: Alias → account eligibility → adapter
+ceiling → saved contract → per-model/per-protocol effective state → one local
+protocol choice before send. That choice is the saved preferred protocol,
+then the client protocol, then the remaining granted protocols. The choice
+does not replace credential or provider retry, and an HTTP 400 does not
+switch protocol. Authenticated `GET /v1/models` and
 protected `GET /dashboard/api/v4/application-models` publish only currently
 routable public names that have an effective enabled protocol. `application-models` lists Go names that resolve in the saved catalog and have an enabled protocol. It does not consult a price snapshot and excludes Custom.
 

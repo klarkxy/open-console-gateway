@@ -9,7 +9,7 @@
 - Gemini `countTokens` 同样返回 `501`；Gemini CLI 预期回退到本地估算。只有 `generateContent` 与 `streamGenerateContent` 会真正转发。
 - 非空 Gemini `safetySettings` 返回 `400`，因为不同上游协议无法保留其安全语义；`null` 与空数组不携带策略，可以接受。
 - Gemini `cachedContent`、`fileData`、Google Search 工具、`urlContext`、Code Execution、多模态 function response、function response 的 schema/behavior、`VALIDATED` 函数调用、`candidateCount` 大于 1、非 TEXT 输出模态返回 `400`。图片请改用 base64 `inlineData`，支持 PNG、JPEG、GIF、WebP。
-- Gemini `topK` 与 `thinkingConfig` 只作为跨协议兼容提示接受；Chat Completions 或 Messages 原生上游可能忽略或实现不同语义，不保证与 Gemini 原生后端的采样和思考行为等价。
+- 非空的 Gemini `generationConfig.topK` 或 `generationConfig.thinkingConfig` 在发出 HTTP 之前拒绝。转换没有这两种值的精确形式。
 - 其他无法保留的非空生成选项（包括 `seed`、presence/frequency penalty、logprobs 与 media resolution）返回 `400`，不会静默丢弃。
 - Responses 是无状态端点：必须设置 `store: false`。`previous_response_id`、`conversation`、`store: true`、`background: true` 全部直接 `400` 拒绝，不会静默忽略。
 - Responses 支持图片 URL 与 data URL；`input_image.file_id` 返回 `400`，因为 Gateway 没有 Files API。

@@ -4,11 +4,23 @@
 
 Open Console Gateway 在一个端口上提供四种客户端协议，再把每份请求转换成上游 Plan 所需的格式。转换过程是确定性的：解析 Alias、检查账号资格、应用适配器上限与已保存的供应商合约、检查按模型/按协议的 effective 状态，然后决定透传或转换。显式关闭上游协议的设置优先于基线支持。
 
-协议选择使用已保存的供应商合约。显式刷新目录时导入官方模型列表和协议基线：Go、Zen 使用 Go 文档，Command Code 使用自己的供应商文档，MiniMax CN / Kimi Code CN 使用文档声明的 Chat 与 Messages 家族。Go、Zen、Command Code 在文档缺少模型或抓取失败时回退到 Chat。已保存的覆盖与探测证据仍受密封适配器约束。刷新和启用操作见[供应商](providers.zh-CN.md)；推理请求不会刷新目录，也不会通过尝试另一种上游协议来发现支持。
+协议选择使用该模型已保存的首选协议，以及已经启用、已配置路由、且已授权给所选 Key 的协议。`MODEL_PROTOCOLS` 仍是离线种子和共享别名参考。下表是这份参考，不是实时选择器。
 
-客户端协议在当前模型合约中启用时，请求和响应透传；否则 **请求体** 转到已启用的首选协议，或适配器回退顺序中的第一个可用协议，**响应体** 或 SSE 流转回客户端协议。Gemini 始终转换到已启用的上游协议。供应商目录里的全部供应商（含用户定义 Configurable HTTP，每条 mapping 一个协议）共用这条规则。Custom API 同样转到该账号声明的上游协议，再遵守该端点的合约与按模型覆盖。New API / Sub2API 关联 Key 是例外：这些站点自己会转换 Chat Completions、Messages 和 Responses，因此 OCG 保存站点根地址并把匹配的客户端格式原样交给上游（Gemini 仍转换为 Chat Completions）。CPA 不在此转换默认控制范围内。转换覆盖文本、system、图像、工具调用与结果、推理内容、完成状态、错误与 usage 字段。SSE 用量、错误和终止状态按事件顺序解析，支持同一次响应混用 LF 与 CRLF 事件分隔符。
+显式刷新目录时导入官方模型列表和协议基线：Go、Zen 使用 Go 文档，Command Code 使用自己的供应商文档，MiniMax CN / Kimi Code CN 使用文档声明的 Chat 与 Messages 家族。抓取失败或文档未列出的模型不新增协议证据，已保存的首选保持原样。已保存的覆盖与探测证据仍受密封适配器约束。刷新和启用操作见[供应商](providers.zh-CN.md)。推理请求不刷新目录，也不为了发现另一种协议而向上游发请求。
 
-下表记录代码内的别名配置，不代表供应商当前可用性。刷新写入的官方基线与已保存的启用状态决定 **供应商** 页显示的实际默认协议和可用协议。
+每一次尝试在发送前于本地按这个顺序检查候选：已保存的首选协议，只要它属于已启用、已配置且已授权的集合；然后是同样属于该集合的客户端协议；然后是该模型已保存顺序中其余已授权协议。Gemini 只是客户端格式，不会被当作这些上游协议之一。某个候选无法在转换中保留请求所要求的字段时，改看下一个候选。第一个能够保留这些字段的候选就是这一次尝试的协议。Gateway 不通过 HTTP 协商协议，不探测另一种协议，收到上游 HTTP 400 后也不换协议。凭据与供应商重试仍沿用既有策略，之后的尝试会在自己发送前重新做这次本地选择。上游协议与客户端不同时，**响应体**或 SSE 流转回客户端协议。没有已保存首选时，先检查已授权的客户端协议；若它无法保留请求或未被授权，则按已保存的已授权顺序继续选择。它不会被改写成 Chat Completions。
+
+供应商目录中的全部供应商使用同一顺序，包括用户定义的 Configurable HTTP、Custom API、New API 与 Sub2API 关联 Key，以及 CPA。站点本身可以接受多种上游协议时，OCG 仍只使用该模型已保存并已授权的协议。Gateway 不会为了匹配客户端而新增协议、授权或端点。转换覆盖文本、system、图像、工具调用与结果、推理内容、完成状态、错误与 usage 字段。SSE 用量、错误和终止状态按事件顺序解析，支持同一次响应混用 LF 与 CRLF 事件分隔符。
+
+`GET /v1/models` 上的公开配置见[模型元数据](model-metadata.zh-CN.md)。`ocg.protocols` 列出合格路由上已授权的上游协议。它只在这次响应里推导，不是已保存的协商表。
+
+## 原生不透明历史
+
+已签名的 Messages thinking、redacted thinking `data`，以及加密的 Responses 内容带有无状态标记。前缀为 79 个 ASCII 字节：`ocg-replay-v1:`、64 位十六进制和 `:`。后面是未经改写的原始不透明字节。Gateway 用 SHA-256 哈希这次实际观察到的路由：适配器、上游协议、上游模型、实际请求 URL、凭据 id、凭据版本、目的地、授权连接、绑定和鉴权方式。标记不含 Key、其他秘密、数据库记录或 HMAC。标记只建立与这一条已配置、实际观察到的路由的相等关系。已签名或加密的内容仍由上游校验。
+
+Gateway 在发出 HTTP 请求之前检查标记。路由不符、非空且没有标记的不透明历史、未知版本，以及嵌套或畸形的标记都会被拒绝。Gateway 不会删掉这些字段来让请求继续，也不会把旧对话猜成一种兼容历史。普通文本和工具调用仍然可以跨路由携带。仍走 Messages 的 Messages 请求里，signature 缺失、为 null 或为空的 thinking 在校验和 system 角色提升之后保留原块。这段原生历史不会被静默删除。不带路由标记的旧转换辅助仍会去掉这些未签名块。原生客户端可以按自己的 SDK 把未签名 thinking 变成纯文本。JSON 与 SSE 都把已签名字段留在产生它的那条路由上。若脱敏会破坏已签名的原生内容，Gateway 返回错误，而不是返回一份改写后仍然成功的历史。
+
+标记只在原生客户端转发这段不透明历史时保护它。外部客户端负责会话的序列化。供应商、API 或模型身份变化时，它们的 SDK 可以把原生不透明字段改成纯文本，也可以丢掉该字段。OCG 无法恢复一个从未到达的字段，也无法发现这次丢弃。只有 DSH 插件在基础适配器改写外来的已签名 assistant 消息之前做严格预检。切换协议分组或客户端配置不会迁移旧会话。原生身份变化时，需要新开会话，或者发送已经解析好的历史。带标记的历史确实到达时，同一条已配置路由就是这项保证的边界：上游模型、端点或凭据版本的直接变化会在发出 HTTP 之前拒绝。
 
 | 别名参考偏好 | 模型 |
 | --- | --- |
@@ -84,12 +96,12 @@ function、custom、namespace 工具正常转换。`web_search`、`web_search_pr
 
 ## Gemini 是客户端兼容层
 
-Gemini 是客户端格式：Gateway 把 `contents`、纯文本 `systemInstruction`、受支持的 `inlineData` 图片、`functionDeclarations`、函数调用/结果、JSON Schema 输出、生成选项、Google 错误信封、usage 元数据和 SSE 帧，转换到已知模型的 Chat Completions 或 Messages 原生协议并转回。`v1beta` 与 `v1` 两种 URL 形式都接受。
+Gemini 是客户端格式：Gateway 把 `contents`、纯文本 `systemInstruction`、受支持的 `inlineData` 图片、`functionDeclarations`、函数调用/结果、JSON Schema 输出、生成选项、Google 错误信封、usage 元数据和 SSE 帧，转换到这次尝试选定的上游协议并转回。`v1beta` 与 `v1` 两种 URL 形式都接受。
 
 无法转换的字段返回 `400`：
 
 - 非空 `safetySettings` 无法跨协议执行同一套内容安全阈值，直接返回 `400 INVALID_ARGUMENT`；省略、`null` 或空数组可以使用。`safetySettings` 只影响 Gateway 是否接受请求，不会作为上游执行的提示生效。
-- `generationConfig.topK` 与 `generationConfig.thinkingConfig` 只作为跨协议兼容提示接受；采样、推理预算和 thoughts 展示不保证与 Google Gemini 等价，实际能力由所选 OpenCode-Go 模型决定。
+- 非空的 `generationConfig.topK` 或 `generationConfig.thinkingConfig` 在发出 HTTP 之前拒绝。转换没有这两种值的精确形式。
 - 其他无法跨协议保留的非空生成选项（包括 `seed`、presence/frequency penalty、logprobs 与 media resolution）会返回 `400`，不会静默丢弃。
 - `cachedContent`、`fileData`、Google Search、URL Context、Code Execution、多模态 function response、function response 的 schema/behavior、`VALIDATED` 函数调用模式、`candidateCount` 大于 1、非 TEXT 输出模态会返回 `400`。图片请改用 base64 `inlineData`，支持 PNG、JPEG、GIF、WebP。
 - `countTokens` 与 `embedContent` 返回 `501 UNIMPLEMENTED`；Gemini CLI 对前者失败可使用本地估算，Gateway 当前没有 embeddings 路由。
