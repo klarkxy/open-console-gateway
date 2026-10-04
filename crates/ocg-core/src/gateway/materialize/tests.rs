@@ -1,7 +1,9 @@
 use super::*;
 use crate::alias::{self, ResolvedModel, RuntimeCatalogs};
 use crate::crypto::{KeyCipher, StaticKeyCipher};
-use crate::gateway::protocol::{ApiFormat, is_known_model, parse_client_request};
+use crate::gateway::protocol::{
+    ApiFormat, is_known_model, materialize_parsed_request, parse_client_request,
+};
 use crate::models::{Account, AccountSetupStep, AccountType, AppConfig, UpstreamChannel};
 use crate::provider::{
     CUSTOM_PROVIDER_ID, CredentialKind, KIMI_PROVIDER_ID, MINIMAX_PROVIDER_ID,
@@ -406,7 +408,7 @@ fn materialize_cn_catalog(
 }
 
 #[test]
-fn catalog_cn_model_absent_static_table_same_protocol_avoids_virtual_conversion() {
+fn catalog_cn_preferred_protocol_precedes_same_client() {
     assert!(!is_known_model("MiniMax-New"));
     assert!(!is_known_model("kimi-for-coding"));
 
@@ -430,14 +432,26 @@ fn catalog_cn_model_absent_static_table_same_protocol_avoids_virtual_conversion(
         chat_body("MiniMax-New"),
     );
     assert_eq!(chat.routes.len(), 1, "{:?}", chat.rejections);
+    assert!(
+        chat.rejections.is_empty(),
+        "a successful preferred plan records no alternate attempt: {:?}",
+        chat.rejections
+    );
     assert_eq!(chat.routes[0].plan.client, ApiFormat::ChatCompletions);
-    assert_eq!(chat.routes[0].plan.upstream, ApiFormat::ChatCompletions);
+    assert_eq!(
+        chat.routes[0].plan.upstream,
+        ApiFormat::Messages,
+        "enabled preferred Messages wins over the Chat client"
+    );
+    let converted: serde_json::Value = serde_json::from_slice(&chat.routes[0].plan.body).unwrap();
+    assert_eq!(converted["messages"][0]["role"], "user");
 
     let responses_body = Bytes::from(
         serde_json::to_vec(&json!({
             "model": "MiniMax-New",
             "input": "hi",
             "store": false,
+            "vendor_extension": {"trace_id": "trace_responses"},
             "text": {
                 "format": {
                     "type": "json_schema",
@@ -456,10 +470,23 @@ fn catalog_cn_model_absent_static_table_same_protocol_avoids_virtual_conversion(
         responses_body,
     );
     assert_eq!(responses.routes.len(), 1, "{:?}", responses.rejections);
-    assert_eq!(responses.routes[0].plan.upstream, ApiFormat::Responses);
+    assert!(
+        responses.rejections.is_empty(),
+        "feature fallback stays local: {:?}",
+        responses.rejections
+    );
+    assert_eq!(
+        responses.routes[0].plan.upstream,
+        ApiFormat::Responses,
+        "preferred Messages cannot keep Responses json_schema, so the client protocol is used"
+    );
     let upstream: serde_json::Value =
         serde_json::from_slice(&responses.routes[0].plan.body).unwrap();
     assert_eq!(upstream["text"]["format"]["type"], "json_schema");
+    assert_eq!(
+        upstream["vendor_extension"]["trace_id"], "trace_responses",
+        "the same-protocol fallback keeps unknown native fields"
+    );
 
     let (kimi, kimi_resolved) = cn_catalog_snapshot(
         AdapterKind::Kimi,
@@ -701,4 +728,416 @@ fn granted_messages_endpoint_is_selected_for_a_chat_request() {
     let selection = LiveSendSelection::from_execution(&set.routes[0], "MiniMax-New", "MiniMax-New");
     verify_execution_authorization(&snapshot, &selection, &set.routes[0].spec, Utc::now(), true)
         .unwrap_or_else(|error| panic!("granted messages route must pass live auth: {error:?}"));
+}
+
+fn builtin_endpoint(provider_id: &str, protocol: UpstreamProtocolKind) -> String {
+    let connection = connection_id_for_legacy(LegacyConnectionKind::BuiltinProvider, provider_id);
+    ocg_domain::connection::endpoint_id_for(
+        &connection,
+        ocg_domain::connection::EndpointOperation::from(protocol),
+    )
+    .to_string()
+}
+
+#[test]
+fn ungranted_preferred_protocol_is_not_executed() {
+    let (mut snapshot, resolved) = cn_catalog_snapshot(
+        AdapterKind::Minimax,
+        MINIMAX_PROVIDER_ID,
+        "minimax-chat-grant",
+        "MiniMax-New",
+        &[
+            UpstreamProtocolKind::ChatCompletions,
+            UpstreamProtocolKind::Responses,
+        ],
+        UpstreamProtocolKind::Responses,
+    );
+    let chat = builtin_endpoint(MINIMAX_PROVIDER_ID, UpstreamProtocolKind::ChatCompletions);
+    let responses = builtin_endpoint(MINIMAX_PROVIDER_ID, UpstreamProtocolKind::Responses);
+    snapshot.credentials[0].grants.allowed_endpoint_ids = vec![chat.clone()];
+    let parsed =
+        parse_client_request(ApiFormat::ChatCompletions, chat_body("MiniMax-New")).unwrap();
+    let set = materialize_execution_routes(
+        &snapshot,
+        &AppConfig::default(),
+        &parsed,
+        &resolved,
+        "MiniMax-New",
+        "MiniMax-New",
+        None,
+    )
+    .unwrap();
+    assert_eq!(set.routes.len(), 1, "{:?}", set.rejections);
+    assert!(set.rejections.is_empty(), "{:?}", set.rejections);
+    assert_eq!(set.routes[0].plan.upstream, ApiFormat::ChatCompletions);
+    assert_eq!(set.routes[0].target.endpoint_id, chat);
+    assert_ne!(set.routes[0].target.endpoint_id, responses);
+}
+
+#[test]
+fn preferred_loss_falls_back_to_same_client_and_keeps_native_fields() {
+    let (snapshot, resolved) = cn_catalog_snapshot(
+        AdapterKind::Minimax,
+        MINIMAX_PROVIDER_ID,
+        "minimax-schema",
+        "MiniMax-New",
+        &[
+            UpstreamProtocolKind::Messages,
+            UpstreamProtocolKind::ChatCompletions,
+        ],
+        UpstreamProtocolKind::Messages,
+    );
+    let body = Bytes::from(
+        serde_json::to_vec(&json!({
+            "model": "MiniMax-New",
+            "messages": [
+                {"role": "developer", "content": "dev"},
+                {"role": "user", "content": "hi"}
+            ],
+            "vendor_extension": {"trace_id": "trace_chat"},
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "answer", "schema": {"type": "object"}}
+            }
+        }))
+        .unwrap(),
+    );
+    let parsed = parse_client_request(ApiFormat::ChatCompletions, body).unwrap();
+    let set = materialize_execution_routes(
+        &snapshot,
+        &AppConfig::default(),
+        &parsed,
+        &resolved,
+        "MiniMax-New",
+        "MiniMax-New",
+        None,
+    )
+    .unwrap();
+    assert_eq!(set.routes.len(), 1, "{:?}", set.rejections);
+    assert!(
+        set.rejections.is_empty(),
+        "local fallback must not record a probe or a failed candidate: {:?}",
+        set.rejections
+    );
+    assert_eq!(set.routes[0].plan.client, ApiFormat::ChatCompletions);
+    assert_eq!(set.routes[0].plan.upstream, ApiFormat::ChatCompletions);
+    assert_eq!(
+        set.routes[0].target.endpoint_id,
+        builtin_endpoint(MINIMAX_PROVIDER_ID, UpstreamProtocolKind::ChatCompletions)
+    );
+    let upstream: serde_json::Value = serde_json::from_slice(&set.routes[0].plan.body).unwrap();
+    assert_eq!(upstream["response_format"]["type"], "json_schema");
+    assert_eq!(upstream["vendor_extension"]["trace_id"], "trace_chat");
+    assert_eq!(upstream["messages"][0]["role"], "developer");
+    assert_eq!(upstream["messages"][0]["content"], "dev");
+}
+
+#[test]
+fn unpreservable_protocols_exclude_one_candidate_and_keep_another() {
+    let (mut snapshot, resolved) = cn_catalog_snapshot(
+        AdapterKind::Minimax,
+        MINIMAX_PROVIDER_ID,
+        "minimax-lossy",
+        "MiniMax-New",
+        &[
+            UpstreamProtocolKind::Messages,
+            UpstreamProtocolKind::Responses,
+            UpstreamProtocolKind::ChatCompletions,
+        ],
+        UpstreamProtocolKind::Messages,
+    );
+    snapshot.credentials[0].grants.allowed_endpoint_ids = vec![
+        builtin_endpoint(MINIMAX_PROVIDER_ID, UpstreamProtocolKind::Messages),
+        builtin_endpoint(MINIMAX_PROVIDER_ID, UpstreamProtocolKind::Responses),
+    ];
+    let native = account(
+        "minimax-native",
+        MINIMAX_PROVIDER_ID,
+        CredentialKind::ApiKey,
+        QuotaScope::Key,
+    );
+    let mut native_credential = ExecutionCredential::from(&native);
+    native_credential.destination_id = snapshot.credentials[0].destination_id.clone();
+    native_credential.authorization_connection_id =
+        snapshot.credentials[0].authorization_connection_id.clone();
+    native_credential.binding_id = "binding-minimax-native".into();
+    native_credential.grants.allowed_endpoint_ids = vec![builtin_endpoint(
+        MINIMAX_PROVIDER_ID,
+        UpstreamProtocolKind::ChatCompletions,
+    )];
+    snapshot.credentials.push(native_credential);
+    let body = Bytes::from(
+        serde_json::to_vec(&json!({
+            "model": "MiniMax-New",
+            "messages": [{"role": "user", "content": "hi"}],
+            "vendor_extension": {"trace_id": "trace_native"},
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "answer", "schema": {"type": "object"}}
+            }
+        }))
+        .unwrap(),
+    );
+    let parsed = parse_client_request(ApiFormat::ChatCompletions, body).unwrap();
+    let set = materialize_execution_routes(
+        &snapshot,
+        &AppConfig::default(),
+        &parsed,
+        &resolved,
+        "MiniMax-New",
+        "MiniMax-New",
+        None,
+    )
+    .unwrap();
+    assert_eq!(set.routes.len(), 1, "{:?}", set.rejections);
+    assert_eq!(set.routes[0].routing.account.id, "minimax-native");
+    assert_eq!(set.routes[0].plan.upstream, ApiFormat::ChatCompletions);
+    let upstream: serde_json::Value = serde_json::from_slice(&set.routes[0].plan.body).unwrap();
+    assert_eq!(upstream["response_format"]["type"], "json_schema");
+    assert_eq!(upstream["vendor_extension"]["trace_id"], "trace_native");
+    assert_eq!(set.rejections.len(), 1, "{:?}", set.rejections);
+    assert_eq!(
+        set.rejections[0].account_id.as_deref(),
+        Some("minimax-lossy")
+    );
+    assert_eq!(
+        set.rejections[0].code,
+        RouteRejectionCode::CandidateMaterializationFailed
+    );
+    assert!(
+        set.rejections[0].detail.contains("cannot be preserved"),
+        "{}",
+        set.rejections[0].detail
+    );
+}
+
+fn messages_history_body(signature: Option<&str>) -> Bytes {
+    let mut messages = vec![json!({"role": "user", "content": "hi"})];
+    if let Some(signature) = signature {
+        messages.push(json!({
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "t", "signature": signature},
+                {"type": "text", "text": "ok"}
+            ]
+        }));
+    }
+    Bytes::from(
+        serde_json::to_vec(&json!({
+            "model": "MiniMax-New",
+            "max_tokens": 32,
+            "messages": messages
+        }))
+        .unwrap(),
+    )
+}
+
+fn minimax_messages_snapshot(account_id: &str) -> (RoutingSnapshot, ResolvedModel) {
+    cn_catalog_snapshot(
+        AdapterKind::Minimax,
+        MINIMAX_PROVIDER_ID,
+        account_id,
+        "MiniMax-New",
+        &[UpstreamProtocolKind::Messages],
+        UpstreamProtocolKind::Messages,
+    )
+}
+
+#[test]
+fn production_route_domain_is_stable_for_the_same_observed_route() {
+    let (snapshot, resolved) = minimax_messages_snapshot("minimax-domain");
+    let first = materialize_cn_catalog(
+        &snapshot,
+        &resolved,
+        ApiFormat::Messages,
+        "MiniMax-New",
+        messages_history_body(None),
+    );
+    let second = materialize_cn_catalog(
+        &snapshot,
+        &resolved,
+        ApiFormat::Messages,
+        "MiniMax-New",
+        messages_history_body(None),
+    );
+    assert_eq!(first.routes.len(), 1, "{:?}", first.rejections);
+    let domain = first.routes[0]
+        .plan
+        .replay_domain
+        .expect("production materialize sets a route domain");
+    assert_eq!(
+        domain.hex(),
+        second.routes[0].plan.replay_domain.unwrap().hex()
+    );
+    assert_eq!(domain.hex().len(), 64);
+}
+
+#[test]
+fn native_history_restores_only_for_the_matching_credential() {
+    let (mut snapshot, resolved) = minimax_messages_snapshot("minimax-a");
+    snapshot.credentials[0].credential_id = "cred-a".into();
+    snapshot.credentials[0].credential_version = 1;
+    let mut other = snapshot.credentials[0].clone();
+    other.id = "minimax-b".into();
+    other.credential_id = "cred-b".into();
+    other.credential_version = 2;
+    other.binding_id = "binding-minimax-b".into();
+    let mut only_b = snapshot.clone();
+    only_b.credentials = vec![other.clone()];
+    let learned = materialize_cn_catalog(
+        &only_b,
+        &resolved,
+        ApiFormat::Messages,
+        "MiniMax-New",
+        messages_history_body(None),
+    );
+    let domain = learned.routes[0].plan.replay_domain.unwrap();
+    let marked = ocg_gateway::protocol::bind_replay_opaque(domain, "sig-bytes").unwrap();
+    snapshot.credentials.push(other);
+    let parsed =
+        parse_client_request(ApiFormat::Messages, messages_history_body(Some(&marked))).unwrap();
+    let set = materialize_execution_routes(
+        &snapshot,
+        &AppConfig::default(),
+        &parsed,
+        &resolved,
+        "MiniMax-New",
+        "MiniMax-New",
+        None,
+    )
+    .unwrap();
+    assert_eq!(set.routes.len(), 1, "{:?}", set.rejections);
+    assert_eq!(set.routes[0].routing.account.id, "minimax-b");
+    assert_eq!(
+        set.routes[0].plan.replay_domain.unwrap().hex(),
+        domain.hex()
+    );
+    let upstream: serde_json::Value = serde_json::from_slice(&set.routes[0].plan.body).unwrap();
+    assert_eq!(
+        upstream["messages"][1]["content"][0]["signature"], "sig-bytes",
+        "matching history is restored to the original opaque bytes"
+    );
+    assert!(
+        !upstream.to_string().contains("ocg-replay-v1"),
+        "the upstream body is not sent with the local marker"
+    );
+    assert_eq!(set.rejections.len(), 1, "{:?}", set.rejections);
+    assert_eq!(set.rejections[0].account_id.as_deref(), Some("minimax-a"));
+    assert!(
+        set.rejections[0].detail.contains("does not match"),
+        "{}",
+        set.rejections[0].detail
+    );
+}
+
+#[test]
+fn unmarked_or_foreign_native_history_is_rejected_before_send() {
+    let (snapshot, resolved) = minimax_messages_snapshot("minimax-unmarked");
+    let unmarked =
+        parse_client_request(ApiFormat::Messages, messages_history_body(Some("raw-sig"))).unwrap();
+    let error = expect_pre_send_rejection(materialize_execution_routes(
+        &snapshot,
+        &AppConfig::default(),
+        &unmarked,
+        &resolved,
+        "MiniMax-New",
+        "MiniMax-New",
+        None,
+    ));
+    assert!(error.contains("no route domain"), "{error}");
+
+    let foreign = ocg_gateway::protocol::ReplayDomain::parse(&"ab".repeat(32)).unwrap();
+    let marked = ocg_gateway::protocol::bind_replay_opaque(foreign, "sig-bytes").unwrap();
+    let mismatched =
+        parse_client_request(ApiFormat::Messages, messages_history_body(Some(&marked))).unwrap();
+    let error = expect_pre_send_rejection(materialize_execution_routes(
+        &snapshot,
+        &AppConfig::default(),
+        &mismatched,
+        &resolved,
+        "MiniMax-New",
+        "MiniMax-New",
+        None,
+    ));
+    assert!(error.contains("does not match"), "{error}");
+}
+
+#[test]
+fn exhausted_protocols_keep_transport_and_preservation_rejections() {
+    let (snapshot, resolved) = cn_catalog_snapshot(
+        AdapterKind::Kimi,
+        KIMI_PROVIDER_ID,
+        "kimi-mixed",
+        "kimi-for-coding",
+        &[
+            UpstreamProtocolKind::Responses,
+            UpstreamProtocolKind::Messages,
+        ],
+        UpstreamProtocolKind::Responses,
+    );
+    let body = Bytes::from(
+        serde_json::to_vec(&json!({
+            "model": "kimi-for-coding",
+            "max_tokens": 32,
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "t", "signature": "raw-sig"},
+                    {"type": "text", "text": "ok"}
+                ]}
+            ]
+        }))
+        .unwrap(),
+    );
+    let parsed = parse_client_request(ApiFormat::Messages, body).unwrap();
+    let set = materialize_execution_routes(
+        &snapshot,
+        &AppConfig::default(),
+        &parsed,
+        &resolved,
+        "kimi-for-coding",
+        "kimi-for-coding",
+        None,
+    )
+    .expect("a mixed exhaustion remains a route set with no send");
+    assert!(set.routes.is_empty(), "{:?}", set.rejections);
+    assert_eq!(set.rejections.len(), 2, "{:?}", set.rejections);
+    let transport = set
+        .rejections
+        .iter()
+        .find(|rejection| rejection.code == RouteRejectionCode::ProductionRouteUnsupported)
+        .expect("unresolvable transport");
+    let preserved = set
+        .rejections
+        .iter()
+        .find(|rejection| rejection.code == RouteRejectionCode::CandidateMaterializationFailed)
+        .expect("native history preservation");
+    assert_eq!(transport.account_id.as_deref(), Some("kimi-mixed"));
+    assert_eq!(preserved.account_id.as_deref(), Some("kimi-mixed"));
+    assert!(
+        transport.detail.contains("no official upstream path"),
+        "{}",
+        transport.detail
+    );
+    assert!(
+        preserved.detail.contains("no route domain"),
+        "{}",
+        preserved.detail
+    );
+    let detail = set
+        .incompatibility
+        .expect("mixed exhaustion publishes an aggregate detail");
+    assert!(detail.contains(transport.detail.as_str()), "{detail}");
+    assert!(detail.contains(preserved.detail.as_str()), "{detail}");
+}
+
+fn expect_pre_send_rejection(result: Result<ExecutionRouteSet, super::ProtocolError>) -> String {
+    match result {
+        Err(error) => error.message,
+        Ok(set) => panic!(
+            "expected a pre-send rejection, got {} routes and {} rejections",
+            set.routes.len(),
+            set.rejections.len()
+        ),
+    }
 }

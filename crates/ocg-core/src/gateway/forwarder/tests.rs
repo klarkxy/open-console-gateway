@@ -1307,6 +1307,7 @@ fn chat_plan(model: &str, custom_endpoint: Option<&str>) -> RequestPlan {
             endpoint_url: endpoint_url.to_string(),
             auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
         }),
+        replay_domain: None,
         service_tier: None,
         custom_tools: Vec::new(),
         namespace_tools: Vec::new(),
@@ -3712,4 +3713,466 @@ async fn metered_malformed_accepted_json_stays_uncertain_without_replay() {
     let _ = stop.send(());
     drop(state);
     let _ = fs::remove_dir_all(dir);
+}
+
+fn bound_replay_plan(format: ApiFormat) -> RequestPlan {
+    let mut plan = chat_plan("test-model", None);
+    plan.client = format;
+    plan.upstream = format;
+    plan.replay_domain =
+        Some(ocg_gateway::protocol::ReplayDomain::parse(&"ab".repeat(32)).unwrap());
+    plan
+}
+
+fn assert_redaction_conflict(plan: &RequestPlan, mut body: Value) {
+    let error = prepare_redacted_response(plan, &mut body, Some("SECRET")).unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("signed native history cannot be preserved by secret redaction"),
+        "{}",
+        error.message
+    );
+    assert!(!error.message.contains("SECRET"), "{}", error.message);
+    assert!(
+        body.to_string().contains("SECRET"),
+        "conflict must be reported before redaction mutates the document"
+    );
+}
+
+#[test]
+fn bound_json_rejects_secret_redaction_of_signed_native_history() {
+    let messages = bound_replay_plan(ApiFormat::Messages);
+    assert_redaction_conflict(
+        &messages,
+        json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "thinking",
+                "thinking": "hello",
+                "signature": "pre-SECRET-post"
+            }]
+        }),
+    );
+    assert_redaction_conflict(
+        &messages,
+        json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "thinking",
+                "thinking": "see SECRET",
+                "signature": "sig-1"
+            }]
+        }),
+    );
+    assert_redaction_conflict(
+        &messages,
+        json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "redacted_thinking",
+                "data": "pre-SECRET-post"
+            }]
+        }),
+    );
+    assert_redaction_conflict(
+        &bound_replay_plan(ApiFormat::Responses),
+        json!({
+            "id": "resp_1",
+            "output": [{
+                "type": "reasoning",
+                "id": "rs1",
+                "summary": [],
+                "encrypted_content": "pre-SECRET-post"
+            }]
+        }),
+    );
+}
+
+#[test]
+fn bound_json_still_redacts_unsigned_text_and_keeps_one_signature_marker() {
+    let plan = bound_replay_plan(ApiFormat::Messages);
+    let prefix = ocg_gateway::protocol::replay_marker_prefix(plan.replay_domain.unwrap());
+    let mut body = json!({
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "model": "test-model",
+        "content": [
+            {"type": "thinking", "thinking": "safe", "signature": "sig-1"},
+            {"type": "text", "text": "hello SECRET"}
+        ],
+        "stop_reason": "end_turn"
+    });
+    let value = prepare_redacted_response(&plan, &mut body, Some("SECRET")).unwrap();
+    let encoded = value.to_string();
+    assert!(!encoded.contains("SECRET"), "{encoded}");
+    assert!(encoded.contains("hello"), "{encoded}");
+    assert!(encoded.contains(&format!("{prefix}sig-1")), "{encoded}");
+    assert_eq!(encoded.matches(prefix.as_str()).count(), 1, "{encoded}");
+
+    let mut unsigned = json!({
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "content": [{
+            "type": "thinking",
+            "thinking": "hello SECRET",
+            "signature": null
+        }]
+    });
+    let unsigned = prepare_redacted_response(&plan, &mut unsigned, Some("SECRET")).unwrap();
+    let encoded = unsigned.to_string();
+    assert!(!encoded.contains("SECRET"), "{encoded}");
+    assert!(!encoded.contains("ocg-replay-"), "{encoded}");
+
+    let mut empty_encrypted = json!({
+        "id": "resp_1",
+        "output": [{
+            "type": "reasoning",
+            "id": "rs1",
+            "summary": [],
+            "encrypted_content": ""
+        }]
+    });
+    let responses = bound_replay_plan(ApiFormat::Responses);
+    let empty_encrypted =
+        prepare_redacted_response(&responses, &mut empty_encrypted, Some("SECRET")).unwrap();
+    let encoded = empty_encrypted.to_string();
+    assert!(encoded.contains("\"encrypted_content\":\"\""), "{encoded}");
+    assert!(!encoded.contains("ocg-replay-"), "{encoded}");
+}
+
+fn assert_bound_opaque(value: &str, domain: ocg_gateway::protocol::ReplayDomain, raw: &str) {
+    let prefix = ocg_gateway::protocol::replay_marker_prefix(domain);
+    assert_eq!(value, format!("{prefix}{raw}"));
+    match ocg_gateway::protocol::restore_replay_opaque(domain, value).unwrap() {
+        ocg_gateway::protocol::RestoredReplay::Bound(restored) => assert_eq!(restored, raw),
+        other => panic!("opaque did not restore to {raw}: {other:?} from {value}"),
+    }
+}
+
+fn assert_not_marker(value: &str, marker: &str, secret: &str) {
+    assert_ne!(value, marker, "{secret}");
+    assert!(!value.contains(secret), "{secret} stayed in {value}");
+}
+
+#[test]
+fn bound_json_keeps_native_opaque_for_scaffold_secrets() {
+    for secret in ["ocg", "replay", "abababab"] {
+        let plan = bound_replay_plan(ApiFormat::Messages);
+        let domain = plan.replay_domain.unwrap();
+        let marker = format!(
+            "{}safe",
+            ocg_gateway::protocol::replay_marker_prefix(domain)
+        );
+        let mut body = json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "test-model",
+            "content": [
+                {"type": "thinking", "thinking": "why", "signature": "sig-1"},
+                {"type": "redacted_thinking", "data": "opaque-data"},
+                {"type": "text", "text": format!("see {secret}")},
+                {"type": "text", "text": marker},
+                {"type": "tool_use", "id": "toolu_1", "name": "search", "input": {
+                    "type": "thinking",
+                    "signature": marker,
+                    "data": marker,
+                    "q": format!("see {secret}"),
+                    "nested": {"arg": secret}
+                }}
+            ],
+            "stop_reason": "tool_use"
+        });
+        let value = prepare_redacted_response(&plan, &mut body, Some(secret))
+            .unwrap_or_else(|error| panic!("{secret}: {}", error.message));
+        let content = value["content"].as_array().unwrap();
+        assert_bound_opaque(content[0]["signature"].as_str().unwrap(), domain, "sig-1");
+        assert_eq!(content[0]["thinking"].as_str(), Some("why"));
+        assert_bound_opaque(content[1]["data"].as_str().unwrap(), domain, "opaque-data");
+        assert_eq!(content[2]["text"].as_str(), Some("see <redacted>"));
+        assert_not_marker(content[3]["text"].as_str().unwrap(), &marker, secret);
+        let input = &content[4]["input"];
+        assert_eq!(input["type"].as_str(), Some("thinking"));
+        assert_not_marker(input["signature"].as_str().unwrap(), &marker, secret);
+        assert_not_marker(input["data"].as_str().unwrap(), &marker, secret);
+        assert_eq!(input["q"].as_str(), Some("see <redacted>"));
+        assert_eq!(input["nested"]["arg"].as_str(), Some("<redacted>"));
+    }
+}
+
+#[test]
+fn bound_responses_json_keeps_distinct_summary_content_and_cipher() {
+    for secret in ["ocg", "replay", "abababab"] {
+        let plan = bound_replay_plan(ApiFormat::Responses);
+        let domain = plan.replay_domain.unwrap();
+        let mut body = json!({
+            "id": "resp_1",
+            "output": [{
+                "type": "reasoning",
+                "id": "rs_echo",
+                "summary": [{"type": "summary_text", "text": "S"}],
+                "content": [{"type": "reasoning_text", "text": "R"}],
+                "encrypted_content": "cipher-1"
+            }, {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": format!("see {secret}")}]
+            }]
+        });
+        let value = prepare_redacted_response(&plan, &mut body, Some(secret))
+            .unwrap_or_else(|error| panic!("{secret}: {}", error.message));
+        let item = &value["output"][0];
+        assert_bound_opaque(
+            item["encrypted_content"].as_str().unwrap(),
+            domain,
+            "cipher-1",
+        );
+        assert_eq!(item["summary"][0]["type"].as_str(), Some("summary_text"));
+        assert_eq!(item["summary"][0]["text"].as_str(), Some("S"));
+        assert_eq!(item["content"][0]["type"].as_str(), Some("reasoning_text"));
+        assert_eq!(item["content"][0]["text"].as_str(), Some("R"));
+        assert_eq!(
+            value["output"][1]["content"][0]["text"].as_str(),
+            Some("see <redacted>")
+        );
+    }
+}
+
+#[test]
+fn bound_messages_to_responses_json_keeps_codec_and_redacts_restored_tools() {
+    for secret in ["ocg", "replay", "abababab"] {
+        let mut plan = bound_replay_plan(ApiFormat::Messages);
+        plan.client = ApiFormat::Responses;
+        let domain = plan.replay_domain.unwrap();
+        let marker = format!(
+            "{}safe",
+            ocg_gateway::protocol::replay_marker_prefix(domain)
+        );
+        plan.response_tools = vec![json!({
+            "type": "function",
+            "name": "f",
+            "description": marker,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string", "enum": ["thinking"]},
+                    "signature": {"type": "string", "description": marker},
+                    "data": {"type": "string", "description": marker},
+                    "q": {"type": "string"}
+                }
+            }
+        })];
+        let mut body = json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "test-model",
+            "content": [
+                {"type": "thinking", "thinking": "why", "signature": "sig-1"},
+                {"type": "redacted_thinking", "data": "opaque-data"},
+                {"type": "text", "text": "ordinary"},
+                {"type": "tool_use", "id": "toolu_1", "name": "f", "input": {
+                    "type": "thinking",
+                    "signature": marker,
+                    "data": marker,
+                    "q": format!("see {secret}"),
+                    "payload": serde_json::to_string(&json!({
+                        "type": "thinking",
+                        "signature": marker,
+                        "data": marker,
+                        "q": format!("see {secret}")
+                    })).unwrap()
+                }}
+            ],
+            "stop_reason": "tool_use"
+        });
+        let value = prepare_redacted_response(&plan, &mut body, Some(secret))
+            .unwrap_or_else(|error| panic!("{secret}: {}", error.message));
+        let tools = value["tools"].as_array().expect("restored tools");
+        assert_not_marker(tools[0]["description"].as_str().unwrap(), &marker, secret);
+        assert_eq!(tools[0]["parameters"]["type"].as_str(), Some("object"));
+        assert_eq!(
+            tools[0]["parameters"]["properties"]["type"]["enum"][0].as_str(),
+            Some("thinking")
+        );
+        assert_not_marker(
+            tools[0]["parameters"]["properties"]["signature"]["description"]
+                .as_str()
+                .unwrap(),
+            &marker,
+            secret,
+        );
+        assert_not_marker(
+            tools[0]["parameters"]["properties"]["data"]["description"]
+                .as_str()
+                .unwrap(),
+            &marker,
+            secret,
+        );
+        let output = value["output"].as_array().unwrap();
+        let thinking = output
+            .iter()
+            .find(|item| {
+                item["encrypted_content"].as_str().is_some_and(|text| {
+                    crate::gateway::protocol::decode_anthropic_thinking_block(text)
+                        .is_some_and(|block| block["type"].as_str() == Some("thinking"))
+                })
+            })
+            .unwrap_or_else(|| panic!("{secret}: missing thinking codec"));
+        let block = crate::gateway::protocol::decode_anthropic_thinking_block(
+            thinking["encrypted_content"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(block["thinking"].as_str(), Some("why"));
+        assert_bound_opaque(block["signature"].as_str().unwrap(), domain, "sig-1");
+        assert_eq!(thinking["summary"][0]["text"].as_str(), Some("why"));
+        assert!(
+            thinking
+                .get("content")
+                .is_none_or(|content| { content.as_array().is_none_or(Vec::is_empty) })
+        );
+        let redacted = output
+            .iter()
+            .find(|item| {
+                item["encrypted_content"].as_str().is_some_and(|text| {
+                    crate::gateway::protocol::decode_anthropic_thinking_block(text)
+                        .is_some_and(|block| block["type"].as_str() == Some("redacted_thinking"))
+                })
+            })
+            .unwrap_or_else(|| panic!("{secret}: missing redacted codec"));
+        let redacted_block = crate::gateway::protocol::decode_anthropic_thinking_block(
+            redacted["encrypted_content"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_bound_opaque(
+            redacted_block["data"].as_str().unwrap(),
+            domain,
+            "opaque-data",
+        );
+        let call = output
+            .iter()
+            .find(|item| item["type"].as_str() == Some("function_call"))
+            .unwrap_or_else(|| panic!("{secret}: missing tool call"));
+        let arguments: serde_json::Value =
+            serde_json::from_str(call["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments["type"].as_str(), Some("thinking"));
+        assert_not_marker(arguments["signature"].as_str().unwrap(), &marker, secret);
+        assert_not_marker(arguments["data"].as_str().unwrap(), &marker, secret);
+        assert_eq!(arguments["q"].as_str(), Some("see <redacted>"));
+        let payload: serde_json::Value =
+            serde_json::from_str(arguments["payload"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["type"].as_str(), Some("thinking"));
+        assert_not_marker(payload["signature"].as_str().unwrap(), &marker, secret);
+        assert_not_marker(payload["data"].as_str().unwrap(), &marker, secret);
+        assert_eq!(payload["q"].as_str(), Some("see <redacted>"));
+        let message = output
+            .iter()
+            .find(|item| item["type"].as_str() == Some("message"))
+            .unwrap();
+        assert_eq!(message["content"][0]["text"].as_str(), Some("ordinary"));
+    }
+}
+
+#[test]
+fn bound_json_rejects_a_real_secret_inside_signed_history() {
+    for (secret, signature, thinking) in [
+        ("ocg", "sig-ocg", "why"),
+        ("replay", "sig-1", "see replay"),
+        ("abababab", "sig-1", "see abababab"),
+    ] {
+        let plan = bound_replay_plan(ApiFormat::Messages);
+        let mut body = json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "thinking",
+                "thinking": thinking,
+                "signature": signature
+            }]
+        });
+        let error = prepare_redacted_response(&plan, &mut body, Some(secret)).unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("signed native history cannot be preserved by secret redaction"),
+            "{}",
+            error.message
+        );
+        assert!(!error.message.contains(secret), "{}", error.message);
+        assert!(body.to_string().contains(secret), "{secret}");
+    }
+    let plan = bound_replay_plan(ApiFormat::Responses);
+    let mut body = json!({
+        "output": [{
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": "cipher-ocg"
+        }]
+    });
+    let error = prepare_redacted_response(&plan, &mut body, Some("ocg")).unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("signed native history cannot be preserved by secret redaction"),
+        "{}",
+        error.message
+    );
+    assert!(!error.message.contains("ocg"), "{}", error.message);
+    assert!(body.to_string().contains("cipher-ocg"));
+}
+
+#[test]
+fn unbound_json_still_redacts_signature_text_without_a_marker() {
+    let mut plan = bound_replay_plan(ApiFormat::Messages);
+    plan.replay_domain = None;
+    let mut body = json!({
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {"type": "thinking", "thinking": "why", "signature": "pre-replay-post"},
+            {"type": "text", "text": "see replay"}
+        ]
+    });
+    let value = prepare_redacted_response(&plan, &mut body, Some("replay")).unwrap();
+    assert_eq!(
+        value["content"][0]["signature"].as_str(),
+        Some("pre-<redacted>-post")
+    );
+    assert_eq!(value["content"][1]["text"].as_str(), Some("see <redacted>"));
+    assert!(!value.to_string().contains("ocg-replay-"));
+}
+
+#[test]
+fn responses_encrypted_history_is_not_dropped_for_a_messages_client() {
+    let mut plan = bound_replay_plan(ApiFormat::Responses);
+    plan.client = ApiFormat::Messages;
+    let mut body = json!({
+        "id": "resp_1",
+        "output": [{
+            "type": "reasoning",
+            "id": "rs1",
+            "summary": [{"type": "summary_text", "text": "S"}],
+            "content": [{"type": "reasoning_text", "text": "R"}],
+            "encrypted_content": "cipher-1"
+        }]
+    });
+    let error = prepare_redacted_response(&plan, &mut body, Some("ocg")).unwrap_err();
+    assert!(
+        error.message.contains("cannot be preserved"),
+        "{}",
+        error.message
+    );
+    assert!(body.to_string().contains("cipher-1"));
+    assert!(!error.message.contains("ocg"), "{}", error.message);
 }

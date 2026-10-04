@@ -5,12 +5,10 @@
 use crate::alias::{ProviderMapping, ResolveError, ResolvedModel};
 use crate::gateway::protocol::{
     CustomRouteSpec, MaterializeSpec, ParsedClientRequest, ProtocolError, RequestPlan,
-    materialize_parsed_request,
 };
 use crate::gateway::provider_adapter;
 use crate::gateway::routing::RoutingCandidate;
 use crate::kernel::ids::{custom_model_id_matches, normalize_model_name};
-use crate::kernel::protocol::ApiFormat;
 use crate::models::{AppConfig, UpstreamChannel};
 use crate::provider::ProviderAdapterKind;
 use axum::http::StatusCode;
@@ -241,8 +239,8 @@ pub(crate) fn resolved_contains_model(
 pub(crate) use crate::route_availability::endpoint_id_for_target;
 
 /// Protocols this Key may send on: declared and enabled, with a configured
-/// route, and granted to the credential. Selection then prefers the client
-/// protocol, the saved preference, and the remaining granted protocols.
+/// route, and granted to the credential. Selection tries the saved preference,
+/// then the client protocol, then the remaining granted protocols.
 fn authorized_model_protocols(
     credential: &crate::routing_snapshot::ExecutionCredential,
     destination: &Destination,
@@ -357,60 +355,44 @@ pub(crate) fn materialize_execution_routes(
                 .preferred
                 .or_else(|| authorized.first().copied())
                 .ok_or_else(|| ProtocolError::new("missing preferred protocol"))?;
-            let upstream = match crate::provider_contracts::select_enabled_upstream(
+            // Local feature checks only. A preferred conversion that cannot
+            // keep required request semantics yields to the next already
+            // authorized protocol. Nothing here sends a probe.
+            let order = crate::provider_contracts::enabled_upstream_order(
                 parsed.client,
                 preferred,
                 &authorized,
                 &authorized,
-            ) {
-                Ok(upstream) => upstream,
-                Err(error) => {
-                    rejections.push(reject(
-                        RouteRejectionCode::MappingProtocolIncompatible,
-                        error.message,
-                    ));
-                    continue;
-                }
-            };
+            );
             let adapter = ProviderAdapterKind::from(destination.adapter);
             let channel = crate::routing_runtime::channel_for_adapter(adapter);
-            let custom_route = if destination.adapter == AdapterKind::Http {
-                let selected_protocol = match upstream {
-                    ApiFormat::ChatCompletions => {
-                        ocg_domain::destination::Protocol::ChatCompletions
-                    }
-                    ApiFormat::Responses => ocg_domain::destination::Protocol::Responses,
-                    ApiFormat::Messages => ocg_domain::destination::Protocol::Messages,
-                    ApiFormat::Gemini => {
-                        return Err(ProtocolError::new("client-only upstream protocol"));
-                    }
+            let mut selected_route = None;
+            let mut preserve_error = None;
+            let mut route_error = None;
+            for protocol in order {
+                let upstream = crate::provider_contracts::protocol_to_api(protocol);
+                let custom_route = if destination.adapter == AdapterKind::Http {
+                    let Some(selected) =
+                        ocg_domain::destination::http_model_route(destination, model, protocol)
+                    else {
+                        route_error.get_or_insert_with(|| {
+                            "model protocol has no configured route".to_string()
+                        });
+                        continue;
+                    };
+                    Some(CustomRouteSpec {
+                        endpoint_url: selected.endpoint_url,
+                        auth_kind: match selected.auth_scheme {
+                            AuthScheme::Bearer => ocg_domain::dynamic::DynamicAuthKind::Bearer,
+                            AuthScheme::XApiKey => ocg_domain::dynamic::DynamicAuthKind::XApiKey,
+                            AuthScheme::ApiKey => ocg_domain::dynamic::DynamicAuthKind::ApiKey,
+                            AuthScheme::None => ocg_domain::dynamic::DynamicAuthKind::None,
+                        },
+                    })
+                } else {
+                    None
                 };
-                let Some(selected) = ocg_domain::destination::http_model_route(
-                    destination,
-                    model,
-                    selected_protocol,
-                ) else {
-                    rejections.push(reject(
-                        RouteRejectionCode::ProductionRouteUnsupported,
-                        "model protocol has no configured route".into(),
-                    ));
-                    continue;
-                };
-                Some(CustomRouteSpec {
-                    endpoint_url: selected.endpoint_url,
-                    auth_kind: match selected.auth_scheme {
-                        AuthScheme::Bearer => ocg_domain::dynamic::DynamicAuthKind::Bearer,
-                        AuthScheme::XApiKey => ocg_domain::dynamic::DynamicAuthKind::XApiKey,
-                        AuthScheme::ApiKey => ocg_domain::dynamic::DynamicAuthKind::ApiKey,
-                        AuthScheme::None => ocg_domain::dynamic::DynamicAuthKind::None,
-                    },
-                })
-            } else {
-                None
-            };
-            let plan = materialize_parsed_request(
-                parsed,
-                &MaterializeSpec {
+                let materialize_spec = MaterializeSpec {
                     client_model: client_model.into(),
                     upstream_model: if destination.adapter == AdapterKind::Http {
                         model.upstream_model.clone()
@@ -433,52 +415,130 @@ pub(crate) fn materialize_execution_routes(
                         destination.adapter,
                         &model.upstream_model,
                     ),
-                },
-            );
-            let plan = match plan {
-                Ok(plan) => plan,
-                Err(error) => {
-                    conversion_failures += 1;
-                    conversion_error.get_or_insert_with(|| error.clone());
-                    rejections.push(reject(
-                        RouteRejectionCode::CandidateMaterializationFailed,
-                        error.message,
-                    ));
-                    continue;
+                };
+                // Grant check and transport identity come before conversion so a
+                // domain mismatch can try the next authorized protocol locally.
+                let endpoint_id =
+                    match endpoint_id_for_target(credential, destination, model, upstream) {
+                        Ok(endpoint_id) => endpoint_id,
+                        Err(error) => {
+                            route_error.get_or_insert(error);
+                            continue;
+                        }
+                    };
+                let attempt = match provider_adapter::resolve_execution_transport(
+                    credential,
+                    destination,
+                    config,
+                    &provider_adapter::ExecutionTransportFacts {
+                        upstream,
+                        channel,
+                        upstream_base_override: materialize_spec.upstream_base_override.clone(),
+                        custom_route: materialize_spec.custom_route.clone(),
+                    },
+                ) {
+                    Ok(attempt) => attempt,
+                    Err(error) => {
+                        route_error.get_or_insert(error);
+                        continue;
+                    }
+                };
+                let request_url = match attempt.request_url() {
+                    Ok(url) => url,
+                    Err(error) => {
+                        route_error.get_or_insert(error);
+                        continue;
+                    }
+                };
+                let domain = match crate::gateway::replay::replay_domain_for(
+                    &crate::gateway::replay::ReplayRouteIdentity {
+                        adapter: destination.adapter,
+                        upstream,
+                        upstream_model: &materialize_spec.upstream_model,
+                        request_url: &request_url,
+                        credential_id: &credential.credential_id,
+                        credential_version: credential.credential_version,
+                        destination_id: &credential.destination_id,
+                        authorization_connection_id: &credential.authorization_connection_id,
+                        binding_id: &credential.binding_id,
+                        auth: attempt.wire_auth(),
+                    },
+                ) {
+                    Ok(domain) => domain,
+                    Err(error) => {
+                        preserve_error.get_or_insert(error);
+                        continue;
+                    }
+                };
+                let plan = match crate::gateway::protocol::materialize_parsed_request_with_replay(
+                    parsed,
+                    &materialize_spec,
+                    domain,
+                ) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        preserve_error.get_or_insert(error);
+                        continue;
+                    }
+                };
+                selected_route = Some(ExecutionRoute {
+                    routing: RoutingCandidate {
+                        account: credential.clone(),
+                        adapter,
+                        channel,
+                        resolved_model: model.upstream_model.clone(),
+                    },
+                    plan,
+                    spec: attempt,
+                    target: FrozenTarget {
+                        destination: destination.clone(),
+                        model: model.clone(),
+                        endpoint_id,
+                    },
+                });
+                break;
+            }
+            let Some(route) = selected_route else {
+                // Transport and preservation stay separate ledger entries.
+                // Preservation still counts when a transport error is present.
+                // The incompatible fallback applies only when both are absent.
+                match (route_error, preserve_error) {
+                    (Some(transport), Some(preserved)) => {
+                        rejections.push(reject(
+                            RouteRejectionCode::ProductionRouteUnsupported,
+                            transport,
+                        ));
+                        conversion_failures += 1;
+                        conversion_error.get_or_insert_with(|| preserved.clone());
+                        rejections.push(reject(
+                            RouteRejectionCode::CandidateMaterializationFailed,
+                            preserved.message,
+                        ));
+                    }
+                    (Some(transport), None) => {
+                        rejections.push(reject(
+                            RouteRejectionCode::ProductionRouteUnsupported,
+                            transport,
+                        ));
+                    }
+                    (None, Some(preserved)) => {
+                        conversion_failures += 1;
+                        conversion_error.get_or_insert_with(|| preserved.clone());
+                        rejections.push(reject(
+                            RouteRejectionCode::CandidateMaterializationFailed,
+                            preserved.message,
+                        ));
+                    }
+                    (None, None) => {
+                        rejections.push(reject(
+                            RouteRejectionCode::MappingProtocolIncompatible,
+                            crate::provider_contracts::NO_ENABLED_UPSTREAM_PROTOCOL.into(),
+                        ));
+                    }
                 }
+                continue;
             };
-            let spec = match provider_adapter::resolve_execution_route(
-                credential,
-                destination,
-                config,
-                &plan,
-            ) {
-                Ok(spec) => spec,
-                Err(error) => {
-                    rejections.push(reject(
-                        RouteRejectionCode::ProductionRouteUnsupported,
-                        error,
-                    ));
-                    continue;
-                }
-            };
-            let endpoint_id = endpoint_id_for_target(credential, destination, model, upstream)
-                .map_err(ProtocolError::new)?;
-            routes.push(ExecutionRoute {
-                routing: RoutingCandidate {
-                    account: credential.clone(),
-                    adapter,
-                    channel,
-                    resolved_model: model.upstream_model.clone(),
-                },
-                plan,
-                spec,
-                target: FrozenTarget {
-                    destination: destination.clone(),
-                    model: model.clone(),
-                    endpoint_id,
-                },
-            });
+            routes.push(route);
             break;
         }
     }

@@ -26,7 +26,10 @@ pub(crate) use ocg_gateway::protocol::{
 #[cfg(test)]
 pub(crate) use ocg_gateway::protocol::{LEGACY_TOOL_COMPAT_PROFILE, LEGACY_TOOL_COMPAT_VERSION};
 
-use ocg_gateway::protocol::{ResponseSynthesis, convert_request_json, convert_response_json};
+use ocg_gateway::protocol::{
+    ReplayDomain, ResponseSynthesis, convert_request_json, convert_request_json_with_replay,
+    convert_response_json, convert_response_json_with_replay,
+};
 
 #[derive(Debug, Clone)]
 pub struct RequestPlan {
@@ -50,6 +53,10 @@ pub struct RequestPlan {
     pub resolved_alias: Option<String>,
     /// Isolated Custom origin + auth. Presence selects the Custom HTTP path.
     pub custom_route: Option<CustomRouteSpec>,
+    /// Domain of the observed send route. Production materialize sets this
+    /// before conversion. Operational probes and codec unit helpers leave it
+    /// unset and do not bind native opaque history.
+    pub replay_domain: Option<ReplayDomain>,
     pub(crate) service_tier: Option<String>,
     pub(crate) custom_tools: Vec<String>,
     pub(crate) namespace_tools: Vec<NamespaceToolMapping>,
@@ -323,6 +330,25 @@ pub fn materialize_parsed_request(
     parsed: &ParsedClientRequest,
     spec: &MaterializeSpec,
 ) -> Result<RequestPlan, ProtocolError> {
+    materialize_with_replay_domain(parsed, spec, None)
+}
+
+/// Production conversion. `domain` is the observed route, computed before this
+/// call. Native opaque history is restored for that domain and then converted.
+/// A conversion error rejects this candidate only.
+pub(crate) fn materialize_parsed_request_with_replay(
+    parsed: &ParsedClientRequest,
+    spec: &MaterializeSpec,
+    domain: ReplayDomain,
+) -> Result<RequestPlan, ProtocolError> {
+    materialize_with_replay_domain(parsed, spec, Some(domain))
+}
+
+fn materialize_with_replay_domain(
+    parsed: &ParsedClientRequest,
+    spec: &MaterializeSpec,
+    replay_domain: Option<ReplayDomain>,
+) -> Result<RequestPlan, ProtocolError> {
     let mut body = parsed.parsed.clone();
     if let Some(object) = body.as_object_mut() {
         object.insert("model".into(), json!(&spec.upstream_model));
@@ -334,6 +360,7 @@ pub fn materialize_parsed_request(
         parsed.stream,
         spec.forced_upstream,
         spec.effort_aliases,
+        replay_domain,
     )?;
     plan.client_model = spec.client_model.clone();
     plan.channel = spec.channel;
@@ -356,6 +383,7 @@ fn prepare_parsed_request(
     stream: bool,
     forced_upstream: Option<ApiFormat>,
     effort_aliases: &[(&str, &str)],
+    replay_domain: Option<ReplayDomain>,
 ) -> Result<RequestPlan, ProtocolError> {
     let upstream = match forced_upstream {
         Some(forced) => forced,
@@ -372,8 +400,11 @@ fn prepare_parsed_request(
         .cloned()
         .unwrap_or_else(|| json!("auto"));
     let response_tools = array(&parsed, "tools").to_vec();
-    let mut converted =
-        convert_request_json(client, upstream, parsed).map_err(protocol_conversion_error)?;
+    let mut converted = match replay_domain {
+        Some(domain) => convert_request_json_with_replay(client, upstream, parsed, domain),
+        None => convert_request_json(client, upstream, parsed),
+    }
+    .map_err(protocol_conversion_error)?;
     if upstream == ApiFormat::Responses
         && let Some(effort) = aliased_responses_effort
     {
@@ -399,6 +430,7 @@ fn prepare_parsed_request(
         original_model: None,
         resolved_alias: None,
         custom_route: None,
+        replay_domain,
         service_tier,
         custom_tools: converted.custom_tools,
         namespace_tools: converted.namespace_tools,
@@ -418,20 +450,33 @@ fn fallback_empty_response_id() -> String {
 }
 
 pub fn transform_response(plan: &RequestPlan, body: &Value) -> Result<Value, ProtocolError> {
-    let mut transformed = convert_response_json(
-        plan.upstream,
-        plan.client,
-        body,
-        &plan.custom_tools,
-        &plan.namespace_tools,
-        ResponseSynthesis {
-            created_at: unix_seconds(),
-            empty_response_id: fallback_empty_response_id(),
-        },
-        Some(&plan.model),
-    )
-    .map_err(protocol_conversion_error)?
-    .body;
+    let synthesis = ResponseSynthesis {
+        created_at: unix_seconds(),
+        empty_response_id: fallback_empty_response_id(),
+    };
+    let converted = if let Some(domain) = plan.replay_domain {
+        convert_response_json_with_replay(
+            plan.upstream,
+            plan.client,
+            body,
+            &plan.custom_tools,
+            &plan.namespace_tools,
+            synthesis,
+            Some(&plan.model),
+            domain,
+        )
+    } else {
+        convert_response_json(
+            plan.upstream,
+            plan.client,
+            body,
+            &plan.custom_tools,
+            &plan.namespace_tools,
+            synthesis,
+            Some(&plan.model),
+        )
+    };
+    let mut transformed = converted.map_err(protocol_conversion_error)?.body;
     if plan.client == ApiFormat::Responses && plan.upstream != ApiFormat::Responses {
         transformed["parallel_tool_calls"] = json!(plan.response_parallel_tool_calls);
         transformed["tool_choice"] = plan.response_tool_choice.clone();

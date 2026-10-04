@@ -6,8 +6,8 @@ use crate::custom_http::{join_inference_endpoint, resolve_custom_endpoints};
 use crate::gateway::attempt::{AttemptSpec, CredentialHandle, ProxyRoutingModel};
 use crate::gateway::free_models::resolve_upstream_base;
 use crate::gateway::protocol::{
-    ApiFormat, RequestPlan, command_code_supports_upstream, command_code_upstream_path,
-    opencode_supports_upstream,
+    ApiFormat, CustomRouteSpec, RequestPlan, command_code_supports_upstream,
+    command_code_upstream_path, opencode_supports_upstream,
 };
 use crate::gateway::wire::WireNormalization;
 use crate::kernel::ids::{OLLAMA_CLOUD_BASE_URL, OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH};
@@ -25,57 +25,95 @@ use std::collections::HashMap;
 #[cfg(any(debug_assertions, feature = "ollama-cloud-loopback-test"))]
 use std::sync::{LazyLock, RwLock};
 
-/// Construct transport from explicit destination facts after catalog protocol
-/// selection. This is the production seam; Account adapters below serve probes.
+/// Transport inputs that do not require a converted request body.
+///
+/// Production resolves this before protocol conversion so the replay domain
+/// can name the actual endpoint. The body is not part of the route identity.
+#[derive(Debug, Clone)]
+pub(crate) struct ExecutionTransportFacts {
+    pub upstream: ApiFormat,
+    pub channel: UpstreamChannel,
+    pub upstream_base_override: Option<String>,
+    pub custom_route: Option<CustomRouteSpec>,
+}
+
+/// Test façade that reads transport facts from a [`RequestPlan`].
+///
+/// Production calls [`resolve_execution_transport`] before a request body
+/// exists. Account adapters below serve probes.
+#[cfg(test)]
 pub(crate) fn resolve_execution_route(
     credential: &crate::routing_snapshot::ExecutionCredential,
     destination: &ocg_domain::destination::Destination,
     config: &AppConfig,
     plan: &RequestPlan,
 ) -> Result<AttemptSpec, String> {
+    resolve_execution_transport(
+        credential,
+        destination,
+        config,
+        &ExecutionTransportFacts {
+            upstream: plan.upstream,
+            channel: plan.channel,
+            upstream_base_override: plan.upstream_base_override.clone(),
+            custom_route: plan.custom_route.clone(),
+        },
+    )
+}
+
+pub(crate) fn resolve_execution_transport(
+    credential: &crate::routing_snapshot::ExecutionCredential,
+    destination: &ocg_domain::destination::Destination,
+    config: &AppConfig,
+    facts: &ExecutionTransportFacts,
+) -> Result<AttemptSpec, String> {
     use ocg_domain::destination::AdapterKind;
     let id = credential.id.as_str();
     let (transport, handle) = match destination.adapter {
         AdapterKind::Http => {
-            let route = plan.custom_route.as_ref().ok_or("missing HTTP route")?;
+            let route = facts.custom_route.as_ref().ok_or("missing HTTP route")?;
             (
-                configurable_http_transport(&route.endpoint_url, route.auth_kind, plan.upstream)?,
+                configurable_http_transport(&route.endpoint_url, route.auth_kind, facts.upstream)?,
                 http_credential(id, route.auth_kind),
             )
         }
         AdapterKind::OpencodeGo => (
             opencode_go_transport(
-                resolve_upstream_base(plan.channel, &config.upstream_base_url)?,
-                plan.upstream,
+                resolve_upstream_base(facts.channel, &config.upstream_base_url)?,
+                facts.upstream,
             )?,
             keyed_credential(id),
         ),
         AdapterKind::Zen => (
             zen_free_transport(
-                zen_resolved_base(config, plan.upstream_base_override.as_deref(), plan.channel)?,
-                plan.upstream,
+                zen_resolved_base(
+                    config,
+                    facts.upstream_base_override.as_deref(),
+                    facts.channel,
+                )?,
+                facts.upstream,
             )?,
             CredentialHandle::None,
         ),
-        AdapterKind::Goat => (goat_transport(id, plan.upstream)?, keyed_credential(id)),
-        AdapterKind::Minimax => (minimax_cn_transport(plan.upstream)?, keyed_credential(id)),
-        AdapterKind::Kimi => (kimi_cn_transport(plan.upstream)?, keyed_credential(id)),
+        AdapterKind::Goat => (goat_transport(id, facts.upstream)?, keyed_credential(id)),
+        AdapterKind::Minimax => (minimax_cn_transport(facts.upstream)?, keyed_credential(id)),
+        AdapterKind::Kimi => (kimi_cn_transport(facts.upstream)?, keyed_credential(id)),
         AdapterKind::Ollama => (
-            ollama_cloud_transport(id, plan.upstream)?,
+            ollama_cloud_transport(id, facts.upstream)?,
             keyed_credential(id),
         ),
         AdapterKind::Cpa => {
-            let base_url = plan
+            let base_url = facts
                 .upstream_base_override
                 .clone()
                 .ok_or("CPA is not configured")?;
             (
-                cpa_transport(base_url, plan.upstream)?,
+                cpa_transport(base_url, facts.upstream)?,
                 keyed_credential(id),
             )
         }
     };
-    Ok(transport.into_spec(plan.upstream, handle))
+    Ok(transport.into_spec(facts.upstream, handle))
 }
 
 pub(crate) use crate::gateway::attempt::UpstreamAuth;
@@ -261,7 +299,7 @@ pub fn install_goat_loopback_route_for_test(
     Ok(guard)
 }
 
-/// Shared transport construction for production `resolve_execution_route` and
+/// Shared transport construction for [`resolve_execution_transport`] and
 /// probe/account-test resolvers. Eligibility, credential/grant checks, model
 /// identity, Custom PublicOnly, and dynamic mapping selection stay with the
 /// caller.

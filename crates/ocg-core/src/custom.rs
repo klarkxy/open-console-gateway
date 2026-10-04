@@ -62,9 +62,9 @@ pub struct CustomAccountRuntime {
     pub config: AccountCustomConfig,
     pub capabilities: Vec<AccountModelCapability>,
     pub route_overrides: Vec<(String, ocg_domain::dynamic::DynamicModelUpstreamOverride)>,
-    /// Linked New API / Sub2API Key: the site converts Chat, Messages, and
-    /// Responses, so the contract enables those protocols and the gateway
-    /// passes the matching client format through.
+    /// Linked New API / Sub2API Key. The contract admits Chat, Messages, and
+    /// Responses. Selection still tries the saved preferred protocol, then the
+    /// enabled client protocol, then the remaining authorized protocols.
     pub protocol_passthrough: bool,
 }
 
@@ -91,9 +91,9 @@ impl CustomAccountRuntime {
 
     /// Public-name / protocol rows used to build the Custom contract.
     ///
-    /// A passthrough Key advertises Chat, Responses, and Messages for each
-    /// declared model so client formats pass through. Ordinary Custom Keys
-    /// keep the single stored protocol.
+    /// A passthrough Key admits Chat, Responses, and Messages for each declared
+    /// model. Selection still tries the saved preferred protocol first.
+    /// Ordinary Custom Keys keep the single stored protocol.
     pub fn declared_protocols(&self) -> Vec<(String, UpstreamProtocolKind)> {
         if !self.protocol_passthrough {
             return self

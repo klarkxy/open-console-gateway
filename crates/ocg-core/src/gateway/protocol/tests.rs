@@ -24,6 +24,7 @@ fn plan_with_model(client: ApiFormat, upstream: ApiFormat, model: &str) -> Reque
         original_model: None,
         resolved_alias: None,
         custom_route: None,
+        replay_domain: None,
         service_tier: None,
         custom_tools: Vec::new(),
         namespace_tools: Vec::new(),
@@ -1715,6 +1716,69 @@ fn responses_hosted_tools_and_history_are_ignored_unless_forced() {
         });
         assert!(prepare_request(ApiFormat::Responses, bytes(request)).is_err());
     }
+}
+
+#[test]
+fn parsed_request_helpers_leave_replay_unbound() {
+    let plan = prepare_request(
+        ApiFormat::ChatCompletions,
+        bytes(json!({
+            "model": "minimax-m2.7",
+            "messages": [{"role": "user", "content": "hi"}]
+        })),
+    )
+    .unwrap();
+    assert!(plan.replay_domain.is_none());
+}
+
+#[test]
+fn bound_response_keeps_native_encrypted_content_and_rejects_a_lossy_client() {
+    let domain = ocg_gateway::protocol::ReplayDomain::parse(&"cd".repeat(32)).unwrap();
+    let prefix = ocg_gateway::protocol::replay_marker_prefix(domain);
+    let body = json!({
+        "id": "resp_1",
+        "model": "upstream-model",
+        "output": [{
+            "type": "reasoning",
+            "id": "rs_1",
+            "summary": [],
+            "encrypted_content": "cipher-1",
+            "vendor_extension": {"trace": "keep"}
+        }]
+    });
+    let unbound =
+        transform_response(&plan(ApiFormat::Responses, ApiFormat::Responses), &body).unwrap();
+    assert_eq!(unbound["output"][0]["encrypted_content"], "cipher-1");
+
+    let mut bound_plan = plan(ApiFormat::Responses, ApiFormat::Responses);
+    bound_plan.replay_domain = Some(domain);
+    bound_plan.model = "MiniMax-M3".into();
+    bound_plan.client_model = "alias-model".into();
+    let bound = transform_response(&bound_plan, &body).unwrap();
+    let encrypted = bound["output"][0]["encrypted_content"].as_str().unwrap();
+    assert_eq!(encrypted, format!("{prefix}cipher-1"));
+    assert_eq!(encrypted.matches(prefix.as_str()).count(), 1);
+    assert_eq!(bound["output"][0]["vendor_extension"]["trace"], "keep");
+    assert_eq!(bound["model"], "alias-model");
+
+    let text = json!({
+        "id": "resp_2",
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "hi"}]
+        }]
+    });
+    let ordinary = transform_response(&bound_plan, &text).unwrap();
+    assert!(!ordinary.to_string().contains("ocg-replay-v1"));
+
+    bound_plan.client = ApiFormat::Messages;
+    let error = transform_response(&bound_plan, &body).unwrap_err();
+    assert!(
+        error.message.contains("cannot be preserved"),
+        "{}",
+        error.message
+    );
 }
 
 #[test]

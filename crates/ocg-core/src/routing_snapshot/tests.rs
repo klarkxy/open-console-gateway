@@ -92,6 +92,67 @@ fn route_for_protocol(snapshot: &RoutingSnapshot, name: &str, client: ApiFormat)
     materialized.routes.into_iter().next().unwrap()
 }
 
+fn assert_platform_selection(
+    route: &ExecutionRoute,
+    protocol: Protocol,
+    path: &str,
+    connection: &ocg_domain::connection::ConnectionId,
+) {
+    use ocg_domain::connection::{EndpointOperation, endpoint_id_for};
+    let upstream = match protocol {
+        Protocol::ChatCompletions => ApiFormat::ChatCompletions,
+        Protocol::Responses => ApiFormat::Responses,
+        Protocol::Messages => ApiFormat::Messages,
+    };
+    assert_eq!(route.plan.upstream, upstream);
+    assert_eq!(route.plan.model, "upstream-exact");
+    assert_eq!(
+        route.spec.request_url().unwrap(),
+        format!("https://api.example.com/v1/{path}")
+    );
+    assert_eq!(
+        route.target.endpoint_id,
+        endpoint_id_for(connection, EndpointOperation::from(protocol)).to_string()
+    );
+}
+
+fn recheck_chosen_endpoint_revocation(
+    db: &crate::db::Database,
+    snapshot: &RoutingSnapshot,
+    route: &ExecutionRoute,
+    binding_id: &str,
+    endpoint_ids: &[String],
+    allowed_origins: &[String],
+) {
+    let selected = LiveSendSelection::from_execution(route, "public-model", "public-model");
+    verify_execution_authorization(snapshot, &selected, &route.spec, Utc::now(), true).unwrap();
+    let remaining: Vec<String> = endpoint_ids
+        .iter()
+        .filter(|id| **id != route.target.endpoint_id)
+        .cloned()
+        .collect();
+    db.update_credential_binding(
+        binding_id,
+        None,
+        None,
+        Some(&remaining),
+        Some(allowed_origins),
+    )
+    .unwrap();
+    let revoked = RoutingSnapshot::load(db).unwrap();
+    assert!(
+        verify_execution_authorization(&revoked, &selected, &route.spec, Utc::now(), true).is_err()
+    );
+    db.update_credential_binding(
+        binding_id,
+        None,
+        None,
+        Some(endpoint_ids),
+        Some(allowed_origins),
+    )
+    .unwrap();
+}
+
 #[test]
 fn platform_native_operations_keep_account_authority_and_recheck_persisted_revocation() {
     use crate::platform::{PlatformGroup, PlatformKind};
@@ -156,8 +217,12 @@ fn platform_native_operations_keep_account_authority_and_recheck_persisted_revoc
     // ungranted client protocol does not hide the granted Chat route.
     for (client, _, _) in cases {
         let route = route_for_protocol(&linked, "public-model", client);
-        assert_eq!(route.plan.upstream, ApiFormat::ChatCompletions);
-        assert_eq!(route.target.endpoint_id, original_chat);
+        assert_platform_selection(
+            &route,
+            Protocol::ChatCompletions,
+            "chat/completions",
+            &connection,
+        );
         let selected = LiveSendSelection::from_execution(&route, "public-model", "public-model");
         verify_execution_authorization(&linked, &selected, &route.spec, Utc::now(), true).unwrap();
     }
@@ -170,47 +235,76 @@ fn platform_native_operations_keep_account_authority_and_recheck_persisted_revoc
     )
     .unwrap();
     let authorized = RoutingSnapshot::load(&db).unwrap();
-    for (client, protocol, path) in cases {
+    // Chat, Responses, and Messages are granted. The saved preference is Chat,
+    // so every client uses that Chat route, URL, and endpoint.
+    for (client, _, _) in cases {
         let route = route_for_protocol(&authorized, "public-model", client);
-        assert_eq!(route.plan.upstream, client);
-        assert_eq!(route.plan.model, "upstream-exact");
-        assert_eq!(
-            route.spec.request_url().unwrap(),
-            format!("https://api.example.com/v1/{path}")
+        assert_platform_selection(
+            &route,
+            Protocol::ChatCompletions,
+            "chat/completions",
+            &connection,
         );
-        assert_eq!(
-            route.target.endpoint_id,
-            endpoint_id_for(&connection, EndpointOperation::from(protocol)).to_string()
+        recheck_chosen_endpoint_revocation(
+            &db,
+            &authorized,
+            &route,
+            &credential.binding_id,
+            &endpoint_ids,
+            &credential.grants.allowed_origins,
         );
-        let selected = LiveSendSelection::from_execution(&route, "public-model", "public-model");
-        verify_execution_authorization(&authorized, &selected, &route.spec, Utc::now(), true)
+    }
+    let destination_id = credential.destination_id.clone();
+    let saved =
+        crate::db::destination_store::load_destination_catalog(&db.conn, &destination_id).unwrap();
+    let model = saved
+        .iter()
+        .find(|model| model.public_model == "public-model")
+        .unwrap();
+    for protocol in [
+        Protocol::ChatCompletions,
+        Protocol::Responses,
+        Protocol::Messages,
+    ] {
+        assert!(model.protocols.contains(&protocol), "{protocol:?}");
+    }
+    assert_eq!(model.preferred, Some(Protocol::ChatCompletions));
+    // A saved Responses or Messages preference selects that protocol.
+    for (protocol, path, clients) in [
+        (
+            Protocol::Responses,
+            "responses",
+            [ApiFormat::ChatCompletions, ApiFormat::Messages],
+        ),
+        (
+            Protocol::Messages,
+            "messages",
+            [ApiFormat::ChatCompletions, ApiFormat::Responses],
+        ),
+    ] {
+        let mut catalog = saved.clone();
+        catalog
+            .iter_mut()
+            .find(|model| model.public_model == "public-model")
+            .unwrap()
+            .preferred = Some(protocol);
+        let tx = db.conn.unchecked_transaction().unwrap();
+        crate::db::destination_store::replace_destination_catalog(&tx, &destination_id, &catalog)
             .unwrap();
-        let remaining: Vec<String> = endpoint_ids
-            .iter()
-            .filter(|id| **id != route.target.endpoint_id)
-            .cloned()
-            .collect();
-        db.update_credential_binding(
-            &credential.binding_id,
-            None,
-            None,
-            Some(&remaining),
-            Some(&credential.grants.allowed_origins),
-        )
-        .unwrap();
-        let revoked = RoutingSnapshot::load(&db).unwrap();
-        assert!(
-            verify_execution_authorization(&revoked, &selected, &route.spec, Utc::now(), true)
-                .is_err()
-        );
-        db.update_credential_binding(
-            &credential.binding_id,
-            None,
-            None,
-            Some(&endpoint_ids),
-            Some(&credential.grants.allowed_origins),
-        )
-        .unwrap();
+        tx.commit().unwrap();
+        let preferred_snapshot = RoutingSnapshot::load(&db).unwrap();
+        for client in clients {
+            let route = route_for_protocol(&preferred_snapshot, "public-model", client);
+            assert_platform_selection(&route, protocol, path, &connection);
+            recheck_chosen_endpoint_revocation(
+                &db,
+                &preferred_snapshot,
+                &route,
+                &credential.binding_id,
+                &endpoint_ids,
+                &credential.grants.allowed_origins,
+            );
+        }
     }
 }
 

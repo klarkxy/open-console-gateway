@@ -1145,27 +1145,73 @@ fn platform_passthrough_enables_chat_messages_and_responses() {
         model.preferred_protocol,
         UpstreamProtocolKind::ChatCompletions
     );
+    let enabled = model.enabled_protocols();
+    for protocol in [
+        UpstreamProtocolKind::ChatCompletions,
+        UpstreamProtocolKind::Responses,
+        UpstreamProtocolKind::Messages,
+    ] {
+        assert!(
+            enabled.contains(&protocol),
+            "passthrough still enables {protocol:?}"
+        );
+    }
     let scope = ContractScope::custom_endpoint("platform-key");
+    for client in [
+        ApiFormat::ChatCompletions,
+        ApiFormat::Messages,
+        ApiFormat::Responses,
+        ApiFormat::Gemini,
+    ] {
+        assert_eq!(
+            set.select_upstream(&scope, client, "claude-sonnet")
+                .unwrap(),
+            ApiFormat::ChatCompletions,
+            "{client:?} uses the enabled preferred protocol"
+        );
+    }
+
+    let mut persisted = empty_persisted();
+    persisted.overrides.insert(
+        scope.clone(),
+        vec![PersistedModelProtocolOverride {
+            scope: scope.clone(),
+            model_id: "claude-sonnet".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            state: ProtocolOverrideState::ForceOff,
+            updated_at: Utc::now(),
+        }],
+    );
+    let set = build_effective_contracts(&zen_seed(), &[runtime], persisted);
+    let disabled = &set.custom_endpoints["platform-key"]
+        .model("claude-sonnet")
+        .unwrap();
     assert_eq!(
-        set.select_upstream(&scope, ApiFormat::ChatCompletions, "claude-sonnet")
-            .unwrap(),
-        ApiFormat::ChatCompletions
+        disabled.preferred_protocol,
+        UpstreamProtocolKind::ChatCompletions
+    );
+    assert!(
+        !disabled
+            .enabled_protocols()
+            .contains(&UpstreamProtocolKind::ChatCompletions)
     );
     assert_eq!(
         set.select_upstream(&scope, ApiFormat::Messages, "claude-sonnet")
             .unwrap(),
-        ApiFormat::Messages
+        ApiFormat::Messages,
+        "a disabled preferred protocol is not executed"
     );
     assert_eq!(
         set.select_upstream(&scope, ApiFormat::Responses, "claude-sonnet")
             .unwrap(),
-        ApiFormat::Responses
+        ApiFormat::Responses,
+        "a disabled preferred protocol is not executed"
     );
     assert_eq!(
         set.select_upstream(&scope, ApiFormat::Gemini, "claude-sonnet")
             .unwrap(),
-        ApiFormat::ChatCompletions,
-        "Gemini stays a client format and converts to Chat"
+        ApiFormat::Responses,
+        "Gemini uses the enabled fallback when preferred is disabled"
     );
 }
 
@@ -1295,11 +1341,13 @@ fn minimax_recommended_default_wins_over_client_and_respects_manual_disable() {
     );
     assert_eq!(
         select_upstream_protocol(minimax, ApiFormat::Responses, model_id).unwrap(),
-        ApiFormat::Responses
+        ApiFormat::Messages,
+        "an enabled preferred protocol wins over the client protocol"
     );
     assert_eq!(
         select_upstream_protocol(minimax, ApiFormat::ChatCompletions, model_id).unwrap(),
-        ApiFormat::ChatCompletions
+        ApiFormat::Messages,
+        "an enabled preferred protocol wins over the client protocol"
     );
     assert_eq!(
         select_upstream_protocol(minimax, ApiFormat::Messages, model_id).unwrap(),
@@ -1320,37 +1368,76 @@ fn minimax_recommended_default_wins_over_client_and_respects_manual_disable() {
     );
     let set = build_effective_contracts(&zen_seed(), &[], persisted);
     let minimax = set.providers.get(MINIMAX_PROVIDER_ID).unwrap();
+    let disabled = minimax.model(model_id).unwrap();
+    assert_eq!(
+        disabled.preferred_protocol,
+        UpstreamProtocolKind::Messages,
+        "a disabled preference stays recorded"
+    );
+    assert!(
+        !disabled
+            .enabled_protocols()
+            .contains(&UpstreamProtocolKind::Messages),
+        "force_off removes the preferred protocol from the enabled set"
+    );
     assert_eq!(
         select_upstream_protocol(minimax, ApiFormat::ChatCompletions, model_id).unwrap(),
-        ApiFormat::ChatCompletions
+        ApiFormat::ChatCompletions,
+        "a disabled preferred protocol is not executed"
     );
     assert_eq!(
         select_upstream_protocol(minimax, ApiFormat::Responses, model_id).unwrap(),
-        ApiFormat::Responses
+        ApiFormat::Responses,
+        "a disabled preferred protocol is not executed"
     );
 }
 
 #[test]
-fn cpa_preserves_all_supported_client_protocols_and_converts_gemini_to_chat() {
+fn cpa_uses_enabled_preferred_and_does_not_force_a_disabled_one() {
     let mut cpa = go_contract();
     cpa.adapter_kind = ProviderAdapterKind::Cpa;
     let model = cpa.models.get_mut("glm-5.2").unwrap();
+    assert_eq!(
+        model.preferred_protocol,
+        UpstreamProtocolKind::ChatCompletions
+    );
     for protocol in model.protocols.values_mut() {
         protocol.enabled = true;
     }
-    for protocol in [
+    for client in [
         ApiFormat::ChatCompletions,
         ApiFormat::Responses,
         ApiFormat::Messages,
+        ApiFormat::Gemini,
     ] {
         assert_eq!(
-            select_upstream_protocol(&cpa, protocol, "glm-5.2").unwrap(),
-            protocol
+            select_upstream_protocol(&cpa, client, "glm-5.2").unwrap(),
+            ApiFormat::ChatCompletions,
+            "{client:?} uses the enabled preferred protocol"
         );
     }
+
+    let model = cpa.models.get_mut("glm-5.2").unwrap();
+    model.protocols.get_mut("chat_completions").unwrap().enabled = false;
+    assert_eq!(
+        select_upstream_protocol(&cpa, ApiFormat::Responses, "glm-5.2").unwrap(),
+        ApiFormat::Responses,
+        "a disabled preferred protocol is not executed"
+    );
+    assert_eq!(
+        select_upstream_protocol(&cpa, ApiFormat::Messages, "glm-5.2").unwrap(),
+        ApiFormat::Messages,
+        "a disabled preferred protocol is not executed"
+    );
     assert_eq!(
         select_upstream_protocol(&cpa, ApiFormat::Gemini, "glm-5.2").unwrap(),
-        ApiFormat::ChatCompletions
+        ApiFormat::Responses,
+        "Gemini falls through the enabled fallback after preferred is disabled"
+    );
+    assert_eq!(
+        select_upstream_protocol(&cpa, ApiFormat::ChatCompletions, "glm-5.2").unwrap(),
+        ApiFormat::Responses,
+        "a disabled client protocol is not invented from the disabled preference"
     );
 }
 
@@ -1433,5 +1520,86 @@ fn select_enabled_upstream_passthroughs_a_one_protocol_mapping() {
     assert_eq!(
         select_enabled_upstream(ApiFormat::Messages, protocol, &[protocol], &[protocol]).unwrap(),
         ApiFormat::ChatCompletions
+    );
+}
+
+#[test]
+fn select_enabled_upstream_prefers_enabled_preferred_without_adding_protocols() {
+    let enabled = [
+        UpstreamProtocolKind::ChatCompletions,
+        UpstreamProtocolKind::Responses,
+        UpstreamProtocolKind::Messages,
+    ];
+    let fallback = enabled;
+    assert_eq!(
+        select_enabled_upstream(
+            ApiFormat::ChatCompletions,
+            UpstreamProtocolKind::Messages,
+            &enabled,
+            &fallback,
+        )
+        .unwrap(),
+        ApiFormat::Messages,
+        "enabled preferred wins over the same client protocol"
+    );
+    assert_eq!(
+        select_enabled_upstream(
+            ApiFormat::ChatCompletions,
+            UpstreamProtocolKind::Messages,
+            &[
+                UpstreamProtocolKind::ChatCompletions,
+                UpstreamProtocolKind::Responses,
+            ],
+            &fallback,
+        )
+        .unwrap(),
+        ApiFormat::ChatCompletions,
+        "an unenabled preferred protocol is not executed"
+    );
+    assert_eq!(
+        select_enabled_upstream(
+            ApiFormat::Responses,
+            UpstreamProtocolKind::Messages,
+            &[
+                UpstreamProtocolKind::ChatCompletions,
+                UpstreamProtocolKind::Responses,
+            ],
+            &[
+                UpstreamProtocolKind::ChatCompletions,
+                UpstreamProtocolKind::Responses,
+                UpstreamProtocolKind::Messages,
+            ],
+        )
+        .unwrap(),
+        ApiFormat::Responses,
+        "same client is next after a missing preferred protocol"
+    );
+    assert_eq!(
+        select_enabled_upstream(
+            ApiFormat::Gemini,
+            UpstreamProtocolKind::Messages,
+            &[
+                UpstreamProtocolKind::ChatCompletions,
+                UpstreamProtocolKind::Responses,
+            ],
+            &[
+                UpstreamProtocolKind::ChatCompletions,
+                UpstreamProtocolKind::Responses,
+            ],
+        )
+        .unwrap(),
+        ApiFormat::ChatCompletions,
+        "Gemini uses the enabled fallback when preferred is absent"
+    );
+    let error = select_enabled_upstream(
+        ApiFormat::Gemini,
+        UpstreamProtocolKind::ChatCompletions,
+        &[UpstreamProtocolKind::Messages],
+        &[UpstreamProtocolKind::ChatCompletions],
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.message, NO_ENABLED_UPSTREAM_PROTOCOL,
+        "an enabled protocol outside preferred, client, and fallback is not added"
     );
 }

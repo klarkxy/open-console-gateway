@@ -203,3 +203,89 @@ fn legacy_tool_compat_emission_is_request_id_profile_version_and_dropped_types_o
     assert!(object.contains_key("version"));
     assert!(object.contains_key("dropped_hosted_tools"));
 }
+
+fn thinking_shaped(secret: &str) -> Value {
+    json!({
+        "type": "thinking",
+        "signature": format!("ocg-replay-v1:{}:safe", "ab".repeat(32)),
+        "data": format!("pre-{secret}-post"),
+        "q": format!("see {secret}")
+    })
+}
+
+#[test]
+fn ordinary_tool_containers_are_not_signed_history_conflicts() {
+    let secret = "ocg";
+    let shaped = thinking_shaped(secret);
+    let structured = serde_json::to_string(&shaped).unwrap();
+    for key in ["input", "arguments", "args", "parameters", "metadata"] {
+        let mut body = json!({
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "search",
+        });
+        body[key] = shaped.clone();
+        assert!(
+            !signed_native_history_redaction_conflict(&body, secret),
+            "{key} object was treated as native history"
+        );
+        body[key] = json!(structured);
+        assert!(
+            !signed_native_history_redaction_conflict(&body, secret),
+            "{key} structured string was treated as native history"
+        );
+        body[key] = json!({"nested": {"inner": shaped.clone()}});
+        assert!(
+            !signed_native_history_redaction_conflict(&body, secret),
+            "{key} nested object was treated as native history"
+        );
+    }
+}
+
+#[test]
+fn native_signed_fields_remain_conflicts_outside_ordinary_containers() {
+    let secret = "ocg";
+    let content = json!({
+        "type": "message",
+        "role": "assistant",
+        "content": [{
+            "type": "thinking",
+            "thinking": "why",
+            "signature": format!("pre-{secret}-post")
+        }]
+    });
+    assert!(signed_native_history_redaction_conflict(&content, secret));
+    assert!(signed_native_history_redaction_conflict(
+        &json!({
+            "type": "content_block_delta",
+            "delta": {"type": "signature_delta", "signature": secret}
+        }),
+        secret
+    ));
+    assert!(signed_native_history_redaction_conflict(
+        &json!({
+            "content": [{
+                "type": "redacted_thinking",
+                "data": format!("pre-{secret}-post")
+            }]
+        }),
+        secret
+    ));
+    assert!(signed_native_history_redaction_conflict(
+        &json!({
+            "output": [{
+                "type": "reasoning",
+                "encrypted_content": format!("cipher-{secret}")
+            }]
+        }),
+        secret
+    ));
+    assert!(signed_native_history_redaction_conflict(
+        &json!({
+            "type": "thinking",
+            "thinking": format!("see {secret}"),
+            "signature": "sig-1"
+        }),
+        secret
+    ));
+}

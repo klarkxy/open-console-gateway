@@ -97,6 +97,7 @@ fn chat_plan(
         original_model: None,
         resolved_alias: Some(model.into()),
         custom_route,
+        replay_domain: None,
         service_tier: None,
         custom_tools: Vec::new(),
         namespace_tools: Vec::new(),

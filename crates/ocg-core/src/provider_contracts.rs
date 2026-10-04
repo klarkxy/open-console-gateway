@@ -685,36 +685,54 @@ impl fmt::Display for ProtocolSelectError {
 
 impl std::error::Error for ProtocolSelectError {}
 
+/// Already-enabled protocols to try, in selection order.
+///
+/// 1. `preferred`, when it is enabled.
+/// 2. The client protocol, when it is enabled and distinct.
+/// 3. Remaining enabled entries of `fallback_priority`, in that order.
+///
+/// `enabled` and `fallback_priority` are already permission-filtered. This
+/// does not add a protocol, grant, or endpoint, and it does not contact a
+/// network. An unenabled preferred protocol is omitted. Gemini is client-only
+/// and never matches step 2.
+pub(crate) fn enabled_upstream_order(
+    client: ApiFormat,
+    preferred: UpstreamProtocolKind,
+    enabled: &[UpstreamProtocolKind],
+    fallback_priority: &[UpstreamProtocolKind],
+) -> Vec<UpstreamProtocolKind> {
+    let mut order = Vec::new();
+    if enabled.contains(&preferred) {
+        order.push(preferred);
+    }
+    if let Some(client_protocol) = protocol_from_api(client)
+        && enabled.contains(&client_protocol)
+        && !order.contains(&client_protocol)
+    {
+        order.push(client_protocol);
+    }
+    for protocol in fallback_priority {
+        if enabled.contains(protocol) && !order.contains(protocol) {
+            order.push(*protocol);
+        }
+    }
+    order
+}
+
 /// Pick the upstream protocol for one request.
 ///
-/// 1. Client protocol is enabled → passthrough.
-/// 2. Else preferred is enabled → convert to preferred.
-/// 3. Else the first enabled protocol in `fallback_priority`.
-///
-/// Gemini is client-only and never matches step 1.
+/// Uses [`enabled_upstream_order`] and returns the first entry.
 pub fn select_enabled_upstream(
     client: ApiFormat,
     preferred: UpstreamProtocolKind,
     enabled: &[UpstreamProtocolKind],
     fallback_priority: &[UpstreamProtocolKind],
 ) -> Result<ApiFormat, ProtocolSelectError> {
-    if enabled.is_empty() {
-        return Err(ProtocolSelectError::new(NO_ENABLED_UPSTREAM_PROTOCOL));
-    }
-    if let Some(client_protocol) = protocol_from_api(client)
-        && enabled.contains(&client_protocol)
-    {
-        return Ok(protocol_to_api(client_protocol));
-    }
-    if enabled.contains(&preferred) {
-        return Ok(protocol_to_api(preferred));
-    }
-    for protocol in fallback_priority {
-        if enabled.contains(protocol) {
-            return Ok(protocol_to_api(*protocol));
-        }
-    }
-    Err(ProtocolSelectError::new(NO_ENABLED_UPSTREAM_PROTOCOL))
+    enabled_upstream_order(client, preferred, enabled, fallback_priority)
+        .into_iter()
+        .next()
+        .map(protocol_to_api)
+        .ok_or_else(|| ProtocolSelectError::new(NO_ENABLED_UPSTREAM_PROTOCOL))
 }
 
 pub fn select_upstream_protocol(

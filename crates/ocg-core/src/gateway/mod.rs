@@ -16,6 +16,7 @@ pub mod protocol;
 pub mod protocol_stream;
 pub mod provider_adapter;
 pub(crate) mod recovery;
+pub(crate) mod replay;
 mod response;
 pub mod routing;
 pub mod wire;

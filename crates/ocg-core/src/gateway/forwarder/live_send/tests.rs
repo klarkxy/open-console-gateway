@@ -336,6 +336,7 @@ fn isolated_plan(
             endpoint_url: endpoint.into(),
             auth_kind: ocg_domain::dynamic::DynamicAuthKind::Bearer,
         }),
+        replay_domain: None,
         service_tier: None,
         custom_tools: Vec::new(),
         namespace_tools: Vec::new(),

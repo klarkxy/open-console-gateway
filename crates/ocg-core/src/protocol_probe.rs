@@ -221,6 +221,7 @@ async fn execute_protocol_request(
         original_model: (public_model != ctx.model_id).then(|| public_model.to_string()),
         resolved_alias: (!public_model.is_empty()).then(|| public_model.to_string()),
         custom_route: ctx.custom_route.clone(),
+        replay_domain: None,
         service_tier: None,
         custom_tools: Vec::new(),
         namespace_tools: Vec::new(),

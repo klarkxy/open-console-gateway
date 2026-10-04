@@ -1,13 +1,16 @@
 use super::diagnostics::{
+    SIGNED_HISTORY_REDACTION_CONFLICT, ordinary_data_key, redact_bound_generated_stream_values,
     redact_known_secret, redact_known_secret_stream_values, redact_known_secret_values,
+    signed_native_history_redaction_conflict,
 };
 use super::protocol::{
     ApiFormat, NamespaceToolMapping, ProtocolError, RequestPlan, UsageCounts,
-    encode_anthropic_thinking_block, encode_chat_reasoning, responses_id,
-    rewrite_existing_visible_model, unix_seconds,
+    decode_anthropic_thinking_block, decode_chat_reasoning, encode_anthropic_thinking_block,
+    encode_chat_reasoning, responses_id, rewrite_existing_visible_model, unix_seconds,
 };
 use super::wire::WireNormalization;
 use bytes::{Bytes, BytesMut};
+use ocg_gateway::protocol::{ReplayChunkBinder, ReplayDomain, bind_replay_opaque};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -35,11 +38,73 @@ pub(crate) struct StreamConverter {
     /// frames are normalized before passthrough/conversion; `[DONE]` and
     /// non-JSON frames are untouched by construction (they never parse).
     wire_normalization: WireNormalization,
+    replay_domain: Option<ReplayDomain>,
+    /// Blocks whose reasoning text already contained the known secret. A later
+    /// signature for one of these indexes is altered signed history.
+    secret_tainted_reasoning: BTreeSet<usize>,
+    /// Same-protocol passthrough binders. One signature field per content block.
+    passthrough_signatures: BTreeMap<usize, ReplayChunkBinder>,
+    /// Cross-protocol event binders. Independent of the passthrough binders so
+    /// each output path wraps a raw value once.
+    cache_signatures: BTreeMap<usize, ReplayChunkBinder>,
+    replay_error: Option<String>,
 }
 
 struct DeferredPassthroughFrame {
     passthrough: Bytes,
     converted: Vec<Bytes>,
+}
+
+/// Responses part identity. Summary index `i` and content index `i` are
+/// different lanes, as is visible text at the same indexes.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ResponsePartLane {
+    Text,
+    ReasoningSummary,
+    ReasoningContent,
+}
+
+impl ResponsePartLane {
+    fn is_reasoning(self) -> bool {
+        !matches!(self, Self::Text)
+    }
+
+    fn from_part_type(part_type: &str) -> Self {
+        match part_type {
+            "summary_text" => Self::ReasoningSummary,
+            "reasoning_text" => Self::ReasoningContent,
+            _ => Self::Text,
+        }
+    }
+
+    fn part_type(self) -> Option<&'static str> {
+        match self {
+            Self::ReasoningSummary => Some("summary_text"),
+            Self::ReasoningContent => Some("reasoning_text"),
+            Self::Text => None,
+        }
+    }
+
+    fn delta(self, index: usize, text: String) -> PivotEvent {
+        if self.is_reasoning() {
+            PivotEvent::ReasoningDelta { index, text }
+        } else {
+            PivotEvent::TextDelta { index, text }
+        }
+    }
+}
+
+/// One Responses item's public `encrypted_content`.
+enum ResponsesCipher {
+    Bound(String),
+    Null,
+    Empty,
+}
+
+/// `added` may store a cipher before `done` or the terminal snapshot.
+enum ResponsesCipherSight {
+    Provisional,
+    Authoritative,
 }
 
 #[derive(Default)]
@@ -53,9 +118,20 @@ struct InputState {
     reasoning_block: Option<usize>,
     chat_tools: BTreeMap<u64, ChatTool>,
     response_tools: BTreeMap<u64, ResponseTool>,
-    response_parts: BTreeMap<(u64, u64, bool), usize>,
-    response_delta_seen: BTreeSet<(u64, u64, bool)>,
+    response_parts: BTreeMap<(u64, u64, ResponsePartLane), usize>,
+    response_delta_seen: BTreeSet<(u64, u64, ResponsePartLane)>,
+    /// Upstream output index to the native item id of a recognized Response item.
+    native_item_ids: BTreeMap<u64, String>,
+    /// Shadow parts opened so an empty added frame has one block.
+    /// An explicit native part, including an empty one, is removed from this set.
+    provisional_parts: BTreeSet<(u64, u64, ResponsePartLane)>,
+    /// Output indexes already closed by `output_item.done` or a completed snapshot.
+    completed_output_items: BTreeSet<u64>,
     anthropic_reasoning: BTreeMap<usize, Value>,
+    /// Responses `encrypted_content` for one upstream output index.
+    /// A bound cipher is prefixed when a replay domain is known. Null and empty
+    /// are the item's own field, not a missing one. The tainted pivot reads it.
+    responses_encrypted: BTreeMap<u64, ResponsesCipher>,
     pending_stop: Option<String>,
     usage: Usage,
     saw_tool: bool,
@@ -74,6 +150,24 @@ struct OutputState {
     next_output_index: u64,
     sequence: u64,
     blocks: BTreeMap<usize, OutputBlock>,
+    /// Upstream output indexes whose fallback reasoning item was already emitted.
+    reasoning_item_done: BTreeSet<u64>,
+    /// Upstream message indexes whose one `output_item.done` was already emitted.
+    text_item_done: BTreeSet<u64>,
+    /// Item starts present in bytes already handed to the client.
+    emitted_item_starts: BTreeSet<u64>,
+    /// Text `content_part.added` keys present in bytes already handed to the client.
+    emitted_text_parts: BTreeSet<(u64, u64)>,
+    /// Reasoning summary part starts present in bytes already handed to the client.
+    emitted_summary_parts: BTreeSet<(u64, u64)>,
+    /// Item starts sitting in a converted batch that is not yet the chosen output.
+    item_start_open: BTreeSet<u64>,
+    /// Text part starts sitting in a converted batch that is not yet the chosen output.
+    part_start_open: BTreeSet<(u64, u64)>,
+    /// Summary part starts sitting in a converted batch that is not yet the chosen output.
+    summary_part_open: BTreeSet<(u64, u64)>,
+    /// Synthetic output indexes are exhausted. Do not append a successful final.
+    index_exhausted: bool,
 }
 
 #[derive(Clone, Default)]
@@ -446,11 +540,13 @@ impl StreamSecretRedactor {
                 events,
                 matched: false,
                 reasoning_indexes: BTreeSet::new(),
+                signature_indexes: BTreeSet::new(),
             };
         };
         let mut output = Vec::new();
         let mut matched = false;
         let mut reasoning_indexes = BTreeSet::new();
+        let mut signature_indexes = BTreeSet::new();
         for event in events {
             match event {
                 PivotEvent::Start { id, model, usage } => {
@@ -500,7 +596,8 @@ impl StreamSecretRedactor {
                         &secret,
                     );
                     matched |= delta_matched;
-                    reasoning_indexes.extend(matched_indexes);
+                    reasoning_indexes.extend(&matched_indexes);
+                    signature_indexes.extend(matched_indexes);
                     if !signature.is_empty() {
                         output.push(PivotEvent::SignatureDelta { index, signature });
                     }
@@ -562,6 +659,7 @@ impl StreamSecretRedactor {
             events: output,
             matched,
             reasoning_indexes,
+            signature_indexes,
         }
     }
 
@@ -746,6 +844,7 @@ struct RedactedEvents {
     events: Vec<PivotEvent>,
     matched: bool,
     reasoning_indexes: BTreeSet<usize>,
+    signature_indexes: BTreeSet<usize>,
 }
 
 fn redact_stream_value(value: &str, secret: &str) -> (String, bool) {
@@ -819,6 +918,11 @@ impl StreamConverter {
             deferred_passthrough: Vec::new(),
             deferred_passthrough_bytes: 0,
             wire_normalization,
+            replay_domain: plan.replay_domain,
+            secret_tainted_reasoning: BTreeSet::new(),
+            passthrough_signatures: BTreeMap::new(),
+            cache_signatures: BTreeMap::new(),
+            replay_error: None,
         }
     }
 
@@ -880,9 +984,12 @@ impl StreamConverter {
             if self.passthrough_tainted {
                 let events = self.finish_input();
                 let (chunks, _) = self.encode_redacted(events)?;
+                self.commit_published_responses(&chunks);
                 output.extend(chunks);
             } else {
-                output.extend(self.release_deferred_passthrough(false));
+                let released = self.release_deferred_passthrough(false);
+                self.commit_published_responses(&released);
+                output.extend(released);
                 self.input.terminal = true;
                 self.output.terminal = true;
                 output.push(match self.source {
@@ -908,7 +1015,9 @@ impl StreamConverter {
                 ));
             }
             let events = self.finish_input();
-            output.extend(self.encode_redacted(events)?.0);
+            let chunks = self.encode_redacted(events)?.0;
+            self.commit_published_responses(&chunks);
+            output.extend(chunks);
         }
         Ok(output)
     }
@@ -1003,12 +1112,16 @@ impl StreamConverter {
         output: &mut Vec<Bytes>,
     ) {
         if self.passthrough_tainted {
+            self.commit_published_responses(&converted);
             output.extend(converted);
             return;
         }
         if secret_matched {
             self.passthrough_tainted = true;
-            output.extend(self.release_deferred_passthrough(true));
+            let released = self.release_deferred_passthrough(true);
+            self.commit_published_responses(&released);
+            output.extend(released);
+            self.commit_published_responses(&converted);
             output.extend(converted);
         } else if self.secret_redactor.has_pending() || !self.deferred_passthrough.is_empty() {
             let converted_bytes = converted.iter().map(Bytes::len).sum::<usize>();
@@ -1018,7 +1131,10 @@ impl StreamConverter {
                     > MAX_PENDING_SSE_BYTES
             {
                 self.passthrough_tainted = true;
-                output.extend(self.release_deferred_passthrough(true));
+                let released = self.release_deferred_passthrough(true);
+                self.commit_published_responses(&released);
+                output.extend(released);
+                self.commit_published_responses(&converted);
                 output.extend(converted);
                 return;
             }
@@ -1028,9 +1144,12 @@ impl StreamConverter {
                 converted,
             });
             if !self.secret_redactor.has_pending() {
-                output.extend(self.release_deferred_passthrough(false));
+                let released = self.release_deferred_passthrough(false);
+                self.commit_published_responses(&released);
+                output.extend(released);
             }
         } else {
+            self.commit_published_responses(std::slice::from_ref(&passthrough));
             output.push(passthrough);
         }
     }
@@ -1065,28 +1184,68 @@ impl StreamConverter {
             let passthrough = sanitize_passthrough_sse_frame(
                 self.source,
                 frame,
-                &self.model,
                 &self.client_model,
                 secret,
                 None,
                 self.wire_normalization,
-            );
+                &mut |_| {},
+                None,
+            )?;
             return Ok((passthrough, Vec::new(), false));
         };
         let payload = payload.trim();
         let mut value = parse_sse_payload(payload)?;
-        // Sanitize reads the raw parsed payload so its internal diff sees the
-        // normalization rewrite and replaces the data field; the conversion
-        // path below then consumes the normalized value.
-        let passthrough = sanitize_passthrough_sse_frame(
+        // Reject a bound route before redaction can change signed history or
+        // before a non-string native field is coerced. Unsigned text still
+        // redacts inside sanitize.
+        if let Some(parsed) = value.as_ref() {
+            self.guard_replay_frame(parsed)?;
+        }
+        // Sanitize redacts and rewrites the visible model first. The callback
+        // then binds only native opaque fields on that sanitized JSON.
+        let mut binders = std::mem::take(&mut self.passthrough_signatures);
+        let mut bind_error = None;
+        let mut signature_suffix = None;
+        let domain = self.replay_domain;
+        let source = self.source;
+        let mut passthrough = sanitize_passthrough_sse_frame(
             self.source,
             frame,
-            &self.model,
             &self.client_model,
             secret,
             value.as_ref(),
             self.wire_normalization,
-        );
+            &mut |parsed| {
+                let Some(domain) = domain else {
+                    return;
+                };
+                if bind_error.is_some() {
+                    return;
+                }
+                if let Err(error) = bind_same_protocol_opaque(
+                    source,
+                    parsed,
+                    domain,
+                    &mut binders,
+                    &mut signature_suffix,
+                ) {
+                    bind_error = Some(error);
+                }
+            },
+            None,
+        )?;
+        self.passthrough_signatures = binders;
+        if let Some(error) = bind_error {
+            return Err(error);
+        }
+        if let Some(suffix) = signature_suffix {
+            // The binder releases a held reserved prefix on content_block_stop.
+            // That signature_delta has to precede the stop, matching the cross
+            // path which emits the tail and then BlockStop.
+            let mut combined = suffix.to_vec();
+            combined.extend_from_slice(&passthrough);
+            passthrough = Bytes::from(combined);
+        }
         if let Some(parsed) = value.as_mut() {
             self.wire_normalization.normalize_response_value(parsed);
         }
@@ -1110,6 +1269,7 @@ impl StreamConverter {
                 self.wire_normalization.normalize_response_value(parsed);
             }
             let (chunks, matched) = self.convert_parsed_frame(event_name, payload, value)?;
+            self.commit_published_responses(&chunks);
             output.extend(chunks);
             secret_changed |= matched;
         }
@@ -1132,6 +1292,7 @@ impl StreamConverter {
         } else {
             let value =
                 value.ok_or_else(|| ProtocolError::new("invalid SSE JSON: missing payload"))?;
+            self.guard_replay_frame(&value)?;
             match self.source {
                 ApiFormat::Messages => self.decode_messages(value),
                 ApiFormat::ChatCompletions => self.decode_chat(value),
@@ -1141,8 +1302,115 @@ impl StreamConverter {
                 }
             }
         };
+        if let Some(message) = self.replay_error.clone() {
+            return Err(ProtocolError::new(message));
+        }
         let (chunks, matched) = self.encode_redacted(events)?;
         Ok((chunks, matched))
+    }
+
+    fn bind_outgoing_signature_events(
+        &mut self,
+        events: Vec<PivotEvent>,
+    ) -> Result<Vec<PivotEvent>, ProtocolError> {
+        let Some(domain) = self.replay_domain else {
+            return Ok(events);
+        };
+        let mut output = Vec::with_capacity(events.len());
+        for event in events {
+            match event {
+                PivotEvent::SignatureDelta { index, signature } if !signature.is_empty() => {
+                    if !messages_opaque_carrier(self.target) {
+                        return Err(ProtocolError::new(
+                            "Messages thinking signature cannot be preserved by protocol conversion",
+                        ));
+                    }
+                    let binder = self
+                        .cache_signatures
+                        .entry(index)
+                        .or_insert_with(|| ReplayChunkBinder::new(domain));
+                    let signature = binder
+                        .push(&signature)
+                        .map_err(|error| ProtocolError::new(error.message))?;
+                    if !signature.is_empty() {
+                        output.push(PivotEvent::SignatureDelta { index, signature });
+                    }
+                }
+                PivotEvent::BlockStop { index } => {
+                    if let Some(binder) = self.cache_signatures.get_mut(&index) {
+                        let extra = binder
+                            .finish()
+                            .map_err(|error| ProtocolError::new(error.message))?;
+                        if !extra.is_empty() {
+                            output.push(PivotEvent::SignatureDelta {
+                                index,
+                                signature: extra,
+                            });
+                        }
+                    }
+                    output.push(PivotEvent::BlockStop { index });
+                }
+                other => output.push(other),
+            }
+        }
+        Ok(output)
+    }
+
+    fn bind_cached_reasoning_blocks(&mut self) -> Result<(), ProtocolError> {
+        let Some(domain) = self.replay_domain else {
+            return Ok(());
+        };
+        let indexes: Vec<usize> = self.input.anthropic_reasoning.keys().copied().collect();
+        for index in indexes {
+            let Some(block) = self.input.anthropic_reasoning.get_mut(&index) else {
+                continue;
+            };
+            if !messages_opaque_carrier(self.target) && block_has_native_opaque(block) {
+                return Err(ProtocolError::new(messages_opaque_loss_message(block)));
+            }
+            bind_messages_opaque_fields(block, domain, true)?;
+        }
+        Ok(())
+    }
+
+    fn guard_replay_frame(&self, value: &Value) -> Result<(), ProtocolError> {
+        if self.replay_domain.is_none() {
+            return Ok(());
+        }
+        reject_native_carrier_types(self.source, value)?;
+        if let Some(secret) = self.secret_redactor.secret.as_deref()
+            && signed_native_history_redaction_conflict(value, secret)
+        {
+            return Err(ProtocolError::new(SIGNED_HISTORY_REDACTION_CONFLICT));
+        }
+        Ok(())
+    }
+
+    fn reject_signed_redaction(&mut self, redacted: &RedactedEvents) -> Result<(), ProtocolError> {
+        if !redacted.signature_indexes.is_empty() {
+            return Err(ProtocolError::new(SIGNED_HISTORY_REDACTION_CONFLICT));
+        }
+        for index in redacted
+            .reasoning_indexes
+            .iter()
+            .chain(self.secret_tainted_reasoning.iter())
+        {
+            if cache_block_is_signed(self.input.anthropic_reasoning.get(index)) {
+                return Err(ProtocolError::new(SIGNED_HISTORY_REDACTION_CONFLICT));
+            }
+        }
+        for event in &redacted.events {
+            if let PivotEvent::SignatureDelta { index, signature } = event
+                && !signature.is_empty()
+                && (self.secret_tainted_reasoning.contains(index)
+                    || redacted.reasoning_indexes.contains(index))
+            {
+                return Err(ProtocolError::new(SIGNED_HISTORY_REDACTION_CONFLICT));
+            }
+        }
+        self.secret_tainted_reasoning
+            .extend(&redacted.reasoning_indexes);
+        Ok(())
     }
 
     fn encode_redacted(
@@ -1150,32 +1418,51 @@ impl StreamConverter {
         events: Vec<PivotEvent>,
     ) -> Result<(Vec<Bytes>, bool), ProtocolError> {
         let redacted = self.secret_redactor.redact_events(events);
-        for index in redacted.reasoning_indexes {
-            self.input.anthropic_reasoning.remove(&index);
+        if self.replay_domain.is_some() {
+            self.reject_signed_redaction(&redacted)?;
         }
-        let encoded = self.encode_all(redacted.events)?;
-        let output = self.sanitize_generated_frames(encoded);
+        for index in &redacted.reasoning_indexes {
+            self.input.anthropic_reasoning.remove(index);
+        }
+        let events = self.bind_outgoing_signature_events(redacted.events)?;
+        self.bind_cached_reasoning_blocks()?;
+        let encoded = self.encode_all(events)?;
+        let output = self.rewrite_generated_frames(encoded, self.replay_domain)?;
         Ok((output, redacted.matched))
     }
 
     fn sanitize_generated_frames(&self, frames: Vec<Bytes>) -> Vec<Bytes> {
-        let Some(secret) = self.secret_redactor.secret.as_deref() else {
-            return frames;
+        self.rewrite_generated_frames(frames, None)
+            .unwrap_or_else(|_| Vec::new())
+    }
+
+    fn rewrite_generated_frames(
+        &self,
+        frames: Vec<Bytes>,
+        bound_domain: Option<ReplayDomain>,
+    ) -> Result<Vec<Bytes>, ProtocolError> {
+        let Some(secret) = self
+            .secret_redactor
+            .secret
+            .as_deref()
+            .filter(|secret| !secret.is_empty())
+        else {
+            return Ok(frames);
         };
-        frames
-            .into_iter()
-            .map(|frame| {
-                sanitize_passthrough_sse_frame(
-                    self.target,
-                    frame,
-                    &self.model,
-                    &self.client_model,
-                    Some(secret),
-                    None,
-                    WireNormalization::None,
-                )
-            })
-            .collect()
+        let mut output = Vec::with_capacity(frames.len());
+        for frame in frames {
+            output.push(sanitize_passthrough_sse_frame(
+                self.target,
+                frame,
+                &self.client_model,
+                Some(secret),
+                None,
+                WireNormalization::None,
+                &mut |_| {},
+                bound_domain,
+            )?);
+        }
+        Ok(output)
     }
 
     fn encode_all(&mut self, events: Vec<PivotEvent>) -> Result<Vec<Bytes>, ProtocolError> {
@@ -1187,6 +1474,10 @@ impl StreamConverter {
                 ApiFormat::Responses => self.encode_responses(event),
                 ApiFormat::Gemini => self.encode_gemini(event)?,
             });
+        }
+        if self.target == ApiFormat::Responses && !self.output.index_exhausted {
+            output.extend(self.flush_closed_text_items());
+            output.extend(self.flush_closed_reasoning_items());
         }
         Ok(output)
     }
@@ -1295,6 +1586,14 @@ impl StreamConverter {
                         BlockKind::Text
                     }
                     "thinking" | "redacted_thinking" => {
+                        if self.replay_domain.is_some()
+                            && !messages_opaque_carrier(self.target)
+                            && block_has_native_opaque(block)
+                        {
+                            self.replay_error =
+                                Some(messages_opaque_loss_message(block).to_string());
+                            return Vec::new();
+                        }
                         let replay_is_safe =
                             self.secret_redactor.secret.as_deref().is_none_or(|secret| {
                                 let mut redacted = block.clone();
@@ -1357,6 +1656,16 @@ impl StreamConverter {
                     }
                     "signature_delta" => {
                         let signature = string_at(delta, "/signature", "");
+                        if self.replay_domain.is_some()
+                            && !signature.is_empty()
+                            && !messages_opaque_carrier(self.target)
+                        {
+                            self.replay_error = Some(
+                                "Messages thinking signature cannot be preserved by protocol conversion"
+                                    .to_string(),
+                            );
+                            return Vec::new();
+                        }
                         append_json_string(
                             self.input.anthropic_reasoning.get_mut(&index),
                             "signature",
@@ -1614,6 +1923,17 @@ impl StreamConverter {
             }];
         }
 
+        if self.replay_domain.is_some()
+            && self.target != ApiFormat::Responses
+            && contains_nonempty_reasoning_encrypted(&value)
+        {
+            self.replay_error = Some(
+                "Responses encrypted reasoning cannot be preserved by protocol conversion"
+                    .to_string(),
+            );
+            return Vec::new();
+        }
+
         let mut events = self.start_if_needed(&value);
         match event_type {
             "response.created" | "response.in_progress" => {
@@ -1625,6 +1945,19 @@ impl StreamConverter {
                 let output_index = u64_at(&value, "/output_index").unwrap_or(0);
                 if let Some(item) = value.get("item") {
                     let item_type = item.get("type").and_then(Value::as_str);
+                    if item_type == Some("reasoning") {
+                        self.note_native_item(output_index, item);
+                        self.note_responses_encrypted(
+                            output_index,
+                            item,
+                            ResponsesCipherSight::Provisional,
+                        );
+                        events.extend(self.open_reasoning_shadow(output_index, item));
+                    }
+                    if item_type == Some("message") {
+                        self.note_native_item(output_index, item);
+                        events.extend(self.open_message_shadow(output_index, item));
+                    }
                     if matches!(item_type, Some("function_call" | "custom_tool_call")) {
                         events.extend(self.start_response_tool(output_index, item));
                         if let Some(tool) = self.input.response_tools.get_mut(&output_index) {
@@ -1655,61 +1988,79 @@ impl StreamConverter {
                 let output_index = u64_at(&value, "/output_index").unwrap_or(0);
                 let content_index = u64_at(&value, "/content_index").unwrap_or(0);
                 let part = value.get("part").unwrap_or(&Value::Null);
-                let reasoning = matches!(
-                    part.get("type").and_then(Value::as_str),
-                    Some("reasoning_text" | "summary_text")
+                let lane = ResponsePartLane::from_part_type(
+                    part.get("type").and_then(Value::as_str).unwrap_or(""),
                 );
-                events.extend(self.start_response_part(output_index, content_index, reasoning));
-                let initial = part
-                    .get("text")
-                    .or_else(|| part.get("refusal"))
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.is_empty());
-                if let Some(text) = initial {
-                    let key = (output_index, content_index, reasoning);
-                    self.input.response_delta_seen.insert(key);
-                    if let Some(index) = self.input.response_parts.get(&key).copied() {
-                        events.push(if reasoning {
-                            PivotEvent::ReasoningDelta {
-                                index,
-                                text: text.to_string(),
-                            }
-                        } else {
-                            PivotEvent::TextDelta {
-                                index,
-                                text: text.to_string(),
-                            }
-                        });
-                    }
-                }
+                let key = (output_index, content_index, lane);
+                events.extend(self.start_response_part(output_index, content_index, lane));
+                self.input.provisional_parts.remove(&key);
+                self.append_open_part_delta(
+                    &mut events,
+                    (output_index, content_index, lane),
+                    part.get("text")
+                        .or_else(|| part.get("refusal"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                );
+            }
+            "response.reasoning_summary_part.added" => {
+                let output_index = u64_at(&value, "/output_index").unwrap_or(0);
+                let part_index = u64_at(&value, "/summary_index")
+                    .or_else(|| u64_at(&value, "/content_index"))
+                    .unwrap_or(0);
+                let part = value.get("part").unwrap_or(&Value::Null);
+                let lane = ResponsePartLane::ReasoningSummary;
+                let key = (output_index, part_index, lane);
+                events.extend(self.start_response_part(output_index, part_index, lane));
+                self.input.provisional_parts.remove(&key);
+                self.note_native_item(output_index, &value);
+                self.append_open_part_delta(
+                    &mut events,
+                    key,
+                    part.get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                );
             }
             "response.output_text.delta" | "response.refusal.delta" => {
                 let output_index = u64_at(&value, "/output_index").unwrap_or(0);
                 let content_index = u64_at(&value, "/content_index").unwrap_or(0);
-                events.extend(self.start_response_part(output_index, content_index, false));
-                let key = (output_index, content_index, false);
-                let text = string_at(&value, "/delta", "");
-                if !text.is_empty() {
-                    self.input.response_delta_seen.insert(key);
-                    if let Some(index) = self.input.response_parts.get(&key).copied() {
-                        events.push(PivotEvent::TextDelta { index, text });
-                    }
-                }
+                let lane = ResponsePartLane::Text;
+                self.note_native_item(output_index, &value);
+                events.extend(self.start_response_part(output_index, content_index, lane));
+                self.append_open_part_delta(
+                    &mut events,
+                    (output_index, content_index, lane),
+                    string_at(&value, "/delta", ""),
+                );
             }
-            "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
+            "response.reasoning_summary_text.delta" => {
                 let output_index = u64_at(&value, "/output_index").unwrap_or(0);
-                let content_index = u64_at(&value, "/summary_index")
+                let part_index = u64_at(&value, "/summary_index")
                     .or_else(|| u64_at(&value, "/content_index"))
                     .unwrap_or(0);
-                events.extend(self.start_response_part(output_index, content_index, true));
-                let key = (output_index, content_index, true);
-                let text = string_at(&value, "/delta", "");
-                if !text.is_empty() {
-                    self.input.response_delta_seen.insert(key);
-                    if let Some(index) = self.input.response_parts.get(&key).copied() {
-                        events.push(PivotEvent::ReasoningDelta { index, text });
-                    }
-                }
+                let lane = ResponsePartLane::ReasoningSummary;
+                self.note_native_item(output_index, &value);
+                events.extend(self.start_response_part(output_index, part_index, lane));
+                self.append_open_part_delta(
+                    &mut events,
+                    (output_index, part_index, lane),
+                    string_at(&value, "/delta", ""),
+                );
+            }
+            "response.reasoning_text.delta" => {
+                let output_index = u64_at(&value, "/output_index").unwrap_or(0);
+                let part_index = u64_at(&value, "/content_index").unwrap_or(0);
+                let lane = ResponsePartLane::ReasoningContent;
+                self.note_native_item(output_index, &value);
+                events.extend(self.start_response_part(output_index, part_index, lane));
+                self.append_open_part_delta(
+                    &mut events,
+                    (output_index, part_index, lane),
+                    string_at(&value, "/delta", ""),
+                );
             }
             "response.function_call_arguments.delta" | "response.custom_tool_call_input.delta" => {
                 let output_index = u64_at(&value, "/output_index").unwrap_or(0);
@@ -1771,7 +2122,7 @@ impl StreamConverter {
             "response.output_item.done" => {
                 let output_index = u64_at(&value, "/output_index").unwrap_or(0);
                 if let Some(item) = value.get("item") {
-                    events.extend(self.complete_response_item(output_index, item));
+                    events.extend(self.complete_response_item(output_index, item, false));
                 }
             }
             "response.completed" | "response.incomplete" => {
@@ -1799,6 +2150,14 @@ impl StreamConverter {
                 } else {
                     "end_turn".to_string()
                 });
+                let snapshots = value
+                    .pointer("/response/output")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                for (index, item) in snapshots.iter().enumerate() {
+                    events.extend(self.complete_response_item(index as u64, item, true));
+                }
                 events.extend(self.finish_input());
             }
             _ => {}
@@ -1806,17 +2165,141 @@ impl StreamConverter {
         events
     }
 
+    /// Remember `item.id`, or `item_id` when the frame is a delta.
+    /// `call_id` stays on the tool block and is not an item id.
+    /// A later empty id does not replace one already published.
+    fn note_native_item(&mut self, output_index: u64, item: &Value) {
+        let id = item
+            .get("id")
+            .or_else(|| item.get("item_id"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        self.input
+            .native_item_ids
+            .entry(output_index)
+            .and_modify(|existing| {
+                if existing.is_empty() && !id.is_empty() {
+                    *existing = id.to_string();
+                }
+            })
+            .or_insert_with(|| id.to_string());
+    }
+
+    /// Align a native message item before its visible deltas.
+    ///
+    /// An empty `output_item.added` opens a provisional text part so the
+    /// converted batch of that frame carries the item. Listed content opens
+    /// those parts, including an explicit empty part, instead of the seed.
+    fn open_message_shadow(&mut self, output_index: u64, item: &Value) -> Vec<PivotEvent> {
+        let mut events = Vec::new();
+        let parts = item.get("content").and_then(Value::as_array);
+        if let Some(parts) = parts.filter(|parts| !parts.is_empty()) {
+            for (content_index, part) in parts.iter().enumerate() {
+                let lane = ResponsePartLane::from_part_type(
+                    part.get("type").and_then(Value::as_str).unwrap_or(""),
+                );
+                if lane != ResponsePartLane::Text {
+                    continue;
+                }
+                let part_index = content_index as u64;
+                let key = (output_index, part_index, lane);
+                events.extend(self.start_response_part(output_index, part_index, lane));
+                self.input.provisional_parts.remove(&key);
+                let text = part
+                    .get("text")
+                    .or_else(|| part.get("refusal"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                self.append_open_part_delta(&mut events, key, text);
+            }
+            return events;
+        }
+        let key = (output_index, 0, ResponsePartLane::Text);
+        if !self.input.response_parts.contains_key(&key) {
+            events.extend(self.start_response_part(output_index, 0, ResponsePartLane::Text));
+            self.input.provisional_parts.insert(key);
+        }
+        events
+    }
+
+    /// Align a native reasoning item on its added frame.
+    ///
+    /// Listed summary and content lanes stay distinct, including an explicit
+    /// empty part. A body-less item gets one provisional summary part so the
+    /// item keeps its original index. That seed is not a real summary.
+    fn open_reasoning_shadow(&mut self, output_index: u64, item: &Value) -> Vec<PivotEvent> {
+        let mut events = Vec::new();
+        if let Some(parts) = item.get("summary").and_then(Value::as_array) {
+            events.extend(self.open_listed_reasoning_lane(
+                output_index,
+                parts,
+                ResponsePartLane::ReasoningSummary,
+            ));
+        }
+        if let Some(parts) = item.get("content").and_then(Value::as_array) {
+            events.extend(self.open_listed_reasoning_lane(
+                output_index,
+                parts,
+                ResponsePartLane::ReasoningContent,
+            ));
+        }
+        let any_lane = self
+            .input
+            .response_parts
+            .keys()
+            .any(|key| key.0 == output_index && key.2.is_reasoning());
+        if !any_lane {
+            let key = (output_index, 0, ResponsePartLane::ReasoningSummary);
+            events.extend(self.start_response_part(
+                output_index,
+                0,
+                ResponsePartLane::ReasoningSummary,
+            ));
+            self.input.provisional_parts.insert(key);
+        }
+        events
+    }
+
+    fn open_listed_reasoning_lane(
+        &mut self,
+        output_index: u64,
+        parts: &[Value],
+        lane: ResponsePartLane,
+    ) -> Vec<PivotEvent> {
+        let mut events = Vec::new();
+        let Some(part_type) = lane.part_type() else {
+            return events;
+        };
+        for (index, part) in parts.iter().enumerate() {
+            if part.get("type").and_then(Value::as_str) != Some(part_type) {
+                continue;
+            }
+            let part_index = index as u64;
+            let key = (output_index, part_index, lane);
+            events.extend(self.start_response_part(output_index, part_index, lane));
+            self.input.provisional_parts.remove(&key);
+            let text = part
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            self.append_open_part_delta(&mut events, key, text);
+        }
+        events
+    }
+
     fn start_response_part(
         &mut self,
         output_index: u64,
-        content_index: u64,
-        reasoning: bool,
+        part_index: u64,
+        lane: ResponsePartLane,
     ) -> Vec<PivotEvent> {
-        let key = (output_index, content_index, reasoning);
+        let key = (output_index, part_index, lane);
         if self.input.response_parts.contains_key(&key) {
             return Vec::new();
         }
-        let kind = if reasoning {
+        let kind = if lane.is_reasoning() {
             BlockKind::Reasoning
         } else {
             BlockKind::Text
@@ -1826,7 +2309,59 @@ impl StreamConverter {
         vec![start]
     }
 
+    /// Append text while this lane's block is still open. A block that already
+    /// stopped does not receive another delta.
+    fn append_open_part_delta(
+        &mut self,
+        events: &mut Vec<PivotEvent>,
+        key: (u64, u64, ResponsePartLane),
+        text: String,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let Some(index) = self.input.response_parts.get(&key).copied() else {
+            return;
+        };
+        if !self.input.active.contains_key(&index) {
+            return;
+        }
+        self.input.provisional_parts.remove(&key);
+        self.input.response_delta_seen.insert(key);
+        events.push(key.2.delta(index, text));
+    }
+
+    /// Emit a final part once when no earlier delta on this lane carried it.
+    fn emit_unseen_open_part(
+        &mut self,
+        events: &mut Vec<PivotEvent>,
+        key: (u64, u64, ResponsePartLane),
+        text: String,
+    ) {
+        if self.input.response_delta_seen.contains(&key) {
+            return;
+        }
+        let Some(index) = self.input.response_parts.get(&key).copied() else {
+            return;
+        };
+        if !self.input.active.contains_key(&index) {
+            return;
+        }
+        self.input.response_delta_seen.insert(key);
+        events.push(key.2.delta(index, text));
+    }
+
+    fn stop_open_part(&mut self, events: &mut Vec<PivotEvent>, key: (u64, u64, ResponsePartLane)) {
+        let Some(index) = self.input.response_parts.get(&key).copied() else {
+            return;
+        };
+        if self.input.active.remove(&index).is_some() {
+            events.push(PivotEvent::BlockStop { index });
+        }
+    }
+
     fn start_response_tool(&mut self, output_index: u64, item: &Value) -> Vec<PivotEvent> {
+        self.note_native_item(output_index, item);
         if self.input.response_tools.contains_key(&output_index) {
             return Vec::new();
         }
@@ -1859,9 +2394,31 @@ impl StreamConverter {
         vec![start]
     }
 
-    fn complete_response_item(&mut self, output_index: u64, item: &Value) -> Vec<PivotEvent> {
+    fn complete_response_item(
+        &mut self,
+        output_index: u64,
+        item: &Value,
+        final_snapshot: bool,
+    ) -> Vec<PivotEvent> {
+        let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
+        if !matches!(
+            item_type,
+            "function_call" | "custom_tool_call" | "message" | "reasoning"
+        ) {
+            return Vec::new();
+        }
+        // The first close emits the item. A later terminal snapshot still
+        // replaces that item's final cipher without opening the block again.
+        let first_close = !self.input.completed_output_items.contains(&output_index);
+        if item_type == "reasoning" && (first_close || final_snapshot) {
+            self.note_responses_encrypted(output_index, item, ResponsesCipherSight::Authoritative);
+        }
+        if !self.input.completed_output_items.insert(output_index) {
+            return Vec::new();
+        }
+        self.note_native_item(output_index, item);
         let mut events = Vec::new();
-        match item.get("type").and_then(Value::as_str).unwrap_or("") {
+        match item_type {
             "function_call" | "custom_tool_call" => {
                 events.extend(self.start_response_tool(output_index, item));
                 let mut stop_index = None;
@@ -1904,39 +2461,83 @@ impl StreamConverter {
             "message" => {
                 if let Some(parts) = item.get("content").and_then(Value::as_array) {
                     for (content_index, part) in parts.iter().enumerate() {
-                        let kind = part.get("type").and_then(Value::as_str).unwrap_or("");
-                        let reasoning = matches!(kind, "reasoning_text" | "summary_text");
-                        let key = (output_index, content_index as u64, reasoning);
-                        events.extend(self.start_response_part(
-                            output_index,
-                            content_index as u64,
-                            reasoning,
-                        ));
-                        if !self.input.response_delta_seen.contains(&key)
-                            && let Some(index) = self.input.response_parts.get(&key).copied()
-                        {
-                            let text = part
-                                .get("text")
-                                .or_else(|| part.get("refusal"))
-                                .and_then(Value::as_str)
-                                .unwrap_or("")
-                                .to_string();
-                            events.push(if reasoning {
-                                PivotEvent::ReasoningDelta { index, text }
-                            } else {
-                                PivotEvent::TextDelta { index, text }
-                            });
-                        }
-                        if let Some(index) = self.input.response_parts.get(&key).copied() {
-                            self.input.active.remove(&index);
-                            events.push(PivotEvent::BlockStop { index });
-                        }
+                        let lane = ResponsePartLane::from_part_type(
+                            part.get("type").and_then(Value::as_str).unwrap_or(""),
+                        );
+                        let part_index = content_index as u64;
+                        let key = (output_index, part_index, lane);
+                        events.extend(self.start_response_part(output_index, part_index, lane));
+                        self.input.provisional_parts.remove(&key);
+                        let text = part
+                            .get("text")
+                            .or_else(|| part.get("refusal"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        self.emit_unseen_open_part(&mut events, key, text);
+                        self.stop_open_part(&mut events, key);
                     }
                 }
+                self.stop_leftover_provisional(&mut events, output_index);
+            }
+            "reasoning" => {
+                events.extend(self.emit_reasoning_snapshot(output_index, item));
             }
             _ => {}
         }
         events
+    }
+
+    /// Close one reasoning item.
+    ///
+    /// Visible text, reasoning summary, and reasoning content are separate
+    /// lanes. Summary index `i` does not hide content index `i`. Text already
+    /// carried by an earlier delta on that lane is not emitted again. An unseen
+    /// lane is emitted once, then its block stops. A stopped block does not
+    /// receive another delta. Summary parts are emitted before content parts.
+    fn emit_reasoning_snapshot(&mut self, output_index: u64, item: &Value) -> Vec<PivotEvent> {
+        let mut events = Vec::new();
+        let parts = reasoning_snapshot_parts(item);
+        if parts.is_empty() {
+            if self.input.responses_encrypted.contains_key(&output_index) {
+                let key = (output_index, 0, ResponsePartLane::ReasoningSummary);
+                let existed = self.input.response_parts.contains_key(&key);
+                events.extend(self.start_response_part(
+                    output_index,
+                    0,
+                    ResponsePartLane::ReasoningSummary,
+                ));
+                if !existed {
+                    self.input.provisional_parts.insert(key);
+                }
+                self.stop_open_part(&mut events, key);
+            }
+            self.stop_leftover_provisional(&mut events, output_index);
+            return events;
+        }
+        for part in parts {
+            let key = (output_index, part.index, part.lane);
+            events.extend(self.start_response_part(output_index, part.index, part.lane));
+            self.input.provisional_parts.remove(&key);
+            self.emit_unseen_open_part(&mut events, key, part.text);
+            self.stop_open_part(&mut events, key);
+        }
+        self.stop_leftover_provisional(&mut events, output_index);
+        events
+    }
+
+    /// Close shadow parts that never appeared as a real native part.
+    fn stop_leftover_provisional(&mut self, events: &mut Vec<PivotEvent>, output_index: u64) {
+        let keys: Vec<_> = self
+            .input
+            .provisional_parts
+            .iter()
+            .copied()
+            .filter(|key| key.0 == output_index)
+            .collect();
+        for key in keys {
+            self.stop_open_part(events, key);
+        }
     }
 
     fn encode_messages(&mut self, event: PivotEvent) -> Vec<Bytes> {
@@ -1956,7 +2557,18 @@ impl StreamConverter {
             PivotEvent::BlockStart { index, kind } => {
                 let content_block = match kind {
                     BlockKind::Text => json!({"type":"text","text":""}),
-                    BlockKind::Reasoning => json!({"type":"thinking","thinking":"","signature":""}),
+                    BlockKind::Reasoning => self
+                        .input
+                        .anthropic_reasoning
+                        .get(&index)
+                        .filter(|block| {
+                            block.get("type").and_then(Value::as_str) == Some("redacted_thinking")
+                        })
+                        .and_then(|block| block.get("data").and_then(Value::as_str))
+                        .map_or_else(
+                            || json!({"type":"thinking","thinking":"","signature":""}),
+                            |data| json!({"type":"redacted_thinking","data":data}),
+                        ),
                     BlockKind::Tool { id, name } => {
                         json!({"type":"tool_use","id":id,"name":name,"input":{}})
                     }
@@ -2283,6 +2895,9 @@ impl StreamConverter {
     }
 
     fn encode_responses(&mut self, event: PivotEvent) -> Vec<Bytes> {
+        if self.output.index_exhausted {
+            return Vec::new();
+        }
         match event {
             PivotEvent::Start { id, model, usage } => {
                 self.output.id = responses_id(&id);
@@ -2294,43 +2909,95 @@ impl StreamConverter {
                 vec![self.responses_event("response.created", json!({"response":response}))]
             }
             PivotEvent::BlockStart { index, kind } => {
-                let output_index = self.output.next_output_index;
-                self.output.next_output_index += 1;
-                let mut frames = Vec::new();
-                let item = match &kind {
-                    BlockKind::Text => {
-                        json!({"type":"message","id":format!("msg_{output_index}"),"status":"in_progress","role":"assistant","content":[]})
-                    }
-                    BlockKind::Reasoning => {
-                        json!({"type":"reasoning","id":format!("rs_{output_index}"),"summary":[]})
-                    }
-                    BlockKind::Tool { id, name } => {
-                        let (response_name, namespace, custom) = self.response_tool_identity(name);
-                        let mut item = if custom {
-                            json!({"type":"custom_tool_call","id":format!("ctc_{output_index}"),"call_id":id,"name":response_name,"input":"","status":"in_progress"})
-                        } else {
-                            json!({"type":"function_call","id":format!("fc_{output_index}"),"call_id":id,"name":response_name,"arguments":"","status":"in_progress"})
-                        };
-                        if let Some(namespace) = namespace {
-                            item["namespace"] = json!(namespace);
-                        }
-                        item
-                    }
+                let part = match &kind {
+                    BlockKind::Reasoning | BlockKind::Text => self.response_part_key(index),
+                    BlockKind::Tool { .. } => None,
                 };
-                frames.push(self.responses_event(
-                    "response.output_item.added",
-                    json!({"output_index":output_index,"item":item}),
-                ));
-                match kind {
-                    BlockKind::Text => frames.push(self.responses_event(
-                        "response.content_part.added",
-                        json!({"item_id":format!("msg_{output_index}"),"output_index":output_index,"content_index":0,"part":{"type":"output_text","text":"","annotations":[],"logprobs":[]}}),
-                    )),
-                    BlockKind::Reasoning => frames.push(self.responses_event(
-                        "response.reasoning_summary_part.added",
-                        json!({"item_id":format!("rs_{output_index}"),"output_index":output_index,"summary_index":0,"part":{"type":"summary_text","text":""}}),
-                    )),
-                    BlockKind::Tool { .. } => {}
+                let text_part = part.filter(|(_, _, lane)| *lane == ResponsePartLane::Text);
+                let shared_output = if let Some((upstream, _, _)) = text_part {
+                    self.wire_index_for_text(upstream)
+                } else {
+                    part.and_then(|(upstream, _, lane)| {
+                        lane.is_reasoning()
+                            .then(|| self.wire_index_for_upstream(upstream))
+                            .flatten()
+                    })
+                };
+                let native = part
+                    .map(|(upstream, _, _)| upstream)
+                    .or_else(|| self.tool_upstream(index));
+                let Some(output_index) = shared_output.or_else(|| self.assign_output_index(native))
+                else {
+                    return self.fail_output_index();
+                };
+                let summary_index = match part {
+                    Some((_, part_index, ResponsePartLane::ReasoningSummary)) => Some(part_index),
+                    None if matches!(&kind, &BlockKind::Reasoning) => Some(0),
+                    _ => None,
+                };
+                let message_id = text_part
+                    .map(|(upstream, _, _)| self.native_item_id(upstream, output_index, "msg_"))
+                    .unwrap_or_else(|| format!("msg_{output_index}"));
+                let reasoning_id = self.reasoning_wire_id(index, output_index);
+                let content_index = text_part.map(|(_, part_index, _)| part_index);
+                let item_start_published = self.output.emitted_item_starts.contains(&output_index)
+                    || self.output.item_start_open.contains(&output_index);
+                let mut frames = Vec::new();
+                if shared_output.is_none() && !item_start_published {
+                    let item = match &kind {
+                        BlockKind::Text => {
+                            json!({"type":"message","id":message_id.clone(),"status":"in_progress","role":"assistant","content":[]})
+                        }
+                        BlockKind::Reasoning => {
+                            json!({"type":"reasoning","id":reasoning_id.clone(),"summary":[]})
+                        }
+                        BlockKind::Tool { id, name } => {
+                            let (response_name, namespace, custom) =
+                                self.response_tool_identity(name);
+                            let item_id = self.tool_wire_id(index, output_index, custom);
+                            let mut item = if custom {
+                                json!({"type":"custom_tool_call","id":item_id,"call_id":id,"name":response_name,"input":"","status":"in_progress"})
+                            } else {
+                                json!({"type":"function_call","id":item_id,"call_id":id,"name":response_name,"arguments":"","status":"in_progress"})
+                            };
+                            if let Some(namespace) = namespace {
+                                item["namespace"] = json!(namespace);
+                            }
+                            item
+                        }
+                    };
+                    self.output.item_start_open.insert(output_index);
+                    frames.push(self.responses_event(
+                        "response.output_item.added",
+                        json!({"output_index":output_index,"item":item}),
+                    ));
+                }
+                if let Some(content_index) = content_index {
+                    let provisional = text_part.is_some_and(|(upstream, part_index, lane)| {
+                        self.part_is_provisional((upstream, part_index, lane))
+                    });
+                    if !provisional {
+                        self.push_text_part_added(
+                            &mut frames,
+                            &message_id,
+                            output_index,
+                            content_index,
+                        );
+                    }
+                }
+                if let Some(summary_index) = summary_index {
+                    let provisional = part.is_some_and(|(upstream, part_index, lane)| {
+                        lane == ResponsePartLane::ReasoningSummary
+                            && self.part_is_provisional((upstream, part_index, lane))
+                    });
+                    if !provisional {
+                        self.push_summary_part_added(
+                            &mut frames,
+                            &reasoning_id,
+                            output_index,
+                            summary_index,
+                        );
+                    }
                 }
                 self.output.blocks.insert(
                     index,
@@ -2346,26 +3013,74 @@ impl StreamConverter {
                 frames
             }
             PivotEvent::TextDelta { index, text } => {
-                let Some(block) = self.output.blocks.get_mut(&index) else {
+                let part = self.response_part_key(index);
+                let text_part = part.filter(|(_, _, lane)| *lane == ResponsePartLane::Text);
+                let content_index = text_part.map(|(_, part_index, _)| part_index).unwrap_or(0);
+                let Some(block) = self.output.blocks.get(&index) else {
                     return Vec::new();
                 };
-                block.content.push_str(&text);
                 let output_index = block.output_index.unwrap_or(0);
-                vec![self.responses_event(
+                let message_id = text_part
+                    .map(|(upstream, _, _)| self.native_item_id(upstream, output_index, "msg_"))
+                    .unwrap_or_else(|| format!("msg_{output_index}"));
+                let mut frames = Vec::new();
+                if text_part.is_some() {
+                    self.push_text_part_added(
+                        &mut frames,
+                        &message_id,
+                        output_index,
+                        content_index,
+                    );
+                }
+                if let Some(block) = self.output.blocks.get_mut(&index) {
+                    block.content.push_str(&text);
+                }
+                frames.push(self.responses_event(
                     "response.output_text.delta",
-                    json!({"item_id":format!("msg_{output_index}"),"output_index":output_index,"content_index":0,"delta":text,"logprobs":[]}),
-                )]
+                    json!({"item_id":message_id,"output_index":output_index,"content_index":content_index,"delta":text,"logprobs":[]}),
+                ));
+                frames
             }
             PivotEvent::ReasoningDelta { index, text } => {
+                let part = self.response_part_key(index);
                 let Some(block) = self.output.blocks.get_mut(&index) else {
                     return Vec::new();
                 };
                 block.content.push_str(&text);
                 let output_index = block.output_index.unwrap_or(0);
-                vec![self.responses_event(
-                    "response.reasoning_summary_text.delta",
-                    json!({"item_id":format!("rs_{output_index}"),"output_index":output_index,"summary_index":0,"delta":text}),
-                )]
+                let reasoning_id = self.reasoning_wire_id(index, output_index);
+                match part {
+                    Some((_, part_index, ResponsePartLane::ReasoningContent)) => {
+                        vec![self.responses_event(
+                            "response.reasoning_text.delta",
+                            json!({"item_id":reasoning_id,"output_index":output_index,"content_index":part_index,"delta":text}),
+                        )]
+                    }
+                    Some((upstream, part_index, ResponsePartLane::ReasoningSummary)) => {
+                        let mut frames = Vec::new();
+                        if !self.part_is_provisional((
+                            upstream,
+                            part_index,
+                            ResponsePartLane::ReasoningSummary,
+                        )) {
+                            self.push_summary_part_added(
+                                &mut frames,
+                                &reasoning_id,
+                                output_index,
+                                part_index,
+                            );
+                        }
+                        frames.push(self.responses_event(
+                            "response.reasoning_summary_text.delta",
+                            json!({"item_id":reasoning_id,"output_index":output_index,"summary_index":part_index,"delta":text}),
+                        ));
+                        frames
+                    }
+                    _ => vec![self.responses_event(
+                        "response.reasoning_summary_text.delta",
+                        json!({"item_id":reasoning_id,"output_index":output_index,"summary_index":0,"delta":text}),
+                    )],
+                }
             }
             PivotEvent::SignatureDelta { .. } => Vec::new(),
             PivotEvent::ArgumentsDelta { index, arguments } => {
@@ -2374,10 +3089,11 @@ impl StreamConverter {
                 };
                 block.content.push_str(&arguments);
                 let output_index = block.output_index.unwrap_or(0);
-                if matches!(
+                let custom = matches!(
                     &block.kind,
                     BlockKind::Tool { name, .. } if self.custom_tools.contains(name)
-                ) {
+                );
+                let custom_delta = if custom {
                     let Some(input) = custom_tool_input_prefix(&block.content) else {
                         return Vec::new();
                     };
@@ -2389,14 +3105,20 @@ impl StreamConverter {
                     if delta.is_empty() {
                         return Vec::new();
                     }
+                    Some(delta)
+                } else {
+                    None
+                };
+                let item_id = self.tool_wire_id(index, output_index, custom);
+                if let Some(delta) = custom_delta {
                     return vec![self.responses_event(
                         "response.custom_tool_call_input.delta",
-                        json!({"item_id":format!("ctc_{output_index}"),"output_index":output_index,"delta":delta}),
+                        json!({"item_id":item_id,"output_index":output_index,"delta":delta}),
                     )];
                 }
                 vec![self.responses_event(
                     "response.function_call_arguments.delta",
-                    json!({"item_id":format!("fc_{output_index}"),"output_index":output_index,"delta":arguments}),
+                    json!({"item_id":item_id,"output_index":output_index,"delta":arguments}),
                 )]
             }
             PivotEvent::BlockStop { index } => self.close_response_block(index),
@@ -2425,39 +3147,76 @@ impl StreamConverter {
         let output_index = block.output_index.unwrap_or(0);
         let content = block.content.clone();
         let kind = block.kind.clone();
+        let provisional_empty = content.is_empty()
+            && self
+                .response_part_key(index)
+                .is_some_and(|key| self.part_is_provisional(key));
+        if provisional_empty {
+            return Vec::new();
+        }
         match kind {
-            BlockKind::Text => vec![
-                self.responses_event("response.output_text.done", json!({"item_id":format!("msg_{output_index}"),"output_index":output_index,"content_index":0,"text":content,"logprobs":[]})),
-                self.responses_event("response.content_part.done", json!({"item_id":format!("msg_{output_index}"),"output_index":output_index,"content_index":0,"part":{"type":"output_text","text":content,"annotations":[],"logprobs":[]}})),
-                self.responses_event("response.output_item.done", json!({"output_index":output_index,"item":{"type":"message","id":format!("msg_{output_index}"),"status":"completed","role":"assistant","content":[{"type":"output_text","text":content,"annotations":[],"logprobs":[]}]}})),
-            ],
+            BlockKind::Text => {
+                if let Some((upstream, content_index, ResponsePartLane::Text)) =
+                    self.response_part_key(index)
+                {
+                    let item_id = self.native_item_id(upstream, output_index, "msg_");
+                    vec![
+                        self.responses_event("response.output_text.done", json!({"item_id":item_id.clone(),"output_index":output_index,"content_index":content_index,"text":&content,"logprobs":[]})),
+                        self.responses_event("response.content_part.done", json!({"item_id":item_id,"output_index":output_index,"content_index":content_index,"part":{"type":"output_text","text":content,"annotations":[],"logprobs":[]}})),
+                    ]
+                } else {
+                    vec![
+                        self.responses_event("response.output_text.done", json!({"item_id":format!("msg_{output_index}"),"output_index":output_index,"content_index":0,"text":content,"logprobs":[]})),
+                        self.responses_event("response.content_part.done", json!({"item_id":format!("msg_{output_index}"),"output_index":output_index,"content_index":0,"part":{"type":"output_text","text":content,"annotations":[],"logprobs":[]}})),
+                        self.responses_event("response.output_item.done", json!({"output_index":output_index,"item":{"type":"message","id":format!("msg_{output_index}"),"status":"completed","role":"assistant","content":[{"type":"output_text","text":content,"annotations":[],"logprobs":[]}]}})),
+                    ]
+                }
+            }
             BlockKind::Reasoning => {
-                let item = self.response_reasoning_item(index, output_index, &content);
-                vec![
-                    self.responses_event("response.reasoning_summary_text.done", json!({"item_id":format!("rs_{output_index}"),"output_index":output_index,"summary_index":0,"text":content})),
-                    self.responses_event("response.reasoning_summary_part.done", json!({"item_id":format!("rs_{output_index}"),"output_index":output_index,"summary_index":0,"part":{"type":"summary_text","text":content}})),
-                    self.responses_event("response.output_item.done", json!({"output_index":output_index,"item":item})),
-                ]
+                let reasoning_id = self.reasoning_wire_id(index, output_index);
+                if let Some((_, part_index, lane)) = self.response_part_key(index) {
+                    match lane {
+                        ResponsePartLane::ReasoningSummary => vec![
+                            self.responses_event("response.reasoning_summary_text.done", json!({"item_id":reasoning_id.clone(),"output_index":output_index,"summary_index":part_index,"text":content})),
+                            self.responses_event("response.reasoning_summary_part.done", json!({"item_id":reasoning_id,"output_index":output_index,"summary_index":part_index,"part":{"type":"summary_text","text":content}})),
+                        ],
+                        ResponsePartLane::ReasoningContent | ResponsePartLane::Text => Vec::new(),
+                    }
+                } else {
+                    let item = self.response_reasoning_item(index, output_index, &content);
+                    vec![
+                        self.responses_event("response.reasoning_summary_text.done", json!({"item_id":reasoning_id.clone(),"output_index":output_index,"summary_index":0,"text":content})),
+                        self.responses_event("response.reasoning_summary_part.done", json!({"item_id":reasoning_id,"output_index":output_index,"summary_index":0,"part":{"type":"summary_text","text":content}})),
+                        self.responses_event("response.output_item.done", json!({"output_index":output_index,"item":item})),
+                    ]
+                }
             }
             BlockKind::Tool { id, name } => {
                 let (response_name, namespace, custom) = self.response_tool_identity(&name);
+                let item_id = self.tool_wire_id(index, output_index, custom);
                 if custom {
                     let input = custom_tool_input(&content);
-                    let mut item = json!({"type":"custom_tool_call","id":format!("ctc_{output_index}"),"call_id":id,"name":response_name,"input":input,"status":"completed"});
+                    let mut item = json!({"type":"custom_tool_call","id":item_id.clone(),"call_id":id,"name":response_name,"input":input,"status":"completed"});
                     if let Some(namespace) = namespace {
                         item["namespace"] = json!(namespace);
                     }
                     vec![
-                        self.responses_event("response.custom_tool_call_input.done", json!({"item_id":format!("ctc_{output_index}"),"output_index":output_index,"input":input})),
-                        self.responses_event("response.output_item.done", json!({"output_index":output_index,"item":item})),
+                        self.responses_event(
+                            "response.custom_tool_call_input.done",
+                            json!({"item_id":item_id,"output_index":output_index,"input":input}),
+                        ),
+                        self.responses_event(
+                            "response.output_item.done",
+                            json!({"output_index":output_index,"item":item}),
+                        ),
                     ]
                 } else {
-                    let mut item = json!({"type":"function_call","id":format!("fc_{output_index}"),"call_id":id,"name":response_name,"arguments":content,"status":"completed"});
+                    let mut item = json!({"type":"function_call","id":item_id.clone(),"call_id":id,"name":response_name,"arguments":content,"status":"completed"});
                     if let Some(namespace) = namespace {
                         item["namespace"] = json!(namespace);
                     }
                     vec![
-                        self.responses_event("response.function_call_arguments.done", json!({"item_id":format!("fc_{output_index}"),"output_index":output_index,"name":response_name,"arguments":content})),
+                        self.responses_event("response.function_call_arguments.done", json!({"item_id":item_id,"output_index":output_index,"name":response_name,"arguments":content})),
                         self.responses_event("response.output_item.done", json!({"output_index":output_index,"item":item})),
                     ]
                 }
@@ -2479,6 +3238,8 @@ impl StreamConverter {
         for index in open {
             frames.extend(self.close_response_block(index));
         }
+        frames.extend(self.flush_closed_text_items());
+        frames.extend(self.flush_closed_reasoning_items());
         self.output.terminal = true;
         let (status, details) = match self.output.stop_reason.as_deref() {
             Some("max_tokens" | "model_context_window_exceeded") => {
@@ -2503,25 +3264,55 @@ impl StreamConverter {
     fn response_output_items(&self) -> Vec<Value> {
         let mut blocks: Vec<(&usize, &OutputBlock)> = self.output.blocks.iter().collect();
         blocks.sort_by_key(|(_, block)| block.output_index.unwrap_or(u64::MAX));
+        let mut seen_reasoning = BTreeSet::new();
+        let mut seen_text = BTreeSet::new();
         blocks
             .into_iter()
-            .map(|(source_index, block)| {
+            .filter_map(|(source_index, block)| {
                 let output_index = block.output_index.unwrap_or(0);
                 match &block.kind {
-                    BlockKind::Text => json!({"type":"message","id":format!("msg_{output_index}"),"status":"completed","role":"assistant","content":[{"type":"output_text","text":block.content,"annotations":[],"logprobs":[]}]}),
-                    BlockKind::Reasoning => self.response_reasoning_item(*source_index, output_index, &block.content),
+                    BlockKind::Text => {
+                        if let Some((upstream, _, ResponsePartLane::Text)) =
+                            self.response_part_key(*source_index)
+                        {
+                            if !seen_text.insert(upstream) {
+                                None
+                            } else {
+                                let wire = block.output_index.unwrap_or(output_index);
+                                Some(self.text_group_item(upstream, wire))
+                            }
+                        } else {
+                            Some(json!({"type":"message","id":format!("msg_{output_index}"),"status":"completed","role":"assistant","content":[{"type":"output_text","text":block.content,"annotations":[],"logprobs":[]}]}))
+                        }
+                    }
+                    BlockKind::Reasoning => {
+                        if let Some((upstream, _, _)) = self.response_part_key(*source_index) {
+                            if !seen_reasoning.insert(upstream) {
+                                return None;
+                            }
+                            let wire = block.output_index.unwrap_or(output_index);
+                            Some(self.reasoning_group_item(upstream, wire))
+                        } else {
+                            Some(self.response_reasoning_item(
+                                *source_index,
+                                output_index,
+                                &block.content,
+                            ))
+                        }
+                    }
                     BlockKind::Tool { id, name } => {
                         let (response_name, namespace, custom) =
                             self.response_tool_identity(name);
+                        let item_id = self.tool_wire_id(*source_index, output_index, custom);
                         let mut item = if custom {
-                            json!({"type":"custom_tool_call","id":format!("ctc_{output_index}"),"call_id":id,"name":response_name,"input":custom_tool_input(&block.content),"status":"completed"})
+                            json!({"type":"custom_tool_call","id":item_id,"call_id":id,"name":response_name,"input":custom_tool_input(&block.content),"status":"completed"})
                         } else {
-                            json!({"type":"function_call","id":format!("fc_{output_index}"),"call_id":id,"name":response_name,"arguments":block.content,"status":"completed"})
+                            json!({"type":"function_call","id":item_id,"call_id":id,"name":response_name,"arguments":block.content,"status":"completed"})
                         };
                         if let Some(namespace) = namespace {
                             item["namespace"] = json!(namespace);
                         }
-                        item
+                        Some(item)
                     }
                 }
             })
@@ -2556,7 +3347,7 @@ impl StreamConverter {
         };
         let mut item = json!({
             "type":"reasoning",
-            "id":format!("rs_{output_index}"),
+            "id":self.reasoning_wire_id(source_index, output_index),
             "summary":summary
         });
         let encrypted_content = self
@@ -2564,6 +3355,7 @@ impl StreamConverter {
             .anthropic_reasoning
             .get(&source_index)
             .and_then(encode_anthropic_thinking_block)
+            .or_else(|| self.native_encrypted_for(source_index))
             .or_else(|| {
                 (self.source == ApiFormat::ChatCompletions)
                     .then(|| encode_chat_reasoning(content))
@@ -2571,6 +3363,493 @@ impl StreamConverter {
             });
         if let Some(encrypted_content) = encrypted_content {
             item["encrypted_content"] = json!(encrypted_content);
+        }
+        item
+    }
+
+    /// Remember one Responses item's own `encrypted_content`.
+    ///
+    /// An added cipher is provisional. The first `output_item.done` replaces
+    /// it, or clears it when that event omits the field or sends null or
+    /// empty. A terminal snapshot then replaces the final public field, even
+    /// when the block is already closed. Each nonempty payload is bound and
+    /// checked on its own; a later secret does not keep an earlier safe cipher.
+    fn note_responses_encrypted(
+        &mut self,
+        output_index: u64,
+        item: &Value,
+        sight: ResponsesCipherSight,
+    ) {
+        let authoritative = matches!(sight, ResponsesCipherSight::Authoritative);
+        let text = match item.get("encrypted_content") {
+            None => {
+                if authoritative {
+                    self.input.responses_encrypted.remove(&output_index);
+                }
+                return;
+            }
+            Some(Value::Null) => {
+                if authoritative {
+                    self.input
+                        .responses_encrypted
+                        .insert(output_index, ResponsesCipher::Null);
+                }
+                return;
+            }
+            Some(Value::String(text)) if text.is_empty() => {
+                if authoritative {
+                    self.input
+                        .responses_encrypted
+                        .insert(output_index, ResponsesCipher::Empty);
+                }
+                return;
+            }
+            Some(Value::String(text)) => text.clone(),
+            Some(_) => return,
+        };
+        if !authoritative && self.input.responses_encrypted.contains_key(&output_index) {
+            return;
+        }
+        if self
+            .secret_redactor
+            .secret
+            .as_deref()
+            .is_some_and(|secret| {
+                signed_native_history_redaction_conflict(
+                    &json!({"type":"reasoning","encrypted_content":text.as_str()}),
+                    secret,
+                )
+            })
+        {
+            if self.replay_domain.is_some() {
+                self.replay_error = Some(SIGNED_HISTORY_REDACTION_CONFLICT.to_string());
+            } else if authoritative {
+                self.input.responses_encrypted.remove(&output_index);
+            }
+            return;
+        }
+        let stored = if let Some(domain) = self.replay_domain {
+            let mut map = Map::new();
+            map.insert("type".to_string(), json!("reasoning"));
+            map.insert("encrypted_content".to_string(), json!(text.as_str()));
+            if let Err(error) = bind_reasoning_encrypted_field(&mut map, domain) {
+                self.replay_error = Some(error.message);
+                return;
+            }
+            map.get("encrypted_content")
+                .and_then(Value::as_str)
+                .unwrap_or(text.as_str())
+                .to_string()
+        } else {
+            text
+        };
+        self.input
+            .responses_encrypted
+            .insert(output_index, ResponsesCipher::Bound(stored));
+    }
+
+    fn native_encrypted_for(&self, source_index: usize) -> Option<String> {
+        let upstream = self
+            .input
+            .response_parts
+            .iter()
+            .find_map(|(key, index)| (*index == source_index).then_some(key.0))?;
+        let first = self
+            .input
+            .response_parts
+            .iter()
+            .filter(|(key, _)| key.0 == upstream && key.2.is_reasoning())
+            .map(|(_, index)| *index)
+            .min()?;
+        if first != source_index {
+            return None;
+        }
+        match self.input.responses_encrypted.get(&upstream) {
+            Some(ResponsesCipher::Bound(text)) => Some(text.clone()),
+            _ => None,
+        }
+    }
+
+    /// Keep a recognized native index. Synthetic indexes are a separate counter
+    /// and never move because an upstream index was large.
+    fn assign_output_index(&mut self, native: Option<u64>) -> Option<u64> {
+        if let Some(native) = native
+            && !self.output_index_taken(native)
+        {
+            return Some(native);
+        }
+        self.alloc_synthetic_output_index()
+    }
+
+    fn alloc_synthetic_output_index(&mut self) -> Option<u64> {
+        let mut candidate = self.output.next_output_index;
+        let guard = self.output.blocks.len().saturating_add(1);
+        for _ in 0..=guard {
+            if !self.output_index_taken(candidate) {
+                if let Some(next) = candidate.checked_add(1) {
+                    self.output.next_output_index = next;
+                }
+                return Some(candidate);
+            }
+            candidate = candidate.checked_add(1)?;
+        }
+        None
+    }
+
+    fn fail_output_index(&mut self) -> Vec<Bytes> {
+        if self.output.terminal {
+            return Vec::new();
+        }
+        self.output.index_exhausted = true;
+        self.output.terminal = true;
+        self.input.terminal = true;
+        let response = self.failed_response_object("server_error", OUTPUT_INDEX_EXHAUSTED);
+        vec![self.responses_event("response.failed", json!({"response": response}))]
+    }
+
+    fn output_index_taken(&self, index: u64) -> bool {
+        self.output
+            .blocks
+            .values()
+            .any(|block| block.output_index == Some(index))
+    }
+
+    fn wire_index_for_text(&self, upstream: u64) -> Option<u64> {
+        self.input
+            .response_parts
+            .iter()
+            .filter(|(key, _)| key.0 == upstream && key.2 == ResponsePartLane::Text)
+            .find_map(|(_, source)| {
+                self.output
+                    .blocks
+                    .get(source)
+                    .and_then(|block| block.output_index)
+            })
+    }
+
+    fn native_item_id(&self, upstream: u64, wire: u64, prefix: &str) -> String {
+        self.input
+            .native_item_ids
+            .get(&upstream)
+            .filter(|id| !id.is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("{prefix}{wire}"))
+    }
+
+    fn reasoning_wire_id(&self, source: usize, wire: u64) -> String {
+        match self.response_part_key(source) {
+            Some((upstream, _, _)) => self.native_item_id(upstream, wire, "rs_"),
+            None => format!("rs_{wire}"),
+        }
+    }
+
+    fn tool_upstream(&self, source: usize) -> Option<u64> {
+        self.input
+            .response_tools
+            .iter()
+            .find_map(|(upstream, tool)| (tool.block == Some(source)).then_some(*upstream))
+    }
+
+    fn tool_wire_id(&self, source: usize, wire: u64, custom: bool) -> String {
+        let prefix = if custom { "ctc_" } else { "fc_" };
+        match self.tool_upstream(source) {
+            Some(upstream) => self.native_item_id(upstream, wire, prefix),
+            None => format!("{prefix}{wire}"),
+        }
+    }
+
+    fn part_is_provisional(&self, key: (u64, u64, ResponsePartLane)) -> bool {
+        self.input.provisional_parts.contains(&key)
+    }
+
+    fn push_text_part_added(
+        &mut self,
+        frames: &mut Vec<Bytes>,
+        item_id: &str,
+        output_index: u64,
+        content_index: u64,
+    ) {
+        let part_key = (output_index, content_index);
+        if self.output.emitted_text_parts.contains(&part_key)
+            || self.output.part_start_open.contains(&part_key)
+        {
+            return;
+        }
+        self.output.part_start_open.insert(part_key);
+        frames.push(self.responses_event(
+            "response.content_part.added",
+            json!({"item_id":item_id,"output_index":output_index,"content_index":content_index,"part":{"type":"output_text","text":"","annotations":[],"logprobs":[]}}),
+        ));
+    }
+
+    fn push_summary_part_added(
+        &mut self,
+        frames: &mut Vec<Bytes>,
+        item_id: &str,
+        output_index: u64,
+        summary_index: u64,
+    ) {
+        let part_key = (output_index, summary_index);
+        if self.output.emitted_summary_parts.contains(&part_key)
+            || self.output.summary_part_open.contains(&part_key)
+        {
+            return;
+        }
+        self.output.summary_part_open.insert(part_key);
+        frames.push(self.responses_event(
+            "response.reasoning_summary_part.added",
+            json!({"item_id":item_id,"output_index":output_index,"summary_index":summary_index,"part":{"type":"summary_text","text":""}}),
+        ));
+    }
+
+    /// One message item for every text part of an upstream output item.
+    /// A provisional seed with no text is omitted. An explicit empty part stays.
+    fn text_group_item(&self, upstream: u64, wire: u64) -> Value {
+        let mut parts: Vec<(u64, usize)> = self
+            .input
+            .response_parts
+            .iter()
+            .filter(|(key, _)| key.0 == upstream && key.2 == ResponsePartLane::Text)
+            .map(|(key, source)| (key.1, *source))
+            .collect();
+        parts.sort_by_key(|(part, _)| *part);
+        let content: Vec<Value> = parts
+            .into_iter()
+            .filter_map(|(part_index, source)| {
+                let text = self
+                    .output
+                    .blocks
+                    .get(&source)
+                    .map(|block| block.content.as_str())?;
+                let provisional =
+                    self.part_is_provisional((upstream, part_index, ResponsePartLane::Text));
+                if text.is_empty() && provisional {
+                    None
+                } else {
+                    Some(json!({"type":"output_text","text":text,"annotations":[],"logprobs":[]}))
+                }
+            })
+            .collect();
+        json!({
+            "type": "message",
+            "id": self.native_item_id(upstream, wire, "msg_"),
+            "status": "completed",
+            "role": "assistant",
+            "content": content
+        })
+    }
+
+    /// One `output_item.done` after the native message item has completed and
+    /// every text part of that item has closed.
+    fn flush_closed_text_items(&mut self) -> Vec<Bytes> {
+        let upstreams: BTreeSet<u64> = self
+            .input
+            .response_parts
+            .keys()
+            .filter(|key| key.2 == ResponsePartLane::Text)
+            .map(|key| key.0)
+            .collect();
+        let mut frames = Vec::new();
+        for upstream in upstreams {
+            if self.output.text_item_done.contains(&upstream)
+                || !self.input.completed_output_items.contains(&upstream)
+            {
+                continue;
+            }
+            let sources: Vec<usize> = self
+                .input
+                .response_parts
+                .iter()
+                .filter(|(key, _)| key.0 == upstream && key.2 == ResponsePartLane::Text)
+                .map(|(_, source)| *source)
+                .collect();
+            if sources.is_empty()
+                || sources.iter().any(|source| {
+                    !self
+                        .output
+                        .blocks
+                        .get(source)
+                        .is_some_and(|block| block.closed)
+                })
+            {
+                continue;
+            }
+            let Some(wire) = self.wire_index_for_text(upstream) else {
+                continue;
+            };
+            let item = self.text_group_item(upstream, wire);
+            self.output.text_item_done.insert(upstream);
+            frames.push(self.responses_event(
+                "response.output_item.done",
+                json!({"output_index": wire, "item": item}),
+            ));
+        }
+        frames
+    }
+
+    fn commit_published_responses(&mut self, frames: &[Bytes]) {
+        if self.target != ApiFormat::Responses && self.source != ApiFormat::Responses {
+            return;
+        }
+        for frame in frames {
+            self.note_published_response_frame(frame);
+        }
+        self.output.item_start_open.clear();
+        self.output.part_start_open.clear();
+        self.output.summary_part_open.clear();
+    }
+
+    fn note_published_response_frame(&mut self, frame: &Bytes) {
+        let Ok(Some((_, payload))) = parse_sse_frame(frame) else {
+            return;
+        };
+        let Ok(Some(value)) = parse_sse_payload(payload.trim()) else {
+            return;
+        };
+        let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+        if event_type == "response.output_item.added"
+            && matches!(
+                value.pointer("/item/type").and_then(Value::as_str),
+                Some("message" | "reasoning" | "function_call" | "custom_tool_call")
+            )
+            && let Some(index) = value.get("output_index").and_then(Value::as_u64)
+        {
+            self.output.emitted_item_starts.insert(index);
+        }
+        if event_type == "response.content_part.added"
+            && value.pointer("/part/type").and_then(Value::as_str) == Some("output_text")
+            && let (Some(output_index), Some(content_index)) = (
+                value.get("output_index").and_then(Value::as_u64),
+                value.get("content_index").and_then(Value::as_u64),
+            )
+        {
+            self.output
+                .emitted_text_parts
+                .insert((output_index, content_index));
+        }
+        if event_type == "response.reasoning_summary_part.added"
+            && let (Some(output_index), Some(summary_index)) = (
+                value.get("output_index").and_then(Value::as_u64),
+                value.get("summary_index").and_then(Value::as_u64),
+            )
+        {
+            self.output
+                .emitted_summary_parts
+                .insert((output_index, summary_index));
+        }
+    }
+
+    fn response_part_key(&self, source_index: usize) -> Option<(u64, u64, ResponsePartLane)> {
+        self.input
+            .response_parts
+            .iter()
+            .find_map(|(key, index)| (*index == source_index).then_some(*key))
+    }
+
+    /// Wire index already assigned to another reasoning lane of this upstream item.
+    /// Visible text at the same upstream index keeps its own item.
+    fn wire_index_for_upstream(&self, upstream: u64) -> Option<u64> {
+        self.reasoning_siblings(upstream)
+            .into_iter()
+            .find_map(|(source, _, _)| {
+                self.output
+                    .blocks
+                    .get(&source)
+                    .and_then(|block| block.output_index)
+            })
+    }
+
+    fn reasoning_siblings(&self, upstream: u64) -> Vec<(usize, u64, ResponsePartLane)> {
+        let mut siblings: Vec<_> = self
+            .input
+            .response_parts
+            .iter()
+            .filter(|(key, _)| key.0 == upstream && key.2.is_reasoning())
+            .map(|(key, source)| (*source, key.1, key.2))
+            .collect();
+        siblings.sort_by_key(|(_, part, lane)| (*lane, *part));
+        siblings
+    }
+
+    /// One `output_item.done` after every reasoning lane of an upstream item has
+    /// closed. Summary text stays in `summary`; raw CoT stays in `content`.
+    fn flush_closed_reasoning_items(&mut self) -> Vec<Bytes> {
+        let upstreams: BTreeSet<u64> = self
+            .input
+            .response_parts
+            .keys()
+            .filter(|key| key.2.is_reasoning())
+            .map(|key| key.0)
+            .collect();
+        let mut frames = Vec::new();
+        for upstream in upstreams {
+            if self.output.reasoning_item_done.contains(&upstream) {
+                continue;
+            }
+            let siblings = self.reasoning_siblings(upstream);
+            if siblings.is_empty()
+                || siblings.iter().any(|(source, _, _)| {
+                    !self
+                        .output
+                        .blocks
+                        .get(source)
+                        .is_some_and(|block| block.closed)
+                })
+            {
+                continue;
+            }
+            let Some(wire) = self.wire_index_for_upstream(upstream) else {
+                continue;
+            };
+            let item = self.reasoning_group_item(upstream, wire);
+            self.output.reasoning_item_done.insert(upstream);
+            frames.push(self.responses_event(
+                "response.output_item.done",
+                json!({"output_index": wire, "item": item}),
+            ));
+        }
+        frames
+    }
+
+    fn reasoning_group_item(&self, upstream: u64, wire: u64) -> Value {
+        let mut summary = Vec::new();
+        let mut content = Vec::new();
+        for (source, part_index, lane) in self.reasoning_siblings(upstream) {
+            let Some(text) = self
+                .output
+                .blocks
+                .get(&source)
+                .map(|block| block.content.as_str())
+            else {
+                continue;
+            };
+            if text.is_empty() && self.part_is_provisional((upstream, part_index, lane)) {
+                continue;
+            }
+            match lane {
+                ResponsePartLane::ReasoningSummary => {
+                    summary.push(json!({"type":"summary_text","text":text}));
+                }
+                ResponsePartLane::ReasoningContent => {
+                    content.push(json!({"type":"reasoning_text","text":text}));
+                }
+                ResponsePartLane::Text => {}
+            }
+        }
+        let mut item = json!({
+            "type": "reasoning",
+            "id": self.native_item_id(upstream, wire, "rs_"),
+            "summary": summary,
+        });
+        if !content.is_empty() {
+            item["content"] = Value::Array(content);
+        }
+        if let Some(cipher) = self.input.responses_encrypted.get(&upstream) {
+            item["encrypted_content"] = match cipher {
+                ResponsesCipher::Bound(encrypted) => json!(encrypted),
+                ResponsesCipher::Null => Value::Null,
+                ResponsesCipher::Empty => json!(""),
+            };
         }
         item
     }
@@ -2707,15 +3986,20 @@ fn done_frame() -> Bytes {
 /// line-ending style remain intact. `parsed` may supply the already-parsed data
 /// payload so callers on the hot path parse each frame once; `None` makes this
 /// function parse the frame itself (used for freshly generated frames).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "format, frame, visible model, normalization, native binder, and route domain stay separate"
+)]
 fn sanitize_passthrough_sse_frame(
     format: ApiFormat,
     frame: Bytes,
-    _model_hint: &str,
     client_model: &str,
     known_secret: Option<&str>,
     parsed: Option<&Value>,
     wire_normalization: WireNormalization,
-) -> Bytes {
+    rewrite_native: &mut dyn FnMut(&mut Value),
+    bound_domain: Option<ReplayDomain>,
+) -> Result<Bytes, ProtocolError> {
     let secret = known_secret.filter(|secret| !secret.is_empty());
     let mut output = frame;
     // Obtain the frame's JSON value, parsing lazily only when the caller did
@@ -2731,17 +4015,24 @@ fn sanitize_passthrough_sse_frame(
         let mut value = source_value.clone();
         wire_normalization.normalize_response_value(&mut value);
         if let Some(secret) = secret {
-            redact_known_secret_stream_values(&mut value, secret);
+            if let Some(domain) = bound_domain {
+                if redact_bound_generated_stream_values(&mut value, secret, domain) {
+                    return Err(ProtocolError::new(SIGNED_HISTORY_REDACTION_CONFLICT));
+                }
+            } else {
+                redact_known_secret_stream_values(&mut value, secret);
+            }
         }
         rewrite_existing_visible_model(format, &mut value, client_model);
+        rewrite_native(&mut value);
         if value != source_value {
             output = rewrite_sse_data(&output, &value);
         }
     }
-    match secret {
+    Ok(match secret {
         Some(secret) => redact_sse_metadata(output, secret),
         None => output,
-    }
+    })
 }
 
 fn redact_sse_metadata(frame: Bytes, known_secret: &str) -> Bytes {
@@ -3046,6 +4337,459 @@ fn chat_id(id: &str) -> String {
         id.to_string()
     } else {
         format!("chatcmpl-{id}")
+    }
+}
+
+const ANTHROPIC_THINKING_PREFIX: &str = "ocg-anthropic-thinking-v1:";
+const CHAT_REASONING_PREFIX: &str = "ocg-chat-reasoning-v1:";
+const REPLAY_VERSION_PREFIX: &str = "ocg-replay-v1:";
+const SIGNATURE_MUST_BE_STRING: &str = "Messages thinking signature must be a string";
+const REDACTED_DATA_MUST_BE_NONEMPTY: &str =
+    "Messages redacted thinking data must be a nonempty string";
+const ENCRYPTED_MUST_BE_STRING: &str = "Responses encrypted_content must be a string or null";
+const CARRIER_MALFORMED: &str = "opaque replay carrier is malformed";
+const OUTPUT_INDEX_EXHAUSTED: &str = "response output index space is exhausted";
+
+fn messages_opaque_carrier(target: ApiFormat) -> bool {
+    matches!(target, ApiFormat::Messages | ApiFormat::Responses)
+}
+
+fn block_has_native_opaque(block: &Value) -> bool {
+    match block.get("type").and_then(Value::as_str) {
+        Some("thinking") => block
+            .get("signature")
+            .and_then(Value::as_str)
+            .is_some_and(|signature| !signature.is_empty()),
+        Some("redacted_thinking") => block
+            .get("data")
+            .and_then(Value::as_str)
+            .is_some_and(|data| !data.is_empty()),
+        _ => false,
+    }
+}
+
+fn messages_opaque_loss_message(block: &Value) -> &'static str {
+    if block.get("type").and_then(Value::as_str) == Some("redacted_thinking") {
+        "Messages redacted thinking cannot be preserved by protocol conversion"
+    } else {
+        "Messages thinking signature cannot be preserved by protocol conversion"
+    }
+}
+
+fn bind_messages_opaque_fields(
+    block: &mut Value,
+    domain: ReplayDomain,
+    allow_bound: bool,
+) -> Result<(), ProtocolError> {
+    match block.get("type").and_then(Value::as_str) {
+        Some("thinking") => bind_optional_opaque_field(
+            block,
+            "signature",
+            domain,
+            SIGNATURE_MUST_BE_STRING,
+            allow_bound,
+        ),
+        Some("redacted_thinking") => bind_required_opaque_field(
+            block,
+            "data",
+            domain,
+            REDACTED_DATA_MUST_BE_NONEMPTY,
+            allow_bound,
+        ),
+        _ => Ok(()),
+    }
+}
+
+fn bind_optional_opaque_field(
+    value: &mut Value,
+    field: &str,
+    domain: ReplayDomain,
+    invalid: &str,
+    allow_bound: bool,
+) -> Result<(), ProtocolError> {
+    let raw = {
+        let text = optional_native_string(value.get(field), invalid)?;
+        match text {
+            Some(text) if !text.is_empty() => text.to_string(),
+            _ => return Ok(()),
+        }
+    };
+    if allow_bound && raw.starts_with(REPLAY_VERSION_PREFIX) {
+        return Ok(());
+    }
+    let bound =
+        bind_replay_opaque(domain, &raw).map_err(|error| ProtocolError::new(error.message))?;
+    insert_field(value, field, bound);
+    Ok(())
+}
+
+fn bind_required_opaque_field(
+    value: &mut Value,
+    field: &str,
+    domain: ReplayDomain,
+    invalid: &str,
+    allow_bound: bool,
+) -> Result<(), ProtocolError> {
+    let raw = required_opaque_string(value.get(field), invalid)?.to_string();
+    if allow_bound && raw.starts_with(REPLAY_VERSION_PREFIX) {
+        return Ok(());
+    }
+    let bound =
+        bind_replay_opaque(domain, &raw).map_err(|error| ProtocolError::new(error.message))?;
+    insert_field(value, field, bound);
+    Ok(())
+}
+
+/// Mirrors the kernel string rules. Null and missing are absent. Any other
+/// non-string is an error. Empty is returned and the caller decides whether
+/// empty is legal.
+fn optional_native_string<'a>(
+    value: Option<&'a Value>,
+    invalid: &str,
+) -> Result<Option<&'a str>, ProtocolError> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.as_str())),
+        Some(_) => Err(ProtocolError::new(invalid)),
+    }
+}
+
+fn required_opaque_string<'a>(
+    value: Option<&'a Value>,
+    invalid: &str,
+) -> Result<&'a str, ProtocolError> {
+    match optional_native_string(value, invalid)? {
+        Some(text) if !text.is_empty() => Ok(text),
+        _ => Err(ProtocolError::new(invalid)),
+    }
+}
+
+fn bind_same_protocol_opaque(
+    source: ApiFormat,
+    value: &mut Value,
+    domain: ReplayDomain,
+    binders: &mut BTreeMap<usize, ReplayChunkBinder>,
+    suffix: &mut Option<Bytes>,
+) -> Result<(), ProtocolError> {
+    match source {
+        ApiFormat::Messages => bind_messages_sse(value, domain, binders, suffix),
+        ApiFormat::Responses => bind_responses_tree(value, domain),
+        ApiFormat::ChatCompletions | ApiFormat::Gemini => Ok(()),
+    }
+}
+
+fn bind_messages_sse(
+    value: &mut Value,
+    domain: ReplayDomain,
+    binders: &mut BTreeMap<usize, ReplayChunkBinder>,
+    suffix: &mut Option<Bytes>,
+) -> Result<(), ProtocolError> {
+    let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+    let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+    match event_type {
+        "content_block_start" => {
+            let Some(block) = value.get_mut("content_block") else {
+                return Ok(());
+            };
+            match block.get("type").and_then(Value::as_str) {
+                Some("thinking") => {
+                    let raw =
+                        optional_native_string(block.get("signature"), SIGNATURE_MUST_BE_STRING)?;
+                    let Some(raw) = raw.filter(|text| !text.is_empty()) else {
+                        return Ok(());
+                    };
+                    let raw = raw.to_string();
+                    let bound = push_signature(binders, index, domain, &raw)?;
+                    insert_field(block, "signature", bound);
+                }
+                Some("redacted_thinking") => bind_required_opaque_field(
+                    block,
+                    "data",
+                    domain,
+                    REDACTED_DATA_MUST_BE_NONEMPTY,
+                    false,
+                )?,
+                _ => {}
+            }
+        }
+        "content_block_delta" => {
+            let delta_type = value
+                .pointer("/delta/type")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if delta_type != "signature_delta" {
+                return Ok(());
+            }
+            let raw = optional_native_string(
+                value.pointer("/delta/signature"),
+                SIGNATURE_MUST_BE_STRING,
+            )?;
+            let Some(raw) = raw.filter(|text| !text.is_empty()) else {
+                return Ok(());
+            };
+            let bound = push_signature(binders, index, domain, raw)?;
+            if let Some(delta) = value.get_mut("delta").and_then(Value::as_object_mut) {
+                delta.insert("signature".to_string(), json!(bound));
+            }
+        }
+        "content_block_stop" => {
+            if let Some(binder) = binders.get_mut(&index) {
+                let extra = binder
+                    .finish()
+                    .map_err(|error| ProtocolError::new(error.message))?;
+                if !extra.is_empty() {
+                    *suffix = Some(sse_json(
+                        Some("content_block_delta"),
+                        &json!({
+                            "type": "content_block_delta",
+                            "index": index,
+                            "delta": {"type": "signature_delta", "signature": extra}
+                        }),
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn push_signature(
+    binders: &mut BTreeMap<usize, ReplayChunkBinder>,
+    index: usize,
+    domain: ReplayDomain,
+    raw: &str,
+) -> Result<String, ProtocolError> {
+    let binder = binders
+        .entry(index)
+        .or_insert_with(|| ReplayChunkBinder::new(domain));
+    binder
+        .push(raw)
+        .map_err(|error| ProtocolError::new(error.message))
+}
+
+fn insert_field(value: &mut Value, field: &str, raw: String) {
+    if let Some(object) = value.as_object_mut() {
+        object.insert(field.to_string(), json!(raw));
+    }
+}
+
+fn bind_responses_tree(value: &mut Value, domain: ReplayDomain) -> Result<(), ProtocolError> {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                bind_responses_tree(item, domain)?;
+            }
+        }
+        Value::Object(map) => {
+            if map.get("type").and_then(Value::as_str) == Some("reasoning") {
+                bind_reasoning_encrypted_field(map, domain)?;
+            }
+            for child in map.values_mut() {
+                bind_responses_tree(child, domain)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn bind_reasoning_encrypted_field(
+    map: &mut Map<String, Value>,
+    domain: ReplayDomain,
+) -> Result<(), ProtocolError> {
+    let encrypted = match map.get("encrypted_content") {
+        None | Some(Value::Null) => return Ok(()),
+        Some(Value::String(text)) if text.is_empty() => return Ok(()),
+        Some(Value::String(text)) => text.clone(),
+        Some(_) => return Err(ProtocolError::new(ENCRYPTED_MUST_BE_STRING)),
+    };
+    if let Some(mut block) = decode_anthropic_thinking_block(&encrypted) {
+        bind_messages_opaque_fields(&mut block, domain, false)?;
+        let wrapped = encode_anthropic_thinking_block(&block)
+            .ok_or_else(|| ProtocolError::new(CARRIER_MALFORMED))?;
+        map.insert("encrypted_content".to_string(), json!(wrapped));
+        return Ok(());
+    }
+    if decode_chat_reasoning(&encrypted).is_some() {
+        return Ok(());
+    }
+    if encrypted.starts_with(ANTHROPIC_THINKING_PREFIX)
+        || encrypted.starts_with(CHAT_REASONING_PREFIX)
+    {
+        return Err(ProtocolError::new(CARRIER_MALFORMED));
+    }
+    let bound = bind_replay_opaque(domain, &encrypted)
+        .map_err(|error| ProtocolError::new(error.message))?;
+    map.insert("encrypted_content".to_string(), json!(bound));
+    Ok(())
+}
+
+fn reject_native_carrier_types(source: ApiFormat, value: &Value) -> Result<(), ProtocolError> {
+    match source {
+        ApiFormat::Messages => reject_messages_tree(value, true),
+        ApiFormat::Responses => reject_responses_tree(value, true),
+        ApiFormat::ChatCompletions | ApiFormat::Gemini => Ok(()),
+    }
+}
+
+/// `native_scope` is false under tool `input`, `arguments`, `args`,
+/// `parameters`, and `metadata`. Those subtrees are ordinary data.
+fn reject_messages_tree(value: &Value, native_scope: bool) -> Result<(), ProtocolError> {
+    if !native_scope {
+        return Ok(());
+    }
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                reject_messages_tree(item, true)?;
+            }
+        }
+        Value::Object(map) => {
+            match map.get("type").and_then(Value::as_str) {
+                Some("thinking") | Some("signature_delta") => {
+                    optional_native_string(map.get("signature"), SIGNATURE_MUST_BE_STRING)?;
+                }
+                Some("redacted_thinking") => {
+                    required_opaque_string(map.get("data"), REDACTED_DATA_MUST_BE_NONEMPTY)?;
+                }
+                _ => {}
+            }
+            for (key, child) in map {
+                reject_messages_tree(child, !ordinary_data_key(key))?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// `native_scope` is false under the same ordinary-data keys as Messages.
+fn reject_responses_tree(value: &Value, native_scope: bool) -> Result<(), ProtocolError> {
+    if !native_scope {
+        return Ok(());
+    }
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                reject_responses_tree(item, true)?;
+            }
+        }
+        Value::Object(map) => {
+            if map.get("type").and_then(Value::as_str) == Some("reasoning") {
+                reject_reasoning_encrypted(map)?;
+            }
+            for (key, child) in map {
+                reject_responses_tree(child, !ordinary_data_key(key))?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn reject_reasoning_encrypted(map: &Map<String, Value>) -> Result<(), ProtocolError> {
+    match map.get("encrypted_content") {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::String(text)) if text.is_empty() => Ok(()),
+        Some(Value::String(text)) => reject_encrypted_codec(text),
+        Some(_) => Err(ProtocolError::new(ENCRYPTED_MUST_BE_STRING)),
+    }
+}
+
+fn reject_encrypted_codec(encrypted: &str) -> Result<(), ProtocolError> {
+    if let Some(block) = decode_anthropic_thinking_block(encrypted) {
+        return reject_messages_tree(&block, true);
+    }
+    if decode_chat_reasoning(encrypted).is_some() {
+        return Ok(());
+    }
+    if encrypted.starts_with(ANTHROPIC_THINKING_PREFIX)
+        || encrypted.starts_with(CHAT_REASONING_PREFIX)
+    {
+        return Err(ProtocolError::new(CARRIER_MALFORMED));
+    }
+    Ok(())
+}
+
+fn cache_block_is_signed(block: Option<&Value>) -> bool {
+    let Some(block) = block else {
+        return false;
+    };
+    match block.get("type").and_then(Value::as_str) {
+        Some("thinking") => block
+            .get("signature")
+            .and_then(Value::as_str)
+            .is_some_and(|signature| !signature.is_empty()),
+        Some("redacted_thinking") => block
+            .get("data")
+            .and_then(Value::as_str)
+            .is_some_and(|data| !data.is_empty()),
+        _ => false,
+    }
+}
+
+struct ReasoningSnapshotPart {
+    lane: ResponsePartLane,
+    index: u64,
+    text: String,
+}
+
+fn reasoning_snapshot_parts(item: &Value) -> Vec<ReasoningSnapshotPart> {
+    let mut parts = Vec::new();
+    push_reasoning_lane(
+        &mut parts,
+        ResponsePartLane::ReasoningSummary,
+        item.get("summary"),
+    );
+    push_reasoning_lane(
+        &mut parts,
+        ResponsePartLane::ReasoningContent,
+        item.get("content"),
+    );
+    parts
+}
+
+fn push_reasoning_lane(
+    parts: &mut Vec<ReasoningSnapshotPart>,
+    lane: ResponsePartLane,
+    value: Option<&Value>,
+) {
+    let Some(part_type) = lane.part_type() else {
+        return;
+    };
+    let Some(items) = value.and_then(Value::as_array) else {
+        return;
+    };
+    for (index, part) in items.iter().enumerate() {
+        if part.get("type").and_then(Value::as_str) != Some(part_type) {
+            continue;
+        }
+        let text = part
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        parts.push(ReasoningSnapshotPart {
+            lane,
+            index: index as u64,
+            text,
+        });
+    }
+}
+
+fn contains_nonempty_reasoning_encrypted(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(contains_nonempty_reasoning_encrypted),
+        Value::Object(map) => {
+            let encrypted = map.get("type").and_then(Value::as_str) == Some("reasoning")
+                && map
+                    .get("encrypted_content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.is_empty());
+            encrypted || map.values().any(contains_nonempty_reasoning_encrypted)
+        }
+        _ => false,
     }
 }
 

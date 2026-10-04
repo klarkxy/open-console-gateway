@@ -12,9 +12,11 @@ use crate::gateway::classify::{
     rate_limit_fallback,
 };
 use crate::gateway::diagnostics::{
-    ErrorDiagnostic, RequestTrace, api_format_name, emit_failure, emit_legacy_tool_compat,
-    redact_known_secret, redact_known_secret_values, safe_upstream_headers,
+    ErrorDiagnostic, RequestTrace, SIGNED_HISTORY_REDACTION_CONFLICT, api_format_name,
+    emit_failure, emit_legacy_tool_compat, redact_bound_generated_values, redact_known_secret,
+    redact_known_secret_values, safe_upstream_headers,
     sanitize_upstream_error_value_with_known_secret, serialize_diagnostic,
+    signed_native_history_redaction_conflict,
 };
 use crate::gateway::failure::decode::{
     decode as decode_failure, openrouter_free_rejection, parse_retry_after, plan_window_admission,
@@ -22,8 +24,8 @@ use crate::gateway::failure::decode::{
 };
 use crate::gateway::materialize::native_log_identity;
 use crate::gateway::protocol::{
-    RequestPlan, UsageCounts, error_body, extract_usage, format_error, has_complete_usage,
-    has_usage, merge_stream_usage, transform_response,
+    ProtocolError, RequestPlan, UsageCounts, error_body, extract_usage, format_error,
+    has_complete_usage, has_usage, merge_stream_usage, transform_response,
 };
 use crate::gateway::protocol_stream::StreamConverter;
 use crate::gateway::recovery::{RecoveryPermit, ResourceSet, restriction_endpoint_identity};
@@ -2665,16 +2667,14 @@ pub(crate) async fn forward_request_with_deadline(
         attempt_spec
             .wire_normalization
             .normalize_response_value(&mut upstream_json);
-        // Redact before protocol conversion as well as after it. Some response
-        // adapters serialize source values into opaque replay fields (for
-        // example, Anthropic thinking blocks in Responses encrypted_content),
-        // where a post-conversion exact-string pass could no longer see the Key.
-        // Metrics extraction above is read-only, so redact in place instead of
-        // cloning the whole response tree.
-        if let Some(secret) = attempt_context.known_secret.as_deref() {
-            redact_known_secret_values(&mut upstream_json, secret);
-        }
-        let mut response_json = match transform_response(plan, &upstream_json) {
+        // A bound route fails before redaction can rewrite signed native
+        // history. Unsigned text is still redacted before and after conversion.
+        // Metrics extraction above is read-only.
+        let response_json = match prepare_redacted_response(
+            plan,
+            &mut upstream_json,
+            attempt_context.known_secret.as_deref(),
+        ) {
             Ok(value) => value,
             Err(error) => {
                 let message = format!("response conversion failed: {}", error.message);
@@ -2727,17 +2727,19 @@ pub(crate) async fn forward_request_with_deadline(
                     &attempt_context,
                     Some(failure),
                 )?;
+                let upstream_body = if error.message == SIGNED_HISTORY_REDACTION_CONFLICT {
+                    None
+                } else {
+                    Some(&upstream_json)
+                };
                 return Ok(ForwardResult {
-                    response: error_response(plan.client, &message, Some(&upstream_json)),
+                    response: error_response(plan.client, &message, upstream_body),
                     action,
                     error_message: Some(message),
                     sent: true,
                 });
             }
         };
-        if let Some(secret) = attempt_context.known_secret.as_deref() {
-            redact_known_secret_values(&mut response_json, secret);
-        }
 
         {
             let db = state.db.lock();
@@ -3401,6 +3403,41 @@ async fn response_text(
         text.push_str("\n<upstream error body truncated>");
     }
     Ok(text)
+}
+
+/// Redact a successful upstream JSON body and convert it.
+///
+/// When the plan has a replay domain, a secret inside signed native history
+/// is an error before either redaction pass mutates the document. The error
+/// text does not include the secret. Unsigned text is redacted, then
+/// converted. The second pass checks restored raw opaque and signed thinking.
+/// Only a native signature, redacted data, or encrypted field keeps a validated
+/// marker or codec. Tool declarations and ordinary text are still redacted.
+fn prepare_redacted_response(
+    plan: &RequestPlan,
+    upstream_json: &mut Value,
+    known_secret: Option<&str>,
+) -> Result<Value, ProtocolError> {
+    if plan.replay_domain.is_some()
+        && known_secret
+            .is_some_and(|secret| signed_native_history_redaction_conflict(upstream_json, secret))
+    {
+        return Err(ProtocolError::new(SIGNED_HISTORY_REDACTION_CONFLICT));
+    }
+    if let Some(secret) = known_secret {
+        redact_known_secret_values(upstream_json, secret);
+    }
+    let mut response_json = transform_response(plan, upstream_json)?;
+    if let Some(secret) = known_secret {
+        if let Some(domain) = plan.replay_domain {
+            if redact_bound_generated_values(&mut response_json, secret, domain) {
+                return Err(ProtocolError::new(SIGNED_HISTORY_REDACTION_CONFLICT));
+            }
+        } else {
+            redact_known_secret_values(&mut response_json, secret);
+        }
+    }
+    Ok(response_json)
 }
 
 fn error_response(format: ApiFormat, message: &str, upstream: Option<&Value>) -> Response {
