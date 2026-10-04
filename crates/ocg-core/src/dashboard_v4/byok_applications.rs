@@ -11,7 +11,7 @@ use crate::{
     dashboard_v3::{
         ControlRevision, MutationExpectation, V3ApiError, check_expectation, parse_mutation_json,
     },
-    model_metadata::ModelMetadata,
+    model_metadata::{ModelMetadata, read_published_protocol_profile},
     state::CoreState,
 };
 use axum::{
@@ -309,47 +309,104 @@ fn gateway_url(state: &CoreState) -> String {
         format!("{root}/v1")
     }
 }
+const METADATA_FIELDS: [&str; 9] = [
+    "name",
+    "contextWindow",
+    "maxOutputTokens",
+    "inputModalities",
+    "outputModalities",
+    "reasoning",
+    "reasoningEfforts",
+    "toolCalling",
+    "parallelToolCalls",
+];
+
+#[derive(Debug, PartialEq, Eq)]
+enum CatalogReadError {
+    Unusable(String),
+    Metadata,
+}
+
 fn available_models_locked(state: &CoreState) -> Result<Vec<ByokModel>, V3ApiError> {
     let rows = crate::gateway::handler::published_models_data_locked(state)
         .map_err(V3ApiError::internal)?;
-    let fields = [
-        "name",
-        "contextWindow",
-        "maxOutputTokens",
-        "inputModalities",
-        "outputModalities",
-        "reasoning",
-        "reasoningEfforts",
-        "toolCalling",
-        "parallelToolCalls",
-    ];
+    match models_from_published_rows(&rows) {
+        Ok(models) => Ok(models),
+        Err(CatalogReadError::Metadata) => {
+            Err(V3ApiError::internal("Invalid published model metadata"))
+        }
+        Err(CatalogReadError::Unusable(detail)) => {
+            Err(V3ApiError::precondition_failed_at(state, detail))
+        }
+    }
+}
+
+/// Schema 2 plus a validated `ocg.protocols` profile. A rejected row fails the
+/// whole catalog. Metadata stays on the existing whitelist, and Chat is not
+/// filled in for a missing or invalid profile.
+fn models_from_published_rows(
+    rows: &[serde_json::Value],
+) -> Result<Vec<ByokModel>, CatalogReadError> {
     let mut models = Vec::new();
+    let mut failures = Vec::new();
     for row in rows {
-        let Some(id) = row.get("id").and_then(|v| v.as_str()) else {
+        let Some(id) = row.get("id").and_then(|value| value.as_str()) else {
             continue;
         };
-        let metadata = row
-            .get("ocg")
-            .and_then(|v| v.as_object())
-            .map(|object| {
-                serde_json::Value::Object(
-                    object
-                        .iter()
-                        .filter(|(key, _)| fields.contains(&key.as_str()))
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect(),
-                )
-            })
-            .unwrap_or_else(|| serde_json::json!({}));
-        let metadata: ModelMetadata = serde_json::from_value(metadata)
-            .map_err(|_| V3ApiError::internal("Invalid published model metadata"))?;
-        models.push(ByokModel {
-            id: id.to_owned(),
-            metadata,
-        });
+        match byok_model_from_published_row(id, row) {
+            Ok(model) => models.push(model),
+            Err(CatalogReadError::Metadata) => return Err(CatalogReadError::Metadata),
+            Err(CatalogReadError::Unusable(reason)) => failures.push((id.to_string(), reason)),
+        }
     }
-    models.sort_by(|a, b| a.id.cmp(&b.id));
+    if !failures.is_empty() {
+        failures.sort_by(|left, right| left.0.cmp(&right.0));
+        let detail = failures
+            .into_iter()
+            .map(|(id, reason)| format!("{id}: {reason}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(CatalogReadError::Unusable(format!(
+            "published model protocol profile is not usable: {detail}"
+        )));
+    }
+    models.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(models)
+}
+
+fn byok_model_from_published_row(
+    id: &str,
+    row: &serde_json::Value,
+) -> Result<ByokModel, CatalogReadError> {
+    let ocg = row.get("ocg").and_then(|value| value.as_object());
+    let schema = ocg
+        .and_then(|object| object.get("schemaVersion"))
+        .and_then(|value| value.as_u64());
+    if schema != Some(2) {
+        return Err(CatalogReadError::Unusable(
+            "published model schemaVersion is not 2".into(),
+        ));
+    }
+    let profile = read_published_protocol_profile(ocg.and_then(|object| object.get("protocols")))
+        .map_err(|error| CatalogReadError::Unusable(error.to_string()))?;
+    let metadata = ocg
+        .map(|object| {
+            serde_json::Value::Object(
+                object
+                    .iter()
+                    .filter(|(key, _)| METADATA_FIELDS.contains(&key.as_str()))
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            )
+        })
+        .unwrap_or_else(|| serde_json::json!({}));
+    let metadata: ModelMetadata =
+        serde_json::from_value(metadata).map_err(|_| CatalogReadError::Metadata)?;
+    Ok(ByokModel {
+        id: id.to_owned(),
+        metadata,
+        protocols: profile,
+    })
 }
 
 fn payload_locked(state: &CoreState, inspection: ByokInspection) -> ByokApplication {

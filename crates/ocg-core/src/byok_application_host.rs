@@ -26,6 +26,10 @@ use lock::{CrossProcessLock, LockPolicy};
 use paths::{DiscoveredPaths, ResolvedTarget, catalog_path, parent_is_safe};
 use receipt::{PendingKind, Receipt, Store, fingerprint, has_backup};
 
+/// `ParsedStatus.collision` is only a flag. Name every id the adapters treat as
+/// managed so a grouped provider is not reported as the legacy id `ocg`.
+const MANAGED_PROVIDER_IDS_DIAGNOSTIC: &str = "ocg, ocg-chat, ocg-responses, or ocg-messages";
+
 #[cfg(test)]
 #[path = "byok_application_host/tests.rs"]
 mod tests;
@@ -271,6 +275,11 @@ impl ByokNativeHost {
     ) -> ByokResult<ByokInspection> {
         require_closed(client, client_closed)?;
         validate_models(client, models)?;
+        // A Messages reasoning flag or effort menu is not a reason to reject
+        // the configuration. Native controls pass through unchanged; adapters
+        // do not invent a budget, adaptive switch, or menu. Whether the client
+        // accepts that control is a backend risk, not a product policy.
+        // Unpreservable cross-format controls stay in the kernel.
         if let Some(id) = default_model_id
             && !models.iter().any(|model| model.id == id)
         {
@@ -326,13 +335,13 @@ impl ByokNativeHost {
             self.report(
                 Level::Warn,
                 format!(
-                    "{} at {} already holds a configuration named ocg that OCG does not own",
+                    "{} at {} already holds an unowned managed provider ({MANAGED_PROVIDER_IDS_DIAGNOSTIC})",
                     client.id(),
                     target.path.display()
                 ),
             );
             return Err(ByokError::conflict(
-                "An unowned ocg provider already exists in this configuration",
+                "An unowned managed provider already exists in this configuration",
             ));
         }
         if parsed.user_changed_owned {
@@ -527,10 +536,20 @@ impl ByokNativeHost {
             )
         } else if let Some(detail) = parsed.incompatible.clone() {
             (ByokStatus::Incompatible, Some(detail), false, false, false)
-        } else if parsed.collision || parsed.user_changed_owned {
+        } else if parsed.collision {
             (
                 ByokStatus::Conflict,
-                Some("An ocg entry exists that OCG does not own or no longer matches".into()),
+                Some(format!(
+                    "An unowned managed provider already exists ({MANAGED_PROVIDER_IDS_DIAGNOSTIC})"
+                )),
+                false,
+                false,
+                false,
+            )
+        } else if parsed.user_changed_owned {
+            (
+                ByokStatus::Conflict,
+                Some("Owned fields changed outside OCG and no longer match".into()),
                 false,
                 false,
                 false,

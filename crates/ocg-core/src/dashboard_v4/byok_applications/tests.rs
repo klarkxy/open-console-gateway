@@ -8,6 +8,7 @@ use crate::dashboard_v3::V3ApiError;
 use crate::dashboard_v4::types::ByokConfigureRequest;
 use crate::db::Database;
 use crate::gateway_keys;
+use crate::model_metadata::PublishedUpstreamProtocol;
 use crate::models::{
     Account, AccountCustomConfigInput, AccountModelCapabilityInput, AccountSetupStep, AccountType,
 };
@@ -706,4 +707,132 @@ async fn router_requires_a_session_or_loopback_authority_before_the_host() {
     let _ = stop.send(());
 
     close_state(dir, state);
+}
+
+fn chat_protocols() -> Value {
+    json!({
+        "preferred": "chat_completions",
+        "supported": ["chat_completions"]
+    })
+}
+
+#[test]
+fn published_schema_2_profile_keeps_whitelisted_metadata() {
+    let models = models_from_published_rows(&[
+        json!({
+            "id": "later",
+            "ocg": {
+                "schemaVersion": 2,
+                "name": "Later",
+                "protocols": chat_protocols()
+            }
+        }),
+        json!({
+            "id": "named",
+            "ocg": {
+                "schemaVersion": 2,
+                "name": "Visible",
+                "contextWindow": 8192,
+                "reasoning": true,
+                "reasoningEfforts": { "high": "high" },
+                "vendorHint": "not metadata",
+                "protocols": chat_protocols()
+            }
+        }),
+    ])
+    .unwrap();
+    assert_eq!(
+        models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["later", "named"]
+    );
+    let named = &models[1];
+    assert_eq!(named.metadata.name.as_deref(), Some("Visible"));
+    assert_eq!(named.metadata.context_window, Some(8192));
+    assert_eq!(named.metadata.reasoning, Some(true));
+    assert_eq!(
+        named
+            .metadata
+            .reasoning_efforts
+            .as_ref()
+            .and_then(|efforts| efforts.get("high"))
+            .map(String::as_str),
+        Some("high")
+    );
+    assert!(named.metadata.tool_calling.is_none());
+    assert_eq!(
+        named.protocols.preferred,
+        PublishedUpstreamProtocol::ChatCompletions
+    );
+    assert_eq!(
+        named.protocols.supported,
+        vec![PublishedUpstreamProtocol::ChatCompletions]
+    );
+}
+
+#[test]
+fn rejected_profiles_fail_the_whole_catalog_in_id_order() {
+    let error = models_from_published_rows(&[
+        json!({
+            "id": "good",
+            "ocg": {
+                "schemaVersion": 2,
+                "name": "Good",
+                "protocols": chat_protocols()
+            }
+        }),
+        json!({
+            "id": "c",
+            "ocg": {
+                "schemaVersion": 2,
+                "protocols": {
+                    "preferred": "responses",
+                    "supported": ["chat_completions"]
+                }
+            }
+        }),
+        json!({
+            "ocg": {
+                "schemaVersion": 2,
+                "name": "skipped",
+                "protocols": chat_protocols()
+            }
+        }),
+        json!({
+            "id": "a",
+            "ocg": { "schemaVersion": 2, "name": "Missing profile" }
+        }),
+        json!({
+            "id": "b",
+            "ocg": {
+                "schemaVersion": 1,
+                "name": "Old schema",
+                "protocols": chat_protocols()
+            }
+        }),
+    ])
+    .unwrap_err();
+    assert_eq!(
+        error,
+        CatalogReadError::Unusable(
+            "published model protocol profile is not usable: a: published model protocol profile is unknown; b: published model schemaVersion is not 2; c: published model protocol profile is invalid"
+                .into()
+        )
+    );
+}
+
+#[test]
+fn malformed_published_metadata_stays_a_metadata_error() {
+    let error = models_from_published_rows(&[json!({
+        "id": "typed",
+        "ocg": {
+            "schemaVersion": 2,
+            "reasoningEfforts": 1,
+            "protocols": chat_protocols()
+        }
+    })])
+    .unwrap_err();
+    assert_eq!(error, CatalogReadError::Metadata);
 }

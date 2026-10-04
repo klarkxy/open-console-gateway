@@ -10,7 +10,7 @@ mod tests;
 use super::receipt::{ApplyPlan, FileRole, ManagedSnapshot, PlannedFile, Receipt};
 use super::{ByokError, ByokResult};
 use crate::byok_application::{ByokClient, ByokModel};
-use crate::model_metadata::ModelMetadata;
+use crate::model_metadata::{ModelMetadata, PublishedUpstreamProtocol};
 
 pub use codex::CodexAdapter;
 pub use kimi::KimiAdapter;
@@ -19,7 +19,185 @@ pub use zcode::ZcodeAdapter;
 
 pub const PROVIDER_ID: &str = "ocg";
 pub const PROVIDER_NAME: &str = "Open Console Gateway";
+const CHAT_PROVIDER_ID: &str = "ocg-chat";
+const RESPONSES_PROVIDER_ID: &str = "ocg-responses";
+const MESSAGES_PROVIDER_ID: &str = "ocg-messages";
+const MANAGED_PROVIDER_IDS: [&str; 4] = [
+    PROVIDER_ID,
+    CHAT_PROVIDER_ID,
+    RESPONSES_PROVIDER_ID,
+    MESSAGES_PROVIDER_ID,
+];
 
+/// Kimi, MiniMax, and ZCode can all address these upstream protocols.
+/// Codex keeps its own Responses client and does not consult this list.
+const GROUPED_TRANSPORTS: [PublishedUpstreamProtocol; 3] = [
+    PublishedUpstreamProtocol::ChatCompletions,
+    PublishedUpstreamProtocol::Responses,
+    PublishedUpstreamProtocol::Messages,
+];
+
+struct ProtocolAssignment<'a> {
+    model: &'a ByokModel,
+    protocol: PublishedUpstreamProtocol,
+}
+
+fn is_managed_provider(id: &str) -> bool {
+    MANAGED_PROVIDER_IDS.contains(&id)
+}
+
+fn provider_id_for(protocol: PublishedUpstreamProtocol) -> &'static str {
+    match protocol {
+        PublishedUpstreamProtocol::ChatCompletions => CHAT_PROVIDER_ID,
+        PublishedUpstreamProtocol::Responses => RESPONSES_PROVIDER_ID,
+        PublishedUpstreamProtocol::Messages => MESSAGES_PROVIDER_ID,
+    }
+}
+
+fn provider_name_for(protocol: PublishedUpstreamProtocol) -> &'static str {
+    match protocol {
+        PublishedUpstreamProtocol::ChatCompletions => "Open Console Gateway Chat",
+        PublishedUpstreamProtocol::Responses => "Open Console Gateway Responses",
+        PublishedUpstreamProtocol::Messages => "Open Console Gateway Messages",
+    }
+}
+
+/// Trim and drop trailing slashes. Chat and Responses clients append their
+/// own path under this `/v1` base.
+fn gateway_v1_base(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_string()
+}
+
+/// Drop one terminal `/v1` after the same trim. Deployment subpaths stay.
+/// `http://host/gateway/v1` becomes `http://host/gateway`. `/v1extra` stays.
+fn gateway_root_base(url: &str) -> String {
+    let trimmed = gateway_v1_base(url);
+    match trimmed.strip_suffix("/v1") {
+        Some(root) => root.trim_end_matches('/').to_string(),
+        None => trimmed,
+    }
+}
+
+fn base_for(protocol: PublishedUpstreamProtocol, gateway_v1_url: &str) -> String {
+    if protocol == PublishedUpstreamProtocol::Messages {
+        gateway_root_base(gateway_v1_url)
+    } else {
+        gateway_v1_base(gateway_v1_url)
+    }
+}
+
+fn profile_error(model: &ByokModel, reason: impl std::fmt::Display) -> ByokError {
+    ByokError::invalid(format!(
+        "published model protocol profile is not usable: {}: {reason}",
+        model.id
+    ))
+}
+
+fn ensure_profile(model: &ByokModel) -> ByokResult<()> {
+    model
+        .protocols
+        .validate()
+        .map_err(|error| profile_error(model, error))
+}
+
+/// Preferred protocol when this client can speak it. Otherwise Messages, then
+/// Chat, and only when that protocol is both client-supported and listed in
+/// the model's saved `supported` set. Responses is not a fallback, and Chat
+/// is not invented to keep the model available.
+fn route_model(
+    model: &ByokModel,
+    client_supported: &[PublishedUpstreamProtocol],
+) -> ByokResult<PublishedUpstreamProtocol> {
+    ensure_profile(model)?;
+    if client_supported.contains(&model.protocols.preferred) {
+        return Ok(model.protocols.preferred);
+    }
+    for candidate in [
+        PublishedUpstreamProtocol::Messages,
+        PublishedUpstreamProtocol::ChatCompletions,
+    ] {
+        if client_supported.contains(&candidate) && model.protocols.supported.contains(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    Err(profile_error(
+        model,
+        "no client transport supports a truthful upstream protocol",
+    ))
+}
+
+fn assign_protocols(models: &[ByokModel]) -> ByokResult<Vec<ProtocolAssignment<'_>>> {
+    models
+        .iter()
+        .map(|model| {
+            Ok(ProtocolAssignment {
+                model,
+                protocol: route_model(model, &GROUPED_TRANSPORTS)?,
+            })
+        })
+        .collect()
+}
+
+fn routed_provider<'a>(
+    assignments: &'a [ProtocolAssignment<'a>],
+    model_id: &str,
+) -> ByokResult<&'static str> {
+    assignments
+        .iter()
+        .find(|assignment| assignment.model.id == model_id)
+        .map(|assignment| provider_id_for(assignment.protocol))
+        .ok_or_else(|| ByokError::invalid("defaultModelId must be one of the selected models"))
+}
+
+/// Legacy receipts stored one `provider` object. Grouped receipts store
+/// `providers` with a key for every managed id, using null when that id is
+/// absent. Both shapes compare equal after this fill.
+fn managed_provider_object(value: &serde_json::Value) -> serde_json::Value {
+    let mut providers = serde_json::Map::new();
+    if let Some(map) = value.get("providers").and_then(|item| item.as_object()) {
+        for id in MANAGED_PROVIDER_IDS {
+            providers.insert(
+                id.to_string(),
+                map.get(id).cloned().unwrap_or(serde_json::Value::Null),
+            );
+        }
+    } else {
+        let legacy = value
+            .get("provider")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        for id in MANAGED_PROVIDER_IDS {
+            let item = if id == PROVIDER_ID {
+                legacy.clone()
+            } else {
+                serde_json::Value::Null
+            };
+            providers.insert(id.to_string(), item);
+        }
+    }
+    serde_json::Value::Object(providers)
+}
+
+fn ownership_conflict_view(
+    receipt: Option<&Receipt>,
+    target_present: bool,
+    current: &serde_json::Value,
+    view: impl Fn(&serde_json::Value) -> serde_json::Value,
+) -> bool {
+    if !target_present {
+        return false;
+    }
+    match receipt {
+        Some(receipt) => {
+            view(&super::receipt::without_secrets(
+                &receipt.last_managed.owned,
+            )) != view(&super::receipt::without_secrets(current))
+        }
+        None => false,
+    }
+}
+
+#[derive(Clone, Copy)]
 pub struct ConfigureInput<'a> {
     pub gateway_v1_url: &'a str,
     pub secret: &'a str,
@@ -81,6 +259,7 @@ pub fn validate_models(_client: ByokClient, models: &[ByokModel]) -> ByokResult<
         if !seen.insert(model.id.as_str()) {
             return Err(ByokError::invalid("Model ids must be unique"));
         }
+        ensure_profile(model)?;
     }
     Ok(())
 }

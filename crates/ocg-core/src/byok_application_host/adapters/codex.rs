@@ -3,9 +3,9 @@ use super::{
     ConfigureInput, FormatAdapter, PROVIDER_ID, PROVIDER_NAME, ParsedStatus, default_plan_defaults,
     display_name, ensure_default_selected, ensure_retained_ocg_default, first_owned, has_image,
     ownership_conflict, planned_catalog, planned_target, preserve_created, snapshot,
-    toml_item_json,
+    toml_item_json, validate_models,
 };
-use crate::byok_application::{ByokError, ByokModel, ByokResult};
+use crate::byok_application::{ByokClient, ByokError, ByokModel, ByokResult};
 use crate::byok_application_host::receipt::{ApplyPlan, Receipt};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -72,6 +72,7 @@ impl FormatAdapter for CodexAdapter {
         receipt: Option<&Receipt>,
         input: ConfigureInput<'_>,
     ) -> ByokResult<ApplyPlan> {
+        validate_models(ByokClient::Codex, input.models)?;
         let catalog_path = catalog_path.ok_or_else(|| {
             ByokError::internal("Codex catalog path was not derived from the target")
         })?;
@@ -512,7 +513,11 @@ fn catalog_model(model: &ByokModel) -> Value {
     if has_image(&model.metadata) {
         modalities.push("image");
     }
-    let emitted = wire_efforts(model.metadata.reasoning_efforts.as_ref());
+    let emitted = if model.metadata.reasoning == Some(false) {
+        Vec::new()
+    } else {
+        wire_efforts(model.metadata.reasoning_efforts.as_ref())
+    };
     let supported: Vec<Value> = emitted
         .iter()
         .map(|(wire, level)| {

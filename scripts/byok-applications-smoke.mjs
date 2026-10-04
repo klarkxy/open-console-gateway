@@ -15,12 +15,35 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const executable = join(
+
+function argumentValue(name) {
+  const prefix = `${name}=`;
+  const args = process.argv.slice(2);
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === name) {
+      const value = args[index + 1];
+      if (!value || value.startsWith("-")) {
+        throw new Error(`${name} requires a path`);
+      }
+      return value;
+    }
+    if (arg.startsWith(prefix)) {
+      const value = arg.slice(prefix.length);
+      if (!value) throw new Error(`${name} requires a path`);
+      return value;
+    }
+  }
+  return undefined;
+}
+
+const defaultExecutable = join(
   repo,
   "target",
   "debug",
   process.platform === "win32" ? "ocg-manager-cli.exe" : "ocg-manager-cli",
 );
+const executable = resolve(argumentValue("--cli") ?? defaultExecutable);
 const exactModel = "vendor/model.name";
 const publicModels = [exactModel, "模".repeat(100), ...Array.from({ length: 248 }, (_, index) => `vendor/model.${index}`)];
 const keyNames = { codex: "codex", kimi: "kimi-code", minimax: "minimax-code", zcode: "zcode" };
@@ -192,13 +215,13 @@ async function publishModel(endpoint, secrets) {
       name: "BYOK smoke",
       key: upstreamKey,
       customConfig: {
-        endpointUrl: "https://example.test/v1/chat/completions",
-        upstreamProtocol: "chat_completions",
+        endpointUrl: "https://example.test/v1/messages",
+        upstreamProtocol: "messages",
       },
       modelCapabilities: publicModels.map((id) => ({
         publicModel: id,
         upstreamModel: id,
-        protocol: "chat_completions",
+        protocol: "messages",
       })),
     }),
   });
@@ -308,6 +331,22 @@ async function main() {
       }), secrets);
       const publishedIds = published.data.map((model) => model.id).sort();
       assert.deepEqual(publishedIds, [...publicModels].sort());
+      for (const model of published.data) {
+        const protocols = model.ocg?.protocols;
+        assert.equal(model.ocg?.schemaVersion, 2, `${model.id} schemaVersion`);
+        assert.ok(protocols, `${model.id} omitted ocg.protocols`);
+        assert.equal(protocols.preferred, "messages", `${model.id} preferred protocol`);
+        assert.equal(
+          protocols.supported.includes("messages"),
+          true,
+          `${model.id} supported protocols`,
+        );
+        assert.equal(
+          protocols.supported.includes("chat_completions"),
+          false,
+          `${model.id} published a fixed chat protocol`,
+        );
+      }
       const configured = await readJson(await fetch(`${endpoint}/applications/byok/${client}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -329,6 +368,18 @@ async function main() {
       assertNoSecrets(configured, secrets);
       const clientDir = dirname(targets[client]);
       assert.equal(await treeContains(clientDir, exactModel), true, `${client} files omitted the exact model id`);
+      if (client !== "codex") {
+        assert.equal(
+          await treeContains(clientDir, "ocg-messages"),
+          true,
+          `${client} files omitted the messages provider group`,
+        );
+        assert.equal(
+          await treeContains(clientDir, "ocg-chat"),
+          false,
+          `${client} files kept a fixed chat provider group`,
+        );
+      }
       const connection = await readJson(await fetch(`${endpoint}/connection`), secrets);
       const matching = connection.subKeys.filter((key) => key.name === keyNames[client] && key.enabled);
       assert.equal(matching.length, 1);

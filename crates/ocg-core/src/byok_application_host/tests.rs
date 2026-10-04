@@ -5,10 +5,13 @@ use super::lock::{
 use super::paths::{DiscoveredPaths, ResolvedTarget};
 use super::receipt::{
     ApplyPlan, FileRole, Journal, ManagedSnapshot, PendingFile, PendingKind, PlannedFile,
-    RECEIPT_VERSION, Store, new_receipt,
+    RECEIPT_VERSION, Receipt, Store, new_receipt,
 };
 use super::*;
-use crate::byok_application::{ByokClient, ByokHostRequest, ByokSecret, ByokStatus};
+use crate::byok_application::{
+    ByokClient, ByokHostRequest, ByokSecret, ByokStatus, PublishedModelProtocolProfile,
+    PublishedUpstreamProtocol,
+};
 use crate::model_metadata::ModelMetadata;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -66,6 +69,25 @@ fn harness(name: &str) -> Harness {
     }
 }
 
+fn chat_profile() -> PublishedModelProtocolProfile {
+    PublishedModelProtocolProfile {
+        preferred: PublishedUpstreamProtocol::ChatCompletions,
+        supported: vec![PublishedUpstreamProtocol::ChatCompletions],
+    }
+}
+
+fn with_protocols(
+    mut row: ByokModel,
+    preferred: PublishedUpstreamProtocol,
+    supported: &[PublishedUpstreamProtocol],
+) -> ByokModel {
+    row.protocols = PublishedModelProtocolProfile {
+        preferred,
+        supported: supported.to_vec(),
+    };
+    row
+}
+
 fn model(id: &str, context: u64, output: Option<u64>) -> ByokModel {
     ByokModel {
         id: id.into(),
@@ -77,6 +99,7 @@ fn model(id: &str, context: u64, output: Option<u64>) -> ByokModel {
             input_modalities: Some(vec!["text".into()]),
             ..ModelMetadata::default()
         },
+        protocols: chat_profile(),
     }
 }
 
@@ -1855,9 +1878,15 @@ fn host_console_reports_a_refused_write_and_leaves_the_file_untouched() {
     );
     let events = recorded(&lines);
     assert!(
-        events.iter().any(|(level, message)| *level == Level::Warn
-            && message.contains("already holds a configuration named ocg that OCG does not own")),
-        "the collision must be reported: {events:?}"
+        events.iter().any(|(level, message)| {
+            *level == Level::Warn
+                && message.contains("unowned managed provider")
+                && message.contains("ocg-chat")
+                && message.contains("ocg-responses")
+                && message.contains("ocg-messages")
+                && !message.contains("named ocg")
+        }),
+        "the collision must name every managed id: {events:?}"
     );
     assert!(
         events.iter().any(|(level, message)| *level == Level::Warn
@@ -1908,4 +1937,770 @@ fn host_console_reports_a_stale_fingerprint_as_an_abandoned_operation() {
             && message.contains("changed after it was read; the operation was abandoned")),
         "an operation that lost the race must say so: {events:?}"
     );
+}
+
+fn write_target(host: &ByokNativeHost, client: ByokClient, body: &str) -> PathBuf {
+    let path = target_file(host, client);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, body).unwrap();
+    path
+}
+
+fn located_target(host: &ByokNativeHost, client: ByokClient) -> ResolvedTarget {
+    ResolvedTarget {
+        client,
+        path: PathBuf::from(inspect(host, client).config_path),
+        discovery_source: "default".into(),
+    }
+}
+
+fn legacy_kimi_toml(user_note: Option<&str>) -> String {
+    let note = match user_note {
+        Some(note) => format!("user_note = \"{note}\"\n"),
+        None => String::new(),
+    };
+    format!(
+        "\
+keep = \"yes\"\n\
+default_model = \"ocg/legacy\"\n\
+\n\
+[providers.ocg]\n\
+type = \"openai\"\n\
+base_url = \"http://127.0.0.1:9/v1\"\n\
+api_key = \"synthetic-secret\"\n\
+name = \"Open Console Gateway\"\n\
+\n\
+[providers.moonshot]\n\
+type = \"kimi\"\n\
+\n\
+[models.\"ocg/legacy\"]\n\
+provider = \"ocg\"\n\
+model = \"legacy\"\n\
+display_name = \"legacy\"\n\
+max_context_size = 8192\n\
+{note}"
+    )
+}
+
+fn legacy_kimi_owned(user_note: Option<&str>) -> serde_json::Value {
+    let mut model = json!({
+        "provider": "ocg",
+        "model": "legacy",
+        "display_name": "legacy",
+        "max_context_size": 8192
+    });
+    if let Some(note) = user_note {
+        model["user_note"] = json!(note);
+    }
+    json!({
+        "provider": {
+            "type": "openai",
+            "base_url": "http://127.0.0.1:9/v1",
+            "name": "Open Console Gateway"
+        },
+        "models": {
+            "ocg/legacy": model
+        }
+    })
+}
+
+fn legacy_kimi_receipt(target_path: &str, owned: serde_json::Value) -> Receipt {
+    Receipt {
+        version: RECEIPT_VERSION,
+        client: ByokClient::Kimi.id().into(),
+        target_path: target_path.into(),
+        identity: "legacy-kimi-receipt".into(),
+        created_target: false,
+        created_catalog: false,
+        baseline_default: None,
+        last_applied_default: Some("ocg/legacy".into()),
+        first_owned: serde_json::Value::Null,
+        last_managed: ManagedSnapshot {
+            provider_id: "ocg".into(),
+            model_ids: vec!["legacy".into()],
+            owned,
+            applied_default: Some("ocg/legacy".into()),
+        },
+        pending: None,
+    }
+}
+
+fn assert_legacy_provider_shape(owned: &serde_json::Value) {
+    assert!(owned.get("provider").is_some_and(|value| value.is_object()));
+    assert!(owned.get("providers").is_none());
+    assert_eq!(
+        owned["models"]["ocg/legacy"]["user_note"].as_str(),
+        Some("kept-by-user")
+    );
+}
+
+#[test]
+fn legacy_kimi_receipt_is_read_from_disk_and_survives_configure_update_remove_and_recovery() {
+    let h = harness("legacy-receipt");
+    let client = ByokClient::Kimi;
+    let original = legacy_kimi_toml(Some("kept-by-user"));
+    let path = write_target(&h.host, client, &original);
+    let target = located_target(&h.host, client);
+    let store = Store::open(&h.host.data_dir, &target).unwrap();
+    let planted = legacy_kimi_receipt(
+        &target.path.to_string_lossy(),
+        legacy_kimi_owned(Some("kept-by-user")),
+    );
+    store.save_receipt(&planted).unwrap();
+    let on_disk = read_text(&store.receipt_path());
+    assert!(on_disk.contains("\"provider\""));
+    assert!(!on_disk.contains("\"providers\""));
+
+    let loaded = inspect(&h.host, client);
+    assert_eq!(loaded.status, ByokStatus::Configured);
+    assert!(loaded.configured_model_ids.iter().any(|id| id == "legacy"));
+    assert_legacy_provider_shape(&store.load().unwrap().unwrap().last_managed.owned);
+
+    let bytes = fs::read(&path).unwrap();
+    let old_hash = super::fs::content_hash(Some(&bytes));
+    fs::create_dir_all(store.backup_dir()).unwrap();
+    fs::write(store.backup_dir().join("old-target.bin"), &bytes).unwrap();
+    let journal = Journal {
+        prior_receipt: Some(planted),
+        kind: PendingKind::Configure,
+        files: vec![PendingFile {
+            role: FileRole::Target,
+            old_hash,
+            new_hash: super::fs::content_hash(Some(b"new-state-not-written")),
+        }],
+    };
+    fs::write(
+        store.journal_path(),
+        serde_json::to_vec_pretty(&journal).unwrap(),
+    )
+    .unwrap();
+    fs::remove_file(store.receipt_path()).unwrap();
+    let recovering = inspect(&h.host, client);
+    assert_eq!(recovering.status, ByokStatus::RecoveryRequired);
+    recover(&h.host, client, recovering.fingerprint.as_deref().unwrap()).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_legacy_provider_shape(&store.load().unwrap().unwrap().last_managed.owned);
+
+    let configured = configure(
+        &h.host,
+        client,
+        inspect(&h.host, client).fingerprint.as_deref().unwrap(),
+        vec![model("legacy", 8192, None)],
+        None,
+    )
+    .unwrap();
+    assert_eq!(configured.status, ByokStatus::Configured);
+    let migrated: toml_edit::DocumentMut = read_text(&path).parse().unwrap();
+    assert!(migrated["providers"].get("ocg").is_none());
+    assert_eq!(
+        migrated["providers"]["ocg-chat"]["type"].as_str(),
+        Some("openai")
+    );
+    assert_eq!(
+        migrated["models"]["ocg/legacy"]["provider"].as_str(),
+        Some("ocg-chat")
+    );
+    assert_eq!(
+        migrated["models"]["ocg/legacy"]["user_note"].as_str(),
+        Some("kept-by-user")
+    );
+    assert_eq!(
+        migrated["providers"]["moonshot"]["type"].as_str(),
+        Some("kimi")
+    );
+    assert_eq!(migrated["keep"].as_str(), Some("yes"));
+    assert_eq!(migrated["default_model"].as_str(), Some("ocg/legacy"));
+    assert!(
+        store
+            .load()
+            .unwrap()
+            .unwrap()
+            .last_managed
+            .owned
+            .get("providers")
+            .is_some()
+    );
+
+    configure(
+        &h.host,
+        client,
+        inspect(&h.host, client).fingerprint.as_deref().unwrap(),
+        vec![model("legacy", 9000, None)],
+        None,
+    )
+    .unwrap();
+    let updated: toml_edit::DocumentMut = read_text(&path).parse().unwrap();
+    assert_eq!(
+        updated["models"]["ocg/legacy"]["user_note"].as_str(),
+        Some("kept-by-user")
+    );
+    assert_eq!(
+        updated["models"]["ocg/legacy"]["max_context_size"].as_integer(),
+        Some(9000)
+    );
+
+    remove(
+        &h.host,
+        client,
+        inspect(&h.host, client).fingerprint.as_deref().unwrap(),
+    )
+    .unwrap();
+    let removed: toml_edit::DocumentMut = read_text(&path).parse().unwrap();
+    assert!(removed["providers"].get("ocg").is_none());
+    assert!(removed["providers"].get("ocg-chat").is_none());
+    assert!(
+        removed
+            .get("models")
+            .and_then(|models| models.get("ocg/legacy"))
+            .is_none()
+    );
+    assert_eq!(
+        removed["providers"]["moonshot"]["type"].as_str(),
+        Some("kimi")
+    );
+    assert_eq!(removed["keep"].as_str(), Some("yes"));
+    assert!(removed.get("default_model").is_none());
+}
+
+#[test]
+fn unowned_managed_provider_ids_conflict_before_any_write() {
+    for id in ["ocg", "ocg-chat", "ocg-responses", "ocg-messages"] {
+        let h = harness(&format!("group-collision-{id}"));
+        let body =
+            format!("[providers.{id}]\ntype = \"openai\"\nbase_url = \"http://example.test\"\n");
+        let path = write_target(&h.host, ByokClient::Kimi, &body);
+        let view = inspect(&h.host, ByokClient::Kimi);
+        assert_eq!(view.status, ByokStatus::Conflict, "{id}");
+        let detail = view.detail.unwrap_or_default();
+        for managed in ["ocg", "ocg-chat", "ocg-responses", "ocg-messages"] {
+            assert!(detail.contains(managed), "{id} detail was {detail}");
+        }
+        assert!(!detail.contains("named ocg"), "{detail}");
+        assert!(!view.configure_supported);
+        let error = configure(
+            &h.host,
+            ByokClient::Kimi,
+            view.fingerprint.as_deref().unwrap(),
+            vec![model("m", 1000, None)],
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, crate::byok_application::ByokErrorKind::Conflict);
+        assert!(error.message.contains("unowned managed provider"));
+        assert!(!error.message.contains("named ocg"));
+        assert_eq!(read_text(&path), body, "{id}");
+    }
+
+    let h = harness("foreign-provider");
+    let body = "[providers.moonshot]\ntype = \"kimi\"\n";
+    let path = write_target(&h.host, ByokClient::Kimi, body);
+    let view = inspect(&h.host, ByokClient::Kimi);
+    assert_ne!(view.status, ByokStatus::Conflict);
+    assert!(view.configure_supported);
+    configure(
+        &h.host,
+        ByokClient::Kimi,
+        view.fingerprint.as_deref().unwrap(),
+        vec![model("m", 1000, None)],
+        None,
+    )
+    .unwrap();
+    let doc: toml_edit::DocumentMut = read_text(&path).parse().unwrap();
+    assert_eq!(doc["providers"]["moonshot"]["type"].as_str(), Some("kimi"));
+    assert!(doc["providers"].get("ocg-chat").is_some());
+}
+
+#[test]
+fn stale_managed_group_and_alias_follow_the_retained_default() {
+    let h = harness("stale-group");
+    let client = ByokClient::Kimi;
+    let path = write_target(&h.host, client, "outside = \"kept\"\n");
+    let chat = with_protocols(
+        model("chat-model", 4000, None),
+        PublishedUpstreamProtocol::ChatCompletions,
+        &[PublishedUpstreamProtocol::ChatCompletions],
+    );
+    let messages = with_protocols(
+        model("messages-model", 4000, None),
+        PublishedUpstreamProtocol::Messages,
+        &[PublishedUpstreamProtocol::Messages],
+    );
+    configure(
+        &h.host,
+        client,
+        inspect(&h.host, client).fingerprint.as_deref().unwrap(),
+        vec![chat, messages],
+        Some("chat-model".into()),
+    )
+    .unwrap();
+    configure(
+        &h.host,
+        client,
+        inspect(&h.host, client).fingerprint.as_deref().unwrap(),
+        vec![with_protocols(
+            model("chat-model", 4000, None),
+            PublishedUpstreamProtocol::ChatCompletions,
+            &[PublishedUpstreamProtocol::ChatCompletions],
+        )],
+        None,
+    )
+    .unwrap();
+    let doc: toml_edit::DocumentMut = read_text(&path).parse().unwrap();
+    assert!(doc["providers"].get("ocg-messages").is_none());
+    assert!(doc["models"].get("ocg/messages-model").is_none());
+    assert!(doc["providers"].get("ocg-chat").is_some());
+    assert_eq!(
+        doc["models"]["ocg/chat-model"]["provider"].as_str(),
+        Some("ocg-chat")
+    );
+    assert_eq!(doc["default_model"].as_str(), Some("ocg/chat-model"));
+    assert_eq!(doc["outside"].as_str(), Some("kept"));
+
+    let dropped = harness("dropped-default");
+    let dropped_path = write_target(&dropped.host, client, "outside = \"kept\"\n");
+    configure(
+        &dropped.host,
+        client,
+        inspect(&dropped.host, client)
+            .fingerprint
+            .as_deref()
+            .unwrap(),
+        vec![
+            with_protocols(
+                model("chat-model", 4000, None),
+                PublishedUpstreamProtocol::ChatCompletions,
+                &[PublishedUpstreamProtocol::ChatCompletions],
+            ),
+            with_protocols(
+                model("messages-model", 4000, None),
+                PublishedUpstreamProtocol::Messages,
+                &[PublishedUpstreamProtocol::Messages],
+            ),
+        ],
+        Some("messages-model".into()),
+    )
+    .unwrap();
+    configure(
+        &dropped.host,
+        client,
+        inspect(&dropped.host, client)
+            .fingerprint
+            .as_deref()
+            .unwrap(),
+        vec![with_protocols(
+            model("chat-model", 4000, None),
+            PublishedUpstreamProtocol::ChatCompletions,
+            &[PublishedUpstreamProtocol::ChatCompletions],
+        )],
+        None,
+    )
+    .unwrap();
+    let dropped_doc: toml_edit::DocumentMut = read_text(&dropped_path).parse().unwrap();
+    assert!(dropped_doc["providers"].get("ocg-messages").is_none());
+    assert!(dropped_doc["models"].get("ocg/messages-model").is_none());
+    assert_eq!(
+        dropped_doc["default_model"].as_str(),
+        Some("ocg/chat-model")
+    );
+    assert_eq!(dropped_doc["outside"].as_str(), Some("kept"));
+
+    let switched = harness("switched-default");
+    let switched_path = write_target(&switched.host, client, "outside = \"kept\"\n");
+    configure(
+        &switched.host,
+        client,
+        inspect(&switched.host, client)
+            .fingerprint
+            .as_deref()
+            .unwrap(),
+        vec![
+            with_protocols(
+                model("chat-model", 4000, None),
+                PublishedUpstreamProtocol::ChatCompletions,
+                &[PublishedUpstreamProtocol::ChatCompletions],
+            ),
+            with_protocols(
+                model("messages-model", 4000, None),
+                PublishedUpstreamProtocol::Messages,
+                &[PublishedUpstreamProtocol::Messages],
+            ),
+        ],
+        Some("chat-model".into()),
+    )
+    .unwrap();
+    let mut switched_doc: toml_edit::DocumentMut = read_text(&switched_path).parse().unwrap();
+    switched_doc["default_model"] = toml_edit::value("ocg/messages-model");
+    fs::write(&switched_path, switched_doc.to_string()).unwrap();
+    let frozen = fs::read(&switched_path).unwrap();
+    let error = remove(
+        &switched.host,
+        client,
+        inspect(&switched.host, client)
+            .fingerprint
+            .as_deref()
+            .unwrap(),
+    )
+    .unwrap_err();
+    assert_eq!(error.kind, crate::byok_application::ByokErrorKind::Conflict);
+    assert!(error.message.contains("would be removed"));
+    assert_eq!(fs::read(&switched_path).unwrap(), frozen);
+
+    let extra = harness("extra-alias");
+    let extra_path = write_target(&extra.host, client, "outside = \"kept\"\n");
+    configure(
+        &extra.host,
+        client,
+        inspect(&extra.host, client).fingerprint.as_deref().unwrap(),
+        vec![model("kept", 4000, None)],
+        None,
+    )
+    .unwrap();
+    let mut edited: toml_edit::DocumentMut = read_text(&extra_path).parse().unwrap();
+    let mut alias = toml_edit::Table::new();
+    alias["provider"] = toml_edit::value("ocg-chat");
+    alias["model"] = toml_edit::value("extra");
+    alias["user_note"] = toml_edit::value("hand-added");
+    edited["models"]
+        .as_table_mut()
+        .unwrap()
+        .insert("ocg/extra", toml_edit::Item::Table(alias));
+    fs::write(&extra_path, edited.to_string()).unwrap();
+    let hand_edited = fs::read(&extra_path).unwrap();
+    let error = configure(
+        &extra.host,
+        client,
+        inspect(&extra.host, client).fingerprint.as_deref().unwrap(),
+        vec![model("kept", 4000, None)],
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind, crate::byok_application::ByokErrorKind::Conflict);
+    assert!(error.message.contains("Owned fields changed"));
+    assert_eq!(fs::read(&extra_path).unwrap(), hand_edited);
+    assert!(read_text(&extra_path).contains("hand-added"));
+    assert!(read_text(&extra_path).contains("outside"));
+}
+
+#[test]
+fn unrecorded_legacy_model_field_is_not_silently_dropped() {
+    let h = harness("unrecorded-note");
+    let client = ByokClient::Kimi;
+    let original = legacy_kimi_toml(Some("only-in-file"));
+    let path = write_target(&h.host, client, &original);
+    let target = located_target(&h.host, client);
+    let store = Store::open(&h.host.data_dir, &target).unwrap();
+    store
+        .save_receipt(&legacy_kimi_receipt(
+            &target.path.to_string_lossy(),
+            legacy_kimi_owned(None),
+        ))
+        .unwrap();
+    let view = inspect(&h.host, client);
+    assert_eq!(view.status, ByokStatus::Conflict);
+    assert!(view.detail.unwrap_or_default().contains("no longer match"));
+    let error = configure(
+        &h.host,
+        client,
+        view.fingerprint.as_deref().unwrap(),
+        vec![model("legacy", 8192, None)],
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind, crate::byok_application::ByokErrorKind::Conflict);
+    assert!(error.message.contains("Owned fields changed"));
+    assert_eq!(read_text(&path), original);
+    assert!(read_text(&path).contains("only-in-file"));
+}
+
+fn messages_row(id: &str, reasoning: Option<bool>, menu: bool) -> ByokModel {
+    let mut row = with_protocols(
+        model(id, 1000, None),
+        PublishedUpstreamProtocol::Messages,
+        &[PublishedUpstreamProtocol::Messages],
+    );
+    row.metadata.reasoning = reasoning;
+    if menu {
+        row.metadata.reasoning_efforts = Some([("high".into(), "high".into())].into());
+    }
+    row
+}
+
+fn assert_no_manufactured_control(text: &str) {
+    assert!(!text.contains("support_efforts"));
+    assert!(!text.contains("off_effort"));
+    assert!(!text.contains("adaptive_thinking"));
+    assert!(!text.contains("budget_tokens"));
+    assert!(!text.contains("default_effort"));
+    assert!(!text.contains("thinking_config"));
+    assert!(!text.contains("effortOptions"));
+    assert!(!text.contains("defaultEffort"));
+    assert!(!text.contains("adaptive"));
+}
+
+#[test]
+fn kimi_and_minimax_accept_messages_reasoning_without_inventing_controls() {
+    let kimi_body = "keep = \"yes\"\n";
+    let mini_body = "logLevel: info\n";
+    let rows = vec![
+        messages_row("reasoning-flag", Some(true), true),
+        messages_row("effort-menu", None, true),
+        messages_row("off", Some(false), false),
+        messages_row("unknown", None, false),
+    ];
+
+    let kimi = harness("messages-capability-kimi");
+    let path = write_target(&kimi.host, ByokClient::Kimi, kimi_body);
+    configure(
+        &kimi.host,
+        ByokClient::Kimi,
+        inspect(&kimi.host, ByokClient::Kimi)
+            .fingerprint
+            .as_deref()
+            .unwrap(),
+        rows.clone(),
+        None,
+    )
+    .unwrap();
+    let text = read_text(&path);
+    let doc: toml_edit::DocumentMut = text.parse().unwrap();
+    assert_eq!(
+        doc.get("providers")
+            .and_then(|item| item.get("ocg-messages"))
+            .and_then(|item| item.get("type"))
+            .and_then(toml_edit::Item::as_str),
+        Some("anthropic")
+    );
+    let models = doc.get("models").unwrap();
+    let flag = models.get("ocg/reasoning-flag").unwrap();
+    let capabilities = flag
+        .get("capabilities")
+        .and_then(toml_edit::Item::as_array)
+        .unwrap();
+    assert!(
+        capabilities
+            .iter()
+            .any(|item| item.as_str() == Some("thinking"))
+    );
+    assert!(flag.get("support_efforts").is_none());
+    let menu = models.get("ocg/effort-menu").unwrap();
+    assert!(menu.get("support_efforts").is_none());
+    let menu_capabilities = menu.get("capabilities").and_then(toml_edit::Item::as_array);
+    assert!(
+        menu_capabilities
+            .is_none_or(|items| { items.iter().all(|item| item.as_str() != Some("thinking")) })
+    );
+    assert_no_manufactured_control(&text);
+    assert!(text.contains("keep"));
+
+    let mini = harness("messages-capability-minimax");
+    let path = write_target(&mini.host, ByokClient::Minimax, mini_body);
+    configure(
+        &mini.host,
+        ByokClient::Minimax,
+        inspect(&mini.host, ByokClient::Minimax)
+            .fingerprint
+            .as_deref()
+            .unwrap(),
+        rows,
+        None,
+    )
+    .unwrap();
+    let yaml_text = read_text(&path);
+    let yaml: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml_text).unwrap();
+    let flag = &yaml["custom_provider"]["ocg-messages"]["models"]["reasoning-flag"];
+    assert_eq!(flag["reasoning"].as_bool(), Some(true));
+    assert!(flag.get("thinking").is_none());
+    let menu = &yaml["custom_provider"]["ocg-messages"]["models"]["effort-menu"];
+    assert!(menu.get("reasoning").is_none());
+    assert!(menu.get("thinking").is_none());
+    assert_no_manufactured_control(&yaml_text);
+    assert!(yaml_text.contains("logLevel"));
+
+    let blocked = harness("messages-capability-still-collides");
+    let foreign = "[providers.ocg-responses]\ntype = \"openai\"\n";
+    let path = write_target(&blocked.host, ByokClient::Kimi, foreign);
+    let error = configure(
+        &blocked.host,
+        ByokClient::Kimi,
+        inspect(&blocked.host, ByokClient::Kimi)
+            .fingerprint
+            .as_deref()
+            .unwrap(),
+        vec![messages_row("reasoning-flag", Some(true), true)],
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind, crate::byok_application::ByokErrorKind::Conflict);
+    assert!(error.message.contains("unowned managed provider"));
+    assert_eq!(read_text(&path), foreign);
+}
+
+#[test]
+fn chat_reasoning_menu_stays_a_saved_dictionary() {
+    let mut kimi_chat = with_protocols(
+        model("chat-model", 8000, None),
+        PublishedUpstreamProtocol::ChatCompletions,
+        &[PublishedUpstreamProtocol::ChatCompletions],
+    );
+    kimi_chat.metadata.reasoning = Some(true);
+    kimi_chat.metadata.reasoning_efforts = Some([("high".into(), "high".into())].into());
+    let h = harness("kimi-chat-menu");
+    let path = write_target(&h.host, ByokClient::Kimi, "keep = \"yes\"\n");
+    configure(
+        &h.host,
+        ByokClient::Kimi,
+        inspect(&h.host, ByokClient::Kimi)
+            .fingerprint
+            .as_deref()
+            .unwrap(),
+        vec![kimi_chat],
+        None,
+    )
+    .unwrap();
+    let text = read_text(&path);
+    assert!(text.contains("support_efforts"));
+    assert!(text.contains("high"));
+    assert!(!text.contains("adaptive_thinking"));
+    assert!(!text.contains("default_effort"));
+
+    let mut mini_chat = with_protocols(
+        model("chat-model", 8000, Some(1000)),
+        PublishedUpstreamProtocol::ChatCompletions,
+        &[PublishedUpstreamProtocol::ChatCompletions],
+    );
+    mini_chat.metadata.reasoning = Some(true);
+    mini_chat.metadata.reasoning_efforts = Some([("high".into(), "high".into())].into());
+    let mini = harness("minimax-chat-menu");
+    let path = write_target(&mini.host, ByokClient::Minimax, "logLevel: info\n");
+    configure(
+        &mini.host,
+        ByokClient::Minimax,
+        inspect(&mini.host, ByokClient::Minimax)
+            .fingerprint
+            .as_deref()
+            .unwrap(),
+        vec![mini_chat],
+        None,
+    )
+    .unwrap();
+    let yaml = read_text(&path);
+    assert!(yaml.contains("effortOptions"));
+    assert!(yaml.contains("high"));
+    assert!(!yaml.contains("thinking_config"));
+    assert!(!yaml.contains("defaultEffort"));
+    assert!(!yaml.contains("adaptive"));
+}
+
+#[test]
+fn zcode_keeps_responses_and_does_not_inherit_the_messages_control_gate() {
+    let h = harness("zcode-protocols");
+    let client = ByokClient::Zcode;
+    let path = write_target(
+        &h.host,
+        client,
+        r#"{"schemaVersion":1,"config":{"providerOrder":["keep"],"providerConfigRules":{"providerRules":[{"providerId":"keep","providerName":"Keep","enabled":true,"config":{"group":"standard-personal"}}]},"modelConfigRules":{"providerModelRules":[],"manualProviderModelRules":[]},"extraUser":true}}"#,
+    );
+    let mut messages = messages_row("messages-model", Some(true), true);
+    messages.metadata.max_output_tokens = Some(100);
+    let mut responses = with_protocols(
+        model("responses-model", 4000, Some(100)),
+        PublishedUpstreamProtocol::Responses,
+        &[PublishedUpstreamProtocol::Responses],
+    );
+    responses.metadata.reasoning = Some(true);
+    let mut chat = with_protocols(
+        model("chat-model", 4000, Some(100)),
+        PublishedUpstreamProtocol::ChatCompletions,
+        &[PublishedUpstreamProtocol::ChatCompletions],
+    );
+    chat.metadata.reasoning = Some(true);
+    chat.metadata.reasoning_efforts = Some([("high".into(), "high".into())].into());
+    configure(
+        &h.host,
+        client,
+        inspect(&h.host, client).fingerprint.as_deref().unwrap(),
+        vec![messages, responses, chat],
+        None,
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let rules = value["config"]["providerConfigRules"]["providerRules"]
+        .as_array()
+        .unwrap();
+    let provider = |id: &str| rules.iter().find(|rule| rule["providerId"] == id).unwrap();
+    assert_eq!(
+        provider("ocg-messages")["config"]["api"]["type"],
+        "anthropic-messages"
+    );
+    assert_eq!(
+        provider("ocg-responses")["config"]["api"]["type"],
+        "openai-responses"
+    );
+    assert_eq!(
+        provider("ocg-chat")["config"]["api"]["type"],
+        "openai-chat-completions"
+    );
+    let model_rules = value["config"]["modelConfigRules"]["providerModelRules"]
+        .as_array()
+        .unwrap();
+    let model_rule = |id: &str| {
+        model_rules
+            .iter()
+            .find(|rule| rule["modelId"] == id)
+            .unwrap()
+    };
+    assert!(
+        model_rule("messages-model")["config"]["optionSpecs"]
+            .get("reasoningLevel")
+            .is_none()
+    );
+    assert_eq!(
+        model_rule("chat-model")["config"]["optionSpecs"]["reasoningLevel"]["values"],
+        json!(["high"])
+    );
+    assert_eq!(value["config"]["extraUser"], true);
+    assert!(
+        value["config"]["providerOrder"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "keep")
+    );
+}
+
+#[test]
+fn zcode_manual_collision_leaves_the_file_unchanged() {
+    let h = harness("zcode-manual-collision");
+    let client = ByokClient::Zcode;
+    let path = write_target(
+        &h.host,
+        client,
+        r#"{"schemaVersion":1,"config":{"providerOrder":["keep"],"providerConfigRules":{"providerRules":[]},"modelConfigRules":{"providerModelRules":[],"manualProviderModelRules":[]},"extraUser":true}}"#,
+    );
+    configure(
+        &h.host,
+        client,
+        inspect(&h.host, client).fingerprint.as_deref().unwrap(),
+        vec![model("kept", 4000, Some(100))],
+        None,
+    )
+    .unwrap();
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    value["config"]["modelConfigRules"]["manualProviderModelRules"] = json!([
+        {"providerId": "ocg-chat", "modelId": "new", "config": {"enabled": true}}
+    ]);
+    fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    let frozen = fs::read(&path).unwrap();
+    let error = configure(
+        &h.host,
+        client,
+        inspect(&h.host, client).fingerprint.as_deref().unwrap(),
+        vec![model("new", 4000, Some(100))],
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind, crate::byok_application::ByokErrorKind::Conflict);
+    assert!(error.message.contains("same provider and model"));
+    assert_eq!(fs::read(&path).unwrap(), frozen);
+    assert!(read_text(&path).contains("extraUser"));
 }

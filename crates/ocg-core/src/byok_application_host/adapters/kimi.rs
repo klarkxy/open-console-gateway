@@ -1,11 +1,11 @@
 use super::{
-    ConfigureInput, FormatAdapter, PROVIDER_ID, PROVIDER_NAME, ParsedStatus, default_after_restore,
-    default_plan_defaults, display_name, ensure_default_selected, ensure_retained_ocg_default,
-    first_owned, has_image, ownership_conflict, planned_target, preserve_created, restore_default,
-    snapshot, toml_item_json,
+    ConfigureInput, FormatAdapter, ParsedStatus, default_after_restore, default_plan_defaults,
+    display_name, ensure_default_selected, ensure_retained_ocg_default, first_owned, has_image,
+    planned_target, preserve_created, restore_default, snapshot, toml_item_json,
 };
-use crate::byok_application::{ByokError, ByokModel, ByokResult};
+use crate::byok_application::{ByokClient, ByokError, ByokModel, ByokResult};
 use crate::byok_application_host::receipt::{ApplyPlan, Receipt};
+use crate::model_metadata::PublishedUpstreamProtocol;
 use serde_json::{Value, json};
 use std::path::Path;
 use toml_edit::{Array, DocumentMut, Item, Table, value};
@@ -35,7 +35,7 @@ impl FormatAdapter for KimiAdapter {
             collision: present && receipt.is_none(),
             configured_model_ids: ocg_model_ids(&doc),
             current_default: ocg_default(&doc),
-            user_changed_owned: ownership_conflict(receipt, true, &owned),
+            user_changed_owned: kimi_conflict(receipt, true, &owned),
         }
     }
 
@@ -48,6 +48,8 @@ impl FormatAdapter for KimiAdapter {
         receipt: Option<&Receipt>,
         input: ConfigureInput<'_>,
     ) -> ByokResult<ApplyPlan> {
+        super::validate_models(ByokClient::Kimi, input.models)?;
+        let assignments = super::assign_protocols(input.models)?;
         let mut doc = match target_bytes {
             None => DocumentMut::new(),
             Some(bytes) => parse_toml(bytes)?,
@@ -59,10 +61,10 @@ impl FormatAdapter for KimiAdapter {
         }
         if provider_present(&doc) && receipt.is_none() {
             return Err(ByokError::conflict(
-                "An unowned ocg Kimi provider already exists",
+                "An unowned managed Kimi provider already exists",
             ));
         }
-        if ownership_conflict(receipt, target_bytes.is_some(), &owned_from_doc(&doc)) {
+        if kimi_conflict(receipt, target_bytes.is_some(), &owned_from_doc(&doc)) {
             return Err(ByokError::conflict("Owned Kimi fields changed outside OCG"));
         }
         ensure_default_selected(input.default_model_id, input.models)?;
@@ -76,8 +78,8 @@ impl FormatAdapter for KimiAdapter {
         );
         let resulting = requested_alias.as_deref().or(current_default.as_deref());
         ensure_retained_ocg_default(ocg_model_id(resulting), &model_ids)?;
-        write_provider(&mut doc, input.gateway_v1_url, input.secret)?;
-        sync_models(&mut doc, input.models)?;
+        write_providers(&mut doc, &assignments, input.gateway_v1_url, input.secret)?;
+        sync_models(&mut doc, &assignments)?;
         if let Some(model) = input.default_model_id {
             doc["default_model"] = value(alias_for(model));
         }
@@ -111,16 +113,18 @@ impl FormatAdapter for KimiAdapter {
             return Ok(removal_plan(target_path, receipt));
         };
         let mut doc = parse_toml(bytes)?;
-        if ownership_conflict(Some(receipt), true, &owned_from_doc(&doc)) {
+        if kimi_conflict(Some(receipt), true, &owned_from_doc(&doc)) {
             return Err(ByokError::conflict("Owned Kimi fields changed outside OCG"));
         }
         let current_default = string_key(&doc, "default_model");
         let resulting = default_after_restore(receipt, current_default.as_deref());
         ensure_retained_ocg_default(ocg_model_id(resulting.as_deref()), &[])?;
         if let Some(providers) = doc.get_mut("providers").and_then(Item::as_table_like_mut) {
-            providers.remove(PROVIDER_ID);
+            for id in super::MANAGED_PROVIDER_IDS {
+                providers.remove(id);
+            }
         }
-        remove_ocg_models(&mut doc);
+        remove_managed_models(&mut doc);
         match restore_default(receipt, current_default.as_deref()) {
             Some(Some(value_str)) => doc["default_model"] = value(value_str),
             Some(None) => {
@@ -197,13 +201,30 @@ fn root_shape_ok(doc: &DocumentMut) -> bool {
 }
 
 fn provider_present(doc: &DocumentMut) -> bool {
-    doc.get("providers")
-        .and_then(|item| item.get(PROVIDER_ID))
-        .is_some_and(|item| !item.is_none())
+    super::MANAGED_PROVIDER_IDS.iter().any(|id| {
+        doc.get("providers")
+            .and_then(|item| item.get(*id))
+            .is_some_and(|item| !item.is_none())
+    })
+}
+
+fn kimi_conflict(receipt: Option<&Receipt>, present: bool, current: &Value) -> bool {
+    super::ownership_conflict_view(receipt, present, current, kimi_view)
+}
+
+fn kimi_view(stripped: &Value) -> Value {
+    let models = match stripped.get("models") {
+        Some(models) if models.is_object() => models.clone(),
+        _ => json!({}),
+    };
+    json!({
+        "providers": super::managed_provider_object(stripped),
+        "models": models,
+    })
 }
 
 fn alias_for(model_id: &str) -> String {
-    format!("{PROVIDER_ID}/{model_id}")
+    format!("{}/{}", super::PROVIDER_ID, model_id)
 }
 
 fn string_key(doc: &DocumentMut, key: &str) -> Option<String> {
@@ -216,7 +237,7 @@ fn ocg_default(doc: &DocumentMut) -> Option<String> {
 
 fn ocg_model_id(default_model: Option<&str>) -> Option<&str> {
     let value = default_model?;
-    let prefix = format!("{PROVIDER_ID}/");
+    let prefix = format!("{}/", super::PROVIDER_ID);
     value.strip_prefix(&prefix)
 }
 
@@ -229,12 +250,16 @@ fn ocg_model_ids(doc: &DocumentMut) -> Vec<String> {
         let Some(table) = item.as_table() else {
             continue;
         };
-        if table.get("provider").and_then(Item::as_str) != Some(PROVIDER_ID) {
+        if !table
+            .get("provider")
+            .and_then(Item::as_str)
+            .is_some_and(super::is_managed_provider)
+        {
             continue;
         }
         if let Some(id) = table.get("model").and_then(Item::as_str) {
             ids.push(id.to_string());
-        } else if let Some(id) = key.strip_prefix(&format!("{PROVIDER_ID}/")) {
+        } else if let Some(id) = key.strip_prefix(&format!("{}/", super::PROVIDER_ID)) {
             ids.push(id.to_string());
         }
     }
@@ -250,26 +275,81 @@ fn ensure_table<'a>(doc: &'a mut DocumentMut, key: &str) -> ByokResult<&'a mut T
         .ok_or_else(|| ByokError::invalid("Kimi configuration table is not a mapping"))
 }
 
-fn write_provider(doc: &mut DocumentMut, gateway: &str, secret: &str) -> ByokResult<()> {
-    let providers = ensure_table(doc, "providers")?;
-    if providers.get(PROVIDER_ID).is_none() {
-        providers.insert(PROVIDER_ID, Item::Table(Table::new()));
+fn write_providers(
+    doc: &mut DocumentMut,
+    assignments: &[super::ProtocolAssignment<'_>],
+    gateway: &str,
+    secret: &str,
+) -> ByokResult<()> {
+    let mut used = Vec::new();
+    for assignment in assignments {
+        if !used.contains(&assignment.protocol) {
+            used.push(assignment.protocol);
+        }
     }
-    let provider = providers
-        .get_mut(PROVIDER_ID)
-        .and_then(Item::as_table_mut)
-        .ok_or_else(|| ByokError::invalid("Kimi ocg provider must be a table"))?;
-    provider["type"] = value("openai");
-    provider["base_url"] = value(gateway);
-    provider["api_key"] = value(secret);
-    if provider.get("name").is_none() {
-        provider["name"] = value(PROVIDER_NAME);
+    if let Some(providers) = doc.get_mut("providers").and_then(Item::as_table_mut) {
+        let stale: Vec<String> = providers
+            .iter()
+            .filter_map(|(key, item)| {
+                if item.is_none() || !super::is_managed_provider(key) {
+                    return None;
+                }
+                let keep = used
+                    .iter()
+                    .any(|protocol| super::provider_id_for(*protocol) == key);
+                (!keep).then_some(key.to_string())
+            })
+            .collect();
+        for key in stale {
+            providers.remove(&key);
+        }
+    }
+    for protocol in used {
+        upsert_provider(doc, protocol, gateway, secret)?;
     }
     Ok(())
 }
 
-fn sync_models(doc: &mut DocumentMut, models: &[ByokModel]) -> ByokResult<()> {
-    let wanted: Vec<String> = models.iter().map(|model| alias_for(&model.id)).collect();
+fn upsert_provider(
+    doc: &mut DocumentMut,
+    protocol: PublishedUpstreamProtocol,
+    gateway: &str,
+    secret: &str,
+) -> ByokResult<()> {
+    let id = super::provider_id_for(protocol);
+    let providers = ensure_table(doc, "providers")?;
+    if providers.get(id).is_none() {
+        providers.insert(id, Item::Table(Table::new()));
+    }
+    let provider = providers
+        .get_mut(id)
+        .and_then(Item::as_table_mut)
+        .ok_or_else(|| ByokError::invalid("Kimi managed provider must be a table"))?;
+    provider["type"] = value(kimi_provider_type(protocol));
+    provider["base_url"] = value(super::base_for(protocol, gateway));
+    provider["api_key"] = value(secret);
+    if provider.get("name").is_none() {
+        provider["name"] = value(super::provider_name_for(protocol));
+    }
+    Ok(())
+}
+
+fn kimi_provider_type(protocol: PublishedUpstreamProtocol) -> &'static str {
+    match protocol {
+        PublishedUpstreamProtocol::ChatCompletions => "openai",
+        PublishedUpstreamProtocol::Responses => "openai_responses",
+        PublishedUpstreamProtocol::Messages => "anthropic",
+    }
+}
+
+fn sync_models(
+    doc: &mut DocumentMut,
+    assignments: &[super::ProtocolAssignment<'_>],
+) -> ByokResult<()> {
+    let wanted: Vec<String> = assignments
+        .iter()
+        .map(|assignment| alias_for(&assignment.model.id))
+        .collect();
     {
         let table = ensure_table(doc, "models")?;
         for alias in &wanted {
@@ -278,7 +358,7 @@ fn sync_models(doc: &mut DocumentMut, models: &[ByokModel]) -> ByokResult<()> {
                     .as_table()
                     .and_then(|table| table.get("provider"))
                     .and_then(Item::as_str);
-                if provider != Some(PROVIDER_ID) {
+                if !provider.is_some_and(super::is_managed_provider) {
                     return Err(ByokError::conflict(
                         "A model alias in the ocg namespace is not owned by OCG",
                     ));
@@ -292,7 +372,7 @@ fn sync_models(doc: &mut DocumentMut, models: &[ByokModel]) -> ByokResult<()> {
             .iter()
             .filter_map(|(key, item)| {
                 let provider = item.as_table()?.get("provider")?.as_str()?;
-                (provider == PROVIDER_ID && !wanted.iter().any(|alias| alias == key))
+                (super::is_managed_provider(provider) && !wanted.iter().any(|alias| alias == key))
                     .then_some(key.to_string())
             })
             .collect();
@@ -300,8 +380,8 @@ fn sync_models(doc: &mut DocumentMut, models: &[ByokModel]) -> ByokResult<()> {
             table.remove(&key);
         }
     }
-    for model in models {
-        let alias = alias_for(&model.id);
+    for assignment in assignments {
+        let alias = alias_for(&assignment.model.id);
         let models_table = ensure_table(doc, "models")?;
         if models_table.get(&alias).is_none() {
             models_table.insert(&alias, Item::Table(Table::new()));
@@ -310,16 +390,16 @@ fn sync_models(doc: &mut DocumentMut, models: &[ByokModel]) -> ByokResult<()> {
             .get_mut(&alias)
             .and_then(Item::as_table_mut)
             .ok_or_else(|| ByokError::invalid("Kimi model entry must be a table"))?;
-        entry["provider"] = value(PROVIDER_ID);
-        entry["model"] = value(model.id.as_str());
-        match model.metadata.context_window {
+        entry["provider"] = value(super::provider_id_for(assignment.protocol));
+        entry["model"] = value(assignment.model.id.as_str());
+        match assignment.model.metadata.context_window {
             Some(context) => entry["max_context_size"] = value(context as i64),
             None => {
                 entry.remove("max_context_size");
             }
         }
-        entry["display_name"] = value(display_name(model));
-        match kimi_capabilities(model) {
+        entry["display_name"] = value(display_name(assignment.model));
+        match kimi_capabilities(assignment.model) {
             Some(capabilities) => {
                 let mut array = Array::new();
                 for capability in capabilities {
@@ -331,12 +411,12 @@ fn sync_models(doc: &mut DocumentMut, models: &[ByokModel]) -> ByokResult<()> {
                 entry.remove("capabilities");
             }
         }
-        sync_reasoning_tiers(entry, model);
+        sync_reasoning_tiers(entry, assignment.model, assignment.protocol);
     }
     Ok(())
 }
 
-fn remove_ocg_models(doc: &mut DocumentMut) {
+fn remove_managed_models(doc: &mut DocumentMut) {
     let Some(table) = doc.get_mut("models").and_then(Item::as_table_mut) else {
         return;
     };
@@ -344,7 +424,7 @@ fn remove_ocg_models(doc: &mut DocumentMut) {
         .iter()
         .filter_map(|(key, item)| {
             let provider = item.as_table()?.get("provider")?.as_str()?;
-            (provider == PROVIDER_ID).then_some(key.to_string())
+            super::is_managed_provider(provider).then_some(key.to_string())
         })
         .collect();
     for key in keys {
@@ -430,20 +510,20 @@ fn preserved_kimi_support_wire(spelling: &str) -> Option<&str> {
 }
 
 fn declares_thinking(model: &ByokModel) -> bool {
-    if model.metadata.reasoning == Some(false) {
-        return false;
-    }
-    if model.metadata.reasoning == Some(true) {
-        return true;
-    }
-    model
-        .metadata
-        .reasoning_efforts
-        .as_ref()
-        .is_some_and(|efforts| efforts.values().any(|spelling| !spelling.trim().is_empty()))
+    model.metadata.reasoning == Some(true)
 }
 
-fn sync_reasoning_tiers(entry: &mut Table, model: &ByokModel) {
+fn sync_reasoning_tiers(entry: &mut Table, model: &ByokModel, protocol: PublishedUpstreamProtocol) {
+    entry.remove("default_effort");
+    entry.remove("adaptive_thinking");
+    // Messages thinking budgets and adaptive controls are a different API.
+    // Chat wire spellings stay on Chat and Responses, where the gateway copies
+    // the same effort string. An omitted menu is support without choices.
+    if protocol == PublishedUpstreamProtocol::Messages {
+        entry.remove("support_efforts");
+        entry.remove("off_effort");
+        return;
+    }
     let tiers = kimi_tiers(model);
     if tiers.support.is_empty() {
         entry.remove("support_efforts");
@@ -460,14 +540,19 @@ fn sync_reasoning_tiers(entry: &mut Table, model: &ByokModel) {
             entry.remove("off_effort");
         }
     }
-    entry.remove("default_effort");
 }
 
 fn owned_from_doc(doc: &DocumentMut) -> Value {
-    let provider = doc
-        .get("providers")
-        .and_then(|item| item.get(PROVIDER_ID))
-        .map(toml_item_json);
+    let mut providers = serde_json::Map::new();
+    for id in super::MANAGED_PROVIDER_IDS {
+        let value = doc
+            .get("providers")
+            .and_then(|item| item.get(id))
+            .filter(|item| !item.is_none())
+            .map(toml_item_json)
+            .unwrap_or(Value::Null);
+        providers.insert((*id).to_string(), value);
+    }
     let mut models = serde_json::Map::new();
     if let Some(table) = doc.get("models").and_then(Item::as_table_like) {
         for (key, item) in table.iter() {
@@ -475,14 +560,14 @@ fn owned_from_doc(doc: &DocumentMut) -> Value {
                 .as_table_like()
                 .and_then(|entry| entry.get("provider"))
                 .and_then(Item::as_str);
-            if provider != Some(PROVIDER_ID) {
+            if !provider.is_some_and(super::is_managed_provider) {
                 continue;
             }
             models.insert(key.to_string(), toml_item_json(item));
         }
     }
     json!({
-        "provider": provider,
+        "providers": Value::Object(providers),
         "models": models,
     })
 }

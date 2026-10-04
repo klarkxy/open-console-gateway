@@ -1,5 +1,6 @@
 //! Fixed downstream BYOK clients. Hosts own filesystem effects; V4 owns ordinary Keys.
 use crate::model_metadata::ModelMetadata;
+pub use crate::model_metadata::{PublishedModelProtocolProfile, PublishedUpstreamProtocol};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
@@ -100,6 +101,8 @@ impl ByokInspection {
 pub struct ByokModel {
     pub id: String,
     pub metadata: ModelMetadata,
+    /// Saved upstream profile. Required for configure; Chat is not assumed.
+    pub protocols: PublishedModelProtocolProfile,
 }
 
 /// A secret never participates in wire serialization or readable Debug output.

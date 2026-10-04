@@ -14,20 +14,26 @@
 
 | 客户端 | 源码基线 | OCG 管理的配置 |
 | --- | --- | --- |
-| Codex | [0.153.4 schema](https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/core/config.schema.json) | `model_providers.ocg`、Responses 协议和私有 Codex `ModelsResponse` 目录 |
-| Kimi Code | [配置服务](https://github.com/MoonshotAI/kimi-code/blob/4fbe065442179435c43d3c3dc8d11bb408b3fd30/packages/agent-core-v2/src/app/config/configService.ts) | TOML `providers.ocg` 和 `models."ocg/<公开名称>"`；请求模型仍为精确公开名称 |
-| MiniMax Code | [本地供应商写入](https://github.com/MiniMax-AI/minimax-code/blob/2aed5ca703c3359dd028af51e6c4cbc6a5e15c46/packages/config/src/local-model-provider-write.ts) | YAML `custom_provider.ocg`、Chat Completions 和兼容文件锁 |
-| ZCode | [文件 codec](https://github.com/zai-org/ZCode/blob/29628c9acdb81b703bbd4080c207a0e7ce5e276e/packages/provider-node/src/provider-config-file-codec.ts) | `schemaVersion: 1`、Personal Provider 与稀疏模型规则、兼容的所有者标记锁 |
+| Codex | [0.153.4 schema](https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/core/config.schema.json) | `model_providers.ocg`、固定 Responses 传输和私有 Codex `ModelsResponse` 目录 |
+| Kimi Code | [配置服务](https://github.com/MoonshotAI/kimi-code/blob/4fbe065442179435c43d3c3dc8d11bb408b3fd30/packages/agent-core-v2/src/app/config/configService.ts) | 分组 TOML 供应商 `ocg-chat`、`ocg-responses`、`ocg-messages`；公开模型 id 仍为 `ocg/<公开名称>` |
+| MiniMax Code | [本地供应商写入](https://github.com/MiniMax-AI/minimax-code/blob/2aed5ca703c3359dd028af51e6c4cbc6a5e15c46/packages/config/src/local-model-provider-write.ts) | 分组 YAML `custom_provider.ocg-chat`、`ocg-responses`、`ocg-messages`，以及兼容文件锁 |
+| ZCode | [文件 codec](https://github.com/zai-org/ZCode/blob/29628c9acdb81b703bbd4080c207a0e7ce5e276e/packages/provider-node/src/provider-config-file-codec.ts) | ZCode 文件 `schemaVersion` 1、分组供应商规则 `ocg-chat`、`ocg-responses`、`ocg-messages`、稀疏模型规则、兼容的所有者标记锁 |
 
 Codex 的模型目录属于全局选择，配置时启用 OCG 目录。Host 在既有文件锁与指纹校验范围内，保留仍在发布列表中的 OCG 默认模型，否则选择导出的第一个模型。不要仅因旧 schema 包含字段就使用嵌套 `profiles` 或根 `profile`：当前[配置说明](https://learn.chatgpt.com/docs/config-file/config-advanced)采用独立 Profile 文件，当前 App Server 也拒绝这些旧字段。
 
 0.153.4 的 `ModelsResponse` 反序列化要求每个条目提供 `base_instructions` 或 `model_messages.instructions_template`；仅满足 `ModelInfo` 字段结构并不足够。使用固定保存于 `resources/codex-byok/` 的未修改官方通用兜底指令，来源为 [`codex-rs/models-manager/prompt.md`](https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/models-manager/prompt.md)。原生 CLI 与桌面包均需保留 Apache 许可证和来源说明。升级时应验证完整目录加载器，包括这一外层反序列化要求。
 
-MiniMax 的默认选择采用 `custom_provider:ocg/<公开名称>`。公开名称内部的斜线必须保留：[模型名称解析器](https://github.com/MiniMax-AI/minimax-code/blob/2aed5ca703c3359dd028af51e6c4cbc6a5e15c46/packages/local-runtime-v2/src/service/model-system/resolution/model-key.ts)只按第一条斜线拆分，[供应商前缀](https://github.com/MiniMax-AI/minimax-code/blob/2aed5ca703c3359dd028af51e6c4cbc6a5e15c46/packages/config/src/model-availability.ts)为 `custom_provider:`。
+Kimi Code、MiniMax Code 和 ZCode 按已发布的首选协议把模型分到 `ocg-chat`、`ocg-responses` 和 `ocg-messages`。每个实际使用的协议有一条供应商记录，并使用同一把 Gateway Key。Messages 使用去掉末尾 `/v1` 之后的网关根地址，部署子路径保留。Chat 与 Responses 保留 `/v1` 基址。客户端能够使用该协议时，写入的就是已发布首选。Responses 不是回退协议；配置没有列出 Chat 时也不会补上 Chat。旧的 `ocg` 供应商对象记在所有权 receipt 中，不再使用时移除。与非 OCG 所有的 `ocg` 名称冲突仍然拒绝。Kimi 的公开模型 id 仍是 `ocg/<公开名称>`，每条模型的 provider 字段指向分组后的供应商。Kimi 的供应商类型是 `openai`、`openai_responses` 和 `anthropic`。ZCode 的 api 类型是 `openai-chat-completions`、`openai-responses` 和 `anthropic-messages`。配置选择 Responses 时，适配器会写入 Responses 分组。已安装的 ZCode 3.14.3 在公开 ASAR `out/host/index.js` 中列出 `openai-chat-completions`、`openai-responses` 和 `anthropic-messages`，请求解析把 `openai-responses` 经 `openai` 对应到 `/responses`。这覆盖已安装的请求实现，不覆盖完整桌面界面运行，也不覆盖原生配置解析运行。
+
+Chat Completions 或 Responses 的客户端菜单可以原样携带已发布的 `reasoningEfforts` 拼写。这些拼写保持精确的分类协议值，不会变成 Messages 的思考预算或自适应强度。某个 Responses 供应商是否接受历史 Chat 拼写，仍以该后端合约为准。原生 Messages 推理支持可以为 true。OCG 省去 Messages 配置菜单，也不会把 `reasoning: true` 变成预算。Kimi、MiniMax 及同类 SDK 可以套用自己的预设或默认控件。省去的菜单并不描述该控件，OCG 也不承诺供应商接受它。同一格式上，原生控件原样通过。转换无法保留的跨格式控件会在发出 HTTP 之前拒绝，原生控制参数是否受理由上游后端决定。ZCode 只在 Chat 分组写入 `reasoningLevel`。DSH 按模型选择 API；这三个客户端按协议选择一个供应商分组。Codex 仍使用 `model_providers.ocg` 和它的 Responses 传输。这个客户端选择不改变 Gateway 按次尝试的上游协议选择。
+
+这些客户端负责会话的序列化。供应商、API 或模型身份变化时，它们的 SDK 可以把原生不透明字段改成纯文本，也可以丢掉该字段。OCG 无法恢复一个从未到达的字段，也无法发现这次丢弃。切换协议分组或改写已保存的配置不会迁移旧会话。身份变化时，需要新开会话，或者发送已经解析好的历史。带标记的历史确实到达时，同一条已配置路由就是这项保证的边界：上游模型、端点或凭据版本的直接变化会在发出 HTTP 之前拒绝。DSH 插件是在基础适配器之前做严格预检的客户端。
+
+MiniMax 的默认选择采用 `custom_provider:<分组>/<公开名称>`，`<分组>` 是路由到的供应商（`ocg-chat`、`ocg-responses` 或 `ocg-messages`）。匹配时先取最长的受管理 id，因此 `ocg-chat` 不会被读成旧的 `ocg`。公开名称内部的斜线必须保留：[模型名称解析器](https://github.com/MiniMax-AI/minimax-code/blob/2aed5ca703c3359dd028af51e6c4cbc6a5e15c46/packages/local-runtime-v2/src/service/model-system/resolution/model-key.ts)只按第一条斜线拆分，[供应商前缀](https://github.com/MiniMax-AI/minimax-code/blob/2aed5ca703c3359dd028af51e6c4cbc6a5e15c46/packages/config/src/model-availability.ts)为 `custom_provider:`。
 
 ## 所有权与恢复
 
-适配器管理各格式对应的供应商和模型字段，并记录最后写入的值。保留其他内容，拒绝接管同名的非 OCG 条目，不得删除模型却保留指向它的默认选择。只有默认值仍匹配 OCG 写入的选择时，才进行还原。
+适配器管理各格式对应的供应商和模型字段，并记录最后写入的值。保留其他内容，拒绝接管同名的非 OCG 条目，不得删除模型却保留指向它的默认选择。手工 ZCode 规则留在原处。它与即将写入的受管规则使用同一个受管供应商和模型，或者仍指向这次写入会移除的受管供应商时，OCG 报告冲突。受管模型规则上 OCG 不拥有的字段予以保留。既有的 CAS 检查和所有权冲突保护仍然保留。只有默认值仍匹配 OCG 写入的选择时，才进行还原。
 
 Host 在自身数据目录保存私有的原始备份、所有权记录和操作日志。恢复前先验证所有当前文件状态与备份哈希，支持 Codex 两份文件处于不同写入阶段的情况。文件与管理记录一起恢复，移除后结束本次所有权。含凭据的文件收紧权限，诊断响应不得携带配置片段或 Key。目标、目录、管理记录和备份路径中的符号链接或重解析点不得使操作越过已检查的路径。
 
