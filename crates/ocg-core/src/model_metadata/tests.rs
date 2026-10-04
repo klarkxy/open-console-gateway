@@ -277,3 +277,57 @@ fn modelsdev_fills_only_fields_the_route_never_learned() {
     assert_eq!(source, "unknown");
     assert!(!filled);
 }
+
+#[test]
+fn parsed_offerings_keep_operator_replacement_and_empty_upstream_tiers() {
+    let destination = route_fixture();
+    let model = &destination.catalog[0];
+    let catalog = crate::modelsdev::parse_api(
+        br#"{
+        "lab": {"models": {"upstream": {
+            "limit": {"context": 64000},
+            "modalities": {"input": ["text", "image"]},
+            "reasoning": true,
+            "reasoning_options": [{"type": "effort", "values": ["low", "high"]}]
+        }}}
+    }"#,
+    );
+
+    let (metadata, source, filled) = effective_with_catalog(&[], &catalog, &destination, model);
+    assert_eq!(source, "modelsdev");
+    assert!(filled);
+    assert_eq!(
+        metadata
+            .reasoning_efforts
+            .as_ref()
+            .unwrap()
+            .get("high")
+            .map(String::as_str),
+        Some("high")
+    );
+
+    let mut records = vec![];
+    record_for(&mut records, &destination, model).observed = Some(ModelMetadata {
+        reasoning: Some(true),
+        reasoning_efforts: Some(BTreeMap::new()),
+        ..Default::default()
+    });
+    let (metadata, source, filled) =
+        effective_with_catalog(&records, &catalog, &destination, model);
+    assert_eq!(source, "upstream");
+    assert!(filled);
+    assert_eq!(metadata.context_window, Some(64000));
+    assert_eq!(metadata.reasoning_efforts, Some(BTreeMap::new()));
+
+    record_for(&mut records, &destination, model).declared = Some(ModelMetadata {
+        context_window: Some(16000),
+        ..Default::default()
+    });
+    let (metadata, source, filled) =
+        effective_with_catalog(&records, &catalog, &destination, model);
+    assert_eq!(source, "operator");
+    assert!(!filled);
+    assert_eq!(metadata.context_window, Some(16000));
+    assert_eq!(metadata.reasoning_efforts, None);
+    assert_eq!(metadata.input_modalities, None);
+}

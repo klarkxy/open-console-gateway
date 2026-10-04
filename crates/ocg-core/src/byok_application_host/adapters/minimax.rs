@@ -404,6 +404,23 @@ fn model_value(model: &ByokModel) -> serde_yaml_ng::Value {
     if model.metadata.reasoning == Some(true) {
         mapping.insert(yaml_key("reasoning"), serde_yaml_ng::Value::Bool(true));
     }
+    let wires = minimax_effort_options(model);
+    if !wires.is_empty() {
+        let mut thinking = Mapping::new();
+        thinking.insert(
+            yaml_key("effortOptions"),
+            serde_yaml_ng::Value::Sequence(
+                wires
+                    .into_iter()
+                    .map(serde_yaml_ng::Value::String)
+                    .collect(),
+            ),
+        );
+        mapping.insert(
+            yaml_key("thinking"),
+            serde_yaml_ng::Value::Mapping(thinking),
+        );
+    }
     if has_image(&model.metadata) {
         mapping.insert(yaml_key("attachment"), serde_yaml_ng::Value::Bool(true));
         let mut capabilities = Mapping::new();
@@ -414,6 +431,46 @@ fn model_value(model: &ByokModel) -> serde_yaml_ng::Value {
         );
     }
     serde_yaml_ng::Value::Mapping(mapping)
+}
+
+/// Distinct wire spellings the pinned resolver can send unchanged, in
+/// selector-key order. Exact `none` stays in the menu and `thinking_config`
+/// stays absent: `mode: switchable` without `default_value` makes the catalog
+/// variant thinking-off and drops the selected effort. Any other
+/// case-insensitive `none` or `off` spelling is rewritten to API `none`, so it
+/// is omitted. Other spellings stay exact. Absent and empty maps, and explicit
+/// `reasoning: false`, omit the menu. No default is invented.
+fn minimax_effort_options(model: &ByokModel) -> Vec<String> {
+    if model.metadata.reasoning == Some(false) {
+        return Vec::new();
+    }
+    let Some(efforts) = model.metadata.reasoning_efforts.as_ref() else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut wires = Vec::new();
+    for spelling in efforts.values() {
+        let Some(wire) = preserved_minimax_wire(spelling) else {
+            continue;
+        };
+        if !seen.insert(wire.clone()) {
+            continue;
+        }
+        wires.push(wire);
+    }
+    wires
+}
+
+fn preserved_minimax_wire(spelling: &str) -> Option<String> {
+    let trimmed = spelling.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "off" => None,
+        "none" => (trimmed == "none").then(|| "none".to_string()),
+        _ => Some(spelling.to_string()),
+    }
 }
 
 const PREFERENCE_KEYS: [&str; 2] = ["defaultModelThinking", "defaultModelContextWindow"];

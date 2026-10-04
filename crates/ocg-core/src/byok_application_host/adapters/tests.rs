@@ -2045,3 +2045,567 @@ fn adapters_export_empty_catalogs_without_placeholder_models() {
             .all(|rule| rule["providerId"] != "ocg")
     );
 }
+
+fn reasoning_model(
+    id: &str,
+    reasoning: Option<bool>,
+    efforts: Option<&[(&str, &str)]>,
+) -> ByokModel {
+    let mut row = model(id);
+    row.metadata.reasoning = reasoning;
+    row.metadata.reasoning_efforts = efforts.map(|pairs| {
+        pairs
+            .iter()
+            .map(|(level, wire)| ((*level).to_string(), (*wire).to_string()))
+            .collect()
+    });
+    row
+}
+
+fn toml_strings(item: Option<&toml_edit::Item>) -> Option<Vec<String>> {
+    item.map(|item| {
+        item.as_array()
+            .expect("string array")
+            .iter()
+            .map(|value| value.as_str().expect("string").to_string())
+            .collect()
+    })
+}
+
+fn expect_strings(values: Option<&[&str]>) -> Option<Vec<String>> {
+    values.map(|items| items.iter().map(|item| (*item).to_string()).collect())
+}
+
+fn assert_kimi_reasoning(
+    table: &toml_edit::Table,
+    support: Option<&[&str]>,
+    off: Option<&str>,
+    thinking: bool,
+) {
+    assert_eq!(
+        toml_strings(table.get("support_efforts")),
+        expect_strings(support)
+    );
+    assert_eq!(
+        table.get("off_effort").and_then(toml_edit::Item::as_str),
+        off
+    );
+    assert!(table.get("default_effort").is_none());
+    assert_eq!(
+        toml_strings(table.get("capabilities")),
+        thinking.then(|| vec!["thinking".to_string()])
+    );
+}
+
+fn kimi_table<'a>(doc: &'a toml_edit::DocumentMut, id: &str) -> &'a toml_edit::Table {
+    let alias = format!("ocg/{id}");
+    doc.get("models")
+        .and_then(|item| item.get(alias.as_str()))
+        .and_then(toml_edit::Item::as_table)
+        .unwrap_or_else(|| panic!("missing Kimi model {id}"))
+}
+
+fn yaml_field<'a>(value: &'a serde_yaml_ng::Value, key: &str) -> Option<&'a serde_yaml_ng::Value> {
+    value
+        .as_mapping()
+        .and_then(|mapping| mapping.get(serde_yaml_ng::Value::String(key.into())))
+}
+
+fn yaml_strings(value: &serde_yaml_ng::Value) -> Vec<String> {
+    value
+        .as_sequence()
+        .expect("sequence")
+        .iter()
+        .map(|item| item.as_str().expect("string").to_string())
+        .collect()
+}
+
+fn assert_minimax_reasoning(
+    model_value: &serde_yaml_ng::Value,
+    options: Option<&[&str]>,
+    reasoning: bool,
+) {
+    assert_eq!(
+        yaml_field(model_value, "reasoning").and_then(serde_yaml_ng::Value::as_bool),
+        reasoning.then_some(true)
+    );
+    assert!(yaml_field(model_value, "thinking_config").is_none());
+    assert!(yaml_field(model_value, "defaultVariant").is_none());
+    match options {
+        None => assert!(yaml_field(model_value, "thinking").is_none()),
+        Some(expected) => {
+            let thinking = yaml_field(model_value, "thinking").expect("thinking menu");
+            assert_eq!(
+                yaml_strings(yaml_field(thinking, "effortOptions").expect("effort options")),
+                expected
+                    .iter()
+                    .map(|item| (*item).to_string())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(thinking.as_mapping().expect("thinking mapping").len(), 1);
+        }
+    }
+}
+
+fn minimax_model<'a>(root: &'a serde_yaml_ng::Value, id: &str) -> &'a serde_yaml_ng::Value {
+    yaml_field(
+        yaml_field(yaml_field(root, "custom_provider").unwrap(), "ocg").unwrap(),
+        "models",
+    )
+    .unwrap()
+    .as_mapping()
+    .unwrap()
+    .get(serde_yaml_ng::Value::String(id.into()))
+    .unwrap_or_else(|| panic!("missing MiniMax model {id}"))
+}
+
+#[test]
+fn kimi_and_minimax_export_declared_reasoning_choices() {
+    let mapped = &[
+        ("low", "low"),
+        ("high", "high"),
+        ("xhigh", "max"),
+        ("max", "max"),
+        ("off", "none"),
+    ];
+    let literal_off = &[("high", "high"), ("off", "off")];
+    let levels_only = &[("low", "low"), ("high", "high")];
+    let aliases = &[
+        ("high", "high"),
+        ("low", "OFF"),
+        ("max", "None"),
+        ("minimal", "none"),
+        ("xhigh", " none "),
+    ];
+    let models = vec![
+        reasoning_model("reasoner", Some(true), Some(mapped)),
+        reasoning_model("literal-off", Some(true), Some(literal_off)),
+        reasoning_model("aliases", Some(true), Some(aliases)),
+        reasoning_model("levels-only", None, Some(levels_only)),
+        reasoning_model("bare", Some(true), None),
+        reasoning_model("bare-empty", Some(true), Some(&[] as &[(&str, &str)])),
+        reasoning_model("missing", None, None),
+        reasoning_model("empty", None, Some(&[] as &[(&str, &str)])),
+        reasoning_model("disabled", Some(false), Some(mapped)),
+        reasoning_model("retired", Some(true), Some(mapped)),
+    ];
+    let shaped = &[
+        ("high", "MAX_CUSTOM"),
+        ("low", "max_custom"),
+        ("xhigh", "on"),
+        ("max", "off"),
+        ("minimal", "wire_custom"),
+        ("off", "CUSTOM_OFF"),
+    ];
+    let mut kimi_models = models.clone();
+    kimi_models.push(reasoning_model("shaped", Some(true), Some(shaped)));
+
+    let kimi_target = PathBuf::from("/tmp/ocg-kimi/reasoning.toml");
+    let kimi_original = "\
+keep = \"yes\"\n\
+\n\
+[models.moonshot]\n\
+provider = \"kimi\"\n\
+model = \"moonshot-v1\"\n\
+note = \"user\"\n";
+    let kimi = KimiAdapter
+        .configure(
+            &kimi_target,
+            None,
+            Some(kimi_original.as_bytes()),
+            None,
+            None,
+            input(&kimi_models, None),
+        )
+        .unwrap();
+    let kimi_bytes = role_bytes(&kimi, FileRole::Target).unwrap();
+    let kimi_doc = toml(kimi_bytes.as_slice());
+    assert_kimi_reasoning(
+        kimi_table(&kimi_doc, "reasoner"),
+        Some(&["high", "low", "max"][..]),
+        Some("none"),
+        true,
+    );
+    assert_kimi_reasoning(
+        kimi_table(&kimi_doc, "literal-off"),
+        Some(&["high"][..]),
+        Some("off"),
+        true,
+    );
+    assert_kimi_reasoning(
+        kimi_table(&kimi_doc, "aliases"),
+        Some(&["high", "none"][..]),
+        None,
+        true,
+    );
+    assert_kimi_reasoning(
+        kimi_table(&kimi_doc, "shaped"),
+        Some(&["max_custom", "wire_custom"][..]),
+        Some("CUSTOM_OFF"),
+        true,
+    );
+    assert_kimi_reasoning(
+        kimi_table(&kimi_doc, "levels-only"),
+        Some(&["high", "low"][..]),
+        None,
+        true,
+    );
+    for id in ["bare", "bare-empty"] {
+        assert_kimi_reasoning(kimi_table(&kimi_doc, id), None, None, true);
+    }
+    for id in ["missing", "empty", "disabled"] {
+        assert_kimi_reasoning(kimi_table(&kimi_doc, id), None, None, false);
+    }
+    assert_eq!(
+        kimi_doc
+            .get("models")
+            .and_then(|item| item.get("moonshot"))
+            .and_then(|item| item.get("note"))
+            .and_then(toml_edit::Item::as_str),
+        Some("user")
+    );
+    assert_eq!(
+        kimi_doc.get("keep").and_then(toml_edit::Item::as_str),
+        Some("yes")
+    );
+
+    let kimi_receipt = carry(&kimi);
+    let mut tier_edit = kimi_doc.clone();
+    let mut replacement = toml_edit::Array::new();
+    replacement.push("low");
+    tier_edit["models"]["ocg/reasoner"]["support_efforts"] =
+        toml_edit::Item::Value(replacement.into());
+    let tier_edit = tier_edit.to_string();
+    assert_conflict(KimiAdapter.configure(
+        &kimi_target,
+        None,
+        Some(tier_edit.as_bytes()),
+        None,
+        Some(&kimi_receipt),
+        input(&kimi_models, None),
+    ));
+    assert_conflict(KimiAdapter.remove(
+        &kimi_target,
+        None,
+        Some(tier_edit.as_bytes()),
+        None,
+        &kimi_receipt,
+    ));
+
+    let mut unrelated = kimi_doc.clone();
+    unrelated["models"]["moonshot"]["model"] = toml_edit::value("moonshot-v2");
+    let unrelated = unrelated.to_string();
+    let preserved = KimiAdapter
+        .configure(
+            &kimi_target,
+            None,
+            Some(unrelated.as_bytes()),
+            None,
+            Some(&kimi_receipt),
+            input(&kimi_models, None),
+        )
+        .unwrap();
+    let preserved_doc = toml(role_bytes(&preserved, FileRole::Target).unwrap().as_slice());
+    assert_eq!(
+        preserved_doc
+            .get("models")
+            .and_then(|item| item.get("moonshot"))
+            .and_then(|item| item.get("model"))
+            .and_then(toml_edit::Item::as_str),
+        Some("moonshot-v2")
+    );
+    assert_kimi_reasoning(
+        kimi_table(&preserved_doc, "reasoner"),
+        Some(&["high", "low", "max"][..]),
+        Some("none"),
+        true,
+    );
+
+    let cleared = vec![
+        reasoning_model("reasoner", Some(true), None),
+        reasoning_model("literal-off", Some(false), Some(mapped)),
+        reasoning_model("aliases", Some(true), Some(aliases)),
+        reasoning_model("levels-only", None, Some(levels_only)),
+        reasoning_model("bare", Some(true), None),
+        reasoning_model("bare-empty", Some(true), Some(&[] as &[(&str, &str)])),
+        reasoning_model("missing", None, None),
+        reasoning_model("empty", None, Some(&[] as &[(&str, &str)])),
+        reasoning_model("disabled", Some(false), Some(mapped)),
+    ];
+    let shaped_kept = &[("low", "wire_custom")];
+    let mut kimi_cleared = cleared.clone();
+    kimi_cleared.push(reasoning_model("shaped", Some(true), Some(shaped_kept)));
+    let reconfigured = KimiAdapter
+        .configure(
+            &kimi_target,
+            None,
+            Some(kimi_bytes.as_slice()),
+            None,
+            Some(&kimi_receipt),
+            input(&kimi_cleared, None),
+        )
+        .unwrap();
+    let reconfigured_doc = toml(
+        role_bytes(&reconfigured, FileRole::Target)
+            .unwrap()
+            .as_slice(),
+    );
+    assert_kimi_reasoning(kimi_table(&reconfigured_doc, "reasoner"), None, None, true);
+    assert_kimi_reasoning(
+        kimi_table(&reconfigured_doc, "literal-off"),
+        None,
+        None,
+        false,
+    );
+    assert_kimi_reasoning(
+        kimi_table(&reconfigured_doc, "levels-only"),
+        Some(&["high", "low"][..]),
+        None,
+        true,
+    );
+    assert_kimi_reasoning(
+        kimi_table(&reconfigured_doc, "aliases"),
+        Some(&["high", "none"][..]),
+        None,
+        true,
+    );
+    assert_kimi_reasoning(
+        kimi_table(&reconfigured_doc, "shaped"),
+        Some(&["wire_custom"][..]),
+        None,
+        true,
+    );
+    assert!(
+        reconfigured_doc
+            .get("models")
+            .and_then(|item| item.get("ocg/retired"))
+            .is_none()
+    );
+    assert_eq!(
+        reconfigured_doc
+            .get("models")
+            .and_then(|item| item.get("moonshot"))
+            .and_then(|item| item.get("note"))
+            .and_then(toml_edit::Item::as_str),
+        Some("user")
+    );
+
+    let removed = KimiAdapter
+        .remove(
+            &kimi_target,
+            None,
+            Some(kimi_bytes.as_slice()),
+            None,
+            &kimi_receipt,
+        )
+        .unwrap();
+    let removed_doc = toml(role_bytes(&removed, FileRole::Target).unwrap().as_slice());
+    assert!(
+        removed_doc
+            .get("models")
+            .and_then(toml_edit::Item::as_table)
+            .unwrap()
+            .get("ocg/reasoner")
+            .is_none()
+    );
+    assert_eq!(
+        removed_doc
+            .get("models")
+            .and_then(|item| item.get("moonshot"))
+            .and_then(|item| item.get("model"))
+            .and_then(toml_edit::Item::as_str),
+        Some("moonshot-v1")
+    );
+    assert_eq!(
+        removed_doc.get("keep").and_then(toml_edit::Item::as_str),
+        Some("yes")
+    );
+
+    let mini_target = PathBuf::from("/tmp/ocg-minimax/reasoning.yaml");
+    let mini_original = r#"logLevel: debug
+extra: stay
+defaultModel: provider:minimax/kept
+defaultModelThinking:
+  effort: user-effort
+defaultModelContextWindow: 4096
+provider:
+  minimax:
+    name: official
+"#;
+    let mini = MinimaxAdapter
+        .configure(
+            &mini_target,
+            None,
+            Some(mini_original.as_bytes()),
+            None,
+            None,
+            input(&models, None),
+        )
+        .unwrap();
+    let mini_bytes = role_bytes(&mini, FileRole::Target).unwrap();
+    let mini_root: serde_yaml_ng::Value = serde_yaml_ng::from_slice(mini_bytes.as_slice()).unwrap();
+    assert_minimax_reasoning(
+        minimax_model(&mini_root, "reasoner"),
+        Some(&["high", "low", "max", "none"][..]),
+        true,
+    );
+    assert_minimax_reasoning(
+        minimax_model(&mini_root, "literal-off"),
+        Some(&["high"][..]),
+        true,
+    );
+    assert_minimax_reasoning(
+        minimax_model(&mini_root, "aliases"),
+        Some(&["high", "none"][..]),
+        true,
+    );
+    assert_minimax_reasoning(
+        minimax_model(&mini_root, "levels-only"),
+        Some(&["high", "low"][..]),
+        false,
+    );
+    for id in ["bare", "bare-empty", "missing", "empty", "disabled"] {
+        assert_minimax_reasoning(minimax_model(&mini_root, id), None, id.starts_with("bare"));
+    }
+    assert_eq!(mini_root["logLevel"].as_str(), Some("debug"));
+    assert_eq!(mini_root["extra"].as_str(), Some("stay"));
+    assert_minimax_preferences(&mini_root);
+    assert_eq!(
+        mini_root["provider"]["minimax"]["name"].as_str(),
+        Some("official")
+    );
+
+    let mini_receipt = carry(&mini);
+    let mut tier_edit = mini_root.clone();
+    tier_edit["custom_provider"]["ocg"]["models"]["reasoner"]["thinking"]["effortOptions"] =
+        serde_yaml_ng::Value::Sequence(vec![serde_yaml_ng::Value::String("low".into())]);
+    let tier_edit = serde_yaml_ng::to_string(&tier_edit).unwrap();
+    assert_conflict(MinimaxAdapter.configure(
+        &mini_target,
+        None,
+        Some(tier_edit.as_bytes()),
+        None,
+        Some(&mini_receipt),
+        input(&models, None),
+    ));
+    assert_conflict(MinimaxAdapter.remove(
+        &mini_target,
+        None,
+        Some(tier_edit.as_bytes()),
+        None,
+        &mini_receipt,
+    ));
+
+    let logged = yaml_text(mini_bytes.as_slice()).replace("logLevel: debug", "logLevel: info");
+    let preserved = MinimaxAdapter
+        .configure(
+            &mini_target,
+            None,
+            Some(logged.as_bytes()),
+            None,
+            Some(&mini_receipt),
+            input(&models, None),
+        )
+        .unwrap();
+    let preserved_root: serde_yaml_ng::Value =
+        serde_yaml_ng::from_slice(role_bytes(&preserved, FileRole::Target).unwrap().as_slice())
+            .unwrap();
+    assert_eq!(preserved_root["logLevel"].as_str(), Some("info"));
+    assert_eq!(
+        preserved_root["provider"]["minimax"]["name"].as_str(),
+        Some("official")
+    );
+    assert_minimax_reasoning(
+        minimax_model(&preserved_root, "reasoner"),
+        Some(&["high", "low", "max", "none"][..]),
+        true,
+    );
+
+    let reconfigured = MinimaxAdapter
+        .configure(
+            &mini_target,
+            None,
+            Some(mini_bytes.as_slice()),
+            None,
+            Some(&mini_receipt),
+            input(&cleared, None),
+        )
+        .unwrap();
+    let reconfigured_root: serde_yaml_ng::Value = serde_yaml_ng::from_slice(
+        role_bytes(&reconfigured, FileRole::Target)
+            .unwrap()
+            .as_slice(),
+    )
+    .unwrap();
+    assert_minimax_reasoning(minimax_model(&reconfigured_root, "reasoner"), None, true);
+    assert_minimax_reasoning(
+        minimax_model(&reconfigured_root, "literal-off"),
+        None,
+        false,
+    );
+    assert_minimax_reasoning(
+        minimax_model(&reconfigured_root, "aliases"),
+        Some(&["high", "none"][..]),
+        true,
+    );
+    assert_minimax_reasoning(
+        minimax_model(&reconfigured_root, "levels-only"),
+        Some(&["high", "low"][..]),
+        false,
+    );
+    assert!(
+        yaml_field(
+            yaml_field(
+                yaml_field(&reconfigured_root, "custom_provider").unwrap(),
+                "ocg",
+            )
+            .unwrap(),
+            "models",
+        )
+        .unwrap()
+        .as_mapping()
+        .unwrap()
+        .get(serde_yaml_ng::Value::String("retired".into()))
+        .is_none()
+    );
+    assert_eq!(reconfigured_root["extra"].as_str(), Some("stay"));
+    assert_minimax_preferences(&reconfigured_root);
+    assert_eq!(
+        reconfigured_root["provider"]["minimax"]["name"].as_str(),
+        Some("official")
+    );
+
+    let removed = MinimaxAdapter
+        .remove(
+            &mini_target,
+            None,
+            Some(mini_bytes.as_slice()),
+            None,
+            &mini_receipt,
+        )
+        .unwrap();
+    let removed_root: serde_yaml_ng::Value =
+        serde_yaml_ng::from_slice(role_bytes(&removed, FileRole::Target).unwrap().as_slice())
+            .unwrap();
+    assert!(
+        yaml_field(&removed_root, "custom_provider")
+            .and_then(|custom| yaml_field(custom, "ocg"))
+            .is_none()
+    );
+    assert_eq!(removed_root["logLevel"].as_str(), Some("debug"));
+    assert_eq!(removed_root["extra"].as_str(), Some("stay"));
+    assert_minimax_preferences(&removed_root);
+    assert_eq!(
+        removed_root["provider"]["minimax"]["name"].as_str(),
+        Some("official")
+    );
+}
+
+fn assert_minimax_preferences(root: &serde_yaml_ng::Value) {
+    assert_eq!(root["defaultModel"].as_str(), Some("provider:minimax/kept"));
+    assert_eq!(
+        root["defaultModelThinking"]["effort"].as_str(),
+        Some("user-effort")
+    );
+    assert_eq!(root["defaultModelContextWindow"].as_u64(), Some(4096));
+}

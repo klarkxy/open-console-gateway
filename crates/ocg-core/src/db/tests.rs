@@ -17862,7 +17862,7 @@ fn goat_declared_window_stays_on_the_receiving_key() {
         routed.cooldown_ends_at_for(UpstreamChannel::Go, before),
         Some(later_week)
     );
-    assert!(raw.cooldown_until.unwrap() < later_week);
+    assert!(raw.cooldown_week_until.unwrap() < later_week);
 
     db.create_account(&goat_account("goat-b")).unwrap();
     let identity_id: String = db

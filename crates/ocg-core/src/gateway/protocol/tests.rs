@@ -594,7 +594,7 @@ fn responses_no_reasoning_maps_to_chat_thinking_disabled() {
     assert_eq!(plan.upstream, ApiFormat::ChatCompletions);
     let body: Value = serde_json::from_slice(&plan.body).unwrap();
     assert_eq!(body["thinking"]["type"], "disabled");
-    assert!(body.get("reasoning_effort").is_none());
+    assert_eq!(body["reasoning_effort"], "none");
 }
 
 #[test]

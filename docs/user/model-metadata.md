@@ -16,27 +16,49 @@ For catalogs without a known context window, the plugin retains bounded internal
 
 ## Discovery And Explicit Declarations
 
-This version captures explicitly supplied metadata during Go/GOAT catalog refresh and saved configurable HTTP destination refresh. It does not infer specifications from a model's name. Other adapter catalogs, and upstreams that return only IDs, need an operator declaration until their metadata ingestion is implemented. Refresh the provider directory to collect new metadata; merely opening DSH does not issue provider-directory requests.
+This version captures explicitly supplied metadata during Go/GOAT catalog refresh and saved configurable HTTP destination refresh. It does not infer specifications from a model's name. Other adapter catalogs and upstreams that return only IDs can use the public catalog fallback below; add an operator declaration where that catalog has no usable facts. Refresh the provider directory to collect new metadata; merely opening DSH does not issue provider-directory requests.
 
 Routes fall back to the public [models.dev](https://models.dev) catalog for
 any field they never learned — no operator declaration, and no
 upstream-observed value for that field. OCG downloads
 `https://models.dev/api.json` in the background (never inside a `/v1/models`
-request), caches it locally, and refreshes it about once a day; a failed
-refresh keeps the previous cache and retries later, so offline use simply
-stays with the last copy.
+request) and caches each provider's models with that provider's API address.
+A download that fails, times out, or returns HTTP 200 without a usable
+catalog leaves the previous cache in place and retries later. Offline use
+stays on that last good copy. A current cache is reused for about a day. A
+cache written by an older build, which only has the flat model index, still
+answers and is refreshed on the next opportunity even when the file itself
+is recent.
 
-Matching is by exact upstream model ID, then its last path segment, then the
-exact public model ID — never a fuzzy name guess. The same model ID under
-several models.dev providers keeps only the common guarantees (minimum
-limits, modality intersection, identical effort spellings), and modalities
-outside `text`/`image`/`audio`/`video` are dropped at ingestion. Effort-style
-`reasoning_options` become selectable reasoning levels (the `none` spelling
-fills the `off` selector); toggle-only and budget-token options carry no
-selectable wire level and leave the levels unknown.
+A saved route uses a provider row when the URL matches that provider: same
+scheme, host, and port, and the provider path is a segment-boundary prefix
+of the route. The longest matching path wins. A model entry may name its own
+API; that address replaces the provider address for that model. A matched
+provider that does not list the model, or lists it with empty reasoning
+tiers, ends the search. A broader provider on the same host is not
+substituted, and a canonical model is not substituted either.
+
+A route that matches no provider uses the model id's generic baseline. That
+baseline is an inference for an unrecognized proxy, not a verification of
+the proxy. If the rows for that exact id share one canonical link and the
+target exists, the target's facts are used, so a generic custom route can
+still publish the canonical choices for ids such as `gpt-5.2`,
+`gpt-5.3-codex`, and `o3` when unrelated providers simply omit those rows.
+Conflicting links, a missing target, or no link keep only the facts those
+rows share. An id written as `provider/model` reads that catalog row and
+does not follow another canonical hop. The same id is also tried as the
+upstream id, then its last path segment, then the public id. There is no
+fuzzy name guess. Modalities outside `text`/`image`/`audio`/`video` are
+dropped at ingestion. Effort-style `reasoning_options` become selectable
+reasoning levels (the `none` spelling fills the `off` selector). A bare
+`reasoning: true`, a toggle, or a budget does not invent tiers.
 
 Effective facts keep their per-field priority: operator declaration >
-upstream observation > models.dev > unknown. A declaration or refresh always overrides the public catalog for the fields it knows, and an operator declaration is never augmented from the public catalog; when models.dev fills gaps under an upstream observation, the row's `sources` list credits both.
+upstream observation > models.dev > unknown. An operator declaration
+replaces the whole record and is never filled from the public catalog. An
+upstream observation that explicitly lists no reasoning tiers stays empty.
+When models.dev fills gaps under an upstream observation, the row's
+`sources` list credits both.
 
 Declare metadata in the dashboard: open **Providers**, select a connection, and use a model row's **Model capabilities** action. The form shows the effective metadata and its source (`operator`, `upstream`, `modelsdev`, or `unknown`), applies the same validation rules as the server, saves the full declaration under CAS, and can clear a manual declaration to reveal discovered facts. Blank fields mean unknown, not false. The **Aliases** page shows every mapping's effective input modalities and their provenance, and its **Declare** link on unknown rows lands directly in this editor.
 
@@ -76,7 +98,7 @@ Only declare effective capabilities supported by the actual gateway path. The op
 
 ## Alias And Route Safety
 
-For an alias that may use several enabled mappings, capacities are the minimum known limit, modalities are the intersection and tiers are retained only when every mapping agrees on the same wire spelling. Any unknown candidate prevents a positive guarantee. This deliberately favors safety over advertising the largest backend's capacity; capability-aware fallback routing is not added here.
+For an alias that may use several enabled mappings, capacities are the minimum known limit, modalities are the intersection and tiers are retained only when every mapping agrees on the same wire spelling. Any unknown candidate prevents a positive guarantee. A model enabled on more than one protocol route is held to the same rule: each route contributes its verified provider facts or, when the route matches no provider, the generic baseline. A route with neither is unknown and withdraws positive claims. This deliberately favors safety over advertising the largest backend's capacity; capability-aware fallback routing is not added here.
 
 Facts and declarations bind to the destination's route, protocols and exact model mapping. Changing these invalidates the old binding. Model-specific upstream overrides are not populated from discovery of a different destination route. Operator declarations survive refresh of the unchanged route. Raw upstream payloads and credential echoes are not stored as metadata.
 

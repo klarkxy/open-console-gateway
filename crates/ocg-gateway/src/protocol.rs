@@ -732,10 +732,23 @@ fn convert_request(
             responses_request_to_messages(body, false, namespace_tools)?
         }
         (ApiFormat::ChatCompletions, ApiFormat::Responses) => {
-            messages_request_to_responses(chat_request_to_messages(body)?)?
+            // The Messages pivot below turns this string into a token budget.
+            // Put the original spelling back after that rewrite.
+            let effort = explicit_effort_string(body.get("reasoning_effort"));
+            let mut converted = messages_request_to_responses(chat_request_to_messages(body)?)?;
+            preserve_responses_reasoning_effort(&mut converted, effort.as_deref());
+            converted
         }
         (ApiFormat::Responses, ApiFormat::ChatCompletions) => {
-            messages_request_to_chat(responses_request_to_messages(body, true, namespace_tools)?)?
+            // Same budget pivot. Keep the Responses spelling on reasoning_effort.
+            let effort = explicit_effort_string(body.pointer("/reasoning/effort"));
+            let mut converted = messages_request_to_chat(responses_request_to_messages(
+                body,
+                true,
+                namespace_tools,
+            )?)?;
+            preserve_chat_reasoning_effort(&mut converted, effort.as_deref());
+            converted
         }
         (ApiFormat::Gemini, ApiFormat::Messages) => gemini_request_to_messages(body)?,
         (ApiFormat::Gemini, ApiFormat::ChatCompletions) => {
@@ -803,6 +816,56 @@ fn convert_request(
         ensure_leading_user_message(messages);
     }
     Ok(converted)
+}
+
+// A JSON string is an explicit wire spelling. Missing, null, and non-strings
+// stay unset so this path does not invent an effort.
+fn explicit_effort_string(value: Option<&Value>) -> Option<String> {
+    value.and_then(Value::as_str).map(str::to_owned)
+}
+
+fn preserve_responses_reasoning_effort(body: &mut Value, effort: Option<&str>) {
+    let Some(effort) = effort else {
+        return;
+    };
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    let reasoning_is_object = object.get("reasoning").is_some_and(Value::is_object);
+    if reasoning_is_object {
+        if let Some(reasoning) = object.get_mut("reasoning").and_then(Value::as_object_mut) {
+            reasoning.insert("effort".into(), json!(effort));
+        }
+    } else {
+        object.insert(
+            "reasoning".into(),
+            json!({ "effort": effort, "summary": "auto" }),
+        );
+    }
+}
+
+fn preserve_chat_reasoning_effort(body: &mut Value, effort: Option<&str>) {
+    let Some(effort) = effort else {
+        return;
+    };
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    object.insert("reasoning_effort".into(), json!(effort));
+    // A small max or a forced tool makes the Messages pivot emit thinking
+    // disabled. That marker would cancel a positive effort. none and off keep
+    // it, including the HY3 Chat compatibility shape.
+    if matches!(effort, "none" | "off") {
+        return;
+    }
+    let pivot_disabled = object
+        .get("thinking")
+        .and_then(|thinking| thinking.get("type"))
+        .and_then(Value::as_str)
+        == Some("disabled");
+    if pivot_disabled {
+        object.remove("thinking");
+    }
 }
 
 #[derive(Debug, Default)]

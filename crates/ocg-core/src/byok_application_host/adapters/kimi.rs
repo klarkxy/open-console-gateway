@@ -331,6 +331,7 @@ fn sync_models(doc: &mut DocumentMut, models: &[ByokModel]) -> ByokResult<()> {
                 entry.remove("capabilities");
             }
         }
+        sync_reasoning_tiers(entry, model);
     }
     Ok(())
 }
@@ -362,13 +363,7 @@ fn kimi_capabilities(model: &ByokModel) -> Option<Vec<&'static str>> {
         Some(false) => declared_tools = true,
         None => {}
     }
-    if model.metadata.reasoning == Some(true)
-        || model
-            .metadata
-            .reasoning_efforts
-            .as_ref()
-            .is_some_and(|efforts| !efforts.is_empty())
-    {
+    if declares_thinking(model) {
         caps.push("thinking");
     }
     if has_image(&model.metadata) {
@@ -379,6 +374,93 @@ fn kimi_capabilities(model: &ByokModel) -> Option<Vec<&'static str>> {
     } else {
         None
     }
+}
+
+struct KimiTiers {
+    support: Vec<String>,
+    off: Option<String>,
+}
+
+/// Selector key `off` is stored in `off_effort` with its declared spelling.
+/// Every other spelling is advertised only when the native selector would send
+/// that same string: it trims and lowercases the choice, `on` adds no
+/// parameter, and `off` is the disable path. Absent and empty maps omit both,
+/// and explicit `reasoning: false` suppresses them. No default is invented.
+fn kimi_tiers(model: &ByokModel) -> KimiTiers {
+    if model.metadata.reasoning == Some(false) {
+        return KimiTiers {
+            support: Vec::new(),
+            off: None,
+        };
+    }
+    let Some(efforts) = model.metadata.reasoning_efforts.as_ref() else {
+        return KimiTiers {
+            support: Vec::new(),
+            off: None,
+        };
+    };
+    let off = efforts
+        .get("off")
+        .filter(|spelling| !spelling.trim().is_empty())
+        .cloned();
+    let mut seen = std::collections::BTreeSet::new();
+    if let Some(spelling) = &off {
+        seen.insert(spelling.clone());
+    }
+    let mut support = Vec::new();
+    for spelling in efforts.values() {
+        let Some(wire) = preserved_kimi_support_wire(spelling) else {
+            continue;
+        };
+        if !seen.insert(wire.to_string()) {
+            continue;
+        }
+        support.push(wire.to_string());
+    }
+    KimiTiers { support, off }
+}
+
+fn preserved_kimi_support_wire(spelling: &str) -> Option<&str> {
+    let normalized = spelling.trim().to_lowercase();
+    if normalized.is_empty() || spelling != normalized || normalized == "on" || normalized == "off"
+    {
+        return None;
+    }
+    Some(spelling)
+}
+
+fn declares_thinking(model: &ByokModel) -> bool {
+    if model.metadata.reasoning == Some(false) {
+        return false;
+    }
+    if model.metadata.reasoning == Some(true) {
+        return true;
+    }
+    model
+        .metadata
+        .reasoning_efforts
+        .as_ref()
+        .is_some_and(|efforts| efforts.values().any(|spelling| !spelling.trim().is_empty()))
+}
+
+fn sync_reasoning_tiers(entry: &mut Table, model: &ByokModel) {
+    let tiers = kimi_tiers(model);
+    if tiers.support.is_empty() {
+        entry.remove("support_efforts");
+    } else {
+        let mut array = Array::new();
+        for spelling in &tiers.support {
+            array.push(spelling.as_str());
+        }
+        entry["support_efforts"] = Item::Value(array.into());
+    }
+    match tiers.off.as_deref() {
+        Some(spelling) => entry["off_effort"] = value(spelling),
+        None => {
+            entry.remove("off_effort");
+        }
+    }
+    entry.remove("default_effort");
 }
 
 fn owned_from_doc(doc: &DocumentMut) -> Value {

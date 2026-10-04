@@ -38,10 +38,9 @@ fn open_state(label: &str) -> (PathBuf, CoreState) {
         .unwrap(),
     );
     // A fresh catalog skips the background models.dev fetch inside publication.
-    *state.modelsdev_catalog.write() = Arc::new(crate::modelsdev::ModelsDevCatalog {
-        fetched_at: Some(Utc::now()),
-        models: Default::default(),
-    });
+    *state.modelsdev_catalog.write() = Arc::new(crate::modelsdev::ModelsDevCatalog::fresh_flat(
+        Default::default(),
+    ));
     (dir, state)
 }
 

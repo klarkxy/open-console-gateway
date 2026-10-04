@@ -589,9 +589,8 @@ fn models_endpoint_state(label: &str) -> (std::path::PathBuf, crate::state::Core
     );
     // A fresh catalog keeps `ensure_fresh` off the network and gives one model
     // real models.dev facts while the other stays unknown.
-    *state.modelsdev_catalog.write() = Arc::new(crate::modelsdev::ModelsDevCatalog {
-        fetched_at: Some(chrono::Utc::now()),
-        models: [(
+    *state.modelsdev_catalog.write() = Arc::new(crate::modelsdev::ModelsDevCatalog::fresh_flat(
+        [(
             CATALOGED_MODEL.to_string(),
             crate::model_metadata::ModelMetadata {
                 name: Some("Cataloged model".into()),
@@ -605,7 +604,7 @@ fn models_endpoint_state(label: &str) -> (std::path::PathBuf, crate::state::Core
         )]
         .into_iter()
         .collect(),
-    });
+    ));
     publish_models_endpoint_fixture(&state, &[CATALOGED_MODEL, UNCATEGORIZED_MODEL]);
     (dir, state)
 }
@@ -683,6 +682,96 @@ async fn models_endpoint_serves_the_enriched_rows_captured_under_the_lock() {
     assert!(
         unknown.get("contextWindow").is_none(),
         "an unknown model must not declare a context window"
+    );
+
+    drop(state);
+    fs::remove_dir_all(dir).expect("test data directory should be removed");
+}
+
+/// A generic Custom route does not match a catalog provider. Tiers still come
+/// from `parse_api` through the canonical model, not from a hand-built record.
+#[tokio::test]
+async fn models_endpoint_publishes_canonical_tiers_from_the_parsed_catalog() {
+    use axum::body::to_bytes;
+    let (dir, state) = {
+        let dir = std::env::temp_dir().join(format!("ocg-models-parsed-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let state = Arc::new(
+            CoreStateInner::new(
+                Database::open(dir.clone()).unwrap(),
+                dir.clone(),
+                Arc::new(StaticKeyCipher::new("parsed-catalog")),
+            )
+            .unwrap(),
+        );
+        let mut catalog = crate::modelsdev::parse_api(
+            br#"{
+            "openai": {"models": {
+                "gpt-5.2": {
+                    "reasoning": true,
+                    "limit": {"context": 400000, "output": 128000},
+                    "reasoning_options": [{"type": "effort", "values": ["low", "medium", "high", "xhigh"]}]
+                },
+                "gpt-5.3-codex": {
+                    "reasoning": true,
+                    "reasoning_options": [{"type": "effort", "values": ["low", "high", "xhigh"]}]
+                },
+                "o3": {
+                    "reasoning": true,
+                    "reasoning_options": [{"type": "effort", "values": ["low", "medium", "high"]}]
+                }
+            }},
+            "proxy": {"api": "https://proxy.test/v1", "models": {
+                "gpt-5.2": {"canonical_model_id": "openai/gpt-5.2"},
+                "gpt-5.3-codex": {"canonical_model_id": "openai/gpt-5.3-codex"},
+                "o3": {"canonical_model_id": "openai/o3"}
+            }},
+            "unrelated": {"api": "https://other.test/v1", "models": {
+                "different": {"limit": {"context": 1000}}
+            }}
+        }"#,
+        );
+        catalog.fetched_at = Some(chrono::Utc::now());
+        assert!(
+            catalog.is_fresh(chrono::Utc::now()),
+            "a parsed catalog with a fetch time must not refresh during the request"
+        );
+        *state.modelsdev_catalog.write() = Arc::new(catalog);
+        publish_models_endpoint_fixture(&state, &["gpt-5.2", "gpt-5.3-codex", "o3"]);
+        (dir, state)
+    };
+    let headers = models_endpoint_headers(&state);
+    let response = super::handler::models(axum::extract::State(state.clone()), headers).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("response body should be readable");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("response should be JSON");
+    let row = |id: &str| {
+        body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == json!(id))
+            .unwrap_or_else(|| panic!("{id} should be listed"))
+            .clone()
+    };
+    let gpt = row("gpt-5.2");
+    assert_eq!(gpt["ocg"]["sources"], json!(["modelsdev"]));
+    assert_eq!(gpt["ocg"]["status"], json!("declared"));
+    assert_eq!(gpt["contextWindow"], json!(400000));
+    assert_eq!(gpt["maxTokens"], json!(128000));
+    assert_eq!(
+        gpt["ocg"]["reasoningEfforts"],
+        json!({"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh"})
+    );
+    assert_eq!(
+        row("gpt-5.3-codex")["ocg"]["reasoningEfforts"],
+        json!({"low": "low", "high": "high", "xhigh": "xhigh"})
+    );
+    assert_eq!(
+        row("o3")["ocg"]["reasoningEfforts"],
+        json!({"low": "low", "medium": "medium", "high": "high"})
     );
 
     drop(state);

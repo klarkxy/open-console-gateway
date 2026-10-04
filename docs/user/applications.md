@@ -15,6 +15,12 @@ These tabs add an **Open Console Gateway** model provider to an existing local c
 
 Configuration keeps the current OCG model when it is still published; otherwise it activates the first exported model. Choose another model in the client itself. Codex activates the OCG catalog as its global catalog; it does not merge it into the native ChatGPT catalog. Unknown model limits are left unspecified. Model availability does not guarantee that every model supports a coding client's tools.
 
+Declared reasoning choices are exported to each client's native model selector: Codex receives `supported_reasoning_levels`, Kimi receives `support_efforts` and the explicit disable spelling in `off_effort`, MiniMax receives `thinking.effortOptions`, and ZCode receives `reasoningLevel` options. The exported values retain their declared request spellings. A reasoning-capable model without known choices does not acquire guessed Low, Medium, or High options. Update the application configuration and reload the client after the published choices change. See [model metadata and reasoning tiers](model-metadata.md) for the source and declaration rules.
+
+Kimi lowercases ordinary effort selections and treats `on` and `off` as native controls. OCG exports ordinary choices only when Kimi can send their declared spelling unchanged; the explicit disable mapping remains separate in `off_effort`.
+
+MiniMax normalizes the disable spelling `off` to `none`. OCG therefore omits a literal `off` choice when that would change the declared upstream parameter; an explicitly declared `none` remains available. The export does not force a binary thinking mode or invent a default effort.
+
 Disabled Keys stay disabled. Configuring again creates an enabled Key when none with the matching name exists. A Key created before a later client-file error remains available in Connection Center, and retrying reuses it. An empty model catalog is rejected before creating a Key or writing client files.
 
 The generated Codex catalog includes the official generic coding instructions from Codex 0.153.4, which requires an instruction source for each custom model. Source attribution and the Apache 2.0 license are included with OCG.

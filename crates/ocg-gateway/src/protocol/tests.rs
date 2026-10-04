@@ -444,3 +444,545 @@ fn chat_to_responses_rejects_stop_and_preserves_service_tier_and_order() {
         .unwrap();
     assert!(message_at < call_at, "{types:?}");
 }
+
+#[test]
+fn direct_chat_and_responses_preserve_explicit_reasoning_effort_spellings() {
+    for effort in [
+        "low",
+        "high",
+        "xhigh",
+        "max",
+        "none",
+        "off",
+        "minimal",
+        "medium",
+        "wire-custom",
+    ] {
+        let to_responses = convert_req(
+            ApiFormat::ChatCompletions,
+            ApiFormat::Responses,
+            json!({
+                "model": "any",
+                "messages": [{"role": "user", "content": "hi"}],
+                "reasoning_effort": effort
+            }),
+        );
+        assert_eq!(to_responses.body["reasoning"]["effort"], effort, "{effort}");
+        assert_eq!(
+            to_responses.body["reasoning"]["summary"], "auto",
+            "{effort}"
+        );
+
+        let to_chat = convert_req(
+            ApiFormat::Responses,
+            ApiFormat::ChatCompletions,
+            json!({
+                "model": "any",
+                "input": "hi",
+                "store": false,
+                "reasoning": {"effort": effort, "summary": "detailed"}
+            }),
+        );
+        assert_eq!(to_chat.body["reasoning_effort"], effort, "{effort}");
+        assert!(to_chat.body.get("stream_options").is_none(), "{effort}");
+        if effort == "none" {
+            assert_eq!(to_chat.body["thinking"]["type"], "disabled");
+        } else {
+            assert!(to_chat.body.get("thinking").is_none(), "{effort}");
+        }
+    }
+
+    let streamed_responses = convert_req(
+        ApiFormat::ChatCompletions,
+        ApiFormat::Responses,
+        json!({
+            "model": "any",
+            "stream": true,
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "high"
+        }),
+    );
+    assert_eq!(streamed_responses.body["stream"], true);
+    assert_eq!(streamed_responses.body["reasoning"]["effort"], "high");
+    assert!(streamed_responses.body.get("stream_options").is_none());
+
+    let streamed_chat = convert_req(
+        ApiFormat::Responses,
+        ApiFormat::ChatCompletions,
+        json!({
+            "model": "any",
+            "stream": true,
+            "input": "hi",
+            "store": false,
+            "reasoning": {"effort": "high"}
+        }),
+    );
+    assert_eq!(streamed_chat.body["stream"], true);
+    assert_eq!(streamed_chat.body["reasoning_effort"], "high");
+    assert_eq!(streamed_chat.body["stream_options"]["include_usage"], true);
+}
+
+#[test]
+fn direct_openai_conversion_does_not_fabricate_reasoning_effort() {
+    let chat_to_responses = [
+        json!({
+            "model": "any",
+            "messages": [{"role": "user", "content": "hi"}]
+        }),
+        json!({
+            "model": "any",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": null
+        }),
+        json!({
+            "model": "any",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": 1
+        }),
+        json!({
+            "model": "any",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning": {"effort": "xhigh"}
+        }),
+    ];
+    for body in chat_to_responses {
+        let converted = convert_req(ApiFormat::ChatCompletions, ApiFormat::Responses, body);
+        assert!(
+            converted.body.get("reasoning").is_none(),
+            "{}",
+            converted.body
+        );
+    }
+
+    let responses_to_chat = [
+        json!({"model": "any", "input": "hi", "store": false}),
+        json!({
+            "model": "any",
+            "input": "hi",
+            "store": false,
+            "reasoning": null
+        }),
+        json!({
+            "model": "any",
+            "input": "hi",
+            "store": false,
+            "reasoning": {}
+        }),
+        json!({
+            "model": "any",
+            "input": "hi",
+            "store": false,
+            "reasoning": {"effort": null}
+        }),
+        json!({
+            "model": "any",
+            "input": "hi",
+            "store": false,
+            "reasoning": {"effort": true}
+        }),
+        json!({
+            "model": "any",
+            "input": "hi",
+            "store": false,
+            "reasoning_effort": "xhigh"
+        }),
+    ];
+    for body in responses_to_chat {
+        let converted = convert_req(ApiFormat::Responses, ApiFormat::ChatCompletions, body);
+        assert!(
+            converted.body.get("reasoning_effort").is_none(),
+            "{}",
+            converted.body
+        );
+        assert!(
+            converted.body.get("thinking").is_none(),
+            "{}",
+            converted.body
+        );
+    }
+}
+
+#[test]
+fn direct_openai_effort_survives_small_max_output_and_forced_tool_choice() {
+    let capped = convert_req(
+        ApiFormat::ChatCompletions,
+        ApiFormat::Responses,
+        json!({
+            "model": "any",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "high",
+            "max_completion_tokens": 3000,
+            "temperature": 0.2
+        }),
+    );
+    assert_eq!(capped.body["reasoning"]["effort"], "high");
+    assert_eq!(capped.body["max_output_tokens"], 3000);
+
+    let forced = convert_req(
+        ApiFormat::ChatCompletions,
+        ApiFormat::Responses,
+        json!({
+            "model": "any",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "xhigh",
+            "max_completion_tokens": 128,
+            "temperature": 0.2,
+            "tool_choice": {"type": "function", "function": {"name": "lookup"}},
+            "tools": [{
+                "type": "function",
+                "function": {"name": "lookup", "parameters": {"type": "object"}}
+            }]
+        }),
+    );
+    assert_eq!(forced.body["reasoning"]["effort"], "xhigh");
+    assert_eq!(forced.body["max_output_tokens"], 128);
+    assert_eq!(forced.body["tool_choice"]["type"], "function");
+    assert_eq!(forced.body["tool_choice"]["name"], "lookup");
+    assert_eq!(forced.body["temperature"], 0.2);
+
+    let capped_chat = convert_req(
+        ApiFormat::Responses,
+        ApiFormat::ChatCompletions,
+        json!({
+            "model": "any",
+            "input": "hi",
+            "store": false,
+            "reasoning": {"effort": "max"},
+            "max_output_tokens": 3000
+        }),
+    );
+    assert_eq!(capped_chat.body["reasoning_effort"], "max");
+    assert_eq!(capped_chat.body["max_tokens"], 3000);
+    assert!(capped_chat.body.get("thinking").is_none());
+
+    let forced_chat = convert_req(
+        ApiFormat::Responses,
+        ApiFormat::ChatCompletions,
+        json!({
+            "model": "any",
+            "input": "hi",
+            "store": false,
+            "reasoning": {"effort": "wire-custom"},
+            "max_output_tokens": 128,
+            "temperature": 0.4,
+            "tool_choice": "required",
+            "tools": [{
+                "type": "function",
+                "name": "lookup",
+                "parameters": {"type": "object"}
+            }]
+        }),
+    );
+    assert_eq!(forced_chat.body["reasoning_effort"], "wire-custom");
+    assert_eq!(forced_chat.body["max_tokens"], 128);
+    assert_eq!(forced_chat.body["tool_choice"], "required");
+    assert!(forced_chat.body.get("thinking").is_none());
+    assert_eq!(forced_chat.body["temperature"], 0.4);
+}
+
+#[test]
+fn responses_to_chat_positive_effort_omits_pivot_thinking_disabled() {
+    for effort in ["low", "medium", "high", "xhigh", "max", "wire-custom"] {
+        let capped = convert_req(
+            ApiFormat::Responses,
+            ApiFormat::ChatCompletions,
+            json!({
+                "model": "any",
+                "input": "hi",
+                "store": false,
+                "reasoning": {"effort": effort},
+                "max_output_tokens": 1024,
+                "temperature": 0.3
+            }),
+        );
+        assert_eq!(capped.body["reasoning_effort"], effort, "{effort}");
+        assert_eq!(capped.body["max_tokens"], 1024, "{effort}");
+        assert!(capped.body.get("thinking").is_none(), "{effort}");
+        assert_eq!(capped.body["temperature"], 0.3, "{effort}");
+
+        let forced = convert_req(
+            ApiFormat::Responses,
+            ApiFormat::ChatCompletions,
+            json!({
+                "model": "any",
+                "input": "hi",
+                "store": false,
+                "reasoning": {"effort": effort},
+                "max_output_tokens": 8192,
+                "temperature": 0.3,
+                "tool_choice": "required",
+                "tools": [{
+                    "type": "function",
+                    "name": "lookup",
+                    "parameters": {"type": "object"}
+                }]
+            }),
+        );
+        assert_eq!(forced.body["reasoning_effort"], effort, "{effort}");
+        assert_eq!(forced.body["tool_choice"], "required", "{effort}");
+        assert!(forced.body.get("thinking").is_none(), "{effort}");
+        assert_eq!(forced.body["temperature"], 0.3, "{effort}");
+    }
+
+    for (label, body) in [
+        (
+            "default",
+            json!({
+                "model": "any",
+                "input": "hi",
+                "store": false,
+                "reasoning": {"effort": "none"}
+            }),
+        ),
+        (
+            "max-1024",
+            json!({
+                "model": "any",
+                "input": "hi",
+                "store": false,
+                "reasoning": {"effort": "none"},
+                "max_output_tokens": 1024
+            }),
+        ),
+        (
+            "forced",
+            json!({
+                "model": "any",
+                "input": "hi",
+                "store": false,
+                "reasoning": {"effort": "none"},
+                "max_output_tokens": 8192,
+                "tool_choice": "required",
+                "tools": [{
+                    "type": "function",
+                    "name": "lookup",
+                    "parameters": {"type": "object"}
+                }]
+            }),
+        ),
+    ] {
+        let converted = convert_req(ApiFormat::Responses, ApiFormat::ChatCompletions, body);
+        assert_eq!(converted.body["reasoning_effort"], "none", "{label}");
+        assert_eq!(converted.body["thinking"]["type"], "disabled", "{label}");
+    }
+
+    for (label, body) in [
+        (
+            "max-1024",
+            json!({
+                "model": "any",
+                "input": "hi",
+                "store": false,
+                "reasoning": {"effort": "off"},
+                "max_output_tokens": 1024
+            }),
+        ),
+        (
+            "forced",
+            json!({
+                "model": "any",
+                "input": "hi",
+                "store": false,
+                "reasoning": {"effort": "off"},
+                "max_output_tokens": 8192,
+                "tool_choice": "required",
+                "tools": [{
+                    "type": "function",
+                    "name": "lookup",
+                    "parameters": {"type": "object"}
+                }]
+            }),
+        ),
+    ] {
+        let converted = convert_req(ApiFormat::Responses, ApiFormat::ChatCompletions, body);
+        assert_eq!(converted.body["reasoning_effort"], "off", "{label}");
+        assert_eq!(converted.body["thinking"]["type"], "disabled", "{label}");
+    }
+}
+
+#[test]
+fn direct_openai_effort_preservation_keeps_custom_and_namespace_tools() {
+    let converted = convert_req(
+        ApiFormat::Responses,
+        ApiFormat::ChatCompletions,
+        json!({
+            "model": "any",
+            "store": false,
+            "input": "hi",
+            "reasoning": {"effort": "xhigh"},
+            "tools": [
+                {"type": "custom", "name": "apply_patch"},
+                {
+                    "type": "namespace",
+                    "name": "multi_agent_v1",
+                    "tools": [{
+                        "type": "function",
+                        "name": "spawn_agent",
+                        "parameters": {"type": "object"}
+                    }]
+                }
+            ]
+        }),
+    );
+    assert_eq!(converted.body["reasoning_effort"], "xhigh");
+    assert_eq!(converted.custom_tools, vec!["apply_patch".to_string()]);
+    assert_eq!(converted.namespace_tools.len(), 1);
+    assert_eq!(
+        converted.namespace_tools[0].flattened,
+        "multi_agent_v1__spawn_agent"
+    );
+    let names = converted.body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"apply_patch"), "{names:?}");
+    assert!(names.contains(&"multi_agent_v1__spawn_agent"), "{names:?}");
+}
+
+#[test]
+fn messages_conversion_keeps_effort_budget_approximation_and_tool_safety() {
+    let approximated = convert_req(
+        ApiFormat::ChatCompletions,
+        ApiFormat::Messages,
+        json!({
+            "model": "any",
+            "messages": [{"role": "user", "content": "hi"}],
+            "temperature": 0.2,
+            "reasoning_effort": "xhigh"
+        }),
+    );
+    assert_eq!(
+        approximated.body["thinking"],
+        json!({"type": "enabled", "budget_tokens": 4096})
+    );
+    assert!(approximated.body.get("reasoning_effort").is_none());
+    assert!(approximated.body.get("temperature").is_none());
+
+    let forced = convert_req(
+        ApiFormat::ChatCompletions,
+        ApiFormat::Messages,
+        json!({
+            "model": "any",
+            "messages": [{"role": "user", "content": "hi"}],
+            "temperature": 0.2,
+            "reasoning_effort": "high",
+            "tool_choice": "required",
+            "tools": [{
+                "type": "function",
+                "function": {"name": "lookup", "parameters": {"type": "object"}}
+            }]
+        }),
+    );
+    assert_eq!(forced.body["thinking"]["type"], "disabled");
+    assert_eq!(forced.body["tool_choice"]["type"], "any");
+    assert_eq!(forced.body["temperature"], 0.2);
+    assert!(forced.body.get("reasoning_effort").is_none());
+
+    for effort in ["max", "xhigh"] {
+        let converted = convert_req(
+            ApiFormat::Messages,
+            ApiFormat::ChatCompletions,
+            json!({
+                "model": "any",
+                "max_tokens": 8192,
+                "messages": [{"role": "user", "content": "hi"}],
+                "output_config": {"effort": effort}
+            }),
+        );
+        assert_eq!(converted.body["reasoning_effort"], "high", "{effort}");
+    }
+
+    for (budget, effort) in [(1024_u64, "low"), (4096, "medium"), (16384, "high")] {
+        let converted = convert_req(
+            ApiFormat::Messages,
+            ApiFormat::ChatCompletions,
+            json!({
+                "model": "any",
+                "max_tokens": 32000,
+                "messages": [{"role": "user", "content": "hi"}],
+                "thinking": {"type": "enabled", "budget_tokens": budget}
+            }),
+        );
+        assert_eq!(converted.body["reasoning_effort"], effort, "{budget}");
+    }
+
+    let to_responses = convert_req(
+        ApiFormat::Messages,
+        ApiFormat::Responses,
+        json!({
+            "model": "any",
+            "max_tokens": 8192,
+            "messages": [{"role": "user", "content": "hi"}],
+            "output_config": {"effort": "xhigh"}
+        }),
+    );
+    assert_eq!(to_responses.body["reasoning"]["effort"], "high");
+    assert_eq!(to_responses.body["reasoning"]["summary"], "auto");
+
+    let to_messages = convert_req(
+        ApiFormat::Responses,
+        ApiFormat::Messages,
+        json!({
+            "model": "any",
+            "input": "hi",
+            "store": false,
+            "max_output_tokens": 8192,
+            "reasoning": {"effort": "max"}
+        }),
+    );
+    assert_eq!(
+        to_messages.body["thinking"],
+        json!({"type": "enabled", "budget_tokens": 4096})
+    );
+    assert!(to_messages.body.get("output_config").is_none());
+    assert!(to_messages.body.pointer("/reasoning/effort").is_none());
+}
+
+#[test]
+fn same_protocol_passthrough_keeps_reasoning_effort_bytes() {
+    let chat = convert_req(
+        ApiFormat::ChatCompletions,
+        ApiFormat::ChatCompletions,
+        json!({
+            "model": "any",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "wire-custom"
+        }),
+    );
+    assert_eq!(chat.body["reasoning_effort"], "wire-custom");
+    assert!(chat.body.get("reasoning").is_none());
+
+    let responses = convert_req(
+        ApiFormat::Responses,
+        ApiFormat::Responses,
+        json!({
+            "model": "any",
+            "input": "hi",
+            "store": false,
+            "reasoning": {"effort": "max", "summary": "detailed"}
+        }),
+    );
+    assert_eq!(responses.body["reasoning"]["effort"], "max");
+    assert_eq!(responses.body["reasoning"]["summary"], "detailed");
+}
+
+#[test]
+fn gemini_conversion_does_not_preserve_openai_reasoning_effort() {
+    let body = json!({
+        "model": "any",
+        "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+        "generationConfig": {
+            "thinkingConfig": {"thinkingLevel": "high"},
+            "maxOutputTokens": 8192
+        },
+        "reasoning": {"effort": "xhigh"}
+    });
+    let chat = convert_req(ApiFormat::Gemini, ApiFormat::ChatCompletions, body.clone());
+    assert!(chat.body.get("reasoning_effort").is_none());
+    assert!(chat.body.get("thinking").is_none());
+
+    let responses = convert_req(ApiFormat::Gemini, ApiFormat::Responses, body);
+    assert!(responses.body.get("reasoning").is_none());
+}

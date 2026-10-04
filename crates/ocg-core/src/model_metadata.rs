@@ -204,9 +204,9 @@ pub(crate) fn effective(
 /// Effective facts with the models.dev catalog filling fields the route never
 /// learned. Per-field priority is operator declaration, upstream observation,
 /// models.dev, then unknown. A public-catalog hit supplies only absent facts and
-/// never overrides a route-specific one, and an operator declaration stays
-/// untouched. The bool reports whether models.dev contributed at least one
-/// field, so callers can credit it alongside the primary source.
+/// never overrides a route-specific one, and an operator declaration stays a
+/// whole-record replacement. The bool reports whether models.dev contributed at
+/// least one field, so callers can credit it alongside the primary source.
 pub(crate) fn effective_with_catalog(
     records: &[Record],
     modelsdev: &crate::modelsdev::ModelsDevCatalog,
@@ -217,12 +217,10 @@ pub(crate) fn effective_with_catalog(
     if source == "operator" {
         return (metadata, source, false);
     }
-    let Some(found) =
-        crate::modelsdev::lookup(modelsdev, &model.public_model, &model.upstream_model)
-    else {
+    let Some(found) = crate::modelsdev::lookup(modelsdev, destination, model) else {
         return (metadata, source, false);
     };
-    let filled = metadata.fill_missing(found);
+    let filled = metadata.fill_missing(&found);
     let source = if source == "unknown" {
         "modelsdev"
     } else {
@@ -302,8 +300,8 @@ pub(crate) fn parse_catalog(bytes: &[u8]) -> BTreeMap<String, ModelMetadata> {
     parse_catalog_limit(bytes, 1000)
 }
 
-/// Same normalization with a caller-chosen row cap. models.dev ingestion
-/// flattens many providers and needs a wider cap than one upstream catalog.
+/// Same normalization with a caller-chosen row cap. One upstream page stays
+/// small. The models.dev legacy flat index reuses this cap across providers.
 pub(crate) fn parse_catalog_limit(
     bytes: &[u8],
     max_rows: usize,
@@ -316,104 +314,9 @@ pub(crate) fn parse_catalog_limit(
     };
     let mut result = BTreeMap::new();
     for row in rows.iter().take(max_rows) {
-        let Some(id) = row.get("id").and_then(Value::as_str) else {
+        let Some((id, metadata)) = metadata_from_catalog_row(row) else {
             continue;
         };
-        let Ok(id) = crate::provider::validate_custom_model_id(id) else {
-            continue;
-        };
-        if id.chars().any(char::is_control) {
-            continue;
-        }
-        let mut metadata = ModelMetadata::default();
-        let ext = row
-            .get("ocg")
-            .filter(|v| v.get("schemaVersion").and_then(Value::as_u64) == Some(1));
-        let source = ext.unwrap_or(row);
-        let number = |keys: &[&str]| {
-            keys.iter().find_map(|k| {
-                source
-                    .pointer(k)
-                    .and_then(Value::as_u64)
-                    .filter(|n| *n > 0 && *n <= MAX_TOKENS)
-            })
-        };
-        metadata.context_window = number(&[
-            "/contextWindow",
-            "/context_length",
-            "/context_window",
-            "/limit/context",
-        ])
-        .or_else(|| {
-            row.get("contextWindow")
-                .and_then(Value::as_u64)
-                .filter(|n| *n > 0 && *n <= MAX_TOKENS)
-        });
-        metadata.max_output_tokens = number(&[
-            "/maxOutputTokens",
-            "/maxTokens",
-            "/max_output_tokens",
-            "/max_completion_tokens",
-            "/limit/output",
-        ])
-        .or_else(|| {
-            row.get("maxTokens")
-                .and_then(Value::as_u64)
-                .filter(|n| *n > 0 && *n <= MAX_TOKENS)
-        });
-        metadata.name = source
-            .get("name")
-            .or_else(|| row.get("name"))
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        metadata.input_modalities = modalities(
-            source
-                .get("inputModalities")
-                .or_else(|| source.pointer("/modalities/input"))
-                .or_else(|| source.get("input")),
-        );
-        metadata.output_modalities = modalities(
-            source
-                .get("outputModalities")
-                .or_else(|| source.pointer("/modalities/output")),
-        );
-        metadata.reasoning = source
-            .get("reasoning")
-            .and_then(Value::as_bool)
-            .or_else(|| {
-                source
-                    .pointer("/reasoning/supported")
-                    .and_then(Value::as_bool)
-            });
-        metadata.tool_calling = source
-            .get("toolCalling")
-            .or_else(|| source.get("tool_call"))
-            .and_then(Value::as_bool);
-        metadata.parallel_tool_calls = source.get("parallelToolCalls").and_then(Value::as_bool);
-        let efforts = source
-            .get("reasoningEfforts")
-            .or_else(|| source.get("reasoning_efforts"))
-            .or_else(|| source.pointer("/reasoning/efforts"));
-        if let Some(efforts) = efforts {
-            let parsed = if let Some(values) = efforts.as_array() {
-                values
-                    .iter()
-                    .map(|v| v.as_str().map(|s| (s.to_string(), s.to_string())))
-                    .collect::<Option<BTreeMap<_, _>>>()
-            } else if let Some(values) = efforts.as_object() {
-                values
-                    .iter()
-                    .map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect()
-            } else {
-                None
-            };
-            metadata.reasoning_efforts = parsed;
-        }
-        if metadata.validate().is_err() {
-            // A malformed new declaration withdraws old facts for this ID.
-            metadata = ModelMetadata::default();
-        }
         // Duplicate rows are not authoritative. Keep only common guarantees.
         result
             .entry(id)
@@ -421,6 +324,151 @@ pub(crate) fn parse_catalog_limit(
             .or_insert(metadata);
     }
     result
+}
+
+/// One catalog object, already shaped like a `/v1/models` row or a models.dev
+/// model object. Invalid ids are skipped. A malformed fact list becomes an
+/// empty metadata record for that id so a stale fact is not kept.
+pub(crate) fn metadata_from_catalog_row(row: &Value) -> Option<(String, ModelMetadata)> {
+    let id = row.get("id").and_then(Value::as_str)?;
+    let id = crate::provider::validate_custom_model_id(id).ok()?;
+    if id.chars().any(char::is_control) {
+        return None;
+    }
+    let mut metadata = ModelMetadata::default();
+    let ext = row
+        .get("ocg")
+        .filter(|v| v.get("schemaVersion").and_then(Value::as_u64) == Some(1));
+    let source = ext.unwrap_or(row);
+    let number = |keys: &[&str]| {
+        keys.iter().find_map(|k| {
+            source
+                .pointer(k)
+                .and_then(Value::as_u64)
+                .filter(|n| *n > 0 && *n <= MAX_TOKENS)
+        })
+    };
+    metadata.context_window = number(&[
+        "/contextWindow",
+        "/context_length",
+        "/context_window",
+        "/limit/context",
+    ])
+    .or_else(|| {
+        row.get("contextWindow")
+            .and_then(Value::as_u64)
+            .filter(|n| *n > 0 && *n <= MAX_TOKENS)
+    });
+    metadata.max_output_tokens = number(&[
+        "/maxOutputTokens",
+        "/maxTokens",
+        "/max_output_tokens",
+        "/max_completion_tokens",
+        "/limit/output",
+    ])
+    .or_else(|| {
+        row.get("maxTokens")
+            .and_then(Value::as_u64)
+            .filter(|n| *n > 0 && *n <= MAX_TOKENS)
+    });
+    metadata.name = source
+        .get("name")
+        .or_else(|| row.get("name"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    metadata.input_modalities = modalities(
+        source
+            .get("inputModalities")
+            .or_else(|| source.pointer("/modalities/input"))
+            .or_else(|| source.get("input")),
+    );
+    metadata.output_modalities = modalities(
+        source
+            .get("outputModalities")
+            .or_else(|| source.pointer("/modalities/output")),
+    );
+    metadata.reasoning = source
+        .get("reasoning")
+        .and_then(Value::as_bool)
+        .or_else(|| {
+            source
+                .pointer("/reasoning/supported")
+                .and_then(Value::as_bool)
+        });
+    metadata.tool_calling = source
+        .get("toolCalling")
+        .or_else(|| source.get("tool_call"))
+        .and_then(Value::as_bool);
+    metadata.parallel_tool_calls = source.get("parallelToolCalls").and_then(Value::as_bool);
+    // An explicit efforts field wins, including an empty list. reasoning_options
+    // is only the fallback when that field was not sent.
+    if let Some(efforts) = source
+        .get("reasoningEfforts")
+        .or_else(|| source.get("reasoning_efforts"))
+        .or_else(|| source.pointer("/reasoning/efforts"))
+    {
+        metadata.reasoning_efforts = parse_reasoning_efforts_value(efforts);
+    } else {
+        metadata.reasoning_efforts =
+            reasoning_efforts_from_options(source.get("reasoning_options"));
+    }
+    if metadata.validate().is_err() {
+        metadata = ModelMetadata::default();
+    }
+    Some((id, metadata))
+}
+
+fn parse_reasoning_efforts_value(efforts: &Value) -> Option<BTreeMap<String, String>> {
+    if let Some(values) = efforts.as_array() {
+        values
+            .iter()
+            .map(|v| v.as_str().map(|s| (s.to_string(), s.to_string())))
+            .collect()
+    } else if let Some(values) = efforts.as_object() {
+        values
+            .iter()
+            .map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect()
+    } else {
+        None
+    }
+}
+
+/// Effort-style `reasoning_options` become the selector → wire map.
+/// `none` fills the `off` selector. Toggle-only and budget-token options do
+/// not invent levels. An effort entry with an empty value list is an explicit
+/// empty set. Values outside the selector table are dropped; if that removes
+/// every value, the set stays unknown.
+pub(crate) fn reasoning_efforts_from_options(
+    options: Option<&Value>,
+) -> Option<BTreeMap<String, String>> {
+    let options = options?.as_array()?;
+    let mut saw_effort = false;
+    let mut saw_explicit_empty = false;
+    let mut efforts = BTreeMap::new();
+    for option in options {
+        if option.get("type").and_then(Value::as_str) != Some("effort") {
+            continue;
+        }
+        saw_effort = true;
+        let Some(values) = option.get("values").and_then(Value::as_array) else {
+            continue;
+        };
+        if values.is_empty() {
+            saw_explicit_empty = true;
+        }
+        for value in values.iter().filter_map(Value::as_str) {
+            let level = if value == "none" { "off" } else { value };
+            if EFFORTS.contains(&level) {
+                efforts.insert(level.to_string(), value.to_string());
+            }
+        }
+    }
+    if !saw_effort || (efforts.is_empty() && !saw_explicit_empty) {
+        None
+    } else {
+        Some(efforts)
+    }
 }
 
 fn modalities(value: Option<&Value>) -> Option<Vec<String>> {
