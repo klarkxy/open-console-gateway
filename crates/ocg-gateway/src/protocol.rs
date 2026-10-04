@@ -9,6 +9,10 @@
 //! Callers supply [`ApiFormat`] values; this module never looks up model
 //! catalogs or trials a billable inference path.
 //!
+//! Native reasoning opaque fields use a stateless `ocg-replay-v1:<64hex>:`
+//! envelope. The host supplies the 64-hex route domain. This module does not
+//! hash route identity, store replay state, or see credentials.
+//!
 //! Items are rust-public only as the cross-crate bridge; the host crate keeps
 //! parse, usage, stream, and route-identity facades.
 
@@ -115,6 +119,15 @@ pub fn convert_request_json(
     upstream: ApiFormat,
     body: Value,
 ) -> Result<ConvertedRequestJson, ConversionError> {
+    convert_request_json_inner(client, upstream, body, false)
+}
+
+fn convert_request_json_inner(
+    client: ApiFormat,
+    upstream: ApiFormat,
+    body: Value,
+    keep_native_messages_blocks: bool,
+) -> Result<ConvertedRequestJson, ConversionError> {
     validate_request_features(client, upstream, &body)?;
     let converting = client != upstream;
     let (tool_context, legacy_tool_compat) = if client == ApiFormat::Responses {
@@ -122,7 +135,13 @@ pub fn convert_request_json(
     } else {
         (ResponsesToolContext::default(), None)
     };
-    let body = convert_request(client, upstream, body, &tool_context.namespace_tools)?;
+    let body = convert_request(
+        client,
+        upstream,
+        body,
+        &tool_context.namespace_tools,
+        keep_native_messages_blocks,
+    )?;
     Ok(ConvertedRequestJson {
         body,
         custom_tools: tool_context.custom_tools,
@@ -163,6 +182,73 @@ pub fn convert_response_json(
         &synthesis,
     )?;
     Ok(ResponseConversion { body: transformed })
+}
+
+/// Production request conversion.
+///
+/// Call [`prepare_replay_request`] first so native opaque history is judged
+/// before conversion drops it, then convert the restored body.
+/// [`convert_request_json`] stays available for legacy callers and does not
+/// accept a domain. It is not a fallback when a marker is missing.
+///
+/// Native Messages to Messages keeps the restored assistant blocks, including
+/// thinking with a missing, null, or empty signature. System and developer
+/// roles are still hoisted. Every other pair uses the legacy converter.
+///
+/// A [`ConversionError`] rejects that candidate before send. It is not a
+/// signal to retry another protocol after an upstream 400.
+///
+/// Public only as the cross-crate bridge.
+#[doc(hidden)]
+pub fn convert_request_json_with_replay(
+    client: ApiFormat,
+    upstream: ApiFormat,
+    body: Value,
+    route_domain: ReplayDomain,
+) -> Result<ConvertedRequestJson, ConversionError> {
+    let body = prepare_replay_request(client, upstream, body, route_domain)?;
+    // Replay restoration already accepted unsigned thinking. Only this
+    // same-protocol path keeps those blocks. Legacy conversion still strips them.
+    let keep_native_messages_blocks =
+        client == ApiFormat::Messages && upstream == ApiFormat::Messages;
+    convert_request_json_inner(client, upstream, body, keep_native_messages_blocks)
+}
+
+/// Production response conversion.
+///
+/// Binds native opaque fields on the upstream document, then converts. The
+/// Anthropic thinking wrapper is applied by the existing codec to an
+/// already-bound block and does not receive a second envelope. Chat reasoning
+/// text stays on `ocg-chat-reasoning-v1` when that codec runs.
+///
+/// Public only as the cross-crate bridge.
+#[doc(hidden)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "existing conversion facts plus the exact replay domain"
+)]
+pub fn convert_response_json_with_replay(
+    upstream: ApiFormat,
+    client: ApiFormat,
+    body: &Value,
+    custom_tools: &[String],
+    namespace_tools: &[NamespaceToolMapping],
+    synthesis: ResponseSynthesis,
+    model_hint: Option<&str>,
+    route_domain: ReplayDomain,
+) -> Result<ResponseConversion, ConversionError> {
+    let mut body = body.clone();
+    reject_response_replay_loss(upstream, client, &body)?;
+    bind_outgoing_native_replay(upstream, &mut body, route_domain)?;
+    convert_response_json(
+        upstream,
+        client,
+        &body,
+        custom_tools,
+        namespace_tools,
+        synthesis,
+        model_hint,
+    )
 }
 
 fn convert_between(
@@ -717,6 +803,7 @@ fn convert_request(
     upstream: ApiFormat,
     body: Value,
     namespace_tools: &[NamespaceToolMapping],
+    keep_native_messages_blocks: bool,
 ) -> Result<Value, ConversionError> {
     let gemini_schema = if client == ApiFormat::Gemini {
         gemini_output_schema(&body)?
@@ -809,7 +896,7 @@ fn convert_request(
     if upstream != ApiFormat::Messages {
         return Ok(converted);
     }
-    let mut converted = normalize_messages_system_roles(converted)?;
+    let mut converted = normalize_messages_system_roles(converted, keep_native_messages_blocks)?;
     if matches!(client, ApiFormat::Responses | ApiFormat::Gemini)
         && let Some(messages) = converted.get_mut("messages").and_then(Value::as_array_mut)
     {
@@ -1037,7 +1124,10 @@ fn unique_namespace_tool_name(namespace: &str, name: &str, used: &[String]) -> S
     flattened
 }
 
-fn normalize_messages_system_roles(mut body: Value) -> Result<Value, ConversionError> {
+fn normalize_messages_system_roles(
+    mut body: Value,
+    keep_assistant_blocks: bool,
+) -> Result<Value, ConversionError> {
     let object = body
         .as_object_mut()
         .ok_or_else(|| ConversionError::new("Messages request must be a JSON object"))?;
@@ -1052,6 +1142,7 @@ fn normalize_messages_system_roles(mut body: Value) -> Result<Value, ConversionE
             Some("system" | "developer") => {
                 append_system_blocks(&mut system_blocks, message.get("content"));
             }
+            _ if keep_assistant_blocks => remaining.push(message.clone()),
             _ => {
                 if let Some(message) = sanitize_messages_history(message) {
                     remaining.push(message);
@@ -1126,10 +1217,9 @@ fn gemini_request_to_messages(body: Value) -> Result<Value, ConversionError> {
     copy(&body, &mut out, "stream", "stream");
 
     let generation = body.get("generationConfig").unwrap_or(&Value::Null);
-    // Gemini CLI currently sends topK and thinkingConfig in its chat defaults.
-    // Neither field has one portable meaning across every supported Chat and
-    // Messages upstream, so they are accepted as compatibility hints but are
-    // intentionally not forwarded as provider-specific request fields.
+    // This legacy converter still does not forward topK or thinkingConfig.
+    // There is no portable exact mapping. The production replay wrapper rejects
+    // a present value before conversion; an absent property stays absent.
     copy(generation, &mut out, "temperature", "temperature");
     copy(generation, &mut out, "topP", "top_p");
     copy(generation, &mut out, "stopSequences", "stop_sequences");
@@ -2837,23 +2927,964 @@ pub fn decode_chat_reasoning(encrypted_content: &str) -> Option<String> {
         .filter(|text| !text.is_empty())
 }
 
-fn reasoning_text(item: &Value) -> String {
+const REPLAY_PREFIX: &str = "ocg-replay-";
+const REPLAY_VERSION: &str = "ocg-replay-v1:";
+
+/// Host-supplied same-route domain: exactly 64 hexadecimal characters.
+///
+/// Primary hashes public, non-secret route identity with sha2 and passes the
+/// digest here. Parsing accepts either hex case and stores lowercase. This
+/// type does not hash and does not carry credentials.
+///
+/// # Call order
+///
+/// 1. `ReplayDomain::parse` on the host digest.
+/// 2. Outgoing, once, before the client stores history. JSON uses
+///    [`bind_outgoing_native_replay`] or [`bind_replay_opaque`] on each raw
+///    field. SSE uses one [`ReplayChunkBinder`] per field: push the Messages
+///    initial `thinking.signature` and later `signature_delta` chunks through
+///    that same binder, and push `redacted_thinking.data` or native Responses
+///    `encrypted_content` the same way. [`replay_marker_prefix`] is 79 ASCII
+///    bytes (`ocg-replay-v1:` + 64 hex + `:`) and is emitted only with the
+///    first nonempty chunk. Empty signatures stay empty. Bind a Messages
+///    signature or redacted `data` before `encode_anthropic_thinking_block`;
+///    do not mark the `ocg-anthropic-thinking-v1` or `ocg-chat-reasoning-v1`
+///    strings themselves.
+/// 3. Incoming, per candidate, before conversion: [`prepare_replay_request`].
+///    It parses every native opaque field once, restores only `route_domain`,
+///    and returns [`ConversionError`] for an unknown version, a malformed or
+///    nested marker, a missing marker, a domain mismatch, or two histories
+///    that do not share `route_domain`. It also rejects native opaque the
+///    candidate cannot carry. Unmarked nonempty opaque is an error here, not
+///    a fallback.
+/// 4. [`convert_request_json_with_replay`] runs steps 3 and 4. Native Messages
+///    to Messages keeps restored assistant blocks, including unsigned thinking.
+///    Legacy [`convert_request_json`] does not take a domain and still drops
+///    unsigned thinking and empty redacted data. Do not use it as the
+///    production path.
+/// 5. Responses use [`convert_response_json_with_replay`], which binds
+///    upstream native fields and then converts. [`ConversionError`] means that
+///    candidate is unusable. It does not authorize another protocol attempt
+///    after an upstream 400.
+///
+/// Public only as the cross-crate bridge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[doc(hidden)]
+pub struct ReplayDomain {
+    hex: [u8; 64],
+}
+
+impl ReplayDomain {
+    pub fn parse(token: &str) -> Result<Self, ConversionError> {
+        if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(ConversionError::new(
+                "replay route domain must be 64 hexadecimal characters",
+            ));
+        }
+        let mut hex = [0_u8; 64];
+        for (index, byte) in token.bytes().enumerate() {
+            hex[index] = byte.to_ascii_lowercase();
+        }
+        Ok(Self { hex })
+    }
+
+    /// Canonical lowercase token used inside markers.
+    pub fn hex(&self) -> &str {
+        std::str::from_utf8(&self.hex).expect("replay domain hex is ascii")
+    }
+}
+
+/// Result of restoring one opaque field against the expected route domain.
+///
+/// Public only as the cross-crate bridge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum RestoredReplay {
+    /// The field was absent or empty. Empty is not provenance and is not wrapped.
+    Absent,
+    /// The marker matched `expected`. `raw` is the original payload, unmodified.
+    Bound(String),
+}
+
+/// Fixed 79-byte prefix. Write it once, immediately before the first nonempty
+/// opaque chunk. Do not write it for an empty signature.
+///
+/// Public only as the cross-crate bridge.
+#[doc(hidden)]
+pub fn replay_marker_prefix(domain: ReplayDomain) -> String {
+    format!("{REPLAY_VERSION}{}:", domain.hex())
+}
+
+/// Bind one complete opaque string. Empty stays empty. A value that already
+/// starts with `ocg-replay-` is rejected so a marker cannot wrap another marker.
+///
+/// Public only as the cross-crate bridge.
+#[doc(hidden)]
+pub fn bind_replay_opaque(domain: ReplayDomain, raw: &str) -> Result<String, ConversionError> {
+    if raw.is_empty() {
+        return Ok(String::new());
+    }
+    if raw.starts_with(REPLAY_PREFIX) {
+        return Err(ConversionError::new("opaque replay marker is nested"));
+    }
+    Ok(format!("{}{raw}", replay_marker_prefix(domain)))
+}
+
+/// Route-aware read of one opaque field.
+///
+/// Unmarked nonempty data, an unknown `ocg-replay-` version, a malformed
+/// marker, a nested marker, and a domain other than `expected` are errors.
+///
+/// Public only as the cross-crate bridge.
+#[doc(hidden)]
+pub fn restore_replay_opaque(
+    expected: ReplayDomain,
+    value: &str,
+) -> Result<RestoredReplay, ConversionError> {
+    if value.is_empty() {
+        return Ok(RestoredReplay::Absent);
+    }
+    match split_replay_marker(value)? {
+        None => Err(ConversionError::new(
+            "opaque replay history has no route domain",
+        )),
+        Some((domain, raw)) if domain == expected => Ok(RestoredReplay::Bound(raw.to_string())),
+        Some(_) => Err(ConversionError::new(
+            "opaque replay domain does not match the observed route",
+        )),
+    }
+}
+
+/// One outgoing opaque field. Create a new binder per signature, redacted
+/// `data`, or native `encrypted_content`. Push the initial signature and every
+/// later chunk for that field through the same binder. Call [`Self::finish`]
+/// after the last chunk so a short value still receives one prefix. Empty
+/// input never emits a prefix.
+///
+/// Public only as the cross-crate bridge.
+#[derive(Debug)]
+#[doc(hidden)]
+pub struct ReplayChunkBinder {
+    domain: ReplayDomain,
+    pending: String,
+    prefixed: bool,
+}
+
+impl ReplayChunkBinder {
+    pub fn new(domain: ReplayDomain) -> Self {
+        Self {
+            domain,
+            pending: String::new(),
+            prefixed: false,
+        }
+    }
+
+    /// Bytes to write for this chunk. A chunk that is still a proper prefix of
+    /// the reserved `ocg-replay-` token is held until [`Self::finish`] or until
+    /// a later chunk shows it is ordinary payload.
+    pub fn push(&mut self, chunk: &str) -> Result<String, ConversionError> {
+        if chunk.is_empty() {
+            return Ok(String::new());
+        }
+        if self.prefixed {
+            return Ok(chunk.to_string());
+        }
+        self.pending.push_str(chunk);
+        self.flush_pending(false)
+    }
+
+    pub fn finish(&mut self) -> Result<String, ConversionError> {
+        if self.prefixed || self.pending.is_empty() {
+            return Ok(String::new());
+        }
+        self.flush_pending(true)
+    }
+
+    fn flush_pending(&mut self, finish: bool) -> Result<String, ConversionError> {
+        if self.pending.starts_with(REPLAY_PREFIX) {
+            return Err(ConversionError::new("opaque replay marker is nested"));
+        }
+        if !finish && REPLAY_PREFIX.starts_with(&self.pending) {
+            return Ok(String::new());
+        }
+        self.prefixed = true;
+        let pending = std::mem::take(&mut self.pending);
+        Ok(format!("{}{pending}", replay_marker_prefix(self.domain)))
+    }
+}
+
+/// Bind native opaque fields on an upstream document before the client stores
+/// them. Messages `thinking.signature` and `redacted_thinking.data` are marked
+/// in place. Responses native `encrypted_content` is marked in place. An
+/// `ocg-anthropic-thinking-v1` value is opened, its inner signature or data is
+/// marked, and the wrapper is rewritten without a second envelope.
+/// `ocg-chat-reasoning-v1` is left unchanged. An empty or missing thinking
+/// signature stays unsigned. Redacted `data` must already be a nonempty string.
+/// Responses `encrypted_content` may be null or absent.
+///
+/// Public only as the cross-crate bridge.
+#[doc(hidden)]
+pub fn bind_outgoing_native_replay(
+    format: ApiFormat,
+    body: &mut Value,
+    route_domain: ReplayDomain,
+) -> Result<(), ConversionError> {
+    match format {
+        ApiFormat::Messages => {
+            visit_message_blocks_mut(body, |block| bind_messages_block(block, route_domain))
+        }
+        ApiFormat::Responses => {
+            visit_reasoning_items_mut(body, |item| bind_reasoning_encrypted(item, route_domain))
+        }
+        ApiFormat::ChatCompletions | ApiFormat::Gemini => Ok(()),
+    }
+}
+
+/// Validate and restore client history for one candidate upstream.
+///
+/// The returned document has matching opaque payloads unwrapped. Pass it to
+/// [`convert_request_json`]. Do not convert the original document first.
+///
+/// Public only as the cross-crate bridge.
+#[doc(hidden)]
+pub fn prepare_replay_request(
+    client: ApiFormat,
+    upstream: ApiFormat,
+    mut body: Value,
+    route_domain: ReplayDomain,
+) -> Result<Value, ConversionError> {
+    reject_unpreserved_reasoning_controls(client, upstream, &body)?;
+    match client {
+        ApiFormat::Gemini => reject_gemini_thought_history(&body)?,
+        ApiFormat::Messages => restore_messages_history(&mut body, upstream, route_domain)?,
+        ApiFormat::Responses => restore_responses_history(&mut body, upstream, route_domain)?,
+        ApiFormat::ChatCompletions => reject_chat_reasoning_history(&body, upstream)?,
+    }
+    Ok(body)
+}
+
+fn split_replay_marker(value: &str) -> Result<Option<(ReplayDomain, &str)>, ConversionError> {
+    if !value.starts_with(REPLAY_PREFIX) {
+        return Ok(None);
+    }
+    let Some(rest) = value.strip_prefix(REPLAY_VERSION) else {
+        return Err(ConversionError::new(
+            "opaque replay marker version is not supported",
+        ));
+    };
+    let Some((token, payload)) = rest.split_once(':') else {
+        return Err(ConversionError::new("opaque replay marker is malformed"));
+    };
+    let domain = ReplayDomain::parse(token)
+        .map_err(|_| ConversionError::new("opaque replay marker is malformed"))?;
+    if payload.is_empty() {
+        return Err(ConversionError::new("opaque replay marker is malformed"));
+    }
+    if payload.starts_with(REPLAY_PREFIX) {
+        return Err(ConversionError::new("opaque replay marker is nested"));
+    }
+    Ok(Some((domain, payload)))
+}
+
+fn reject_codec_payload(raw: &str) -> Result<(), ConversionError> {
+    if raw.starts_with(ANTHROPIC_THINKING_ENCRYPTED_PREFIX)
+        || raw.starts_with(CHAT_REASONING_ENCRYPTED_PREFIX)
+    {
+        return Err(ConversionError::new("opaque replay marker is nested"));
+    }
+    Ok(())
+}
+
+fn reject_unpreserved_reasoning_controls(
+    client: ApiFormat,
+    upstream: ApiFormat,
+    body: &Value,
+) -> Result<(), ConversionError> {
+    if client == upstream {
+        return Ok(());
+    }
+    if client == ApiFormat::Gemini {
+        reject_gemini_generation_controls(body)?;
+    }
+    if client == ApiFormat::Responses
+        && let Some(reasoning) = body.get("reasoning")
+        && !reasoning.is_null()
+    {
+        let Some(reasoning) = reasoning.as_object() else {
+            return Err(ConversionError::new(
+                "Responses reasoning.effort cannot be preserved by protocol conversion",
+            ));
+        };
+        let mut effort = None;
+        for (key, value) in reasoning {
+            if value.is_null() {
+                continue;
+            }
+            match key.as_str() {
+                "effort" => {
+                    let Some(text) = value.as_str() else {
+                        return Err(ConversionError::new(
+                            "Responses reasoning.effort cannot be preserved by protocol conversion",
+                        ));
+                    };
+                    effort = Some(text);
+                }
+                "summary" => match value.as_str() {
+                    Some("auto" | "") => {}
+                    _ => {
+                        return Err(ConversionError::new(
+                            "Responses reasoning.summary cannot be preserved by protocol conversion",
+                        ));
+                    }
+                },
+                _ => {
+                    return Err(ConversionError::new(format!(
+                        "Responses reasoning.{key} cannot be preserved by protocol conversion"
+                    )));
+                }
+            }
+        }
+        if let Some(effort) = effort {
+            reject_exact_categorical_effort(client, upstream, body, effort)?;
+        }
+    }
+    if client == ApiFormat::ChatCompletions
+        && let Some(effort) = body.get("reasoning_effort")
+        && !effort.is_null()
+    {
+        let Some(effort) = effort.as_str() else {
+            return Err(ConversionError::new(
+                "Chat Completions reasoning_effort cannot be preserved by protocol conversion",
+            ));
+        };
+        reject_exact_categorical_effort(client, upstream, body, effort)?;
+    }
+    if client == ApiFormat::Messages {
+        reject_messages_reasoning_controls(upstream, body)?;
+    }
+    Ok(())
+}
+
+fn reject_gemini_generation_controls(body: &Value) -> Result<(), ConversionError> {
+    let Some(config) = body.get("generationConfig") else {
+        return Ok(());
+    };
+    if config.get("topK").is_some_and(|value| !value.is_null()) {
+        return Err(ConversionError::new(
+            "Gemini generationConfig.topK cannot be preserved by protocol conversion",
+        ));
+    }
+    if config
+        .get("thinkingConfig")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err(ConversionError::new(
+            "Gemini generationConfig.thinkingConfig cannot be preserved by protocol conversion",
+        ));
+    }
+    Ok(())
+}
+
+fn reject_exact_categorical_effort(
+    client: ApiFormat,
+    upstream: ApiFormat,
+    body: &Value,
+    effort: &str,
+) -> Result<(), ConversionError> {
+    let failure = match client {
+        ApiFormat::Responses => {
+            "Responses reasoning.effort cannot be preserved by protocol conversion"
+        }
+        _ => "Chat Completions reasoning_effort cannot be preserved by protocol conversion",
+    };
+    if upstream == ApiFormat::Messages {
+        return reject_unless_unconditional_disable(client, body, failure);
+    }
+    if !matches!(upstream, ApiFormat::ChatCompletions | ApiFormat::Responses) {
+        return Err(ConversionError::new(failure));
+    }
+    let projected = convert_request_json(client, upstream, body.clone())?;
+    let actual = match upstream {
+        ApiFormat::Responses => projected
+            .body
+            .pointer("/reasoning/effort")
+            .and_then(Value::as_str),
+        ApiFormat::ChatCompletions => projected
+            .body
+            .get("reasoning_effort")
+            .and_then(Value::as_str),
+        _ => None,
+    };
+    if actual == Some(effort) {
+        Ok(())
+    } else {
+        Err(ConversionError::new(failure))
+    }
+}
+
+fn reject_unless_unconditional_disable(
+    client: ApiFormat,
+    body: &Value,
+    failure: &str,
+) -> Result<(), ConversionError> {
+    let projected = convert_request_json(client, ApiFormat::Messages, body.clone())?;
+    if !projected_disable_preserved(&projected.body) {
+        return Err(ConversionError::new(failure));
+    }
+    let relaxed = without_effort_collapse_triggers(client, body);
+    let relaxed = convert_request_json(client, ApiFormat::Messages, relaxed)?;
+    if projected_disable_preserved(&relaxed.body) {
+        Ok(())
+    } else {
+        Err(ConversionError::new(failure))
+    }
+}
+
+fn without_effort_collapse_triggers(client: ApiFormat, body: &Value) -> Value {
+    let mut relaxed = body.clone();
+    let Some(object) = relaxed.as_object_mut() else {
+        return relaxed;
+    };
+    match client {
+        ApiFormat::ChatCompletions => {
+            object.remove("max_tokens");
+            object.remove("max_completion_tokens");
+            object.remove("tool_choice");
+        }
+        ApiFormat::Responses => {
+            object.remove("max_output_tokens");
+            object.remove("tool_choice");
+        }
+        ApiFormat::Messages | ApiFormat::Gemini => {}
+    }
+    relaxed
+}
+
+fn projected_disable_preserved(body: &Value) -> bool {
+    let thinking = body.get("thinking");
+    let disabled = thinking
+        .and_then(|thinking| thinking.get("type"))
+        .and_then(Value::as_str)
+        == Some("disabled")
+        && thinking
+            .and_then(|thinking| thinking.get("budget_tokens"))
+            .is_none();
+    let no_substituted_effort = body.get("reasoning_effort").is_none_or(Value::is_null)
+        && body.pointer("/reasoning/effort").is_none_or(Value::is_null);
+    disabled && no_substituted_effort
+}
+
+fn reject_messages_reasoning_controls(
+    upstream: ApiFormat,
+    body: &Value,
+) -> Result<(), ConversionError> {
+    if body
+        .pointer("/output_config/effort")
+        .is_some_and(|effort| !effort.is_null())
+    {
+        return Err(ConversionError::new(
+            "Messages output_config.effort cannot be preserved by protocol conversion",
+        ));
+    }
+    let Some(thinking) = body.get("thinking") else {
+        return Ok(());
+    };
+    if thinking.is_null() {
+        return Ok(());
+    }
+    if thinking.get("type").and_then(Value::as_str) == Some("disabled") && thinking.is_object() {
+        let projected = convert_request_json(ApiFormat::Messages, upstream, body.clone())?;
+        if projected_disable_preserved(&projected.body) {
+            return Ok(());
+        }
+    }
+    Err(ConversionError::new(
+        "Messages thinking.type cannot be preserved by protocol conversion",
+    ))
+}
+
+fn reject_response_replay_loss(
+    upstream: ApiFormat,
+    client: ApiFormat,
+    body: &Value,
+) -> Result<(), ConversionError> {
+    match upstream {
+        ApiFormat::Messages if !matches!(client, ApiFormat::Messages | ApiFormat::Responses) => {
+            visit_message_blocks(body, reject_messages_block_loss)
+        }
+        ApiFormat::Responses if client != ApiFormat::Responses => {
+            visit_reasoning_items(body, |item| match encrypted_native_string(item)? {
+                Some(encrypted) if !encrypted.is_empty() => Err(ConversionError::new(
+                    "Responses encrypted reasoning cannot be preserved by protocol conversion",
+                )),
+                _ => Ok(()),
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+fn reject_messages_block_loss(block: &Value) -> Result<(), ConversionError> {
+    match block.get("type").and_then(Value::as_str) {
+        Some("thinking") => {
+            match native_string(
+                block.get("signature"),
+                "Messages thinking signature must be a string",
+            )? {
+                Some(signature) if !signature.is_empty() => Err(ConversionError::new(
+                    "Messages thinking signature cannot be preserved by protocol conversion",
+                )),
+                _ => Ok(()),
+            }
+        }
+        Some("redacted_thinking") => {
+            required_opaque_string(
+                block.get("data"),
+                "Messages redacted thinking data must be a nonempty string",
+            )?;
+            Err(ConversionError::new(
+                "Messages redacted thinking cannot be preserved by protocol conversion",
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn reject_chat_reasoning_history(body: &Value, upstream: ApiFormat) -> Result<(), ConversionError> {
+    if upstream == ApiFormat::ChatCompletions {
+        return Ok(());
+    }
+    let Some(messages) = body.get("messages").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    for message in messages {
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        if populated_chat_reasoning(message.get("reasoning_content"))
+            || populated_chat_reasoning(message.get("reasoning"))
+        {
+            return Err(ConversionError::new(
+                "Chat reasoning history cannot be preserved by protocol conversion",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn reject_gemini_thought_history(body: &Value) -> Result<(), ConversionError> {
+    let Some(contents) = body.get("contents").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    for content in contents {
+        let Some(parts) = content.get("parts").and_then(Value::as_array) else {
+            continue;
+        };
+        for part in parts {
+            let thought = part.get("thought").and_then(Value::as_bool) == Some(true);
+            let signed = nonempty_json(part.get("thoughtSignature"))
+                || nonempty_json(part.get("thought_signature"));
+            if thought || signed {
+                return Err(ConversionError::new(
+                    "Gemini thought history cannot be preserved by protocol conversion",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn nonempty_json(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => false,
+        Some(Value::String(text)) => !text.is_empty(),
+        Some(_) => true,
+    }
+}
+
+fn populated_chat_reasoning(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => false,
+        Some(Value::String(text)) => !text.is_empty(),
+        Some(_) => true,
+    }
+}
+
+fn native_string<'a>(
+    value: Option<&'a Value>,
+    invalid: &str,
+) -> Result<Option<&'a str>, ConversionError> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.as_str())),
+        Some(_) => Err(ConversionError::new(invalid)),
+    }
+}
+
+fn required_opaque_string<'a>(
+    value: Option<&'a Value>,
+    invalid: &str,
+) -> Result<&'a str, ConversionError> {
+    match native_string(value, invalid)? {
+        Some(text) if !text.is_empty() => Ok(text),
+        _ => Err(ConversionError::new(invalid)),
+    }
+}
+
+fn encrypted_native_string(item: &Value) -> Result<Option<String>, ConversionError> {
+    match item.get("encrypted_content") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(_) => Err(ConversionError::new(
+            "Responses encrypted_content must be a string or null",
+        )),
+    }
+}
+
+fn restore_messages_history(
+    body: &mut Value,
+    upstream: ApiFormat,
+    domain: ReplayDomain,
+) -> Result<(), ConversionError> {
+    visit_message_blocks_mut(body, |block| {
+        match block.get("type").and_then(Value::as_str) {
+            Some("thinking") => {
+                let raw = {
+                    let signature = native_string(
+                        block.get("signature"),
+                        "Messages thinking signature must be a string",
+                    )?;
+                    match signature {
+                        Some(text) if !text.is_empty() => text.to_string(),
+                        _ => return Ok(()),
+                    }
+                };
+                if upstream != ApiFormat::Messages {
+                    return Err(ConversionError::new(
+                        "Messages thinking signature cannot be preserved by protocol conversion",
+                    ));
+                }
+                let restored = bound_payload(domain, &raw)?;
+                insert_string(block, "signature", restored);
+                Ok(())
+            }
+            Some("redacted_thinking") => {
+                let raw = required_opaque_string(
+                    block.get("data"),
+                    "Messages redacted thinking data must be a nonempty string",
+                )?
+                .to_string();
+                if upstream != ApiFormat::Messages {
+                    return Err(ConversionError::new(
+                        "Messages redacted thinking cannot be preserved by protocol conversion",
+                    ));
+                }
+                let restored = bound_payload(domain, &raw)?;
+                insert_string(block, "data", restored);
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    })
+}
+
+fn restore_responses_history(
+    body: &mut Value,
+    upstream: ApiFormat,
+    domain: ReplayDomain,
+) -> Result<(), ConversionError> {
+    visit_reasoning_items_mut(body, |item| restore_reasoning_item(item, upstream, domain))
+}
+
+fn restore_reasoning_item(
+    item: &mut Value,
+    upstream: ApiFormat,
+    domain: ReplayDomain,
+) -> Result<(), ConversionError> {
+    let encrypted = encrypted_native_string(item)?;
+    let Some(encrypted) = encrypted.filter(|text| !text.is_empty()) else {
+        if upstream != ApiFormat::Responses && !reasoning_summary_text(item).is_empty() {
+            return Err(ConversionError::new(
+                "Responses reasoning summary cannot be preserved by protocol conversion",
+            ));
+        }
+        if upstream != ApiFormat::Responses && !reasoning_content_text(item).is_empty() {
+            return Err(ConversionError::new(
+                "Responses reasoning text cannot be preserved by protocol conversion",
+            ));
+        }
+        return Ok(());
+    };
+    if encrypted.starts_with(CHAT_REASONING_ENCRYPTED_PREFIX) {
+        if decode_chat_reasoning(&encrypted).is_none() {
+            return Err(ConversionError::new("opaque replay carrier is malformed"));
+        }
+        if upstream != ApiFormat::ChatCompletions {
+            return Err(ConversionError::new(
+                "Chat reasoning history cannot be preserved by protocol conversion",
+            ));
+        }
+        return Ok(());
+    }
+    if encrypted.starts_with(ANTHROPIC_THINKING_ENCRYPTED_PREFIX) {
+        let Some(mut block) = decode_anthropic_thinking_block(&encrypted) else {
+            return Err(ConversionError::new("opaque replay carrier is malformed"));
+        };
+        if upstream != ApiFormat::Messages {
+            return Err(ConversionError::new(
+                "Anthropic thinking history cannot be preserved by protocol conversion",
+            ));
+        }
+        restore_carried_block(&mut block, domain)?;
+        let wrapped = encode_anthropic_thinking_block(&block)
+            .ok_or_else(|| ConversionError::new("opaque replay carrier is malformed"))?;
+        insert_string(item, "encrypted_content", wrapped);
+        return Ok(());
+    }
+    if upstream != ApiFormat::Responses {
+        return Err(ConversionError::new(
+            "Responses encrypted reasoning cannot be preserved by protocol conversion",
+        ));
+    }
+    let raw = bound_payload(domain, &encrypted)?;
+    reject_codec_payload(&raw)?;
+    insert_string(item, "encrypted_content", raw);
+    Ok(())
+}
+
+fn restore_carried_block(block: &mut Value, domain: ReplayDomain) -> Result<(), ConversionError> {
+    match block.get("type").and_then(Value::as_str) {
+        Some("thinking") => {
+            let raw = {
+                let signature = native_string(
+                    block.get("signature"),
+                    "Messages thinking signature must be a string",
+                )?;
+                match signature {
+                    Some(text) if !text.is_empty() => text.to_string(),
+                    _ => return Ok(()),
+                }
+            };
+            let restored = bound_payload(domain, &raw)?;
+            insert_string(block, "signature", restored);
+            Ok(())
+        }
+        Some("redacted_thinking") => {
+            let raw = required_opaque_string(
+                block.get("data"),
+                "Messages redacted thinking data must be a nonempty string",
+            )?
+            .to_string();
+            let restored = bound_payload(domain, &raw)?;
+            insert_string(block, "data", restored);
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn bound_payload(domain: ReplayDomain, value: &str) -> Result<String, ConversionError> {
+    match restore_replay_opaque(domain, value)? {
+        RestoredReplay::Bound(raw) => Ok(raw),
+        RestoredReplay::Absent => Ok(String::new()),
+    }
+}
+
+fn bind_messages_block(block: &mut Value, domain: ReplayDomain) -> Result<(), ConversionError> {
+    match block.get("type").and_then(Value::as_str) {
+        Some("thinking") => bind_optional_opaque_field(
+            block,
+            "signature",
+            domain,
+            "Messages thinking signature must be a string",
+        ),
+        Some("redacted_thinking") => bind_required_opaque_field(
+            block,
+            "data",
+            domain,
+            "Messages redacted thinking data must be a nonempty string",
+        ),
+        _ => Ok(()),
+    }
+}
+
+fn bind_optional_opaque_field(
+    value: &mut Value,
+    field: &str,
+    domain: ReplayDomain,
+    invalid: &str,
+) -> Result<(), ConversionError> {
+    let raw = {
+        let text = native_string(value.get(field), invalid)?;
+        match text {
+            Some(text) if !text.is_empty() => text.to_string(),
+            _ => return Ok(()),
+        }
+    };
+    let bound = bind_replay_opaque(domain, &raw)?;
+    insert_string(value, field, bound);
+    Ok(())
+}
+
+fn bind_required_opaque_field(
+    value: &mut Value,
+    field: &str,
+    domain: ReplayDomain,
+    invalid: &str,
+) -> Result<(), ConversionError> {
+    let raw = required_opaque_string(value.get(field), invalid)?.to_string();
+    let bound = bind_replay_opaque(domain, &raw)?;
+    insert_string(value, field, bound);
+    Ok(())
+}
+
+fn bind_reasoning_encrypted(item: &mut Value, domain: ReplayDomain) -> Result<(), ConversionError> {
+    let Some(encrypted) = encrypted_native_string(item)?.filter(|text| !text.is_empty()) else {
+        return Ok(());
+    };
+    if let Some(mut block) = decode_anthropic_thinking_block(&encrypted) {
+        bind_messages_block(&mut block, domain)?;
+        let wrapped = encode_anthropic_thinking_block(&block)
+            .ok_or_else(|| ConversionError::new("opaque replay carrier is malformed"))?;
+        insert_string(item, "encrypted_content", wrapped);
+        return Ok(());
+    }
+    if decode_chat_reasoning(&encrypted).is_some() {
+        return Ok(());
+    }
+    if encrypted.starts_with(ANTHROPIC_THINKING_ENCRYPTED_PREFIX)
+        || encrypted.starts_with(CHAT_REASONING_ENCRYPTED_PREFIX)
+    {
+        return Err(ConversionError::new("opaque replay carrier is malformed"));
+    }
+    insert_string(
+        item,
+        "encrypted_content",
+        bind_replay_opaque(domain, &encrypted)?,
+    );
+    Ok(())
+}
+
+fn insert_string(value: &mut Value, field: &str, raw: String) {
+    if let Some(object) = value.as_object_mut() {
+        object.insert(field.to_string(), Value::String(raw));
+    }
+}
+
+fn visit_message_blocks(
+    body: &Value,
+    mut visit: impl FnMut(&Value) -> Result<(), ConversionError>,
+) -> Result<(), ConversionError> {
+    if let Some(blocks) = body.get("content").and_then(Value::as_array) {
+        for block in blocks {
+            visit(block)?;
+        }
+    }
+    if let Some(messages) = body.get("messages").and_then(Value::as_array) {
+        for message in messages {
+            if let Some(blocks) = message.get("content").and_then(Value::as_array) {
+                for block in blocks {
+                    visit(block)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn visit_message_blocks_mut(
+    body: &mut Value,
+    mut visit: impl FnMut(&mut Value) -> Result<(), ConversionError>,
+) -> Result<(), ConversionError> {
+    if let Some(blocks) = body.get_mut("content").and_then(Value::as_array_mut) {
+        for block in blocks {
+            visit(block)?;
+        }
+    }
+    if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+        for message in messages {
+            if let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) {
+                for block in blocks {
+                    visit(block)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn visit_reasoning_items(
+    body: &Value,
+    mut visit: impl FnMut(&Value) -> Result<(), ConversionError>,
+) -> Result<(), ConversionError> {
+    for key in ["input", "output"] {
+        if let Some(items) = body.get(key).and_then(Value::as_array) {
+            for item in items {
+                if item.get("type").and_then(Value::as_str) == Some("reasoning") {
+                    visit(item)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn visit_reasoning_items_mut(
+    body: &mut Value,
+    mut visit: impl FnMut(&mut Value) -> Result<(), ConversionError>,
+) -> Result<(), ConversionError> {
+    for key in ["input", "output"] {
+        if let Some(items) = body.get_mut(key).and_then(Value::as_array_mut) {
+            for item in items {
+                if item.get("type").and_then(Value::as_str) == Some("reasoning") {
+                    visit(item)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reasoning_part_text(parts: &[Value], native_type: Option<&str>) -> String {
+    parts
+        .iter()
+        .filter(|part| {
+            native_type
+                .is_none_or(|expected| part.get("type").and_then(Value::as_str) == Some(expected))
+        })
+        .filter_map(|part| {
+            part.get("text")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn reasoning_summary_text(item: &Value) -> String {
     item.get("summary")
         .and_then(Value::as_array)
-        .map(|parts| {
-            parts
-                .iter()
-                .filter_map(|part| part.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .filter(|text| !text.is_empty())
-        .or_else(|| {
-            item.get("content")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
+        .map(|parts| reasoning_part_text(parts, None))
         .unwrap_or_default()
+}
+
+fn reasoning_content_text(item: &Value) -> String {
+    match item.get("content") {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(parts)) => reasoning_part_text(parts, Some("reasoning_text")),
+        _ => String::new(),
+    }
+}
+
+fn reasoning_text(item: &Value) -> String {
+    let summary = reasoning_summary_text(item);
+    let content = reasoning_content_text(item);
+    match (summary.is_empty(), content.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => summary,
+        (true, false) => content,
+        (false, false) => format!("{summary}\n{content}"),
+    }
 }
 
 fn chat_stop_to_anthropic(reason: Option<&Value>) -> Value {
