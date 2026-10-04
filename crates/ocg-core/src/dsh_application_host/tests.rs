@@ -2754,7 +2754,7 @@ fn cli_registered_partial_cache_installs_again_without_adopting_foreign_bytes() 
         assert_eq!(fs::read(&legacy_file).unwrap(), legacy_kept);
         let leftover = walk_files(&legacy_dir);
         assert_eq!(leftover, vec![legacy_file]);
-        assert!(legacy_runner.commands.lock().unwrap().len() >= 1);
+        assert!(!legacy_runner.commands.lock().unwrap().is_empty());
         fs::remove_dir_all(legacy_root).unwrap();
     }
 }

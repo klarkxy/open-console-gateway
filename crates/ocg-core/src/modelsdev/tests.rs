@@ -243,8 +243,10 @@ fn invalid_payloads_have_no_model_rows() {
 
 #[test]
 fn lookup_prefers_exact_upstream_then_tail_then_public() {
-    let mut catalog = ModelsDevCatalog::default();
-    catalog.fetched_at = Some(Utc::now());
+    let mut catalog = ModelsDevCatalog {
+        fetched_at: Some(Utc::now()),
+        ..Default::default()
+    };
     for (id, context) in [("org/model", 1000_u64), ("model", 2000), ("public", 3000)] {
         catalog.models.insert(
             id.to_string(),
