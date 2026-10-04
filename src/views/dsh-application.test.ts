@@ -1,16 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { DashboardConflictError, DashboardRequestError } from "../api/dashboard-v3.ts";
 import type { DshApplicationView } from "../api/dashboard-v4.ts";
 import { enUSMessages } from "../i18n/messages/en-US.ts";
 import {
   DEFAULT_APPLICATION_TAB,
   DSH_APPLICATION_OUTCOME_KEYS,
   DSH_DEFAULT_KEY_NAME,
+  DSH_INSTALL_FAILURE_KEYS,
+  DSH_UNINSTALL_FAILURE_KEYS,
   dshDraftRuntimeFromInspection,
   dshHostDetail,
   dshInstallAction,
   dshInstallExpectation,
   dshLoadTargetsEqual,
+  dshMutationFailureKind,
   dshMutationFeedback,
   dshNormalizedLoadTarget,
   dshStatusPresentation,
@@ -159,6 +163,32 @@ test("draft runtime seed uses the cached inspection, not a live ref", () => {
     })),
     "http://127.0.0.1:3080",
   );
+});
+
+test("only a revision conflict is classified as state changed", () => {
+  assert.equal(
+    dshMutationFailureKind(new DashboardConflictError("revision", 4, 5)),
+    "revision-changed",
+  );
+  assert.equal(
+    dshMutationFailureKind(new DashboardRequestError("cache", 409, "conflict")),
+    "conflict",
+  );
+  assert.equal(
+    dshMutationFailureKind(new DashboardRequestError("payload", 409, "operationPayloadMismatch")),
+    "conflict",
+  );
+  assert.equal(
+    dshMutationFailureKind(new DashboardRequestError("missing", 412, "preconditionFailed")),
+    "failed",
+  );
+  assert.equal(dshMutationFailureKind(new Error("network")), "failed");
+  assert.equal(dshMutationFailureKind("cache"), "failed");
+  for (const kind of ["revision-changed", "conflict", "failed"] as const) {
+    assert.equal(typeof DSH_INSTALL_FAILURE_KEYS[kind], "string", kind);
+    assert.ok(DSH_INSTALL_FAILURE_KEYS[kind] in enUSMessages, kind);
+    assert.ok(DSH_UNINSTALL_FAILURE_KEYS[kind] in enUSMessages, kind);
+  }
 });
 
 test("host detail is shown when the action is blocked and omitted for ready/installed summaries", () => {

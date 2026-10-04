@@ -14,6 +14,7 @@ struct FailingAddRunner {
     commands: StdMutex<Vec<CommandSpec>>,
     fail_next_add: StdMutex<bool>,
     write_foreign_on_failure: bool,
+    preserve_manifest_on_failure: bool,
 }
 
 fn mutate_test_manifest(manifest: &Path, package_spec: Option<String>) -> Result<(), String> {
@@ -131,6 +132,13 @@ impl CommandRunner for FailingAddRunner {
                     .ok_or_else(|| "missing package path".to_string())?
                     .trim_matches('"');
                 let fail = std::mem::take(&mut *self.fail_next_add.lock().unwrap());
+                if fail && self.preserve_manifest_on_failure {
+                    return Ok(CommandOutput {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: "simulated add failure with no registration change".into(),
+                    });
+                }
                 let package_spec = if fail && self.write_foreign_on_failure {
                     "https://example.test/concurrent.tgz".to_string()
                 } else {
@@ -170,6 +178,12 @@ fn fixture(name: &str) -> (PathBuf, DshDesktopHost, Arc<FakeRunner>) {
 fn fixture_with_version(name: &str, version: &str) -> (PathBuf, DshDesktopHost, Arc<FakeRunner>) {
     let root =
         std::env::temp_dir().join(format!("ocg-dsh-{name}-{}", uuid::Uuid::new_v4().simple()));
+    #[cfg(not(windows))]
+    let root = {
+        // Positive fixtures need plain ancestors even when the OS temp path is an alias.
+        fs::create_dir_all(&root).unwrap();
+        fs::canonicalize(&root).unwrap()
+    };
     let data_dir = root.join("data");
     let home = root.join("home");
     fs::create_dir_all(&data_dir).unwrap();
@@ -697,6 +711,7 @@ fn failed_install_restores_live_without_deleting_claims() {
         commands: StdMutex::new(Vec::new()),
         fail_next_add: StdMutex::new(true),
         write_foreign_on_failure: false,
+        preserve_manifest_on_failure: false,
     });
     host.runner = runner;
     let gateway = "http://127.0.0.1:9042/v1";
@@ -803,6 +818,7 @@ fn failed_add_restores_absent_registration_and_previous_handoff() {
         commands: StdMutex::new(Vec::new()),
         fail_next_add: StdMutex::new(true),
         write_foreign_on_failure: false,
+        preserve_manifest_on_failure: false,
     });
     host.runner = runner.clone();
     let gateway = "http://127.0.0.1:9042/v1";
@@ -861,6 +877,7 @@ fn failed_add_does_not_remove_a_concurrent_foreign_registration() {
         commands: StdMutex::new(Vec::new()),
         fail_next_add: StdMutex::new(true),
         write_foreign_on_failure: true,
+        preserve_manifest_on_failure: false,
     });
     host.runner = runner.clone();
     let gateway = "http://127.0.0.1:9042/v1";
@@ -892,6 +909,455 @@ fn failed_add_does_not_remove_a_concurrent_foreign_registration() {
     );
     assert_eq!(commands[0].args[3], "add");
     drop(commands);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn failed_add_of_registered_missing_cache_keeps_one_command_and_the_original_error() {
+    for (name, partial) in [
+        ("registered-absent-add", false),
+        ("registered-partial-add", true),
+    ] {
+        let (root, mut host, _runner) = fixture(name);
+        let gateway = "http://127.0.0.1:9042/v1";
+        let package = host.render_package(gateway).unwrap();
+        let nested = nested_relative(&package).to_path_buf();
+        if partial {
+            let nested_path = package.path.join(&nested);
+            fs::create_dir_all(nested_path.parent().unwrap()).unwrap();
+            fs::write(&nested_path, package.files.get(&nested).unwrap()).unwrap();
+        } else {
+            assert!(!package.path.exists(), "{name}");
+        }
+        let manifest = host.home.join("profiles/web/package.json");
+        mutate_test_manifest(&manifest, Some(format!("file:{}", package.path.display()))).unwrap();
+        let manifest_before = fs::read(&manifest).unwrap();
+        let runner = Arc::new(FailingAddRunner {
+            manifest: manifest.clone(),
+            commands: StdMutex::new(Vec::new()),
+            fail_next_add: StdMutex::new(true),
+            write_foreign_on_failure: false,
+            preserve_manifest_on_failure: true,
+        });
+        host.runner = runner.clone();
+        write_private_atomic(
+            &host.data_dir,
+            &host.bootstrap_path(),
+            b"previous-registered-key",
+        )
+        .unwrap();
+        let inspected = host.inspect(gateway).unwrap();
+        assert!(inspected.install_supported, "{name}");
+        assert!(!inspected.installed, "{name}");
+
+        let error = host
+            .install(
+                inspected.fingerprint.as_deref().unwrap(),
+                gateway,
+                CACHE_SECRET,
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error.kind,
+            crate::dsh_application::DshApplicationErrorKind::Precondition,
+            "{name}: {}",
+            error.message
+        );
+        assert!(
+            error
+                .message
+                .contains("simulated add failure with no registration change"),
+            "{name}: {}",
+            error.message
+        );
+        assert!(
+            !error.message.contains("could not be restored"),
+            "{name}: {}",
+            error.message
+        );
+        assert!(!error.message.contains(CACHE_SECRET), "{name}");
+        assert_eq!(
+            fs::read(host.bootstrap_path()).unwrap(),
+            b"previous-registered-key",
+            "{name}"
+        );
+        assert_eq!(fs::read(&manifest).unwrap(), manifest_before, "{name}");
+        let spec = serde_json::from_slice::<Value>(&manifest_before)
+            .unwrap()
+            .pointer("/dependencies/@open-console-gateway~1dsh-plugin")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
+        assert!(spec.starts_with("file:"), "{name}: {spec}");
+        assert!(!spec.starts_with("http"), "{name}: {spec}");
+        if partial {
+            assert_eq!(
+                fs::read(package.path.join(&nested)).unwrap(),
+                package.files.get(&nested).unwrap().as_slice(),
+                "{name}"
+            );
+        }
+        let commands = runner.commands.lock().unwrap();
+        assert_eq!(commands.len(), 1, "{name}");
+        assert_eq!(commands[0].args[3], "add");
+        drop(commands);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+fn owned_older_path(state: &RegistrationState) -> &Path {
+    match state {
+        RegistrationState::OwnedOlder(source) => source,
+        other => panic!("expected an owned older registration, observed {other:?}"),
+    }
+}
+
+fn snapshot_files(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    walk_files(root)
+        .into_iter()
+        .map(|path| {
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect()
+}
+
+fn write_shifted_owned_package(package: &RenderedPackage) -> PathBuf {
+    let mut files = package.files.clone();
+    let nested = nested_relative(package).to_path_buf();
+    let bytes = files
+        .get_mut(&nested)
+        .expect("rendered package has a nested file");
+    assert!(!bytes.is_empty(), "nested package file is empty");
+    bytes[0] ^= 0xff;
+    let digest = package_digest(&files).expect("shifted package can be hashed");
+    let directory = package.trusted_root.join(&digest[..24]);
+    assert_ne!(directory, package.path);
+    for (relative, contents) in &files {
+        let destination = directory.join(relative);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(destination, contents).unwrap();
+    }
+    assert!(is_owned_package_source(&directory, &package.trusted_root));
+    assert!(!recoverable_registered_cache(&directory, package));
+    directory
+}
+
+#[test]
+fn cache_recovery_accepts_absent_identity_and_current_partial_or_absent_sources() {
+    let gateway = "http://127.0.0.1:9042/v1";
+    let (root, host, _runner) = fixture("transition-unregistered");
+    let package = host.render_package(gateway).unwrap();
+    let before = host.registration_state(&package);
+    assert_eq!(before, RegistrationState::Absent);
+    package.materialize().unwrap();
+    let after = host.registration_state(&package);
+    assert_eq!(after, RegistrationState::Absent);
+    assert_eq!(
+        registration_transition(&before, &after, &package),
+        RegistrationTransition::Accepted
+    );
+    assert!(package.exists_and_matches());
+    fs::remove_dir_all(root).unwrap();
+
+    for (name, partial) in [
+        ("transition-absent-cache", false),
+        ("transition-partial-cache", true),
+    ] {
+        let (root, host, _runner) = fixture(name);
+        let package = host.render_package(gateway).unwrap();
+        let nested = nested_relative(&package).to_path_buf();
+        let nested_bytes = package.files.get(&nested).unwrap().clone();
+        if partial {
+            let nested_path = package.path.join(&nested);
+            fs::create_dir_all(nested_path.parent().unwrap()).unwrap();
+            fs::write(&nested_path, &nested_bytes).unwrap();
+        } else {
+            assert!(!package.path.exists(), "{name}");
+        }
+        mutate_test_manifest(
+            &host.home.join("profiles/web/package.json"),
+            Some(format!("file:{}", package.path.display())),
+        )
+        .unwrap();
+        let before = host.registration_state(&package);
+        assert!(
+            same_lexical_path(owned_older_path(&before), &package.path),
+            "{name}"
+        );
+        package.materialize().unwrap();
+        let after = host.registration_state(&package);
+        assert_eq!(after, RegistrationState::Exact, "{name}");
+        assert_eq!(
+            registration_transition(&before, &after, &package),
+            RegistrationTransition::Accepted,
+            "{name}"
+        );
+        assert_eq!(
+            registration_transition(&after, &after, &package),
+            RegistrationTransition::Accepted,
+            "{name}"
+        );
+        if partial {
+            assert_eq!(
+                fs::read(package.path.join(&nested)).unwrap(),
+                nested_bytes,
+                "{name}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn genuine_older_owned_source_stays_accepted_and_keeps_its_bytes() {
+    let (root, host, runner) = fixture("transition-older-source");
+    let gateway = "http://127.0.0.1:9042/v1";
+    let package = host.render_package(gateway).unwrap();
+    let older = write_shifted_owned_package(&package);
+    let older_bytes = snapshot_files(&older);
+    mutate_test_manifest(
+        &host.home.join("profiles/web/package.json"),
+        Some(format!("file:{}", older.display())),
+    )
+    .unwrap();
+    let before = host.registration_state(&package);
+    assert!(same_lexical_path(owned_older_path(&before), &older));
+    package.materialize().unwrap();
+    let after = host.registration_state(&package);
+    assert!(same_lexical_path(owned_older_path(&after), &older));
+    assert_eq!(
+        registration_transition(&before, &after, &package),
+        RegistrationTransition::Accepted
+    );
+    assert_eq!(snapshot_files(&older), older_bytes);
+    assert_eq!(
+        registration_transition(
+            &RegistrationState::OwnedOlder(older.clone()),
+            &RegistrationState::Exact,
+            &package
+        ),
+        RegistrationTransition::Rejected
+    );
+
+    let inspected = host.inspect(gateway).unwrap();
+    assert!(inspected.install_supported);
+    let installed = host
+        .install(
+            inspected.fingerprint.as_deref().unwrap(),
+            gateway,
+            CACHE_SECRET,
+        )
+        .unwrap();
+    assert_eq!(installed.phase, DshApplicationPhase::Installed);
+    assert_package_hides_secret(&package, CACHE_SECRET);
+    assert_eq!(snapshot_files(&older), older_bytes);
+    let commands = runner.commands.lock().unwrap();
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].args[3], "add");
+    drop(commands);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn registration_transition_rejects_foreign_conflict_and_changed_owned_source() {
+    let (root, host, runner) = fixture("transition-reject");
+    let gateway = "http://127.0.0.1:9042/v1";
+    let package = host.render_package(gateway).unwrap();
+    let manifest = host.home.join("profiles/web/package.json");
+    mutate_test_manifest(&manifest, Some(format!("file:{}", package.path.display()))).unwrap();
+    let current = host.registration_state(&package);
+    assert!(same_lexical_path(owned_older_path(&current), &package.path));
+
+    let older = write_shifted_owned_package(&package);
+    let older_bytes = snapshot_files(&older);
+    mutate_test_manifest(&manifest, Some(format!("file:{}", older.display()))).unwrap();
+    let older_state = host.registration_state(&package);
+    assert!(same_lexical_path(owned_older_path(&older_state), &older));
+    assert_ne!(owned_older_path(&current), owned_older_path(&older_state));
+    assert_eq!(
+        registration_transition(&current, &older_state, &package),
+        RegistrationTransition::Rejected
+    );
+    assert_eq!(
+        registration_transition(&older_state, &RegistrationState::Exact, &package),
+        RegistrationTransition::Rejected
+    );
+    assert_eq!(
+        registration_transition(&older_state, &older_state, &package),
+        RegistrationTransition::Accepted
+    );
+    let changed = rejected_registration_transition(&older_state);
+    assert_eq!(
+        changed.kind,
+        crate::dsh_application::DshApplicationErrorKind::Conflict
+    );
+    assert_eq!(
+        changed.message,
+        "DSH registration changed while the OCG package cache was recovered"
+    );
+
+    let foreign = root.join("foreign-plugin");
+    fs::create_dir_all(foreign.join("locale")).unwrap();
+    fs::write(
+        foreign.join("package.json"),
+        b"{\"name\":\"foreign-plugin\"}",
+    )
+    .unwrap();
+    fs::write(foreign.join("locale/en.json"), b"keep-foreign-locale").unwrap();
+    let foreign_bytes = snapshot_files(&foreign);
+    mutate_test_manifest(&manifest, Some(format!("file:{}", foreign.display()))).unwrap();
+    let conflict = host.registration_state(&package);
+    let RegistrationState::Conflict(detail) = &conflict else {
+        panic!("foreign source was not a conflict: {conflict:?}");
+    };
+    assert_eq!(
+        registration_transition(&current, &conflict, &package),
+        RegistrationTransition::Rejected
+    );
+    assert_eq!(
+        registration_transition(&older_state, &conflict, &package),
+        RegistrationTransition::Rejected
+    );
+    assert_eq!(
+        registration_transition(&conflict, &conflict, &package),
+        RegistrationTransition::Rejected
+    );
+    let error = rejected_registration_transition(&conflict);
+    assert_eq!(
+        error.kind,
+        crate::dsh_application::DshApplicationErrorKind::Conflict
+    );
+    assert_eq!(error.message, *detail);
+    assert_eq!(snapshot_files(&foreign), foreign_bytes);
+    assert_eq!(snapshot_files(&older), older_bytes);
+    assert!(!package.path.exists());
+    assert!(!host.bootstrap_path().exists());
+    assert!(runner.commands.lock().unwrap().is_empty());
+
+    let spelled = package
+        .path
+        .parent()
+        .unwrap()
+        .join(".")
+        .join(package.path.file_name().unwrap());
+    assert_eq!(
+        registration_transition(
+            &RegistrationState::OwnedOlder(spelled.clone()),
+            &RegistrationState::Exact,
+            &package
+        ),
+        RegistrationTransition::Accepted
+    );
+    assert_eq!(
+        registration_transition(
+            &RegistrationState::OwnedOlder(package.path.clone()),
+            &RegistrationState::OwnedOlder(spelled),
+            &package
+        ),
+        RegistrationTransition::Accepted
+    );
+    for (before, after, decision) in [
+        (
+            RegistrationState::Absent,
+            RegistrationState::Absent,
+            RegistrationTransition::Accepted,
+        ),
+        (
+            RegistrationState::Exact,
+            RegistrationState::Exact,
+            RegistrationTransition::Accepted,
+        ),
+        (
+            RegistrationState::EditorExact,
+            RegistrationState::EditorExact,
+            RegistrationTransition::Accepted,
+        ),
+        (
+            RegistrationState::Absent,
+            RegistrationState::Exact,
+            RegistrationTransition::Rejected,
+        ),
+        (
+            RegistrationState::Exact,
+            RegistrationState::Absent,
+            RegistrationTransition::Rejected,
+        ),
+        (
+            RegistrationState::EditorExact,
+            RegistrationState::Exact,
+            RegistrationTransition::Rejected,
+        ),
+        (
+            RegistrationState::Exact,
+            RegistrationState::EditorExact,
+            RegistrationTransition::Rejected,
+        ),
+        (
+            RegistrationState::Exact,
+            RegistrationState::OwnedOlder(package.path.clone()),
+            RegistrationTransition::Rejected,
+        ),
+        (
+            RegistrationState::Conflict("same".into()),
+            RegistrationState::Conflict("same".into()),
+            RegistrationTransition::Rejected,
+        ),
+        (
+            RegistrationState::OwnedOlder(package.path.clone()),
+            RegistrationState::Conflict("foreign".into()),
+            RegistrationTransition::Rejected,
+        ),
+    ] {
+        assert_eq!(
+            registration_transition(&before, &after, &package),
+            decision,
+            "{before:?} -> {after:?}"
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn foreign_registration_stops_before_handoff_and_preserves_its_source() {
+    let (root, host, runner) = fixture("foreign-before-handoff");
+    let gateway = "http://127.0.0.1:9042/v1";
+    let package = host.render_package(gateway).unwrap();
+    let foreign = root.join("foreign-plugin");
+    fs::create_dir_all(foreign.join("locale")).unwrap();
+    fs::write(
+        foreign.join("package.json"),
+        b"{\"name\":\"foreign-plugin\",\"keep\":true}",
+    )
+    .unwrap();
+    fs::write(foreign.join("locale/en.json"), b"keep-foreign-locale").unwrap();
+    let foreign_bytes = snapshot_files(&foreign);
+    let manifest = host.home.join("profiles/web/package.json");
+    mutate_test_manifest(&manifest, Some(format!("file:{}", foreign.display()))).unwrap();
+    let manifest_bytes = fs::read(&manifest).unwrap();
+
+    let inspected = host.inspect(gateway).unwrap();
+    assert_eq!(inspected.phase, DshApplicationPhase::Conflict);
+    assert!(!inspected.install_supported);
+    let error = host
+        .install(
+            inspected.fingerprint.as_deref().unwrap(),
+            gateway,
+            CACHE_SECRET,
+        )
+        .unwrap_err();
+    assert_eq!(
+        error.kind,
+        crate::dsh_application::DshApplicationErrorKind::Precondition
+    );
+    assert_eq!(error.message, inspected.detail.unwrap());
+    assert!(!error.message.contains(CACHE_SECRET));
+    assert!(!host.bootstrap_path().exists());
+    assert!(runner.commands.lock().unwrap().is_empty());
+    assert_eq!(snapshot_files(&foreign), foreign_bytes);
+    assert_eq!(fs::read(&manifest).unwrap(), manifest_bytes);
+    assert!(!package.path.exists());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1809,4 +2275,578 @@ fn http_wait_for_install_null_is_unknown_and_reinstall_targets_runtime_package_n
     );
     assert!(cancel_runner.commands.lock().unwrap().is_empty());
     fs::remove_dir_all(cancel_root).unwrap();
+}
+
+const CACHE_SECRET: &str = "ocg-test-secret-cache";
+
+fn write_rendered_package(package: &RenderedPackage, directory: &Path) {
+    for (relative, bytes) in &package.files {
+        let destination = directory.join(relative);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(destination, bytes).unwrap();
+    }
+}
+
+fn nested_relative(package: &RenderedPackage) -> &Path {
+    package
+        .files
+        .keys()
+        .find(|path| path.components().count() > 1)
+        .map(PathBuf::as_path)
+        .expect("rendered package has a nested locale file")
+}
+
+fn assert_package_hides_secret(package: &RenderedPackage, secret: &str) {
+    assert!(package.published_package_ok());
+    for relative in package.files.keys() {
+        let bytes = fs::read(package.path.join(relative)).unwrap();
+        assert!(
+            !bytes
+                .windows(secret.len())
+                .any(|window| window == secret.as_bytes()),
+            "package file {} contains the gateway key",
+            relative.display()
+        );
+    }
+}
+
+fn http_install(
+    host: &DshDesktopHost,
+    origin: &str,
+    gateway: &str,
+    secret: &str,
+) -> DshApplicationResult<DshApplicationInspection> {
+    let inspected = host
+        .execute(DshApplicationHostRequest::Inspect {
+            gateway_v1_url: gateway.into(),
+            profile_path: None,
+            runtime_url: Some(origin.into()),
+        })
+        .unwrap();
+    host.execute(DshApplicationHostRequest::Install {
+        expected_fingerprint: inspected.fingerprint.expect("fingerprint"),
+        gateway_v1_url: gateway.into(),
+        profile_path: None,
+        runtime_url: Some(origin.into()),
+        secret: crate::dsh_application::DshGatewaySecret::new(secret.into()),
+    })
+}
+
+fn http_uninstall(
+    host: &DshDesktopHost,
+    origin: &str,
+    gateway: &str,
+) -> DshApplicationResult<DshApplicationInspection> {
+    let inspected = host
+        .execute(DshApplicationHostRequest::Inspect {
+            gateway_v1_url: gateway.into(),
+            profile_path: None,
+            runtime_url: Some(origin.into()),
+        })
+        .unwrap();
+    host.execute(DshApplicationHostRequest::Uninstall {
+        expected_fingerprint: inspected.fingerprint.expect("fingerprint"),
+        gateway_v1_url: gateway.into(),
+        profile_path: None,
+        runtime_url: Some(origin.into()),
+    })
+}
+
+#[cfg(windows)]
+fn link_directory(target: &Path, link: &Path) -> std::io::Result<()> {
+    use base64::Engine;
+    use std::os::windows::process::CommandExt;
+    let quote = |path: &Path| {
+        path.to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .replace('\'', "''")
+    };
+    let script = format!(
+        "New-Item -ItemType Junction -Path '{}' -Target '{}' -ErrorAction Stop | Out-Null",
+        quote(link),
+        quote(target)
+    );
+    let bytes = script
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let result = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encoded])
+        .creation_flags(0x08000000)
+        .output()?;
+    if result.status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "junction fixture creation failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        )))
+    }
+}
+
+#[cfg(not(windows))]
+fn link_directory(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+fn unlink_directory(path: &Path) {
+    #[cfg(windows)]
+    {
+        let _ = fs::remove_dir(path);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = fs::remove_file(path);
+    }
+}
+
+#[test]
+fn http_missing_package_cache_recovers_across_repeat_install_and_reinstall() {
+    let (root, host, runner) = fixture("http-cache-recovery");
+    write_browser_grant(&host.home);
+    let fake = HttpPluginFake::start(HttpPluginState::empty());
+    let gateway = "http://127.0.0.1:9042/v1";
+    let package = host.render_package(gateway).unwrap();
+    fs::create_dir_all(&package.path).unwrap();
+
+    let installed = http_install(&host, &fake.origin(), gateway, CACHE_SECRET).unwrap();
+    assert_eq!(installed.phase, DshApplicationPhase::Installed);
+    assert_package_hides_secret(&package, CACHE_SECRET);
+    assert_eq!(
+        fs::read(host.bootstrap_path()).unwrap(),
+        CACHE_SECRET.as_bytes()
+    );
+
+    let repeated = http_install(&host, &fake.origin(), gateway, CACHE_SECRET).unwrap();
+    assert!(repeated.installed);
+    assert_package_hides_secret(&package, CACHE_SECRET);
+
+    let removed = http_uninstall(&host, &fake.origin(), gateway).unwrap();
+    assert!(!removed.installed);
+    assert_package_hides_secret(&package, CACHE_SECRET);
+
+    fs::remove_dir_all(&package.path).unwrap();
+    fs::create_dir_all(&package.path).unwrap();
+    let reinstalled = http_install(&host, &fake.origin(), gateway, CACHE_SECRET).unwrap();
+    assert!(reinstalled.installed);
+    assert_package_hides_secret(&package, CACHE_SECRET);
+
+    for relative in package.files.keys() {
+        if relative.components().count() > 1 {
+            fs::remove_file(package.path.join(relative)).unwrap();
+        }
+    }
+    assert!(!package.published_package_ok());
+    let nested = http_install(&host, &fake.origin(), gateway, CACHE_SECRET).unwrap();
+    assert!(nested.installed);
+    assert_package_hides_secret(&package, CACHE_SECRET);
+    assert!(runner.commands.lock().unwrap().is_empty());
+    assert!(
+        fake.methods()
+            .iter()
+            .any(|method| method == "pluginManager/installBundle")
+    );
+    assert!(
+        fake.methods()
+            .iter()
+            .any(|method| method == "pluginManager/removeBundle")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn rejected_package_cache_keeps_modified_unexpected_and_linked_bytes() {
+    let (root, host, runner) = fixture("http-cache-reject");
+    write_browser_grant(&host.home);
+    let fake = HttpPluginFake::start(HttpPluginState::empty());
+    let gateway = "http://127.0.0.1:9042/v1";
+    let package = host.render_package(gateway).unwrap();
+    fs::create_dir_all(&package.path).unwrap();
+    let manifest = package.path.join("package.json");
+    fs::write(&manifest, b"{\"name\":\"foreign-cache\"}").unwrap();
+
+    let error = http_install(&host, &fake.origin(), gateway, CACHE_SECRET).unwrap_err();
+    assert_eq!(
+        error.kind,
+        crate::dsh_application::DshApplicationErrorKind::Conflict
+    );
+    assert!(!error.message.contains(CACHE_SECRET));
+    assert_eq!(
+        fs::read(&manifest).unwrap(),
+        b"{\"name\":\"foreign-cache\"}"
+    );
+    assert!(!package.path.join("index.js").exists());
+    assert!(!host.bootstrap_path().exists());
+
+    fs::remove_dir_all(&package.path).unwrap();
+    let empty_extra = package.path.join("unexpected-empty");
+    fs::create_dir_all(&empty_extra).unwrap();
+    let error = http_install(&host, &fake.origin(), gateway, CACHE_SECRET).unwrap_err();
+    assert_eq!(
+        error.kind,
+        crate::dsh_application::DshApplicationErrorKind::Conflict
+    );
+    assert!(empty_extra.is_dir());
+    assert!(fs::read_dir(&empty_extra).unwrap().next().is_none());
+    assert!(!package.path.join("package.json").exists());
+
+    fs::remove_dir_all(&package.path).unwrap();
+    fs::create_dir_all(&package.path).unwrap();
+    let extra = package.path.join("notes.txt");
+    fs::write(&extra, b"keep-notes").unwrap();
+    let error = http_install(&host, &fake.origin(), gateway, CACHE_SECRET).unwrap_err();
+    assert_eq!(
+        error.kind,
+        crate::dsh_application::DshApplicationErrorKind::Conflict
+    );
+    assert_eq!(fs::read(&extra).unwrap(), b"keep-notes");
+    assert!(!package.path.join("index.js").exists());
+
+    fs::remove_dir_all(&package.path).unwrap();
+    fs::create_dir_all(&package.path).unwrap();
+    let outside = root.join("linked-outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("marker.txt"), b"keep-outside").unwrap();
+    let linked = package.path.join("extra-link");
+    link_directory(&outside, &linked).expect("package link fixture");
+    let error = package.materialize().unwrap_err();
+    assert_eq!(
+        error.kind,
+        crate::dsh_application::DshApplicationErrorKind::Conflict
+    );
+    assert_eq!(
+        fs::read(outside.join("marker.txt")).unwrap(),
+        b"keep-outside"
+    );
+    assert!(is_link_or_reparse(&linked));
+    assert!(!package.path.join("index.js").exists());
+    assert!(
+        !fake
+            .methods()
+            .iter()
+            .any(|method| method == "pluginManager/installBundle")
+    );
+    assert!(runner.commands.lock().unwrap().is_empty());
+    unlink_directory(&linked);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn package_root_and_ancestor_links_do_not_receive_package_bytes() {
+    let (root, host, runner) = fixture("package-anchor-links");
+    let gateway = "http://127.0.0.1:9042/v1";
+    let package = host.render_package(gateway).unwrap();
+    let outside = root.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("marker.txt"), b"keep-outside").unwrap();
+
+    let applications = host.data_dir.join("applications");
+    link_directory(&outside, &applications).expect("ancestor link fixture");
+    let inspected = host.inspect(gateway).unwrap();
+    let error = host
+        .install(
+            inspected.fingerprint.as_deref().unwrap(),
+            gateway,
+            CACHE_SECRET,
+        )
+        .unwrap_err();
+    assert_eq!(
+        error.kind,
+        crate::dsh_application::DshApplicationErrorKind::Conflict
+    );
+    assert!(!error.message.contains(CACHE_SECRET));
+    assert_eq!(
+        fs::read(outside.join("marker.txt")).unwrap(),
+        b"keep-outside"
+    );
+    assert!(!outside.join("dsh").exists());
+    assert!(is_link_or_reparse(&applications));
+    assert!(runner.commands.lock().unwrap().is_empty());
+    unlink_directory(&applications);
+
+    let dsh_dir = host.data_dir.join("applications").join("dsh");
+    fs::create_dir_all(&dsh_dir).unwrap();
+    let packages = dsh_dir.join("packages-v1");
+    link_directory(&outside, &packages).expect("package root link fixture");
+    let error = package.materialize().unwrap_err();
+    assert_eq!(
+        error.kind,
+        crate::dsh_application::DshApplicationErrorKind::Conflict
+    );
+    assert_eq!(
+        fs::read(outside.join("marker.txt")).unwrap(),
+        b"keep-outside"
+    );
+    assert!(is_link_or_reparse(&packages));
+    assert!(!outside.join(package.path.file_name().unwrap()).exists());
+    unlink_directory(&packages);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn nested_locale_cache_accepts_normalized_digest_and_rejects_modified_bytes() {
+    let (root, host, _) = fixture("digest-ownership");
+    let gateway = "http://127.0.0.1:9042/v1";
+    let package = host.render_package(gateway).unwrap();
+    let nested = nested_relative(&package);
+    write_rendered_package(&package, &package.path);
+    assert!(is_owned_package_source(
+        &package.path,
+        &package.trusted_root
+    ));
+
+    let legacy = legacy_native_package_digest(&package.files);
+    #[cfg(windows)]
+    {
+        assert_ne!(legacy, package.digest);
+        let legacy_path = package.trusted_root.join(&legacy[..24]);
+        assert_ne!(legacy_path, package.path);
+        write_rendered_package(&package, &legacy_path);
+        assert!(is_owned_package_source(&legacy_path, &package.trusted_root));
+        let legacy_nested = legacy_path.join(nested);
+        let mut changed = fs::read(&legacy_nested).unwrap();
+        changed[0] ^= 0xff;
+        fs::write(&legacy_nested, &changed).unwrap();
+        assert!(!is_owned_package_source(
+            &legacy_path,
+            &package.trusted_root
+        ));
+    }
+    #[cfg(not(windows))]
+    assert_eq!(legacy, package.digest);
+
+    let normalized_nested = package.path.join(nested);
+    let mut changed = fs::read(&normalized_nested).unwrap();
+    changed[0] ^= 0xff;
+    fs::write(&normalized_nested, &changed).unwrap();
+    assert!(!is_owned_package_source(
+        &package.path,
+        &package.trusted_root
+    ));
+
+    let arbitrary = package.trusted_root.join("0123456789abcdef01234567");
+    assert_ne!(arbitrary, package.path);
+    assert_ne!(
+        arbitrary.file_name().and_then(|value| value.to_str()),
+        Some(&legacy[..24])
+    );
+    write_rendered_package(&package, &arbitrary);
+    assert!(!is_owned_package_source(&arbitrary, &package.trusted_root));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cli_registered_partial_cache_installs_again_without_adopting_foreign_bytes() {
+    let gateway = "http://127.0.0.1:9042/v1";
+    let (root, host, runner) = fixture("cli-partial-cache");
+    let package = host.render_package(gateway).unwrap();
+    let nested = nested_relative(&package);
+    let nested_path = package.path.join(nested);
+    fs::create_dir_all(nested_path.parent().unwrap()).unwrap();
+    fs::write(&nested_path, package.files.get(nested).unwrap()).unwrap();
+    let kept = fs::read(&nested_path).unwrap();
+    mutate_test_manifest(
+        &host.home.join("profiles/web/package.json"),
+        Some(format!("file:{}", package.path.display())),
+    )
+    .unwrap();
+
+    let inspected = host.inspect(gateway).unwrap();
+    assert_eq!(inspected.phase, DshApplicationPhase::Ready);
+    assert!(inspected.install_supported);
+    assert!(!inspected.installed);
+    let installed = host
+        .install(
+            inspected.fingerprint.as_deref().unwrap(),
+            gateway,
+            CACHE_SECRET,
+        )
+        .unwrap();
+    assert_eq!(installed.phase, DshApplicationPhase::Installed);
+    assert_package_hides_secret(&package, CACHE_SECRET);
+    assert_eq!(fs::read(&nested_path).unwrap(), kept);
+
+    let again = host.inspect(gateway).unwrap();
+    host.install(again.fingerprint.as_deref().unwrap(), gateway, CACHE_SECRET)
+        .unwrap();
+    assert_package_hides_secret(&package, CACHE_SECRET);
+    let commands = runner.commands.lock().unwrap();
+    assert_eq!(commands.len(), 2);
+    assert!(commands.iter().all(|command| {
+        command
+            .args
+            .iter()
+            .all(|arg| !arg.to_string_lossy().contains(CACHE_SECRET))
+    }));
+    drop(commands);
+    fs::remove_dir_all(root).unwrap();
+
+    let (foreign_root, foreign_host, foreign_runner) = fixture("cli-foreign-partial");
+    let foreign_package = foreign_host.render_package(gateway).unwrap();
+    let foreign_dir = foreign_package.trusted_root.join("abcdefabcdefabcdefabcd");
+    assert_ne!(foreign_dir, foreign_package.path);
+    fs::create_dir_all(foreign_dir.join("locale")).unwrap();
+    let foreign_manifest = foreign_dir.join("package.json");
+    fs::write(
+        &foreign_manifest,
+        b"{\"name\":\"@open-console-gateway/dsh-plugin\"}",
+    )
+    .unwrap();
+    mutate_test_manifest(
+        &foreign_host.home.join("profiles/web/package.json"),
+        Some(format!("file:{}", foreign_dir.display())),
+    )
+    .unwrap();
+    let seen = foreign_host.inspect(gateway).unwrap();
+    assert_eq!(seen.phase, DshApplicationPhase::Conflict);
+    assert!(!seen.install_supported);
+    let error = foreign_host
+        .install(seen.fingerprint.as_deref().unwrap(), gateway, CACHE_SECRET)
+        .unwrap_err();
+    assert_eq!(
+        error.kind,
+        crate::dsh_application::DshApplicationErrorKind::Precondition
+    );
+    assert!(!error.message.contains(CACHE_SECRET));
+    assert_eq!(
+        fs::read(&foreign_manifest).unwrap(),
+        b"{\"name\":\"@open-console-gateway/dsh-plugin\"}"
+    );
+    assert!(
+        fs::read_dir(foreign_dir.join("locale"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    assert!(!foreign_package.path.exists());
+    assert!(foreign_runner.commands.lock().unwrap().is_empty());
+    fs::remove_dir_all(foreign_root).unwrap();
+
+    #[cfg(windows)]
+    {
+        let (legacy_root, legacy_host, legacy_runner) = fixture("cli-legacy-partial");
+        let legacy_package = legacy_host.render_package(gateway).unwrap();
+        let legacy = legacy_native_package_digest(&legacy_package.files);
+        assert_ne!(legacy, legacy_package.digest);
+        let legacy_dir = legacy_package.trusted_root.join(&legacy[..24]);
+        assert_ne!(legacy_dir, legacy_package.path);
+        let legacy_nested = nested_relative(&legacy_package);
+        let legacy_file = legacy_dir.join(legacy_nested);
+        fs::create_dir_all(legacy_file.parent().unwrap()).unwrap();
+        fs::write(
+            &legacy_file,
+            legacy_package.files.get(legacy_nested).unwrap(),
+        )
+        .unwrap();
+        let legacy_kept = fs::read(&legacy_file).unwrap();
+        mutate_test_manifest(
+            &legacy_host.home.join("profiles/web/package.json"),
+            Some(format!("file:{}", legacy_dir.display())),
+        )
+        .unwrap();
+        let ready = legacy_host.inspect(gateway).unwrap();
+        assert!(ready.install_supported);
+        legacy_host
+            .install(ready.fingerprint.as_deref().unwrap(), gateway, CACHE_SECRET)
+            .unwrap();
+        assert_package_hides_secret(&legacy_package, CACHE_SECRET);
+        assert_eq!(fs::read(&legacy_file).unwrap(), legacy_kept);
+        let leftover = walk_files(&legacy_dir);
+        assert_eq!(leftover, vec![legacy_file]);
+        assert!(legacy_runner.commands.lock().unwrap().len() >= 1);
+        fs::remove_dir_all(legacy_root).unwrap();
+    }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn walk_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                directories.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+#[test]
+fn changed_destination_keeps_the_detached_package_backup() {
+    let (root, host, _) = fixture("backup-preserve");
+    let package = host.render_package("http://127.0.0.1:9042/v1").unwrap();
+    fs::create_dir_all(&package.path).unwrap();
+    let backup = package
+        .path
+        .parent()
+        .unwrap()
+        .join(".ocg-dsh-package-test.bak");
+    fs::rename(&package.path, &backup).unwrap();
+    fs::create_dir_all(&package.path).unwrap();
+    fs::write(package.path.join("external.txt"), b"external-change").unwrap();
+    let snapshot = std::collections::BTreeMap::new();
+    let preserved = restore_missing_only_backup(
+        &package.trusted_root,
+        &backup,
+        &package.path,
+        &package.files,
+        &snapshot,
+    );
+    assert_eq!(preserved, BackupRestore::Preserved);
+    assert_eq!(
+        fs::read(package.path.join("external.txt")).unwrap(),
+        b"external-change"
+    );
+    assert!(backup.is_dir());
+    assert!(fs::read_dir(&backup).unwrap().next().is_none());
+
+    fs::remove_dir_all(&package.path).unwrap();
+    let restored = restore_missing_only_backup(
+        &package.trusted_root,
+        &backup,
+        &package.path,
+        &package.files,
+        &snapshot,
+    );
+    assert_eq!(restored, BackupRestore::Restored);
+    assert!(package.path.is_dir());
+    assert!(!path_is_present(&backup));
+    assert!(fs::read_dir(&package.path).unwrap().next().is_none());
+    assert!(!format!("{restored:?}").contains(CACHE_SECRET));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn recreated_destination_and_changed_detached_path_are_not_rolled_back() {
+    let (root, host, _) = fixture("unsafe-rollback");
+    let package = host.render_package("http://127.0.0.1:9042/v1").unwrap();
+    fs::create_dir_all(&package.path).unwrap();
+    fs::write(package.path.join("kept.txt"), b"original-package").unwrap();
+    let detached = package
+        .path
+        .parent()
+        .unwrap()
+        .join(".ocg-dsh-package-unsafe.bak");
+    rename_package_directory(&package.trusted_root, &package.path, &detached).unwrap();
+    fs::write(&package.path, b"recreated-destination").unwrap();
+    fs::remove_dir_all(&detached).unwrap();
+    fs::write(&detached, b"changed-detached").unwrap();
+
+    let error =
+        rollback_renamed_package(&package.trusted_root, &detached, &package.path).unwrap_err();
+    assert_eq!(
+        error.kind,
+        crate::dsh_application::DshApplicationErrorKind::Conflict
+    );
+    assert!(error.message.contains(&detached.display().to_string()));
+    assert!(!error.message.contains(CACHE_SECRET));
+    assert_eq!(fs::read(&package.path).unwrap(), b"recreated-destination");
+    assert_eq!(fs::read(&detached).unwrap(), b"changed-detached");
+    fs::remove_dir_all(root).unwrap();
 }

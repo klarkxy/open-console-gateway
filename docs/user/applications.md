@@ -93,6 +93,13 @@ preserving other bundles. It does not replace the whole configuration or
 install a separate copy of DSH runtime dependencies. Failures and conflicts are
 reported with their actual cause.
 
+OCG keeps the package cache for the plugin it is installing. When that cache
+is missing files and every file that is already there still matches, OCG
+rebuilds the cache and continues. It leaves a cache unchanged when a file was
+edited, an unexpected file or directory is present, or the cache directory is
+reached through a link. The page shows the reason OCG returned. It says the
+DSH state changed only when the settings revision actually conflicted.
+
 Installation creates or reuses an enabled ordinary Key named `dsh`.
 The Desktop host resolves its value, writes it to a private one-time handoff
 file for the selected target, and asks the displayed running address to install

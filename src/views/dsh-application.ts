@@ -1,4 +1,5 @@
 import type { DshApplicationOutcome, DshApplicationView } from "../api/dashboard-v4.ts";
+import { DashboardRequestError, isRevisionConflict } from "../api/dashboard-v3.ts";
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
 import type { DshApplicationStatus } from "../api/generated/dashboard-v4.ts";
 import type { MessageKey } from "../i18n/index.ts";
@@ -154,6 +155,31 @@ export function dshHostDetail(
     default:
       return null;
   }
+}
+
+export type DshMutationFailureKind = "revision-changed" | "conflict" | "failed";
+
+export const DSH_INSTALL_FAILURE_KEYS: Record<DshMutationFailureKind, MessageKey> = {
+  "revision-changed": "DSH 状态已变化，已刷新当前状态。",
+  conflict: "安装失败：{error}",
+  failed: "安装失败：{error}",
+};
+
+export const DSH_UNINSTALL_FAILURE_KEYS: Record<DshMutationFailureKind, MessageKey> = {
+  "revision-changed": "DSH 状态已变化，已刷新当前状态。",
+  conflict: "卸载失败：{error}",
+  failed: "卸载失败：{error}",
+};
+
+/**
+ * A 409 claims the DSH state changed only for a real settings revision
+ * conflict. Every other 409, including an immutable package-cache rejection,
+ * keeps the host message.
+ */
+export function dshMutationFailureKind(error: unknown): DshMutationFailureKind {
+  if (isRevisionConflict(error)) return "revision-changed";
+  if (error instanceof DashboardRequestError && error.status === 409) return "conflict";
+  return "failed";
 }
 
 /** CAS precondition captured from the inspection that the user confirmed. */

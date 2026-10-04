@@ -38,6 +38,13 @@ const BOOTSTRAP_CLAIM_MARKER: &str = ".claimed-";
 const GATEWAY_PLACEHOLDER: &str = "__OCG_GATEWAY_V1_URL__";
 const BOOTSTRAP_PLACEHOLDER: &str = "__OCG_CREDENTIAL_BOOTSTRAP_PATH_JSON__";
 const MAX_PACKAGE_FILES: usize = 16;
+/// Missing-only cache walks stop at this depth. The embedded package nests
+/// locale files one directory down; a deeper tree is not that package.
+const MAX_PACKAGE_DEPTH: usize = 8;
+/// Directory entries counted while classifying a cache, including empty
+/// directories. This is larger than the file cap so parent directories of a
+/// full package still fit, and a huge foreign tree stops without a full scan.
+const MAX_PACKAGE_WALK_ENTRIES: usize = 32;
 const MAX_PACKAGE_BYTES: u64 = 1024 * 1024;
 const MAX_COMMAND_OUTPUT: usize = 16 * 1024;
 #[cfg(test)]
@@ -847,14 +854,26 @@ impl DshDesktopHost {
             .resolve_dsh_executable()
             .ok_or_else(|| DshApplicationError::precondition("DSH was not found on PATH"))?;
         let package = self.render_package(gateway_v1_url)?;
-        let registration_before = self.registration_state(&package);
-        if matches!(registration_before, RegistrationState::Conflict(_)) {
+        let registration_gate = self.registration_state(&package);
+        if matches!(registration_gate, RegistrationState::Conflict(_)) {
             return Err(DshApplicationError::conflict(
                 "the DSH profile has a conflicting package with the OCG plugin name",
             ));
         }
         let editor_restore = self.editor_restore_plan()?;
         package.materialize()?;
+        // Recovery can make the registered expected path Exact before `add`.
+        // Roll back from that identity so an add that leaves the manifest
+        // unchanged is not replayed against the earlier OwnedOlder state.
+        // This read stays after materialize for that baseline. A conflict or
+        // a different source that appeared while the cache was published is
+        // external: reject it before handoff or `plugin add`.
+        let registration_before = self.registration_state(&package);
+        if registration_transition(&registration_gate, &registration_before, &package)
+            == RegistrationTransition::Rejected
+        {
+            return Err(rejected_registration_transition(&registration_before));
+        }
 
         let bootstrap = self.bootstrap_path();
         let bootstrap_before = read_optional(&bootstrap)?;
@@ -1042,7 +1061,8 @@ impl DshDesktopHost {
             safe_relative_path("icon.png")?,
             include_bytes!("../../../integrations/dsh-plugin/icon.png").to_vec(),
         );
-        let digest = package_digest(&files);
+        let digest = package_digest(&files)
+            .ok_or_else(|| internal("DSH plugin package paths cannot be hashed"))?;
         let trusted_root = self.data_dir.join(PACKAGE_ROOT);
         let path = trusted_root.join(&digest[..24]);
         Ok(RenderedPackage {
@@ -1115,7 +1135,9 @@ impl DshDesktopHost {
                 }
                 if same_lexical_path(&source, &expected.path) && expected.exists_and_matches() {
                     RegistrationState::Exact
-                } else if is_owned_package_source(&source, &expected.trusted_root) {
+                } else if recoverable_registered_cache(&source, expected)
+                    || is_owned_package_source(&source, &expected.trusted_root)
+                {
                     RegistrationState::OwnedOlder(source)
                 } else {
                     RegistrationState::Conflict(
@@ -1564,6 +1586,48 @@ fn registration_matches(left: &RegistrationState, right: &RegistrationState) -> 
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistrationTransition {
+    Accepted,
+    Rejected,
+}
+
+/// Same identity is accepted, including a genuine older source that is still
+/// that same path. Publishing the current cache may also turn
+/// `OwnedOlder(expected.path)` into `Exact`. A conflict, or any other source
+/// or registration change during that publish, is not a recovery.
+fn registration_transition(
+    before: &RegistrationState,
+    after: &RegistrationState,
+    expected: &RenderedPackage,
+) -> RegistrationTransition {
+    if matches!(before, RegistrationState::Conflict(_))
+        || matches!(after, RegistrationState::Conflict(_))
+    {
+        return RegistrationTransition::Rejected;
+    }
+    if registration_matches(before, after) {
+        return RegistrationTransition::Accepted;
+    }
+    match (before, after) {
+        (RegistrationState::OwnedOlder(source), RegistrationState::Exact)
+            if same_lexical_path(source, &expected.path) =>
+        {
+            RegistrationTransition::Accepted
+        }
+        _ => RegistrationTransition::Rejected,
+    }
+}
+
+fn rejected_registration_transition(observed: &RegistrationState) -> DshApplicationError {
+    match observed {
+        RegistrationState::Conflict(detail) => DshApplicationError::conflict(detail.clone()),
+        _ => DshApplicationError::conflict(
+            "DSH registration changed while the OCG package cache was recovered",
+        ),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RenderedPackage {
     trusted_root: PathBuf,
@@ -1580,46 +1644,78 @@ impl RenderedPackage {
                 .unwrap_or(false)
     }
 
+    fn published_package_ok(&self) -> bool {
+        immutable_package_anchors_are_plain(&self.trusted_root)
+            && !path_is_reparse(&self.path)
+            && self.exists_and_matches()
+            && package_files_from_disk(&self.path)
+                .ok()
+                .and_then(|files| package_digest(&files))
+                .as_deref()
+                == Some(self.digest.as_str())
+    }
+
     fn materialize(&self) -> DshApplicationResult<()> {
         let parent = self
             .path
             .parent()
             .ok_or_else(|| internal("invalid DSH plugin package directory"))?;
-        ensure_safe_directory_chain(&self.trusted_root, parent)?;
-        match fs::symlink_metadata(&self.path) {
-            Ok(_) if self.exists_and_matches() => return Ok(()),
-            Ok(_) => {
-                return Err(DshApplicationError::conflict(
-                    "the immutable DSH plugin package does not match its digest",
-                ));
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(internal(error.to_string())),
+        // `safe_directory_chain` canonicalizes the trusted root and then checks
+        // only descendants. A link at that root, or at an ancestor, is invisible
+        // to it and would publish the package outside the data directory.
+        if !immutable_package_anchors_are_plain(&self.trusted_root) || path_is_reparse(&self.path) {
+            return Err(package_link_conflict());
         }
+        ensure_safe_directory_chain(&self.trusted_root, parent)?;
+        if !immutable_package_anchors_are_plain(&self.trusted_root) || path_is_reparse(&self.path) {
+            return Err(package_link_conflict());
+        }
+        let kind = classify_package_cache(&self.trusted_root, &self.path, &self.files)
+            .map_err(internal)?;
+        match kind {
+            PackageCacheKind::Complete => {
+                if self.published_package_ok() {
+                    Ok(())
+                } else {
+                    Err(package_link_conflict())
+                }
+            }
+            PackageCacheKind::Blocking => Err(package_digest_conflict()),
+            PackageCacheKind::Absent => self.publish_absent_package(parent),
+            PackageCacheKind::MissingOnly(snapshot) => {
+                self.publish_over_missing_only(parent, &snapshot)
+            }
+        }
+    }
 
+    fn stage_verified_package(&self, parent: &Path) -> DshApplicationResult<PackageStageGuard> {
+        if !immutable_package_anchors_are_plain(&self.trusted_root) || path_is_reparse(&self.path) {
+            return Err(package_link_conflict());
+        }
         let temporary = parent.join(format!(
             ".ocg-dsh-package-{}.tmp",
             uuid::Uuid::new_v4().simple()
         ));
         fs::create_dir(&temporary).map_err(|error| internal(error.to_string()))?;
-        struct TempDirectoryGuard(PathBuf);
-        impl Drop for TempDirectoryGuard {
-            fn drop(&mut self) {
-                let _ = fs::remove_dir_all(&self.0);
-            }
-        }
-        let guard = TempDirectoryGuard(temporary.clone());
-        if !safe_directory_chain(&self.trusted_root, &temporary) {
+        let guard = PackageStageGuard {
+            trusted_root: self.trusted_root.clone(),
+            path: temporary,
+            active: true,
+        };
+        if !safe_directory_chain(&self.trusted_root, &guard.path) || path_is_reparse(&guard.path) {
             return Err(DshApplicationError::conflict(
                 "the temporary DSH plugin package escaped its trusted root",
             ));
         }
         for (relative, bytes) in &self.files {
-            let destination = temporary.join(relative);
+            let destination = guard.path.join(relative);
             let directory = destination
                 .parent()
                 .ok_or_else(|| internal("invalid DSH plugin resource path"))?;
             ensure_safe_directory_chain(&self.trusted_root, directory)?;
+            if path_is_reparse(directory) || path_is_reparse(&destination) {
+                return Err(package_link_conflict());
+            }
             let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -1629,27 +1725,401 @@ impl RenderedPackage {
                 .and_then(|_| file.sync_all())
                 .map_err(|error| internal(error.to_string()))?;
         }
-        if package_files_from_disk(&temporary).ok().as_ref() != Some(&self.files) {
+        let staged = package_files_from_disk(&guard.path).map_err(internal)?;
+        if staged != self.files || package_digest(&staged).as_deref() != Some(self.digest.as_str())
+        {
             return Err(internal("failed to materialize the DSH plugin package"));
         }
-        match fs::rename(&temporary, &self.path) {
-            Ok(()) => {
-                std::mem::forget(guard);
-                sync_parent(&self.path)?;
-            }
-            Err(_) if self.exists_and_matches() => return Ok(()),
-            Err(error) if self.path.exists() => {
-                return Err(DshApplicationError::conflict(format!(
-                    "the immutable DSH plugin package appeared with different contents: {error}"
-                )));
-            }
-            Err(error) => return Err(internal(error.to_string())),
+        if !immutable_package_anchors_are_plain(&self.trusted_root) {
+            return Err(package_link_conflict());
         }
-        if !self.exists_and_matches() {
-            return Err(internal("published DSH plugin package failed verification"));
-        }
-        Ok(())
+        Ok(guard)
     }
+
+    fn publish_absent_package(&self, parent: &Path) -> DshApplicationResult<()> {
+        let mut staged = self.stage_verified_package(parent)?;
+        if !immutable_package_anchors_are_plain(&self.trusted_root) || path_is_reparse(&self.path) {
+            return Err(package_link_conflict());
+        }
+        match fs::rename(&staged.path, &self.path) {
+            Ok(()) => {
+                staged.disarm();
+                if !self.published_package_ok() {
+                    return Err(internal("published DSH plugin package failed verification"));
+                }
+                sync_parent(&self.path)
+            }
+            Err(_) if self.published_package_ok() => Ok(()),
+            Err(error) if path_is_present(&self.path) => {
+                Err(DshApplicationError::conflict(format!(
+                    "the immutable DSH plugin package appeared with different contents: {error}"
+                )))
+            }
+            Err(error) => Err(internal(error.to_string())),
+        }
+    }
+
+    fn publish_over_missing_only(
+        &self,
+        parent: &Path,
+        snapshot: &BTreeMap<PathBuf, Vec<u8>>,
+    ) -> DshApplicationResult<()> {
+        let mut staged = self.stage_verified_package(parent)?;
+        match classify_package_cache(&self.trusted_root, &self.path, &self.files) {
+            Ok(PackageCacheKind::MissingOnly(current)) if current == *snapshot => {}
+            Ok(PackageCacheKind::MissingOnly(_)) => return Err(package_digest_conflict()),
+            Ok(PackageCacheKind::Complete) if self.published_package_ok() => return Ok(()),
+            Ok(PackageCacheKind::Blocking | PackageCacheKind::Complete) => {
+                return Err(package_digest_conflict());
+            }
+            Ok(PackageCacheKind::Absent) => return self.publish_absent_package(parent),
+            Err(error) => return Err(internal(error)),
+        }
+        let backup = parent.join(format!(
+            ".ocg-dsh-package-{}.bak",
+            uuid::Uuid::new_v4().simple()
+        ));
+        rename_package_directory(&self.trusted_root, &self.path, &backup)?;
+        if !backup_matches_snapshot(&self.trusted_root, &backup, &self.files, snapshot) {
+            match restore_missing_only_backup(
+                &self.trusted_root,
+                &backup,
+                &self.path,
+                &self.files,
+                snapshot,
+            ) {
+                BackupRestore::Restored => return Err(package_digest_conflict()),
+                BackupRestore::Preserved => {
+                    return Err(preserved_backup_conflict(&backup));
+                }
+            }
+        }
+        if !immutable_package_anchors_are_plain(&self.trusted_root) || path_is_reparse(&self.path) {
+            return match restore_missing_only_backup(
+                &self.trusted_root,
+                &backup,
+                &self.path,
+                &self.files,
+                snapshot,
+            ) {
+                BackupRestore::Restored => Err(package_link_conflict()),
+                BackupRestore::Preserved => Err(preserved_backup_conflict(&backup)),
+            };
+        }
+        match fs::rename(&staged.path, &self.path) {
+            Ok(()) => {
+                staged.disarm();
+                if !self.published_package_ok() {
+                    return match restore_missing_only_backup(
+                        &self.trusted_root,
+                        &backup,
+                        &self.path,
+                        &self.files,
+                        snapshot,
+                    ) {
+                        BackupRestore::Restored => {
+                            Err(internal("published DSH plugin package failed verification"))
+                        }
+                        BackupRestore::Preserved => Err(preserved_backup_conflict(&backup)),
+                    };
+                }
+                discard_unchanged_backup(&self.trusted_root, &backup, &self.files, snapshot);
+                sync_parent(&self.path)
+            }
+            Err(error) => match restore_missing_only_backup(
+                &self.trusted_root,
+                &backup,
+                &self.path,
+                &self.files,
+                snapshot,
+            ) {
+                BackupRestore::Restored => Err(DshApplicationError::conflict(format!(
+                    "the immutable DSH plugin package appeared with different contents: {error}"
+                ))),
+                BackupRestore::Preserved => Err(preserved_backup_conflict(&backup)),
+            },
+        }
+    }
+}
+
+struct PackageStageGuard {
+    trusted_root: PathBuf,
+    path: PathBuf,
+    active: bool,
+}
+
+impl PackageStageGuard {
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for PackageStageGuard {
+    fn drop(&mut self) {
+        if !self.active
+            || !immutable_package_anchors_are_plain(&self.trusted_root)
+            || path_is_reparse(&self.path)
+            || !safe_directory_chain(&self.trusted_root, &self.path)
+        {
+            return;
+        }
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PackageCacheKind {
+    Absent,
+    Complete,
+    MissingOnly(BTreeMap<PathBuf, Vec<u8>>),
+    Blocking,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BackupRestore {
+    Restored,
+    Preserved,
+}
+
+enum PackageWalkFail {
+    Blocking,
+    Io(String),
+}
+
+fn package_digest_conflict() -> DshApplicationError {
+    DshApplicationError::conflict("the immutable DSH plugin package does not match its digest")
+}
+
+fn package_link_conflict() -> DshApplicationError {
+    DshApplicationError::conflict(
+        "the immutable DSH plugin package root or one of its ancestors is a link",
+    )
+}
+
+fn preserved_backup_conflict(backup: &Path) -> DshApplicationError {
+    DshApplicationError::conflict(format!(
+        "the immutable DSH plugin package could not be published; previous contents were preserved at {}",
+        backup.display()
+    ))
+}
+
+fn path_is_present(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+fn path_is_reparse(path: &Path) -> bool {
+    path_is_present(path) && is_link_or_reparse(path)
+}
+
+/// The trusted package root and every existing ancestor must be ordinary
+/// directories. Missing ancestors are allowed; `ensure_safe_directory_chain`
+/// creates those later. This is intentionally not part of the shared helper:
+/// credential handoff and other callers have their own path rules.
+fn immutable_package_anchors_are_plain(trusted_root: &Path) -> bool {
+    let Ok(mut current) = canonical_lexical_path(trusted_root) else {
+        return false;
+    };
+    loop {
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_dir() || is_link_or_reparse(&current) {
+                    return false;
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(_) => return false,
+        }
+        match current.parent() {
+            Some(parent) if parent != current => current = parent.to_path_buf(),
+            _ => return true,
+        }
+    }
+}
+
+fn classify_package_cache(
+    trusted_root: &Path,
+    path: &Path,
+    expected: &BTreeMap<PathBuf, Vec<u8>>,
+) -> Result<PackageCacheKind, String> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(PackageCacheKind::Absent),
+        Err(error) => return Err(error.to_string()),
+        Ok(metadata) => {
+            if is_link_or_reparse(path) || !metadata.file_type().is_dir() {
+                return Ok(PackageCacheKind::Blocking);
+            }
+        }
+    }
+    if !safe_directory_chain(trusted_root, path) {
+        return Ok(PackageCacheKind::Blocking);
+    }
+    let mut present = BTreeMap::new();
+    let mut visited = 0usize;
+    match collect_missing_only(path, path, expected, 0, &mut visited, &mut present) {
+        Ok(()) => {}
+        Err(PackageWalkFail::Blocking) => return Ok(PackageCacheKind::Blocking),
+        Err(PackageWalkFail::Io(message)) => return Err(message),
+    }
+    if present == *expected {
+        Ok(PackageCacheKind::Complete)
+    } else {
+        Ok(PackageCacheKind::MissingOnly(present))
+    }
+}
+
+fn collect_missing_only(
+    root: &Path,
+    directory: &Path,
+    expected: &BTreeMap<PathBuf, Vec<u8>>,
+    depth: usize,
+    visited: &mut usize,
+    present: &mut BTreeMap<PathBuf, Vec<u8>>,
+) -> Result<(), PackageWalkFail> {
+    if depth >= MAX_PACKAGE_DEPTH {
+        return Err(PackageWalkFail::Blocking);
+    }
+    let entries =
+        fs::read_dir(directory).map_err(|error| PackageWalkFail::Io(error.to_string()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| PackageWalkFail::Io(error.to_string()))?;
+        *visited = visited.saturating_add(1);
+        if *visited > MAX_PACKAGE_WALK_ENTRIES {
+            return Err(PackageWalkFail::Blocking);
+        }
+        let path = entry.path();
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|error| PackageWalkFail::Io(error.to_string()))?;
+        if is_link_or_reparse(&path) {
+            return Err(PackageWalkFail::Blocking);
+        }
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| PackageWalkFail::Blocking)?;
+        if metadata.file_type().is_dir() {
+            if !expected_package_directory(relative, expected) {
+                return Err(PackageWalkFail::Blocking);
+            }
+            collect_missing_only(root, &path, expected, depth + 1, visited, present)?;
+            continue;
+        }
+        if !metadata.file_type().is_file() || metadata.len() > MAX_PACKAGE_BYTES {
+            return Err(PackageWalkFail::Blocking);
+        }
+        let Some(expected_bytes) = expected.get(relative) else {
+            return Err(PackageWalkFail::Blocking);
+        };
+        let bytes = fs::read(&path).map_err(|error| PackageWalkFail::Io(error.to_string()))?;
+        if bytes.as_slice() != expected_bytes.as_slice() {
+            return Err(PackageWalkFail::Blocking);
+        }
+        present.insert(relative.to_path_buf(), bytes);
+    }
+    Ok(())
+}
+
+fn expected_package_directory(relative: &Path, expected: &BTreeMap<PathBuf, Vec<u8>>) -> bool {
+    !relative.as_os_str().is_empty()
+        && expected
+            .keys()
+            .any(|file| file.starts_with(relative) && file != relative)
+}
+
+fn backup_matches_snapshot(
+    trusted_root: &Path,
+    backup: &Path,
+    expected: &BTreeMap<PathBuf, Vec<u8>>,
+    snapshot: &BTreeMap<PathBuf, Vec<u8>>,
+) -> bool {
+    immutable_package_anchors_are_plain(trusted_root)
+        && !path_is_reparse(backup)
+        && matches!(
+            classify_package_cache(trusted_root, backup, expected),
+            Ok(PackageCacheKind::MissingOnly(found)) if found == *snapshot
+        )
+}
+
+fn restore_missing_only_backup(
+    trusted_root: &Path,
+    backup: &Path,
+    destination: &Path,
+    expected: &BTreeMap<PathBuf, Vec<u8>>,
+    snapshot: &BTreeMap<PathBuf, Vec<u8>>,
+) -> BackupRestore {
+    if !backup_matches_snapshot(trusted_root, backup, expected, snapshot)
+        || path_is_present(destination)
+        || path_is_reparse(destination)
+    {
+        return BackupRestore::Preserved;
+    }
+    if rename_package_directory(trusted_root, backup, destination).is_err() {
+        return BackupRestore::Preserved;
+    }
+    BackupRestore::Restored
+}
+
+fn discard_unchanged_backup(
+    trusted_root: &Path,
+    backup: &Path,
+    expected: &BTreeMap<PathBuf, Vec<u8>>,
+    snapshot: &BTreeMap<PathBuf, Vec<u8>>,
+) {
+    if !backup_matches_snapshot(trusted_root, backup, expected, snapshot) {
+        return;
+    }
+    if path_is_reparse(backup) || !immutable_package_anchors_are_plain(trusted_root) {
+        return;
+    }
+    let _ = fs::remove_dir_all(backup);
+}
+
+fn rename_package_directory(
+    trusted_root: &Path,
+    from: &Path,
+    to: &Path,
+) -> DshApplicationResult<()> {
+    if !immutable_package_anchors_are_plain(trusted_root) || path_is_reparse(from) {
+        return Err(package_link_conflict());
+    }
+    if !safe_directory_chain(trusted_root, from) {
+        return Err(DshApplicationError::conflict(
+            "the immutable DSH plugin package escaped its trusted root",
+        ));
+    }
+    let root = canonical_lexical_path(trusted_root).map_err(DshApplicationError::conflict)?;
+    let destination = canonical_lexical_path(to).map_err(DshApplicationError::conflict)?;
+    if destination.parent() != Some(root.as_path()) || path_is_present(to) {
+        return Err(DshApplicationError::conflict(
+            "the immutable DSH plugin package escaped its trusted root",
+        ));
+    }
+    fs::rename(from, to).map_err(|error| internal(error.to_string()))?;
+    if path_is_reparse(to) || !safe_directory_chain(trusted_root, to) {
+        // `to` is no longer the plain directory just moved. A reverse rename
+        // overwrites a recreated `from` on Windows, including when `to` is a
+        // regular file. Keep the detached path and report it instead.
+        return rollback_renamed_package(trusted_root, to, from);
+    }
+    Ok(())
+}
+
+/// Move a detached package directory back only when it is still a plain
+/// directory inside the trusted root and the original path is absent.
+fn rollback_renamed_package(
+    trusted_root: &Path,
+    detached: &Path,
+    destination: &Path,
+) -> DshApplicationResult<()> {
+    let plain_owned = immutable_package_anchors_are_plain(trusted_root)
+        && !path_is_reparse(detached)
+        && safe_directory_chain(trusted_root, detached);
+    if !plain_owned || path_is_present(destination) {
+        return Err(preserved_backup_conflict(detached));
+    }
+    fs::rename(detached, destination).map_err(|error| internal(error.to_string()))?;
+    if path_is_reparse(destination) || !safe_directory_chain(trusted_root, destination) {
+        return Err(preserved_backup_conflict(destination));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -2024,16 +2494,118 @@ fn restore_live_if_present(
     restore_optional(trusted_root, path, bytes)
 }
 
-fn package_digest(files: &BTreeMap<PathBuf, Vec<u8>>) -> String {
+fn package_digest(files: &BTreeMap<PathBuf, Vec<u8>>) -> Option<String> {
+    let mut entries = Vec::with_capacity(files.len());
+    for (path, bytes) in files {
+        entries.push((normalized_package_key(path)?, bytes.as_slice()));
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return None;
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"open-console-gateway-dsh-package-v1\0");
+    for (key, bytes) in &entries {
+        hash.update(key.as_bytes());
+        hash.update([0]);
+        hash.update(*bytes);
+        hash.update([0]);
+    }
+    Some(format!("{:x}", hash.finalize()))
+}
+
+/// Historical Windows caches hashed `Path` display spelling, so nested locale
+/// files used `\`. Rendered keys keep the template's `/` bytes, and a map read
+/// back from disk already uses the native separator. Rebuilding each relative
+/// path from its components, in the map's existing order, makes both spellings
+/// hash as that old cache did. The normalized digest stays slash-separated.
+/// This is not an alias for other spellings, and caches are not renamed.
+fn legacy_native_package_digest(files: &BTreeMap<PathBuf, Vec<u8>>) -> String {
     let mut hash = Sha256::new();
     hash.update(b"open-console-gateway-dsh-package-v1\0");
     for (path, bytes) in files {
-        hash.update(path.to_string_lossy().as_bytes());
+        hash.update(legacy_native_relative_spelling(path).as_bytes());
         hash.update([0]);
         hash.update(bytes);
         hash.update([0]);
     }
     format!("{:x}", hash.finalize())
+}
+
+fn legacy_native_relative_spelling(path: &Path) -> String {
+    let mut native = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => native.push(part),
+            _ => return path.to_string_lossy().into_owned(),
+        }
+    }
+    native.to_string_lossy().into_owned()
+}
+
+fn normalized_package_key(path: &Path) -> Option<String> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => {
+                let part = part.to_str()?;
+                if part.is_empty() || part.contains(['/', '\\', '\0']) {
+                    return None;
+                }
+                parts.push(part);
+            }
+            _ => return None,
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+fn legacy_directory_name(expected: &RenderedPackage) -> Option<String> {
+    let legacy = legacy_native_package_digest(&expected.files);
+    if legacy == expected.digest {
+        None
+    } else {
+        Some(legacy[..24].to_string())
+    }
+}
+
+fn recoverable_registered_cache(source: &Path, expected: &RenderedPackage) -> bool {
+    if !immutable_package_anchors_are_plain(&expected.trusted_root) || path_is_reparse(source) {
+        return false;
+    }
+    let Ok(source) = canonical_lexical_path(source) else {
+        return false;
+    };
+    let Ok(root) = canonical_lexical_path(&expected.trusted_root) else {
+        return false;
+    };
+    let Ok(expected_path) = canonical_lexical_path(&expected.path) else {
+        return false;
+    };
+    if source.parent() != Some(root.as_path()) {
+        return false;
+    }
+    let Some(name) = source.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    if name.len() != 24 || !name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return false;
+    }
+    let current_name = expected_path.file_name().and_then(|value| value.to_str());
+    let legacy_name = legacy_directory_name(expected);
+    let is_current = current_name == Some(name) && source == expected_path;
+    let is_legacy = legacy_name.as_deref() == Some(name) && legacy_name.as_deref() != current_name;
+    if !is_current && !is_legacy {
+        return false;
+    }
+    matches!(
+        classify_package_cache(&root, &source, &expected.files),
+        Ok(PackageCacheKind::Absent | PackageCacheKind::MissingOnly(_))
+    )
 }
 
 fn read_optional(path: &Path) -> DshApplicationResult<Option<Vec<u8>>> {
@@ -2112,7 +2684,13 @@ fn is_owned_package_source(source: &Path, trusted_root: &Path) -> bool {
         .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
         .and_then(|value| value.get("name").and_then(Value::as_str).map(str::to_owned))
         .is_some_and(|name| name == PACKAGE_NAME);
-    name_matches && package_digest(&files).get(..24) == Some(directory_name)
+    let Some(digest) = package_digest(&files) else {
+        return false;
+    };
+    let legacy = legacy_native_package_digest(&files);
+    let owned_name = digest.get(..24) == Some(directory_name)
+        || (legacy != digest && legacy.get(..24) == Some(directory_name));
+    name_matches && owned_name
 }
 
 fn package_files_from_disk(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {

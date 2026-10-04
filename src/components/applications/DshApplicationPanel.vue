@@ -224,7 +224,6 @@ import {
   NTag,
   useMessage,
 } from "naive-ui";
-import { DashboardRequestError, isRevisionConflict } from "../../api/dashboard.ts";
 import type { DshApplicationView } from "../../api/dashboard-v4.ts";
 import { t } from "../../i18n/index.ts";
 import { useConnectionStore } from "../../stores/connection.ts";
@@ -236,12 +235,15 @@ import { refreshConnectionAfterHarnessMutation } from "../../domain/byok-applica
 import {
   DSH_APPLICATION_OUTCOME_KEYS,
   DSH_DEFAULT_KEY_NAME,
+  DSH_INSTALL_FAILURE_KEYS,
   DSH_MUTATION_FEEDBACK_KEYS,
+  DSH_UNINSTALL_FAILURE_KEYS,
   dshDraftRuntimeFromInspection,
   dshHostDetail,
   dshInstallAction,
   dshLoadTargetsEqual,
   dshMutationExpectation,
+  dshMutationFailureKind,
   dshMutationFeedback,
   dshNormalizedLoadTarget,
   dshStatusPresentation,
@@ -412,13 +414,7 @@ async function confirmInstall(): Promise<void> {
     session,
   );
   if (failed) {
-    if (isRevisionConflict(failed) || (failed instanceof DashboardRequestError && failed.status === 409)) {
-      installConfirmShown.value = false;
-      actionError.value = t("DSH 状态已变化，已刷新当前状态。");
-      await load({ retain: true }).catch(() => {});
-    } else {
-      actionError.value = t("安装失败：{error}", { error: dashboardErrorDetail(failed) });
-    }
+    await reportHarnessFailure(failed, "install");
     return;
   }
   if (!result) return;
@@ -449,13 +445,29 @@ async function confirmUninstall(): Promise<void> {
     uninstallConfirmShown.value = false;
     reportMutation(result, "uninstall");
   } catch (error) {
-    if (isRevisionConflict(error) || (error instanceof DashboardRequestError && error.status === 409)) {
-      uninstallConfirmShown.value = false;
-      actionError.value = t("DSH 状态已变化，已刷新当前状态。");
-      await load({ retain: true }).catch(() => {});
-    } else {
-      actionError.value = t("卸载失败：{error}", { error: dashboardErrorDetail(error) });
-    }
+    await reportHarnessFailure(error, "uninstall");
+  }
+}
+
+async function reportHarnessFailure(failed: unknown, operation: "install" | "uninstall"): Promise<void> {
+  const kind = dshMutationFailureKind(failed);
+  const keys = operation === "install" ? DSH_INSTALL_FAILURE_KEYS : DSH_UNINSTALL_FAILURE_KEYS;
+  const close = () => {
+    if (operation === "install") installConfirmShown.value = false;
+    else uninstallConfirmShown.value = false;
+  };
+  if (kind === "revision-changed") {
+    close();
+    actionError.value = t(keys[kind], { error: dashboardErrorDetail(failed) });
+    await load({ retain: true }).catch(() => {});
+    return;
+  }
+  actionError.value = t(keys[kind], {
+    error: dashboardErrorDetail(failed),
+  });
+  if (kind === "conflict") {
+    close();
+    await load({ retain: true }).catch(() => {});
   }
 }
 
