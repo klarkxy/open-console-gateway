@@ -665,7 +665,12 @@ async fn models_endpoint_serves_the_enriched_rows_captured_under_the_lock() {
     assert_eq!(row["name"], json!("Cataloged model"));
     assert_eq!(row["contextWindow"], json!(262_144));
     assert_eq!(row["maxTokens"], json!(32_768));
-    assert_eq!(row["ocg"]["schemaVersion"], json!(1));
+    assert_eq!(row["ocg"]["schemaVersion"], json!(2));
+    assert!(row["ocg"].get("clientProtocol").is_none());
+    assert_eq!(
+        row["ocg"]["protocols"],
+        json!({"preferred": "chat_completions", "supported": ["chat_completions"]})
+    );
     assert_eq!(row["ocg"]["status"], json!("declared"));
     assert_eq!(row["ocg"]["sources"], json!(["modelsdev"]));
     assert_eq!(row["ocg"]["inputModalities"], json!(["text", "image"]));
@@ -677,8 +682,14 @@ async fn models_endpoint_serves_the_enriched_rows_captured_under_the_lock() {
         .iter()
         .find(|row| row["id"] == json!(UNCATEGORIZED_MODEL))
         .expect("uncataloged model should be listed");
+    assert_eq!(unknown["ocg"]["schemaVersion"], json!(2));
+    assert!(unknown["ocg"].get("clientProtocol").is_none());
     assert_eq!(unknown["ocg"]["status"], json!("unknown"));
     assert_eq!(unknown["ocg"]["sources"], json!(["unknown"]));
+    assert_eq!(
+        unknown["ocg"]["protocols"],
+        json!({"preferred": "chat_completions", "supported": ["chat_completions"]})
+    );
     assert!(
         unknown.get("contextWindow").is_none(),
         "an unknown model must not declare a context window"
@@ -757,6 +768,12 @@ async fn models_endpoint_publishes_canonical_tiers_from_the_parsed_catalog() {
             .clone()
     };
     let gpt = row("gpt-5.2");
+    assert_eq!(gpt["ocg"]["schemaVersion"], json!(2));
+    assert!(gpt["ocg"].get("clientProtocol").is_none());
+    assert_eq!(
+        gpt["ocg"]["protocols"],
+        json!({"preferred": "chat_completions", "supported": ["chat_completions"]})
+    );
     assert_eq!(gpt["ocg"]["sources"], json!(["modelsdev"]));
     assert_eq!(gpt["ocg"]["status"], json!("declared"));
     assert_eq!(gpt["contextWindow"], json!(400000));

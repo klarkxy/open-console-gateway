@@ -1,12 +1,13 @@
 //! Route-bound model metadata. Directory reads are local; discovery and explicit
 //! operator declarations are the only writers. Unknown facts stay absent.
+//! Published protocol profiles are derived for `/v1/models` and are not stored.
 
 use crate::db::Database;
-use ocg_domain::destination::{CatalogModel, Destination};
+use ocg_domain::destination::{CatalogModel, Destination, Protocol};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const SETTING_KEY: &str = "model_metadata_v1";
 const MAX_TOKENS: u64 = 9_007_199_254_740_991;
@@ -141,6 +142,95 @@ impl ModelMetadata {
         }
         filled
     }
+}
+
+/// Upstream protocols a published model row can actually be called with.
+///
+/// Derived from saved per-model preference and authorized routes. This is not
+/// persisted [`ModelMetadata`], not a new recommendation table, and not a claim
+/// that every supported protocol preserves every capability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PublishedModelProtocolProfile {
+    pub preferred: PublishedUpstreamProtocol,
+    pub supported: Vec<PublishedUpstreamProtocol>,
+}
+
+/// Wire vocabulary for [`PublishedModelProtocolProfile`]. Local so the domain
+/// protocol enum does not gain a schema dependency.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PublishedUpstreamProtocol {
+    ChatCompletions,
+    Responses,
+    Messages,
+}
+
+impl PublishedUpstreamProtocol {
+    fn from_domain(protocol: Protocol) -> Self {
+        match protocol {
+            Protocol::ChatCompletions => Self::ChatCompletions,
+            Protocol::Responses => Self::Responses,
+            Protocol::Messages => Self::Messages,
+        }
+    }
+}
+
+/// Why `ocg.protocols` did not become a profile. Neither variant is Chat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishedProtocolProfileError {
+    /// The protocols value is missing or JSON null.
+    Unknown,
+    /// A protocols value is present but preferred is missing, illegal, or
+    /// outside `supported`.
+    Invalid,
+}
+
+impl std::fmt::Display for PublishedProtocolProfileError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown => formatter.write_str("published model protocol profile is unknown"),
+            Self::Invalid => formatter.write_str("published model protocol profile is invalid"),
+        }
+    }
+}
+
+impl std::error::Error for PublishedProtocolProfileError {}
+
+impl PublishedModelProtocolProfile {
+    pub fn validate(&self) -> Result<(), PublishedProtocolProfileError> {
+        let mut seen = BTreeSet::new();
+        if self.supported.is_empty()
+            || !self.supported.contains(&self.preferred)
+            || self
+                .supported
+                .iter()
+                .any(|protocol| !seen.insert(*protocol))
+        {
+            return Err(PublishedProtocolProfileError::Invalid);
+        }
+        Ok(())
+    }
+}
+
+/// Read a derived profile from an `ocg.protocols` value.
+///
+/// Missing and JSON null are [`PublishedProtocolProfileError::Unknown`].
+/// Illegal preferred values and a preferred protocol outside `supported` are
+/// [`PublishedProtocolProfileError::Invalid`]. This does not default to Chat
+/// Completions and does not check `schemaVersion`; the client checks exact 2.
+pub fn read_published_protocol_profile(
+    protocols: Option<&Value>,
+) -> Result<PublishedModelProtocolProfile, PublishedProtocolProfileError> {
+    let Some(protocols) = protocols.filter(|value| !value.is_null()) else {
+        return Err(PublishedProtocolProfileError::Unknown);
+    };
+    let profile = PublishedModelProtocolProfile::deserialize(protocols)
+        .map_err(|_| PublishedProtocolProfileError::Invalid)?;
+    profile.validate()?;
+    Ok(profile)
 }
 
 /// Deliberately stores only whitelisted facts, never raw upstream JSON.
@@ -326,6 +416,17 @@ pub(crate) fn parse_catalog_limit(
     result
 }
 
+/// `ocg` carries the capability whitelist only at published schema 1 or 2.
+/// A derived protocol profile, an unknown field, and raw JSON stay outside
+/// [`ModelMetadata`]. Any other version leaves the row root in charge.
+fn recognized_capability_extension(row: &Value) -> Option<&Value> {
+    let extension = row.get("ocg")?;
+    match extension.get("schemaVersion").and_then(Value::as_u64) {
+        Some(1 | 2) => Some(extension),
+        _ => None,
+    }
+}
+
 /// One catalog object, already shaped like a `/v1/models` row or a models.dev
 /// model object. Invalid ids are skipped. A malformed fact list becomes an
 /// empty metadata record for that id so a stale fact is not kept.
@@ -336,10 +437,7 @@ pub(crate) fn metadata_from_catalog_row(row: &Value) -> Option<(String, ModelMet
         return None;
     }
     let mut metadata = ModelMetadata::default();
-    let ext = row
-        .get("ocg")
-        .filter(|v| v.get("schemaVersion").and_then(Value::as_u64) == Some(1));
-    let source = ext.unwrap_or(row);
+    let source = recognized_capability_extension(row).unwrap_or(row);
     let number = |keys: &[&str]| {
         keys.iter().find_map(|k| {
             source
@@ -540,6 +638,21 @@ pub(crate) fn common(models: &[ModelMetadata]) -> ModelMetadata {
     }
 }
 
+struct PublishedModelFacts {
+    metadata: ModelMetadata,
+    sources: BTreeSet<&'static str>,
+    protocols: Option<PublishedModelProtocolProfile>,
+}
+
+struct QualifiedMapping<'a> {
+    destination: &'a Destination,
+    model: &'a CatalogModel,
+    /// Lowest `routing_rank` among credentials that can carry this mapping.
+    rank: u32,
+    authorized: Vec<Protocol>,
+    choice: Protocol,
+}
+
 pub(crate) fn enrich(
     db: &Database,
     modelsdev: &crate::modelsdev::ModelsDevCatalog,
@@ -551,57 +664,233 @@ pub(crate) fn enrich(
         let Some(id) = row.get("id").and_then(Value::as_str) else {
             continue;
         };
-        let Ok(resolved) = snapshot.resolve(id) else {
+        let Some(facts) = published_model_facts(&records, modelsdev, snapshot, id) else {
             continue;
         };
-        let mut candidates = Vec::new();
-        let mut sources = std::collections::BTreeSet::new();
-        for destination in &snapshot.routing.projection.destinations {
-            if !destination.enabled {
-                continue;
-            }
-            for model in &destination.catalog {
-                if model.enabled
-                    && !model.protocols.is_empty()
-                    && crate::gateway::materialize::resolved_contains_model(
-                        &resolved,
-                        destination,
-                        model,
-                        id,
-                    )
-                {
-                    let (metadata, source, modelsdev_filled) =
-                        effective_with_catalog(&records, modelsdev, destination, model);
-                    candidates.push(metadata);
-                    sources.insert(source);
-                    if modelsdev_filled {
-                        sources.insert("modelsdev");
-                    }
-                }
-            }
-        }
-        let metadata = common(&candidates);
-        if let Some(n) = metadata.context_window {
+        if let Some(n) = facts.metadata.context_window {
             row["contextWindow"] = json!(n);
         }
-        if let Some(n) = metadata.max_output_tokens {
+        if let Some(n) = facts.metadata.max_output_tokens {
             row["maxTokens"] = json!(n);
         }
-        if let Some(name) = &metadata.name {
+        if let Some(name) = &facts.metadata.name {
             row["name"] = json!(name);
         }
-        let mut extension = serde_json::to_value(&metadata)?;
-        extension["schemaVersion"] = json!(1);
-        extension["sources"] = json!(sources);
-        extension["clientProtocol"] = json!("openai-completions");
-        extension["status"] = json!(if metadata == ModelMetadata::default() {
+        let mut extension = serde_json::to_value(&facts.metadata)?;
+        extension["schemaVersion"] = json!(2);
+        extension["sources"] = json!(facts.sources);
+        extension["status"] = json!(if facts.metadata == ModelMetadata::default() {
             "unknown"
         } else {
             "declared"
         });
+        if let Some(protocols) = &facts.protocols {
+            extension["protocols"] = serde_json::to_value(protocols)?;
+        }
         row["ocg"] = extension;
     }
     Ok(())
+}
+
+/// Capability intersection and protocol facts share one qualified-candidate set.
+/// Rows that do not resolve stay untouched. A resolved row with no carrying
+/// credential still publishes unknown metadata and omits `protocols`.
+fn published_model_facts(
+    records: &[Record],
+    modelsdev: &crate::modelsdev::ModelsDevCatalog,
+    snapshot: &crate::gateway::handler::RuntimeCatalogSnapshot,
+    requested: &str,
+) -> Option<PublishedModelFacts> {
+    let resolved = snapshot.resolve(requested).ok()?;
+    let mappings = qualified_publication_mappings(snapshot, requested, &resolved);
+    let mut candidates = Vec::new();
+    let mut sources = BTreeSet::new();
+    for mapping in &mappings {
+        let (metadata, source, modelsdev_filled) =
+            effective_with_catalog(records, modelsdev, mapping.destination, mapping.model);
+        candidates.push(metadata);
+        sources.insert(source);
+        if modelsdev_filled {
+            sources.insert("modelsdev");
+        }
+    }
+    Some(PublishedModelFacts {
+        metadata: common(&candidates),
+        sources,
+        protocols: profile_from_mappings(&mappings),
+    })
+}
+
+fn qualified_publication_mappings<'a>(
+    snapshot: &'a crate::gateway::handler::RuntimeCatalogSnapshot,
+    requested: &str,
+    resolved: &crate::alias::ResolvedModel,
+) -> Vec<QualifiedMapping<'a>> {
+    let mut found = Vec::new();
+    for destination in &snapshot.routing.projection.destinations {
+        if !destination.enabled {
+            continue;
+        }
+        for model in &destination.catalog {
+            if !model.enabled {
+                continue;
+            }
+            if !crate::gateway::materialize::resolved_contains_model(
+                resolved,
+                destination,
+                model,
+                requested,
+            ) {
+                continue;
+            }
+            let Some((authorized, rank, choice)) =
+                mapping_authorization(snapshot, destination, model, requested)
+            else {
+                continue;
+            };
+            found.push(QualifiedMapping {
+                destination,
+                model,
+                rank,
+                authorized,
+                choice,
+            });
+        }
+    }
+    found.sort_by(|left, right| {
+        left.rank
+            .cmp(&right.rank)
+            .then_with(|| left.destination.id.cmp(&right.destination.id))
+            .then_with(|| left.model.upstream_model.cmp(&right.model.upstream_model))
+    });
+    found
+}
+
+/// Authorized protocols are the union across carrying credentials, in the
+/// saved `model.protocols` order. The mapping's choice is the saved preferred
+/// protocol only when that protocol is in the union; otherwise it is the first
+/// saved protocol that is. Nothing here substitutes Chat.
+fn mapping_authorization(
+    snapshot: &crate::gateway::handler::RuntimeCatalogSnapshot,
+    destination: &Destination,
+    model: &CatalogModel,
+    requested: &str,
+) -> Option<(Vec<Protocol>, u32, Protocol)> {
+    let mut authorized = Vec::new();
+    let mut rank = u32::MAX;
+    for credential in &snapshot.routing.credentials {
+        if !credential_can_carry(credential, destination, model, requested) {
+            continue;
+        }
+        let mut carried = false;
+        for protocol in &model.protocols {
+            if !protocol_available(credential, destination, model, *protocol) {
+                continue;
+            }
+            if !authorized.contains(protocol) {
+                authorized.push(*protocol);
+            }
+            carried = true;
+        }
+        if carried {
+            rank = rank.min(credential_routing_rank(snapshot, credential));
+        }
+    }
+    let choice = mapping_choice(model, &authorized)?;
+    Some((authorized, rank, choice))
+}
+
+fn credential_can_carry(
+    credential: &crate::routing_snapshot::ExecutionCredential,
+    destination: &Destination,
+    model: &CatalogModel,
+    requested: &str,
+) -> bool {
+    credential.destination_id == destination.id
+        && credential.enabled
+        && credential.ready
+        && credential.binding_enabled
+        && crate::gateway::materialize::binding_allows_requested_model(
+            &credential.scope,
+            requested,
+            requested,
+            [&model.upstream_model, &model.public_model],
+        )
+}
+
+fn protocol_available(
+    credential: &crate::routing_snapshot::ExecutionCredential,
+    destination: &Destination,
+    model: &CatalogModel,
+    protocol: Protocol,
+) -> bool {
+    if protocol_requires_key(destination, model, protocol) && credential.key_cipher.is_empty() {
+        return false;
+    }
+    crate::route_availability::protocol_is_authorized(credential, destination, model, protocol)
+}
+
+fn protocol_requires_key(
+    destination: &Destination,
+    model: &CatalogModel,
+    protocol: Protocol,
+) -> bool {
+    use ocg_domain::destination::{AdapterKind, AuthScheme};
+    if destination.adapter == AdapterKind::Http {
+        return ocg_domain::destination::http_model_route(destination, model, protocol)
+            .is_some_and(|route| route.auth_scheme != AuthScheme::None);
+    }
+    destination.auth_scheme != AuthScheme::None
+}
+
+fn mapping_choice(model: &CatalogModel, authorized: &[Protocol]) -> Option<Protocol> {
+    if let Some(preferred) = model.preferred
+        && authorized.contains(&preferred)
+    {
+        return Some(preferred);
+    }
+    model
+        .protocols
+        .iter()
+        .copied()
+        .find(|protocol| authorized.contains(protocol))
+}
+
+/// Persisted projection rank for this credential id. A legacy account id does
+/// not supply a rank when that projection row is a different credential.
+fn credential_routing_rank(
+    snapshot: &crate::gateway::handler::RuntimeCatalogSnapshot,
+    credential: &crate::routing_snapshot::ExecutionCredential,
+) -> u32 {
+    snapshot
+        .routing
+        .projection
+        .credentials
+        .iter()
+        .find(|row| row.id == credential.credential_id)
+        .map(|row| row.routing_rank)
+        .unwrap_or(u32::MAX)
+}
+
+fn profile_from_mappings(
+    mappings: &[QualifiedMapping<'_>],
+) -> Option<PublishedModelProtocolProfile> {
+    let preferred = PublishedUpstreamProtocol::from_domain(mappings.first()?.choice);
+    let mut supported = Vec::new();
+    for protocol in Protocol::ALL {
+        if mappings
+            .iter()
+            .any(|mapping| mapping.authorized.contains(&protocol))
+        {
+            supported.push(PublishedUpstreamProtocol::from_domain(protocol));
+        }
+    }
+    let profile = PublishedModelProtocolProfile {
+        preferred,
+        supported,
+    };
+    profile.validate().ok()?;
+    Some(profile)
 }
 
 #[cfg(test)]
