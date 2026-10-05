@@ -1,0 +1,19 @@
+diff --git a/diff-a/internal/watcher/synthesizer/file.go b/diff-b/internal/watcher/synthesizer/file.go
+index 1111111..2222222 100644
+--- a/diff-a/internal/watcher/synthesizer/file.go
++++ b/diff-b/internal/watcher/synthesizer/file.go
+@@ -249,6 +249,14 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([]*coreauth.Auth, error) {
+ 	}
++	if provider == "claude" {
++		if bu, ok := metadata["base_url"].(string); ok && strings.TrimSpace(bu) != "" {
++			a.Attributes["base_url"] = strings.TrimSpace(bu)
++		}
++	}
+ 	// For codex auth files, extract plan_type from metadata or JWT id_token.
+ 	if provider == "codex" {
++		if bu, ok := metadata["base_url"].(string); ok && strings.TrimSpace(bu) != "" {
++			a.Attributes["base_url"] = strings.TrimSpace(bu)
++		}
+ 		if ptRaw, ok := metadata["plan_type"].(string); ok && strings.TrimSpace(ptRaw) != "" {
+ 			a.Attributes["plan_type"] = strings.TrimSpace(ptRaw)
+ 		} else if idTokenRaw, ok := metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {

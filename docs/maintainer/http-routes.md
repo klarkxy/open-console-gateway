@@ -2,8 +2,10 @@
 
 # HTTP Routes
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
 All routes share one port: inference, Dashboard V4 (including remounted V3
-handlers), V2 and V3 tombstones, and SPA. See [Architecture](architecture.md).
+handlers), V2 and V3 tombstones, and SPA. See [Architecture](../architecture.md).
 
 Tombstoned `/dashboard/api/...` REST returns empty-body **401** when anonymous
 (auth runs before the tombstone) and **410**

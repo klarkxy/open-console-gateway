@@ -1,5 +1,5 @@
 [package]
-name = "ocg-manager-cli"
+name = "ocg-cli"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -11,9 +11,10 @@ description = "Headless CLI for Open Console Gateway"
 [features]
 default = ["dsh-local-host"]
 dsh-local-host = ["ocg-core/dsh-local-host"]
+ollama-cloud-loopback-test = ["ocg-core/ollama-cloud-loopback-test"]
 
 [[bin]]
-name = "ocg-manager-cli"
+name = "ocg"
 path = "src/main.rs"
 
 [dependencies]

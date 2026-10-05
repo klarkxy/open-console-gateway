@@ -1,0 +1,53 @@
+diff --git a/diff-a/internal/auth/codex/openai_auth.go b/diff-b/internal/auth/codex/openai_auth.go
+index 1111111..2222222 100644
+--- a/diff-a/internal/auth/codex/openai_auth.go
++++ b/diff-b/internal/auth/codex/openai_auth.go
+@@ -33,6 +33,7 @@ const (
+ // exchanging authorization codes for tokens, and refreshing access tokens.
+ type CodexAuth struct {
+ 	httpClient *http.Client
++	tokenURL   string
+ }
+ 
+ var codexRefreshGroup singleflight.Group
+@@ -60,7 +61,30 @@ func NewCodexAuthWithProxyURL(cfg *config.Config, proxyURL string) *CodexAuth {
+ 		httpClient: util.SetProxy(&sdkCfg, &http.Client{}),
+ 	}
+ }
+ 
++// SetLoopbackTokenURL redirects refresh only. Production token hosts are ignored.
++func (o *CodexAuth) SetLoopbackTokenURL(raw string) {
++	if o == nil {
++		return
++	}
++	parsed, err := url.Parse(strings.TrimSpace(raw))
++	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
++		return
++	}
++	host := parsed.Hostname()
++	if host != "127.0.0.1" && host != "localhost" {
++		return
++	}
++	o.tokenURL = parsed.String()
++}
++
++func (o *CodexAuth) resolvedTokenURL() string {
++	if o != nil && strings.TrimSpace(o.tokenURL) != "" {
++		return o.tokenURL
++	}
++	return TokenURL
++}
++
+ // GenerateAuthURL creates the OAuth authorization URL with PKCE (Proof Key for Code Exchange).
+ // It constructs the URL with the necessary parameters, including the client ID,
+ // response type, redirect URI, scopes, and PKCE challenge.
+@@ -221,8 +243,8 @@ func (o *CodexAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
+ 		"refresh_token": {refreshToken},
+ 		"scope":         {"openid profile email"},
+ 	}
+ 
+-	req, errReq := http.NewRequestWithContext(ctx, "POST", TokenURL, strings.NewReader(data.Encode()))
++	req, errReq := http.NewRequestWithContext(ctx, "POST", o.resolvedTokenURL(), strings.NewReader(data.Encode()))
+ 	if errReq != nil {
+ 		return nil, fmt.Errorf("failed to create refresh request: %w", errReq)
+ 	}

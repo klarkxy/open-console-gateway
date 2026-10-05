@@ -971,6 +971,7 @@ async fn protocol_probes_require_cas_and_reject_stale_tokens_with_zero_upstream(
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
     let path = probe_path(OPENCODE_PROVIDER_ID);
 
@@ -1016,6 +1017,7 @@ async fn protocol_probes_zero_call_gates_do_not_touch_upstream() {
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
 
     let (status, duplicate) = send_json(
@@ -1151,6 +1153,7 @@ async fn go_protocol_probes_send_one_admin_post_per_protocol_with_correct_path_a
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
     create_go_account(&harness).await;
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
 
     let (status, body) = send_json(
@@ -1230,6 +1233,7 @@ async fn goat_protocol_probes_use_only_each_models_sealed_native_family_path() {
         )
         .unwrap();
     harness.state.reload_provider_contracts().unwrap();
+    harness.ensure_owned_plane().await;
 
     for (model_id, expected_protocols) in [
         (
@@ -1316,6 +1320,7 @@ async fn protocol_probe_falls_back_to_the_next_eligible_account() {
     point_upstream(&harness, &origin.url);
     let first_id = create_go_account_with(&harness, "First unavailable", BAD_KEY).await;
     let second_id = create_go_account_with(&harness, "Second available", GO_KEY).await;
+    harness.ensure_owned_plane().await;
 
     let (status, body) = send_json(
         &harness,
@@ -1396,6 +1401,7 @@ async fn protocol_probe_without_eligible_accounts_is_a_zero_call_rejection() {
     let harness = start_probes("probes-no-eligible-account").await;
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
 
     let (status, body) = send_json(
@@ -1432,6 +1438,7 @@ async fn zen_protocol_probe_omits_auth_and_selects_the_singleton_internally() {
     let harness = start_probes("probes-zen").await;
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &format!("{}/zen/go", origin.url));
+    harness.ensure_owned_plane().await;
     let (status, body) = send_json(
         &harness,
         Method::POST,
@@ -1465,6 +1472,7 @@ async fn model_outside_provider_catalog_is_rejected_without_bump_or_upstream() {
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
 
     let (status, body) = send_json(
@@ -1509,6 +1517,7 @@ async fn fetched_catalog_model_probes_all_protocols_and_writes_request_logs() {
         )
         .unwrap();
     harness.state.reload_provider_contracts().unwrap();
+    harness.ensure_owned_plane().await;
 
     let (status, body) = send_json(
         &harness,
@@ -1603,6 +1612,7 @@ async fn removed_and_zen_owned_go_catalog_models_cannot_be_probed() {
         )
         .unwrap();
     harness.state.reload_provider_contracts().unwrap();
+    harness.ensure_owned_plane().await;
     let (status, body) = send_json(
         &harness,
         Method::POST,
@@ -1711,6 +1721,7 @@ async fn s04_probe_errors_and_logs_redact_secrets() {
     .await;
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
 
     let (status, body) = send_json(
@@ -1777,6 +1788,7 @@ async fn connection_test_success_and_failure_never_change_protocol_overrides() {
     let ok_origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &ok_origin.url);
     let account_id = create_go_account(&harness).await;
+    harness.ensure_owned_plane().await;
 
     // Success records reachability, not a routing configuration change.
     let (status, body) = send_json(
@@ -1816,6 +1828,7 @@ async fn connection_test_success_and_failure_never_change_protocol_overrides() {
     )
     .await;
     point_upstream(&harness, &fail_origin.url);
+    harness.reapply_owned_plane().await;
     let (status, body) = send_json(
         &harness,
         Method::POST,
@@ -1876,6 +1889,7 @@ async fn successful_test_records_observation_and_does_not_forward_dashboard_head
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
     let payload = cas(
         &harness,
@@ -1943,6 +1957,7 @@ async fn protocol_probes_use_the_default_proxy_leg_not_the_model_exception() {
     config.proxy_url = "http://127.0.0.1:1".into();
     config.non_stream_timeout_secs = 5;
     harness.state.set_config(config).unwrap();
+    harness.ensure_owned_plane().await;
 
     let (status, body) = send_json(
         &harness,
@@ -1975,6 +1990,7 @@ async fn cas_change_during_outbound_rejects_probe_commit() {
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::from_millis(400)).await;
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
     let start_scope = go_scope_revision(&harness);
     assert!(
@@ -2034,6 +2050,7 @@ async fn two_protocol_success_stores_both_rows_and_bumps_nested_scope_once() {
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
     let start_scope = go_scope_revision(&harness);
     assert!(
@@ -2090,6 +2107,7 @@ async fn two_protocol_batch_rolls_back_when_second_observation_write_fails() {
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
     let before_contracts = harness.state.provider_contracts();
     let start_scope = go_scope_revision(&harness);
@@ -2147,6 +2165,7 @@ async fn probe_commit_advances_global_revision_before_reload_failure() {
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
     let before_contracts = harness.state.provider_contracts();
     let start_scope = go_scope_revision(&harness);
@@ -2615,6 +2634,7 @@ async fn zen_official_static_responses_and_messages_are_writable_and_probeable()
     let messages = zen.model("messages-model-free").unwrap();
     assert!(messages.protocols["messages"].enabled);
     assert_eq!(messages.preferred_protocol, UpstreamProtocolKind::Messages);
+    harness.ensure_owned_plane().await;
 
     let (status, probed_responses) = send_json(
         &harness,

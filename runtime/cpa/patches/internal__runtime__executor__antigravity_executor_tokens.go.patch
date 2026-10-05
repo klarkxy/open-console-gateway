@@ -1,0 +1,15 @@
+diff --git a/diff-a/internal/runtime/executor/antigravity_executor_tokens.go b/diff-b/internal/runtime/executor/antigravity_executor_tokens.go
+index 1111111..2222222 100644
+--- a/diff-a/internal/runtime/executor/antigravity_executor_tokens.go
++++ b/diff-b/internal/runtime/executor/antigravity_executor_tokens.go
+@@ -120,6 +120,10 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
+ 
++	if errDispatch := cliproxyauth.BeforeOCGHTTPDispatch(ctx, httpReq); errDispatch != nil {
++		return cliproxyexecutor.Response{}, errDispatch
++	}
+ 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
+ 	httpResp, errDo := httpClient.Do(httpReq)
++	cliproxyauth.NoteOCGHTTPDispatch(ctx, errDo, httpResp)
+ 	if errDo != nil {
+ 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+ 		return cliproxyexecutor.Response{}, errDo

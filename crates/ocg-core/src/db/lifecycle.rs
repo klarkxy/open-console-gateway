@@ -255,6 +255,79 @@ pub(super) fn preflight_ciphertext_probes(
     Ok(())
 }
 
+/// Read-only snapshot probe. It does not migrate, repair, or rewrite rows,
+/// and it is not used by [`Database::open`].
+///
+/// Known ciphertext columns are streamed one value at a time: every
+/// `credentials` purpose (inference, CPA observer, platform observer), the
+/// legacy `accounts` key/password columns, and leftover
+/// `cpa_integration.management_key_cipher`. Authenticated `v2:` ciphertext
+/// must decrypt. Legacy XOR is not a validated cipher state: readable text
+/// is compatibility only, and a UTF-8 failure is not proof the key is wrong.
+pub(crate) struct SnapshotCiphertextReport {
+    pub legacy_unauthenticated: bool,
+}
+
+pub(crate) fn probe_snapshot_ciphertext(
+    conn: &Connection,
+    cipher: &dyn KeyCipher,
+) -> Result<SnapshotCiphertextReport> {
+    let mut legacy = false;
+    legacy |= probe_known_column(conn, cipher, "credentials", "key_cipher")?;
+    legacy |= probe_known_column(conn, cipher, "credentials", "password_cipher")?;
+    legacy |= probe_known_column(conn, cipher, "accounts", "key_cipher")?;
+    legacy |= probe_known_column(conn, cipher, "accounts", "password_cipher")?;
+    legacy |= probe_known_column(conn, cipher, "cpa_integration", "management_key_cipher")?;
+    Ok(SnapshotCiphertextReport {
+        legacy_unauthenticated: legacy,
+    })
+}
+
+fn probe_known_column(
+    conn: &Connection,
+    cipher: &dyn KeyCipher,
+    table: &'static str,
+    column: &'static str,
+) -> Result<bool> {
+    if !table_exists(conn, table)? || !table_has_column(conn, table, column)? {
+        return Ok(false);
+    }
+    let mut statement = conn.prepare(&format!("SELECT {column} FROM {table}"))?;
+    let mut rows = statement.query([])?;
+    let mut legacy = false;
+    while let Some(row) = rows.next()? {
+        let value: Option<String> = row.get(0)?;
+        let Some(value) = value.filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        legacy |= classify_snapshot_ciphertext(cipher, table, column, &value)?;
+    }
+    Ok(legacy)
+}
+
+fn classify_snapshot_ciphertext(
+    cipher: &dyn KeyCipher,
+    table: &str,
+    column: &str,
+    value: &str,
+) -> Result<bool> {
+    if is_legacy_local_ciphertext(value) {
+        return match cipher.decrypt(value) {
+            Ok(plaintext) => {
+                drop(plaintext);
+                Ok(true)
+            }
+            Err(error) => anyhow::bail!(
+                "legacy unauthenticated ciphertext in {table}.{column} is not readable as text with this cipher ({error}). That result is not proof the key is wrong and is not a validated cipher state"
+            ),
+        };
+    }
+    cipher.decrypt(value).with_context(|| {
+        format!("snapshot cipher rejected authenticated ciphertext in {table}.{column}")
+    })?;
+    Ok(false)
+}
+
 pub(super) fn repair_legacy_account_ciphertext(
     conn: &Connection,
     cipher: &dyn KeyCipher,

@@ -2,6 +2,8 @@
 
 # Model metadata and reasoning tiers in DSH
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
 Use **Applications → DSH** to install the OCG provider. After upgrading OCG to a build containing this feature, install/replace the plugin once and reload the selected DSH runtime. Updating the gateway alone does not replace a previously installed plugin. Model-list reads refresh the directory; requests reuse its snapshot for up to five seconds. Existing Key handoff and credential storage are unchanged.
 
 ## What is reported

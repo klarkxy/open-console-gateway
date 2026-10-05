@@ -826,7 +826,8 @@ async fn fresh_runtime_accepts_authenticated_empty_catalog_without_publishing_mo
     assert!(report.reachable && report.management_ready && report.inference_ready);
     assert_eq!(report.model_count, 0);
 
-    // An empty authenticated result must also replace an older catalog.
+    // Probed ids are not published. Stored catalog bytes stay untouched.
+    let stored_catalog = state.db.lock().cpa_model_catalog().unwrap();
     state
         .persist_managed_connection(
             port,
@@ -839,16 +840,16 @@ async fn fresh_runtime_accepts_authenticated_empty_catalog_without_publishing_mo
         .persist_managed_connection(port, "management-key", "inference-key", vec![])
         .unwrap();
     assert!(state.cpa_model_catalog().is_empty());
-    assert!(
-        state
-            .db
-            .lock()
-            .cpa_model_catalog()
-            .unwrap()
-            .unwrap()
-            .models
-            .is_empty()
-    );
+    let stored_after = state.db.lock().cpa_model_catalog().unwrap();
+    let ids = |record: &Option<crate::db::CpaCatalogRecord>| {
+        record.as_ref().map(|item| {
+            item.models
+                .iter()
+                .map(|model| (model.id.clone(), model.enabled, item.source_url.clone()))
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(ids(&stored_after), ids(&stored_catalog));
     server.abort();
     drop(state);
     fs::remove_dir_all(dir).unwrap();
@@ -1055,9 +1056,13 @@ async fn assert_successful_rollback_catalog(label: &str, expected_models: Vec<St
         .unwrap();
 
     assert_eq!(state.settings_revision(), revision + 1, "{label}");
-    assert_eq!(
-        state.cpa_model_catalog().as_ref(),
-        &expected_models,
+    assert!(
+        state.cpa_model_catalog().is_empty(),
+        "{label}: probed models {} stay off the live route list",
+        expected_models.join(",")
+    );
+    assert!(
+        state.db.lock().cpa_model_catalog().unwrap().is_none(),
         "{label}"
     );
     let managed = load_managed(&dir).unwrap().unwrap();
@@ -2249,6 +2254,92 @@ fn already_running_start_commit_after_shutdown_does_not_publish_idle() {
     assert!(!load_managed(&dir).unwrap().unwrap().desired_running);
     assert_eq!(state.settings_revision(), revision);
     assert_ne!(state.cpa_runtime_snapshot().phase, CpaRuntimePhase::Idle);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn owned_persist_keeps_a_foreign_remote_integration() {
+    let dir = temp_dir("foreign-remote");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    state
+        .persist_managed_connection(8317, "management-key", "inference-key", Vec::new())
+        .unwrap();
+    state
+        .db
+        .lock()
+        .conn
+        .execute(
+            "UPDATE destinations SET base_url = ?1 WHERE adapter = 'cpa'",
+            ["https://remote.example"],
+        )
+        .unwrap();
+    let before = state.db.lock().cpa_integration().unwrap().unwrap();
+    let inference_before = state
+        .db
+        .lock()
+        .get_account(CPA_ACCOUNT_ID)
+        .unwrap()
+        .unwrap()
+        .key_cipher;
+    state
+        .persist_managed_connection(8400, "other-management", "other-inference", Vec::new())
+        .unwrap();
+    state.persist_inference_key("rotated-inference").unwrap();
+    let after = state.db.lock().cpa_integration().unwrap().unwrap();
+    let inference_after = state
+        .db
+        .lock()
+        .get_account(CPA_ACCOUNT_ID)
+        .unwrap()
+        .unwrap()
+        .key_cipher;
+    assert_eq!(after.base_url, "https://remote.example");
+    assert_eq!(after.base_url, before.base_url);
+    assert_eq!(after.management_key_cipher, before.management_key_cipher);
+    assert_eq!(inference_after, inference_before);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn commit_client_keys_rejects_downstream_client_keys() {
+    let dir = temp_dir("downstream-keys");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("cpa-runtime"));
+    let state =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    state
+        .db
+        .lock()
+        .conn
+        .execute(
+            "INSERT INTO access_keys (id, name, key, is_primary, enabled, deleted_at, created_at)
+             VALUES ('runtime-downstream', 'downstream', 'downstream-client-key', 0, 1, NULL, ?1)",
+            [Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+    let rejected = state
+        .commit_client_keys(
+            state.settings_revision(),
+            state.process_generation(),
+            vec!["downstream-client-key".into()],
+            None,
+        )
+        .await
+        .expect_err("access key");
+    assert!(rejected.to_string().contains("downstream client keys"));
+    let opaque = state
+        .commit_client_keys(
+            state.settings_revision(),
+            state.process_generation(),
+            vec!["opaque-provider-key".into()],
+            None,
+        )
+        .await
+        .expect_err("missing managed runtime");
+    assert!(!opaque.to_string().contains("downstream client keys"));
     drop(state);
     fs::remove_dir_all(dir).unwrap();
 }

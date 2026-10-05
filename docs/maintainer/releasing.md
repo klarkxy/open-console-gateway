@@ -2,6 +2,8 @@
 
 # Release Procedure
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
 1. **Prepare once.** Review the previous-tag diff and finish affected behavior
    checks using Node.js 22. Set `X.Y.Z` (or `X.Y.Z-beta.N`) in `package.json`,
    `src-tauri/tauri.conf.json`, both `Cargo.toml` files, and the header/default

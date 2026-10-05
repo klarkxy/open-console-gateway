@@ -16,10 +16,6 @@ use ocg_domain::dynamic::{DynamicAuthKind, DynamicModelMapping, DynamicModelUpst
 
 use crate::dashboard_v3::{ControlRevision, MutationExpectation, V3ApiError, parse_mutation_json};
 use crate::destination_projection::{ProjectionRefusal, RefusedRow, read_v4_projection};
-use crate::quota_recovery::{
-    PersistedQuotaReason, PersistedQuotaRecovery, PersistedQuotaWindow, QuotaEpisode,
-    QuotaPresentationStatus, QuotaRecoveryView,
-};
 use crate::state::CoreState;
 
 use super::types::{
@@ -62,7 +58,7 @@ impl IntoResponse for DestinationsError {
 pub(super) async fn list_destinations(
     State(state): State<CoreState>,
 ) -> Result<Json<DestinationList>, DestinationsError> {
-    let (projection, _, _, revision) = load_projection(&state)?;
+    let (projection, revision) = load_projection(&state)?;
     Ok(Json(DestinationList {
         revision,
         destinations: projection
@@ -76,10 +72,10 @@ pub(super) async fn list_destinations(
 pub(super) async fn list_credentials(
     State(state): State<CoreState>,
 ) -> Result<Json<CredentialList>, DestinationsError> {
-    let (projection, recoveries, probes, revision) = load_projection(&state)?;
+    let (projection, revision) = load_projection(&state)?;
     Ok(Json(CredentialList {
         revision,
-        credentials: overlay_credential_dtos(&state, &projection.credentials, &recoveries, &probes),
+        credentials: overlay_with_policy(&state, &projection.credentials)?,
     }))
 }
 
@@ -89,7 +85,9 @@ pub(super) async fn patch_destination(
     body: Bytes,
 ) -> Result<Json<DestinationPatchResult>, DestinationsError> {
     let input = parse_mutation_json::<DestinationPatchRequest>(&body)?;
-    patch_destination_locked(&state, &id, input).map(Json)
+    let receipt = commit_destination_patch(&state, &id, input)?;
+    crate::cpa_execution::note_product_apply(&state).await;
+    receipt.map(Json)
 }
 
 pub(super) async fn delete_destination(
@@ -98,7 +96,9 @@ pub(super) async fn delete_destination(
     body: Bytes,
 ) -> Result<Json<DestinationDeleteResult>, DestinationsError> {
     let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
-    delete_destination_locked(&state, &id, expectation).map(Json)
+    let saved = delete_destination_locked(&state, &id, expectation)?;
+    crate::cpa_execution::note_product_apply(&state).await;
+    Ok(Json(saved))
 }
 
 fn patch_destination_locked(
@@ -106,6 +106,16 @@ fn patch_destination_locked(
     destination_id: &str,
     input: DestinationPatchRequest,
 ) -> Result<DestinationPatchResult, DestinationsError> {
+    commit_destination_patch(state, destination_id, input)?
+}
+
+/// Outer error: nothing was committed. Inner error: the commit succeeded and
+/// the receipt read failed. The async handler applies once for every inner result.
+fn commit_destination_patch(
+    state: &CoreState,
+    destination_id: &str,
+    input: DestinationPatchRequest,
+) -> Result<Result<DestinationPatchResult, DestinationsError>, DestinationsError> {
     let catalog_updates = input
         .models
         .iter()
@@ -146,24 +156,48 @@ fn patch_destination_locked(
     {
         return Err(V3ApiError::revision_conflict(state).into());
     }
+    ensure_quota_presentation(state)?;
     crate::account_control::update_http_destination_locked(state, destination_id, update)
         .map_err(|error| map_destination_control_error(state, error))?;
-    mutation_result_locked(state, destination_id)
+    Ok(mutation_result_locked(state, destination_id))
+}
+
+pub(super) fn ensure_quota_presentation(state: &CoreState) -> Result<(), DestinationsError> {
+    let db = state.db.lock();
+    crate::cpa_quota::present_all(&db.conn, state.sample_gateway_clock().0)
+        .map_err(|_| V3ApiError::internal("official quota policy could not be read"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_MUTATION_RECEIPT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Next `mutation_result_locked` returns the quota-read error after the commit.
+#[cfg(test)]
+pub(super) fn fail_next_mutation_receipt() {
+    FAIL_NEXT_MUTATION_RECEIPT.with(|flag| flag.set(true));
+}
+
+#[cfg(test)]
+pub(super) fn clear_mutation_receipt_failure() {
+    FAIL_NEXT_MUTATION_RECEIPT.with(|flag| flag.set(false));
 }
 
 pub(super) fn mutation_result_locked(
     state: &CoreState,
     destination_id: &str,
 ) -> Result<DestinationPatchResult, DestinationsError> {
+    #[cfg(test)]
+    if FAIL_NEXT_MUTATION_RECEIPT.with(|flag| flag.replace(false)) {
+        return Err(V3ApiError::internal("official quota policy could not be read").into());
+    }
     // The caller already owns `settings_update`; do not call
     // `load_projection`, which would try to acquire the non-reentrant lock.
-    let (projection, recoveries, probes) = {
+    let projection = {
         let db = state.db.lock();
-        let projection = read_v4_projection(&db).map_err(V3ApiError::internal)?;
-        let recoveries = crate::db::quota_recovery::load_all_identified_on(&db.conn)
-            .map_err(V3ApiError::internal)?;
-        let probes = state.quota_probes.lock().clone();
-        (projection, recoveries, probes)
+        read_v4_projection(&db).map_err(V3ApiError::internal)?
     };
     let projection = projection
         .map_err(|refusals| DestinationsError::Refused(projection_refused(state, &refusals)))?;
@@ -175,7 +209,7 @@ pub(super) fn mutation_result_locked(
     Ok(DestinationPatchResult {
         revision: ControlRevision::from_state(state),
         destination: DestinationDto::from(updated),
-        credentials: overlay_credential_dtos(state, &projection.credentials, &recoveries, &probes),
+        credentials: overlay_with_policy(state, &projection.credentials)?,
     })
 }
 
@@ -249,14 +283,11 @@ fn model_patch(model: DestinationModelPatch) -> DynamicModelMapping {
     }
 }
 
-#[allow(clippy::type_complexity)]
 fn load_projection(
     state: &CoreState,
 ) -> Result<
     (
         crate::destination_projection::DestinationProjection,
-        std::collections::HashMap<String, crate::db::quota_recovery::QuotaRecoveryRow>,
-        std::collections::HashMap<String, QuotaEpisode>,
         ControlRevision,
     ),
     DestinationsError,
@@ -264,79 +295,67 @@ fn load_projection(
     let _settings_update = state.settings_update.lock();
     let db = state.db.lock();
     let projection = read_v4_projection(&db).map_err(V3ApiError::internal)?;
-    let recoveries = crate::db::quota_recovery::load_all_identified_on(&db.conn)
-        .map_err(V3ApiError::internal)?;
-    let probes = state.quota_probes.lock().clone();
     let revision = ControlRevision::from_state(state);
     match projection {
-        Ok(projection) => Ok((projection, recoveries, probes, revision)),
+        Ok(projection) => Ok((projection, revision)),
         Err(refusals) => Err(DestinationsError::Refused(projection_refused(
             state, &refusals,
         ))),
     }
 }
 
-pub(super) fn overlay_credential_dtos(
+pub(super) fn overlay_with_policy(
     state: &CoreState,
     credentials: &[Credential],
-    recoveries: &std::collections::HashMap<String, crate::db::quota_recovery::QuotaRecoveryRow>,
-    probes: &std::collections::HashMap<String, QuotaEpisode>,
+) -> Result<Vec<CredentialDto>, V3ApiError> {
+    let db = state.db.lock();
+    let policy = crate::cpa_quota::present_all(&db.conn, state.sample_gateway_clock().0)
+        .map_err(|_| V3ApiError::internal("official quota policy could not be read"))?;
+    Ok(overlay_credential_dtos(credentials, &policy))
+}
+
+pub(super) fn overlay_credential_dtos(
+    credentials: &[Credential],
+    policy: &std::collections::HashMap<String, crate::cpa_quota::EffectivePlan>,
 ) -> Vec<CredentialDto> {
-    let now = state.sample_gateway_clock().0;
     credentials
         .iter()
         .map(|credential| {
             let mut dto = CredentialDto::from(credential);
-            dto.quota_recovery = recoveries.get(&credential.id).map(|row| {
-                let probing = probes.get(&credential.id).is_some_and(|episode| {
-                    crate::routing_snapshot::quota_episode_matches(
-                        episode,
-                        &credential.id,
-                        row.credential_version,
-                        &row.key_cipher,
-                        row.recovery.epoch,
-                    )
-                });
-                quota_recovery_dto(row.recovery.present(now, probing))
-            });
+            dto.quota_recovery = policy.get(&credential.id).map(policy_quota_dto);
             dto
         })
         .collect()
 }
 
-pub(super) fn overlay_one_credential_dto(
-    state: &CoreState,
+pub(super) fn with_policy_quota(
     credential: &Credential,
-    recovery: Option<&PersistedQuotaRecovery>,
-    probing: bool,
+    plan: &crate::cpa_quota::EffectivePlan,
 ) -> CredentialDto {
-    let now = state.sample_gateway_clock().0;
     let mut dto = CredentialDto::from(credential);
-    dto.quota_recovery = recovery.map(|row| quota_recovery_dto(row.present(now, probing)));
+    dto.quota_recovery = Some(policy_quota_dto(plan));
     dto
 }
 
-fn quota_recovery_dto(view: QuotaRecoveryView) -> QuotaRecoveryDto {
+fn policy_quota_dto(plan: &crate::cpa_quota::EffectivePlan) -> QuotaRecoveryDto {
+    use crate::cpa_quota::{PlanStatus, PlanWindowLabel};
     QuotaRecoveryDto {
-        status: match view.status {
-            QuotaPresentationStatus::Waiting => QuotaRecoveryStatus::Waiting,
-            QuotaPresentationStatus::Ready => QuotaRecoveryStatus::Ready,
-            QuotaPresentationStatus::Probing => QuotaRecoveryStatus::Probing,
+        status: match plan.card.status {
+            PlanStatus::Waiting => QuotaRecoveryStatus::Waiting,
+            PlanStatus::Ready => QuotaRecoveryStatus::Ready,
+            PlanStatus::Probing => QuotaRecoveryStatus::Probing,
         },
-        reason: match view.reason {
-            PersistedQuotaReason::QuotaExhausted => QuotaRecoveryReason::QuotaExhausted,
-            PersistedQuotaReason::InsufficientBalance => QuotaRecoveryReason::InsufficientBalance,
+        reason: QuotaRecoveryReason::QuotaExhausted,
+        window: match plan.card.window {
+            PlanWindowLabel::FiveHours => QuotaRecoveryWindow::FiveHours,
+            PlanWindowLabel::Week => QuotaRecoveryWindow::Week,
+            PlanWindowLabel::Month => QuotaRecoveryWindow::Month,
+            PlanWindowLabel::Unknown => QuotaRecoveryWindow::Unknown,
         },
-        window: match view.window {
-            PersistedQuotaWindow::FiveHours => QuotaRecoveryWindow::FiveHours,
-            PersistedQuotaWindow::Week => QuotaRecoveryWindow::Week,
-            PersistedQuotaWindow::Month => QuotaRecoveryWindow::Month,
-            PersistedQuotaWindow::Unknown => QuotaRecoveryWindow::Unknown,
-        },
-        observed_at: view.observed_at.to_rfc3339(),
-        resets_at: view.resets_at.map(|at| at.to_rfc3339()),
-        next_retry_at: view.next_retry_at.to_rfc3339(),
-        failure_count: view.failure_count,
+        observed_at: plan.card.observed_at.to_rfc3339(),
+        resets_at: plan.card.resets_at.map(|at| at.to_rfc3339()),
+        next_retry_at: plan.card.next_retry_at.to_rfc3339(),
+        failure_count: 0,
     }
 }
 

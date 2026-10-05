@@ -150,7 +150,12 @@ impl GatewayLifecycle {
         let task_state = state.clone();
         let handle = tokio::spawn(async move {
             let _public_registration = public_registration;
-            let server = axum::serve(listener, app);
+            // The policy callback refuses a non-loopback peer. Axum only
+            // inserts that peer when the router is served with connect info.
+            let server = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            );
             let server = server.with_graceful_shutdown(async move {
                 let _ = shutdown_rx.await;
             });

@@ -5,6 +5,8 @@ use crate::db::Database;
 use crate::dynamic::DynamicProviderRuntime;
 use crate::provider::ProviderOrigin;
 use crate::state::CoreStateInner;
+use axum::body::Bytes;
+use axum::extract::{Path, State};
 use chrono::Utc;
 use ocg_domain::destination::{ModelResolution, destination_id_for_dynamic};
 use std::sync::Arc;
@@ -294,4 +296,166 @@ fn account_controls_keep_profile_and_commercial_facts_independent() {
             .console_link,
         Some(AccountConsoleLinkDto::Ollama)
     );
+}
+
+/// Skip-spawn owned plane. The empty task fills `GatewayHandle`; it is not a child process.
+struct OwnedApplyGuard {
+    _shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+}
+
+impl OwnedApplyGuard {
+    fn arm(state: &CoreState) -> Self {
+        crate::cpa_execution::set_skip_spawn(true);
+        crate::cpa_execution::set_fail_ready(false);
+        crate::cpa_execution::set_test_password(Some("synthetic-management".to_string()));
+        crate::cpa_execution::set_before_apply_commit(None);
+        crate::cpa_execution::set_artifact_dir(
+            state,
+            crate::cpa_execution::documented_runtime_dir(),
+        );
+        let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async {});
+        *state.gateway.lock() = Some(crate::gateway_runtime::GatewayHandle {
+            port: 9,
+            listen_addr: "127.0.0.1:9".parse().unwrap(),
+            dashboard_is_local: true,
+            shutdown,
+            task,
+        });
+        Self {
+            _shutdown_rx: shutdown_rx,
+        }
+    }
+}
+
+impl Drop for OwnedApplyGuard {
+    fn drop(&mut self) {
+        crate::cpa_execution::set_skip_spawn(false);
+        crate::cpa_execution::set_fail_ready(false);
+        crate::cpa_execution::set_test_password(None);
+        crate::cpa_execution::set_before_apply_commit(None);
+        clear_mutation_receipt_failure();
+    }
+}
+
+fn plant_malformed_quota_policy(state: &CoreState) {
+    state
+        .db
+        .lock()
+        .conn
+        .execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            rusqlite::params![crate::cpa_policy::SETTINGS_KEY, "{"],
+        )
+        .unwrap();
+}
+
+fn rename_request(state: &CoreState, name: &str) -> DestinationPatchRequest {
+    DestinationPatchRequest {
+        enabled: None,
+        expectation: expectation(state),
+        name: name.into(),
+        endpoint_url: "https://before.example/v1".into(),
+        upstream_protocol: ProtocolDto::ChatCompletions,
+        protocol_routes: None,
+        auth_scheme: AuthSchemeDto::Bearer,
+        models: vec![DestinationModelPatch {
+            enabled: None,
+            public_model: "public-before".into(),
+            upstream_model: "upstream-before".into(),
+            protocols: None,
+            preferred: None,
+            upstream_override: None,
+        }],
+        authorize_credential_ids: Vec::new(),
+    }
+}
+
+fn patch_bytes(request: &DestinationPatchRequest) -> Bytes {
+    Bytes::from(serde_json::to_vec(request).unwrap())
+}
+
+async fn started_plane(state: &CoreState) -> crate::cpa_execution::ExecutionReport {
+    let started =
+        crate::cpa_execution::start(state, state.settings_revision(), state.process_generation())
+            .await
+            .expect("owned plane start");
+    assert_eq!(started.apply_status, "applied");
+    assert!(started.desired_running);
+    started
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn patch_malformed_quota_policy_refuses_before_commit() {
+    let state = dynamic_state();
+    let core = state.state.clone().unwrap();
+    let id = destination_id_for_dynamic("destination-edit-provider");
+    let _plane = OwnedApplyGuard::arm(&core);
+    let started = started_plane(&core).await;
+    let revision = core.settings_revision();
+    plant_malformed_quota_policy(&core);
+    let error = patch_destination(
+        State(core.clone()),
+        Path(id.clone()),
+        patch_bytes(&rename_request(&core, "After")),
+    )
+    .await
+    .expect_err("malformed quota policy");
+    assert!(format!("{error:?}").contains("official quota policy could not be read"));
+    assert_eq!(expect_ok(load_destination(&core, &id)).name, "Before");
+    assert_eq!(core.settings_revision(), revision);
+    let after = crate::cpa_execution::execution_report(&core);
+    assert_eq!(after.desired_revision, started.desired_revision);
+    assert_eq!(after.applied_revision, started.applied_revision);
+    assert_eq!(after.apply_status, started.apply_status);
+    assert!(core.settings_update.try_lock().is_some());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn patch_stale_cas_does_not_apply() {
+    let state = dynamic_state();
+    let core = state.state.clone().unwrap();
+    let id = destination_id_for_dynamic("destination-edit-provider");
+    let _plane = OwnedApplyGuard::arm(&core);
+    let started = started_plane(&core).await;
+    let revision = core.settings_revision();
+    let mut request = rename_request(&core, "After");
+    request.expectation.expected_revision = revision + 1;
+    let error = patch_destination(State(core.clone()), Path(id.clone()), patch_bytes(&request))
+        .await
+        .expect_err("stale destination patch");
+    assert!(format!("{error:?}").contains("revisionConflict"));
+    assert_eq!(expect_ok(load_destination(&core, &id)).name, "Before");
+    assert_eq!(core.settings_revision(), revision);
+    let after = crate::cpa_execution::execution_report(&core);
+    assert_eq!(after.desired_revision, started.desired_revision);
+    assert_eq!(after.applied_revision, started.applied_revision);
+    assert_eq!(after.apply_status, started.apply_status);
+    assert!(core.settings_update.try_lock().is_some());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn patch_receipt_failure_after_commit_still_applies() {
+    let state = dynamic_state();
+    let core = state.state.clone().unwrap();
+    let id = destination_id_for_dynamic("destination-edit-provider");
+    let _plane = OwnedApplyGuard::arm(&core);
+    let started = started_plane(&core).await;
+    let revision = core.settings_revision();
+    fail_next_mutation_receipt();
+    let error = patch_destination(
+        State(core.clone()),
+        Path(id.clone()),
+        patch_bytes(&rename_request(&core, "After")),
+    )
+    .await
+    .expect_err("receipt read");
+    assert!(format!("{error:?}").contains("official quota policy could not be read"));
+    assert_eq!(expect_ok(load_destination(&core, &id)).name, "After");
+    assert!(core.settings_revision() > revision);
+    let applied = crate::cpa_execution::execution_report(&core);
+    assert_eq!(applied.desired_revision, started.desired_revision + 1);
+    assert_eq!(applied.applied_revision, applied.desired_revision);
+    assert_eq!(applied.apply_status, "applied");
+    assert!(core.settings_update.try_lock().is_some());
 }

@@ -2,6 +2,8 @@
 
 # 发布流程
 
+> 适用范围：本页保留当前实现或 OCG2 已发布版本的操作参考，不定义 OCG3 新架构。CPA 底层迁移目标见[架构](../architecture.zh-CN.md)；其中界面步骤不适用于当前 CLI 阶段。
+
 1. **一次准备。** 复核相对上一个 tag 的差异，用 Node.js 22 完成受影响行为的检查。
    在 `package.json`、`src-tauri/tauri.conf.json`、两份 `Cargo.toml` 和
    `compose.example.yaml` 的标题、默认镜像中写入 `X.Y.Z`（或 `X.Y.Z-beta.N`）。

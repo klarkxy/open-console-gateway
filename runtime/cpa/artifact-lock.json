@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "6fecc6e5567912661654a4eaf9b8f5436facd1c2",
+  "sourceVersion": "v8.0.10",
+  "protocolVersion": 1,
+  "buildIdentity": "011f360291c4c026cee9a57c3707ebe5a975b100f4fe54a500fdb0fb6aa6fe4b",
+  "hostSHA256": "9071ca627994330e0abc410f48804645df9eb011697e7084be54ca0f3f7dfbff",
+  "overlaySHA256": "7c6fbad2bc900122e4589ad8492806de9e03d24b5e2d10d66d56817d1afbbe13",
+  "requiredCapabilities": [
+    "attempt-boundary",
+    "selective-no-replay",
+    "explicit-429-failover",
+    "policy-ipc-v1",
+    "readiness-v1",
+    "compat-protocol-routes",
+    "go-zen-identity",
+    "ollama-reasoning",
+    "oauth-redacted-references",
+    "routing-preserve",
+    "identity-fence-epoch-version-material",
+    "validated-protocol-pin-v1",
+    "validation-only-routes-v1",
+    "absolute-request-deadline-v1",
+    "native-refresh-registration-fence-v1",
+    "native-final-endpoint-pin-v1"
+  ],
+  "artifacts": [
+    {
+      "os": "windows",
+      "arch": "x86_64",
+      "variant": "production",
+      "executable": "ocg-cpa-host.exe",
+      "sha256": "8648fd683cef40bb3ffc8dc9af68caf9f7d5a8737cf442dd575669f730f0fc6a",
+      "verification": "host-suite"
+    },
+    {
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "production",
+      "executable": "ocg-cpa-host-linux-amd64",
+      "sha256": "49c964fafd72397fd56a61ec1fb233fdb695a7b413acd7fa05cd9355a8b973a1",
+      "verification": "compiled-only"
+    },
+    {
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "production",
+      "executable": "ocg-cpa-host-darwin-arm64",
+      "sha256": "e3e69aabeca22f101fe10274850237628f66abbb131d43537eb37c4e285a1a86",
+      "verification": "compiled-only"
+    },
+    {
+      "os": "windows",
+      "arch": "x86_64",
+      "variant": "native-loopback-fixture",
+      "executable": "ocg-cpa-host.exe",
+      "sha256": "9d3d21be66d420973ed6c25cb4557000672c8bffaedbf98c604793e3f5c28daf",
+      "verification": "host-suite"
+    }
+  ]
+}

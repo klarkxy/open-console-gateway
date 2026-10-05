@@ -229,3 +229,23 @@ async fn import_never_overwrites_case_variant_existing_filenames() {
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
+
+#[tokio::test]
+async fn owned_import_reads_a_synthetic_root_and_does_not_require_a_remote_row() {
+    let (dir, state) = fixture();
+    let root = dir.join("synthetic-cli");
+    std::fs::create_dir_all(&root).unwrap();
+    let roots = crate::cpa_cli_import::CliRoots::synthetic(root);
+    let error = import_owned_from_roots(&state, input(&state), roots)
+        .await
+        .expect_err("missing synthetic file");
+    let message = error.body.message;
+    assert!(
+        message.contains("No readable CLI credential file was found"),
+        "{message}"
+    );
+    assert!(!message.contains("owned native import does not read installed token files"));
+    assert!(state.db.lock().cpa_integration().unwrap().is_none());
+    drop(state);
+    std::fs::remove_dir_all(dir).unwrap();
+}

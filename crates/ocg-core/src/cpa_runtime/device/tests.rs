@@ -1,5 +1,5 @@
 use super::*;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 struct FakeHost {
     running: AtomicBool,
@@ -47,6 +47,10 @@ fn fixture(stdout: &str, running: bool, deadline: Instant) -> (Arc<FakeHost>, Ar
         host: host.clone(),
         deadline,
         result: Mutex::new(DeviceResult::default()),
+        completion: Mutex::new(None),
+        flight_epoch: AtomicU64::new(0),
+        cancelled_epoch: AtomicU64::new(0),
+        ready_epoch: AtomicU64::new(0),
     });
     (host, session)
 }
@@ -97,6 +101,7 @@ fn saved_success_stops_helper_and_terminal_result_survives_cancel() {
     assert_eq!(session.status().status, "ok");
     assert!(!host.owned_running());
     assert!(!session.cancel());
+    assert_eq!(session.cancelled_epoch.load(Ordering::Acquire), 0);
     assert_eq!(session.status().status, "ok");
 }
 
@@ -171,6 +176,10 @@ fn official_cpa_device_prompt_and_cancel() {
         host: host.clone(),
         deadline: Instant::now() + Duration::from_secs(30),
         result: Mutex::new(DeviceResult::default()),
+        completion: Mutex::new(None),
+        flight_epoch: AtomicU64::new(0),
+        cancelled_epoch: AtomicU64::new(0),
+        ready_epoch: AtomicU64::new(0),
     });
     let prompt_deadline = Instant::now() + PROMPT_TIMEOUT;
     let received = loop {
@@ -194,4 +203,62 @@ fn official_cpa_device_prompt_and_cancel() {
         received,
         "CPA did not emit a device prompt within 15 seconds; inspect network/device support separately"
     );
+}
+
+#[test]
+fn replaced_session_guard_does_not_release_the_other_gate() {
+    let (_host_a, session_a) = fixture("", true, Instant::now() + AUTH_TIMEOUT);
+    let (_host_b, session_b) = fixture("", true, Instant::now() + AUTH_TIMEOUT);
+    let guard_a = session_a.begin_operation().expect("session a acquires");
+    let guard_b = session_b.begin_operation().expect("session b acquires");
+    assert!(session_b.begin_operation().is_none());
+    drop(guard_a);
+    assert!(
+        session_b.begin_operation().is_none(),
+        "dropping session a must leave session b owned"
+    );
+    assert!(session_a.begin_operation().is_some());
+    drop(guard_b);
+    assert!(session_b.begin_operation().is_some());
+}
+
+#[test]
+fn device_poll_guard_drop_on_panic_allows_a_later_acquire() {
+    let (_host, session) = fixture("", true, Instant::now() + AUTH_TIMEOUT);
+    let probed = session.clone();
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = probed.begin_operation().expect("acquire");
+        panic!("device poll failed");
+    }));
+    assert!(caught.is_err());
+    assert!(session.begin_operation().is_some());
+}
+
+#[test]
+fn in_flight_cancel_of_ok_does_not_force_stale() {
+    let (host, session) = fixture(
+        "Authentication saved to private-path\nCodex device authentication successful!\n",
+        true,
+        Instant::now() + AUTH_TIMEOUT,
+    );
+    assert_eq!(session.status().status, "ok");
+    let stops = host.stops.load(Ordering::SeqCst);
+    let guard = session.begin_operation().expect("owner");
+    assert!(session.cancel());
+    let marked = session.cancelled_epoch.load(Ordering::Acquire);
+    assert_eq!(marked, session.flight_epoch.load(Ordering::Acquire));
+    assert!(session.poll_cancelled());
+    assert_eq!(session.status().status, "ok");
+    assert_eq!(host.stops.load(Ordering::SeqCst), stops);
+    assert!(!session.cancel());
+    assert_eq!(session.cancelled_epoch.load(Ordering::Acquire), marked);
+    assert!(session.poll_cancelled());
+    assert_eq!(session.status().status, "ok");
+    assert_eq!(host.stops.load(Ordering::SeqCst), stops);
+    drop(guard);
+    assert!(!session.poll_cancelled());
+    assert!(session.begin_operation().is_some());
+    assert!(!session.cancel());
+    assert_eq!(session.status().status, "ok");
+    assert_eq!(host.stops.load(Ordering::SeqCst), stops);
 }

@@ -1,0 +1,2007 @@
+{
+  "Scope": "Before hermetic SOURCEONLY writer; existing G unchanged production binary source checkpoint",
+  "AtUtc": "2026-10-05T01:34:35.7396520Z",
+  "Head": "da3579dc29bc7a914a8f20bb3ce06d9bd45678c2",
+  "Files": [
+    {
+      "Path": "crates/ocg-domain/Cargo.toml",
+      "SHA256": "94E7A9B9FBE055C7E1BCF785FFCC84BF77F4178E9F96D5DE547E1C1EC9408773"
+    },
+    {
+      "Path": "crates/ocg-cli/Cargo.toml",
+      "SHA256": "08F2268BD08789C01C182131A3379A40CD58B84AEBAF1D0A909824BFF730E0B3"
+    },
+    {
+      "Path": "crates/ocg-domain/build.rs",
+      "SHA256": "2B6B2C1B5E9344BC4C9BB7F210F54EFC63831CEE3663B848EB022629FD6DE147"
+    },
+    {
+      "Path": "crates/ocg-cli/tests/backup_smoke.rs",
+      "SHA256": "ABE7A63A276813FAAF4ED197BD7C610280C489F4BA74B6FF9939730CE32038FF"
+    },
+    {
+      "Path": "crates/ocg-domain/tests/provider_presets_build.rs",
+      "SHA256": "C118985FADE3B09E35C3CC8A4C4CE5C0D5CF7355582EE3FA362A185303560089"
+    },
+    {
+      "Path": "crates/ocg-gateway/Cargo.toml",
+      "SHA256": "1F853462A3C0FCD5945B2078128454EDB3C8F03761BF0F339F6B6BE080552B04"
+    },
+    {
+      "Path": "crates/ocg-cli/src/tests.rs",
+      "SHA256": "9AA2F4D91A2CE796784E62D95517E001C4C58656E2C18BD713B97A7799AED712"
+    },
+    {
+      "Path": "crates/ocg-cli/src/session_file.rs",
+      "SHA256": "B1122DBCB4510ED916C20632E3BC3CC65FC8E3184BBF1A64A58D731F94AD2A04"
+    },
+    {
+      "Path": "crates/ocg-cli/src/process_alive.rs",
+      "SHA256": "410D120E372D0F713263CD31193C7DC3FAFFD274CBD8BAD36D03F89B04F3299A"
+    },
+    {
+      "Path": "crates/ocg-domain/src/zen.rs",
+      "SHA256": "F02185B7E584EB3446C2D133DB2296F004E20F0555CC3EC2503D5575A2AF8104"
+    },
+    {
+      "Path": "crates/ocg-domain/src/provider.rs",
+      "SHA256": "E90E9315AB8515CA3B662D337C5A28A027C98732223AE9305C845DC0473B48DF"
+    },
+    {
+      "Path": "crates/ocg-core/examples/export_dashboard_v3_schema.rs",
+      "SHA256": "3E231B299A468064B2DA16F5677465A034E7550342BBB4729028415FE2F66429"
+    },
+    {
+      "Path": "crates/ocg-core/Cargo.toml",
+      "SHA256": "E8DAEEADAF607906E03E61B4D23E4D98206C435D1D19A85D2FB24BC2974CD2E8"
+    },
+    {
+      "Path": "crates/ocg-core/examples/export_dashboard_v4_schema.rs",
+      "SHA256": "38DDB8C0AD9403B8FD28A77118AEB737C9C414BC47C03A4AB2861FC39C8D0EC0"
+    },
+    {
+      "Path": "crates/ocg-core/examples/probe_protocols.rs",
+      "SHA256": "3345D1A5307CFB14989A84161834F064C39ADDFE3FD47C031D591695921BC6AA"
+    },
+    {
+      "Path": "crates/ocg-cli/src/endpoint.rs",
+      "SHA256": "D8DA2219754D6FAEB042154F2AF6AF7BA75DA4780EA18F7CF7598360E79E9F98"
+    },
+    {
+      "Path": "crates/ocg-cli/src/listener_owner.rs",
+      "SHA256": "610CE31B39C0A45791A1D3D182956D4ADBF42B7C8E8D0790DCE28F0CAA1DF38C"
+    },
+    {
+      "Path": "crates/ocg-cli/src/live_key.rs",
+      "SHA256": "BACA6637F0DC8EB0ED796AC4ACF08D65A28E5C64EAC7E0EA0BB572ABE28A42EA"
+    },
+    {
+      "Path": "crates/ocg-cli/src/main.rs",
+      "SHA256": "302EE08FB0301ED1A3100947AE531A8BC6CE82C19BF53CF64B6BC08EE4FC62AD"
+    },
+    {
+      "Path": "crates/ocg-cli/src/native_browser.rs",
+      "SHA256": "53F8F598BDE3E52CB18F849932C94C94B537C90819F79F7BE09E370219465129"
+    },
+    {
+      "Path": "crates/ocg-cli/src/serve_lock.rs",
+      "SHA256": "11214B36C947B1C2EBBD885FF87CA2A11F28B4876874C3C6E7C87109F298CDBD"
+    },
+    {
+      "Path": "crates/ocg-domain/src/billing.rs",
+      "SHA256": "EC53322B5FF150554F9AF5A4B47186C0AE40F236265E5DB3611B58ABE40838D3"
+    },
+    {
+      "Path": "crates/ocg-core/tests/v3_runtime_invariants.rs",
+      "SHA256": "2051D04D39D4052B025DE593155BC532EA823656785CB0232B06F1783D298A95"
+    },
+    {
+      "Path": "crates/ocg-core/tests/v3_control_plane.rs",
+      "SHA256": "461521D0804219442093C5D96AAB0E1E90D588B2E9B6789224BD34A9382EC6B6"
+    },
+    {
+      "Path": "crates/ocg-core/tests/v2_alias_runtime.rs",
+      "SHA256": "3713F20F25405D46720C41EA7EA2BD07F0AB8FF147B0BB3F334F812C6E81E27A"
+    },
+    {
+      "Path": "crates/ocg-core/tests/v2_alias_plan_contracts.rs",
+      "SHA256": "A52130A94EB80B53B24A84BDEB19C8EADD17E3355A3E8BC223E34C70F9A25FFD"
+    },
+    {
+      "Path": "crates/ocg-core/tests/temporary_policy_http.rs",
+      "SHA256": "57D34EF7A8B9BF4B9DFE5DDEC92076715CF1212893EAF5A767F56D515A70C291"
+    },
+    {
+      "Path": "crates/ocg-core/tests/success_benchmark.rs",
+      "SHA256": "231197ACE5FEA6389AAE3DC8D6555FBC8A1916AC46CF900C72CAA63ECE398F10"
+    },
+    {
+      "Path": "crates/ocg-core/tests/settings_host_effects.rs",
+      "SHA256": "2D44F6743B7CD1A0AEF24C6DB6D093A78450783B4E5543ECE5CEA5D736F5B7D9"
+    },
+    {
+      "Path": "crates/ocg-core/tests/runtime_logging.rs",
+      "SHA256": "5CB072017017F51F69A3D7BBFEB84BCE492EEAC0821458D80DA9061A4722A35F"
+    },
+    {
+      "Path": "crates/ocg-core/tests/ollama_cloud_gateway.rs",
+      "SHA256": "4BD47EF000936098C214804E5F1FA065D90A3916082B1EC0E51A28426C18E4F9"
+    },
+    {
+      "Path": "crates/ocg-core/tests/gateway_routing_acceptance.rs",
+      "SHA256": "B37C9E76829D716BE84E205F79D82FCAA855E00FAA2E3A8CC8C1694F15A193BA"
+    },
+    {
+      "Path": "crates/ocg-core/tests/gateway_resource_recovery.rs",
+      "SHA256": "1A560ECDD9A9379DA353C5FA9ACD3B8ED43E14303ED97A5704DC4D3F9F94FE5E"
+    },
+    {
+      "Path": "crates/ocg-core/tests/gateway_request_budget.rs",
+      "SHA256": "BF48EF340D8640468268CD961BA61FE9A4237978FC99A798BD0B6D15F1A7FF59"
+    },
+    {
+      "Path": "crates/ocg-core/tests/gateway_rebind.rs",
+      "SHA256": "3BA06859B51D9EA16F26F089D76F5A4EA9555277203BC10D565C31F3B48EF6BA"
+    },
+    {
+      "Path": "crates/ocg-core/tests/gateway_go_catalog_models.rs",
+      "SHA256": "4A1159AF2C315F9BE96E8FB1ADCA1C5C4686A651E718C2A1F6AD989B8FD88316"
+    },
+    {
+      "Path": "crates/ocg-core/tests/gateway_goat_transient.rs",
+      "SHA256": "D9A93DE2EF62FA0CDD9A121ACD40EAAA4E530709200EBD5E57CC82CFDC94BB17"
+    },
+    {
+      "Path": "crates/ocg-core/tests/gateway_goat_mixed_failures.rs",
+      "SHA256": "88D32D54F6D63B59DDFA54C490B73D0EC7A55CAF912C37A04AF7A09A18472A43"
+    },
+    {
+      "Path": "crates/ocg-core/tests/gateway_goat_credits.rs",
+      "SHA256": "FFB59066531A6D1EF45C7ED81BBC65CB2BB7FAA99BC7F124DE17FB738EA83DF6"
+    },
+    {
+      "Path": "crates/ocg-core/tests/gateway_fallback.rs",
+      "SHA256": "BB94993A0568335BE1FAD42250D74BAB6BA3607FC641A0A8FD30E3C9B188355E"
+    },
+    {
+      "Path": "crates/ocg-cli/src/native_browser/tests.rs",
+      "SHA256": "61C52DE37DC1DAED71206CD2E8BF904DD39FF8613AAE4892D33F4D7EC7A82542"
+    },
+    {
+      "Path": "crates/ocg-cli/src/process_alive/tests.rs",
+      "SHA256": "07227BE970ABBC377CC896EC7412E5D779BCBED3E1BA427A0EA570261780BB25"
+    },
+    {
+      "Path": "crates/ocg-gateway/src/wire.rs",
+      "SHA256": "FE48AE72F67F92D90BD9704BC7CFE4A59A7E395D6764E289392CF9E3EC1F0CA1"
+    },
+    {
+      "Path": "crates/ocg-gateway/src/selector.rs",
+      "SHA256": "8DAC0F480460BF3F60178D8A55E5AD7DDBC58042C97382106C404C96FD9F9D49"
+    },
+    {
+      "Path": "crates/ocg-cli/src/session_file/tests.rs",
+      "SHA256": "6EBA06AF2A03A5EA86F8ED2D9F643CA8735F095714506FCD1162F288C86799FC"
+    },
+    {
+      "Path": "crates/ocg-cli/src/listener_owner/tests.rs",
+      "SHA256": "D32C44728EE8814B3A0F380AE963CD8FF9ECC4A4B4CF2A30613540A2F224A3AC"
+    },
+    {
+      "Path": "crates/ocg-gateway/src/attempt.rs",
+      "SHA256": "95D5B7740C741B19D0547C1DA711BEA6E8FB34105EA11554CDE4E1FEA609D4DF"
+    },
+    {
+      "Path": "crates/ocg-gateway/src/alias.rs",
+      "SHA256": "6F598560045E4431D0AD7BDF7AE5D1F058FB076A05BB722118D407811A0A1682"
+    },
+    {
+      "Path": "crates/ocg-infra/src/sqlite_logs.rs",
+      "SHA256": "C19A3BC41D21113142A7096C1E6F63B19A4688E9AA27EE670D34EDF7088E45C0"
+    },
+    {
+      "Path": "crates/ocg-domain/src/credential/tests.rs",
+      "SHA256": "C9E525E11ED3A6F304F1E38067A9DF998F8A2042B947FE4830F8C171E159B427"
+    },
+    {
+      "Path": "crates/ocg-domain/src/connection.rs",
+      "SHA256": "85043E6B63FA4A7D491799672E829D7AB34E213C9A894E50DD6F375548BF5F68"
+    },
+    {
+      "Path": "crates/ocg-domain/src/dynamic.rs",
+      "SHA256": "6A35723F4A8068C0F60E33C68E96F69CE040254B16C4C6B6636C656C304581E5"
+    },
+    {
+      "Path": "crates/ocg-domain/src/destination.rs",
+      "SHA256": "44CDDD48EAB6FE9CFA7841B49BA134D7EB06A8C48544CBFEA521EAD5A54088A4"
+    },
+    {
+      "Path": "crates/ocg-cli/src/serve_lock/tests.rs",
+      "SHA256": "02261BF1C3B93F75F92ED6B55B7338A938690C863EA53240825F86B204D6C033"
+    },
+    {
+      "Path": "crates/ocg-domain/src/catalog.rs",
+      "SHA256": "64FE5262A4AB10566515B0019B901295C5F3518C4A63136E9010C148DFB486C8"
+    },
+    {
+      "Path": "crates/ocg-domain/src/credential.rs",
+      "SHA256": "8CDEC7A031CC4B4CE15399A6C8605D3C829D8C40804CBD909F45D248093C2773"
+    },
+    {
+      "Path": "crates/ocg-domain/src/lib.rs",
+      "SHA256": "886AC462F1E2894F2C9388D73B65EF6478E381A4E2D67E1F9FEE7ECF225E0875"
+    },
+    {
+      "Path": "crates/ocg-domain/src/ids.rs",
+      "SHA256": "FB08CEA7788EB4C93C5FCF7EA4BF2ED4FD094EABE643E89E0036CF4FA705CDE4"
+    },
+    {
+      "Path": "crates/ocg-domain/src/protocol.rs",
+      "SHA256": "7E37DA623C41DD2E3F30C38CB5CB6BD7334BD82EA4D5B546FD1BAA91E31E5275"
+    },
+    {
+      "Path": "crates/ocg-domain/src/billing/tests.rs",
+      "SHA256": "6B7ABBC96BB71AB75D2476FCF63C8BCB8B720B4231B6C32ABA337897719F3552"
+    },
+    {
+      "Path": "crates/ocg-domain/src/account.rs",
+      "SHA256": "9C13DE65D57A17F6D8632E4E605871C7D64A672177E0D041EDB074CB42BB72F2"
+    },
+    {
+      "Path": "crates/ocg-gateway/src/protocol/response.rs",
+      "SHA256": "D6ED0AE02D71EE970CE311B2C8C33F78A26F26742FE4FAB737702B16AD2D6BDB"
+    },
+    {
+      "Path": "crates/ocg-gateway/src/protocol/request.rs",
+      "SHA256": "6C45ABA6DC06A7A73FC73F2785B8DBE9252F0DBE0806C6BC4CDA6ABAA08F269D"
+    },
+    {
+      "Path": "crates/ocg-gateway/src/protocol/reasoning.rs",
+      "SHA256": "75C3F470E2B9678A54F2D458A7176A4A63FD2809C04C8ED12DFFBD20682BB085"
+    },
+    {
+      "Path": "crates/ocg-gateway/src/lib.rs",
+      "SHA256": "F364865D63301AFF9B4165636546784E779ED2EBC9F9700602A5693B25A22435"
+    },
+    {
+      "Path": "crates/ocg-gateway/src/classify.rs",
+      "SHA256": "FF11D6877D3B63D7AEB336E7A865A4A0D5EB01C51B20C5EF05A58D712B9A1B57"
+    },
+    {
+      "Path": "crates/ocg-gateway/src/selector/tests.rs",
+      "SHA256": "4519AD1D6202F9065CA4AFF3CCF9B1E034BBBBA2D21F9155D05CF09BD2EE064A"
+    },
+    {
+      "Path": "crates/ocg-gateway/src/quota.rs",
+      "SHA256": "B344F9E20529D1A8AE3343807368678F4CFE3C25ED6115CE5C340F19ED6196E6"
+    },
+    {
+      "Path": "crates/ocg-infra/Cargo.toml",
+      "SHA256": "722E27D323CAF9EDAD8C4294624CAB03C7ECC2C0029804DDC0311F15C260D79C"
+    },
+    {
+      "Path": "crates/ocg-infra/src/crypto.rs",
+      "SHA256": "6F1B852A05B21B0BB0B920AD1727EC8D100BB2D398027EE86201B7CA960D23DB"
+    },
+    {
+      "Path": "crates/ocg-infra/src/inference_http.rs",
+      "SHA256": "63D6997F9EE7AF069B34A6BCF31E4A24AB961B1223C01D1AD0B0D4FA7B455522"
+    },
+    {
+      "Path": "crates/ocg-infra/src/http.rs",
+      "SHA256": "6E15E5C7D7992FD508E412ED1578337C01FABE5889B114891AB2E86AB6FFE604"
+    },
+    {
+      "Path": "crates/ocg-infra/src/lib.rs",
+      "SHA256": "9FD4E231F71FD68EBF42FF9FCF44F3A1D395CE50FFB28458D7C0C445671D23A2"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_platforms.rs",
+      "SHA256": "80BA77B5DD6A11FE8735B5A8A2D8F647FCE99A71F2ACA72CC06A5C3A7785CD1E"
+    },
+    {
+      "Path": "crates/ocg-gateway/src/protocol/validation.rs",
+      "SHA256": "D5D2C3FB249DFC354904120EA136EB0FD21F9CBB79BD6DE1E1E0E84EA465D391"
+    },
+    {
+      "Path": "crates/ocg-gateway/src/protocol/usage.rs",
+      "SHA256": "3F03E8D54C3946BEB0BF9550BE60468F806AAA296E1D244E61FCAF4154DAD56C"
+    },
+    {
+      "Path": "crates/ocg-gateway/src/protocol/tools.rs",
+      "SHA256": "A68A26AD2FF04A9811BA1F56E478073839F9161C5740D92B75A019BAAA395CDA"
+    },
+    {
+      "Path": "crates/ocg-gateway/src/protocol/tests.rs",
+      "SHA256": "5E3CEB635A51EF27C2B2869CFAF079B67CF00E6464FCCB3D0B3C82701AE40833"
+    },
+    {
+      "Path": "crates/ocg-gateway/src/protocol/shared.rs",
+      "SHA256": "8008A0E79B535794A8323D1B785B910F69A1BD413BFAC72B13488D723F544EFE"
+    },
+    {
+      "Path": "crates/ocg-gateway/src/protocol.rs",
+      "SHA256": "A41B2429FE4B5C9831FBD679ABCCDA9B7F283791322EDD8B1A7E1BCF8EEB6EE5"
+    },
+    {
+      "Path": "crates/ocg-gateway/src/quota/tests.rs",
+      "SHA256": "9F2D4C8EAADE98C9DB1351258D5591160ACE329C6514D7E73E7DCCEFFB500523"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_command_code_usage_refresh.rs",
+      "SHA256": "6D104043719ACF07F826792000F0AD4ED90FCA5C8B4A47868BBE50A1BC11F93F"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_browser.rs",
+      "SHA256": "5FF8FA9F5C2693F829E4BA1A5F6BF7D16AB4AD947C5A8B629A96D0E47455452F"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_auth.rs",
+      "SHA256": "C12F4724F7B4588EACBFB0877FC9BADA20D6178622E246488A56E9A3FF37B3AF"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_account_verify.rs",
+      "SHA256": "01B39C182D50DD7931DE1823791CD82F9EC86595F6FE53A8FABCD8C84433869F"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_account_transfer.rs",
+      "SHA256": "6FEC552C423AEE66615A274236F0C3A059A3C8D9CA9782A98DCE6CF987243676"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_account_model_test.rs",
+      "SHA256": "D53D872419A56285A8D3A57B7BA907C396964DA6477E501FEE6451A94FE8F88B"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_accounts.rs",
+      "SHA256": "B267D073EC84A487086406805F05FB8244C1D3A05311F4272FEF85D02578A33B"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v2_rest_retirement.rs",
+      "SHA256": "EC185B91453C12346524B5F53235C115CE2EA756FFB349425F2EFDF8E6AAD3A7"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_auth.rs",
+      "SHA256": "E22078BBEDC456D0817CB277F301427EF809AF493D5EAE0EF696A0A96E70AA4B"
+    },
+    {
+      "Path": "crates/ocg-core/tests/custom_trusted_admin.rs",
+      "SHA256": "DFE9E0CB36A735582F7C9969A1B99C5698DB13882ED792ACEEF4FE7AC7AD03BF"
+    },
+    {
+      "Path": "crates/ocg-core/tests/core_state.rs",
+      "SHA256": "D4079E4FEA6183F9E9143133792DBD775EE794C2570F11507C7F5660A0A5F397"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_managed_key_verify.rs",
+      "SHA256": "DDD8317160E6B162C1468F74D2D4AC399E133D4093D3ED19619806BAB29780EE"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_keys.rs",
+      "SHA256": "EC06518BC2741622C5A25503BA32527C896A64576B20EDC193E0A2A10FF2C4A7"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_custom_discovery.rs",
+      "SHA256": "22ED4F9FF8589EBCF5BC2E97F7A0C8E4ADFEBA9645FB716017591DB739F96141"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_cpa_runtime.rs",
+      "SHA256": "4387FF26A9F99B33E86E3107FFAF20540751BAB8E392C007A33C16566612202C"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_cpa.rs",
+      "SHA256": "7DE290EC62F9C8A2B1232D12D64B395FA1D34A7574EA2B97D8176FFC0F401678"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_contract.rs",
+      "SHA256": "3D76E4B6E073795AEAD1A0417B348E0DEB50056C3328F3063E9A7CF618A67825"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_observability.rs",
+      "SHA256": "1B4632459E4B55D40ACB0194A5417330FE448E5462C8041A4EA79312C822D172"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_model_settings.rs",
+      "SHA256": "29A6703B87740B3B5563060722DC443A5C735A2E444ACDE347ADC60B3E1F64CF"
+    },
+    {
+      "Path": "crates/ocg-cli/src/endpoint/tests.rs",
+      "SHA256": "265137473F180C1CD111CAB079B4F4C6BAA4B843875EC1A8520509C5F8714307"
+    },
+    {
+      "Path": "crates/ocg-cli/src/api_cmd.rs",
+      "SHA256": "12CB5A8BE3D3537CA1971A63850D49035B2D19FFB0EEDF83A8FD331C5587A4FE"
+    },
+    {
+      "Path": "crates/ocg-domain/src/connection/tests.rs",
+      "SHA256": "BAFAC4B3EF9B0CFA17754FC912F663B0019634722373335C9C10AAE7E64B1D21"
+    },
+    {
+      "Path": "crates/ocg-domain/src/provider/tests.rs",
+      "SHA256": "26856D0582225DB27E0E7AB66438ADA5AE42FBA217D0C7C8E99757FF3A7D973B"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v4_destinations.rs",
+      "SHA256": "7D0DD0E9FE80A4EB5A06C0CB5B39612C9D8CB4A86436B2039FFD4240FCFBEB40"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v4_contract.rs",
+      "SHA256": "75D2A95FE63C6E3D1242F35707912FC93B89C6569E15BD1FB9FA1C9B1C9AC618"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v4.rs",
+      "SHA256": "0778AFBABCE3D38D0BC5B919564C97F360C3AB5255022F14665957E5F8AD8A79"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_usage_refresh.rs",
+      "SHA256": "82F41394805073ED26171AE03A10566682173256C2A920637AEDBC0D0028A7D7"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_usage.rs",
+      "SHA256": "D8970B02FF74E4BEA9C89F08E758A6933C42208EE85565407AAA7DC674195965"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_updater.rs",
+      "SHA256": "05F30A21F2D59A1C582469CBC4CD4965D80811F0AAEA9BD192FB6454FBF2F9ED"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_settings.rs",
+      "SHA256": "6CDBBBAFAD504E98DB4A89810629A7A94C5D0019C4238C953D561B5BC40ACFAD"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_proxy_test.rs",
+      "SHA256": "B3F7F7CA66F266DF2EB23686218602C1C0F4659AC62F20E91A86A40DF974A474"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_provider_probes.rs",
+      "SHA256": "957DFE27CCA5F539BF7DAF91B0F82B41A427E4EC0051E301B91577CB13EB1359"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_provider_dtos.rs",
+      "SHA256": "46BFF279C91EB8DECFD7ADF6E9F3D33AB4CB53C92F3C831E1539033B7A7EA5BB"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_providers.rs",
+      "SHA256": "54B6C6D2DF835062850F46957AB774F3F1A91899357C2A5FA1B808D7C143E164"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_pricing_dtos.rs",
+      "SHA256": "96CF362350E824A4C4287D34DB548A27B008D69C94F19F06582270EC9C384307"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_pricing.rs",
+      "SHA256": "77B632AD08C5C2BBED4DDB4643F99CF321608A1C11E686C98B0C4E43A99B6610"
+    },
+    {
+      "Path": "crates/ocg-core/tests/fixtures/fake_upstream.rs",
+      "SHA256": "1B070C99A6A934339E42A51D7EBFB4209174EF24916D593756EBC3D6DE2A1811"
+    },
+    {
+      "Path": "crates/ocg-core/tests/fixtures/dynamic_protocols.rs",
+      "SHA256": "E6E04EBC64A2A020410B5E482F710A3FEBA4E12603C509285FBB1881D1E0AE19"
+    },
+    {
+      "Path": "crates/ocg-core/tests/fixtures/owned_cpa.rs",
+      "SHA256": "9655B2781DBBF979F62D6CF750C82BDF37D5BE552E07C01FE622F14A5A7BF779"
+    },
+    {
+      "Path": "crates/ocg-infra/src/http/tests.rs",
+      "SHA256": "F2C41834D9041E388E4A6377CBC81654A91B5A4F3DB51A8A89FFD5BF4A692666"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v4_stepfun.rs",
+      "SHA256": "EF5375191E888639327EC4E495343E55EB455D05D4020586FFCA50776F501F6A"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v4_official_api.rs",
+      "SHA256": "FAA2EED0A7BADEFA86599FD5DD9CF82BCA3CF91FBF08960D617291FE4910E315"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dynamic_provider.rs",
+      "SHA256": "66EDEF97BFA5405B2A9E184378E0F8048C8307A6F9845061516E02185AF42F92"
+    },
+    {
+      "Path": "crates/ocg-core/tests/fixtures/v3/harness.rs",
+      "SHA256": "3710D8BF77967416AE084F0E5B97A64A551841BE72D347C8EF865C5E7A8B0C1D"
+    },
+    {
+      "Path": "crates/ocg-core/tests/fixtures/refreshed_go_catalog.rs",
+      "SHA256": "57C9E8BD70BD86AC931095978CD4603E0EC2706F3E1C5AC42B7E88F97BD23125"
+    },
+    {
+      "Path": "crates/ocg-core/tests/fixtures/probe_response.rs",
+      "SHA256": "53A66A19DD473408E2BC69A99D9FFA71BB81B4FF88DB49F38A9E298E46BBF658"
+    },
+    {
+      "Path": "crates/ocg-cli/src/api_cmd/tests.rs",
+      "SHA256": "00FF3AE11FA36A0B5BD10BCE5693F339038B10B1997AF65B8AE2B92A34F1270F"
+    },
+    {
+      "Path": "crates/ocg-gateway/src/classify/tests.rs",
+      "SHA256": "B93D75BD78735319AB70DEC79FB9D4E77666396464A40C34B7E460970F7BA6CD"
+    },
+    {
+      "Path": "crates/ocg-gateway/src/alias/tests.rs",
+      "SHA256": "A13F635402C006F258D6D60FF4D8064496D67EFDE440158F4FC8CEF7E7FF4DD8"
+    },
+    {
+      "Path": "crates/ocg-domain/src/destination/tests.rs",
+      "SHA256": "ACFE0080E102AD165E225B4663DB82DAE87F943EE6B5D53D69F122B7F7FAF859"
+    },
+    {
+      "Path": "crates/ocg-core/tests/fixtures/gateway_fallback.rs",
+      "SHA256": "7DD83C5C025A71661AC778E94A2A5745955C31BD92573E241F1D17062643296C"
+    },
+    {
+      "Path": "crates/ocg-infra/src/sqlite_logs/tests.rs",
+      "SHA256": "8A0A51A790889CEC86438A84E013B45BA587512D45D6B33172740CBAEF74DAF1"
+    },
+    {
+      "Path": "crates/ocg-core/src/backup.rs",
+      "SHA256": "05757AA44089382A21D16486A207B44FD4FC83E93471C0B3076E0530648FC2C4"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_model_settings/tests.rs",
+      "SHA256": "A92DFC3740CECE5237E63C867ADFEAD04BD1B7F210035E0DF2A5B77EA7F1E4E0"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_plan_usage_refresh.rs",
+      "SHA256": "25A1A2F25FDAC0EBCB54F8BBF67D0764067D18AE8266175B4BD77D0301F9C736"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_ollama_usage.rs",
+      "SHA256": "B5CAF1207B47E22BA5C8821C8162A9F122F98C12CDFBF4F69C04880CE65BE5E1"
+    },
+    {
+      "Path": "crates/ocg-core/tests/dashboard_v3_platforms/tests.rs",
+      "SHA256": "3F858359CD1E48E5CD2801009930F147B1FAF6F042921FDE590708FF1C06709B"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_runtime.rs",
+      "SHA256": "A9482E2EB1E087DE59989B66A5A79606975BC1E5BB124BA676F26E2C68371DA5"
+    },
+    {
+      "Path": "crates/ocg-core/src/browser.rs",
+      "SHA256": "0B044AE0958D149F7F60872A697127AF306A1BCC572716627D490EFF1F102506"
+    },
+    {
+      "Path": "crates/ocg-core/src/zen_models.rs",
+      "SHA256": "0BF4761738B57E8F6A3DC8BD079922720F1E1628B4331086871CC4D9460C4F3E"
+    },
+    {
+      "Path": "crates/ocg-core/src/usage_sync.rs",
+      "SHA256": "A94D658F81678793088F58C5503DDD18D08021DB7BEEF1954F0DC7C0C20B5323"
+    },
+    {
+      "Path": "crates/ocg-core/tests/fixtures/dashboard_v3/harness.rs",
+      "SHA256": "3063D7868185982C7BE7B666685ADED82A128673CE9F2117AEDB563897996D2C"
+    },
+    {
+      "Path": "crates/ocg-core/src/api_balance.rs",
+      "SHA256": "98C361F00F7A78DB4237363457A35A1433DAE078892B638E7CF393C9F76D5D6D"
+    },
+    {
+      "Path": "crates/ocg-core/src/auth.rs",
+      "SHA256": "864473EBF0D6BDFEDB18EEAB4C9970CB60A514F60E9D79DA8B1456716394277F"
+    },
+    {
+      "Path": "crates/ocg-core/src/billing.rs",
+      "SHA256": "E060C189085D90CCA3C8B05B35969E9038D28E637FA2D57F9B8F6D57E0B2D913"
+    },
+    {
+      "Path": "crates/ocg-core/src/billing_types.rs",
+      "SHA256": "27F47CB3393F5E193FE7993BFA3504FC970411C6174AEDC07B4D6CED5240C36F"
+    },
+    {
+      "Path": "crates/ocg-core/tests/fixtures/blackbox/harness.rs",
+      "SHA256": "2BE006ED8A829D6EE6A2EB53E121472F19D3680783C2C721EB184232AA9A23EE"
+    },
+    {
+      "Path": "crates/ocg-core/src/backup/tests.rs",
+      "SHA256": "CFD6134F690D2A8FA1A31FEEA486D5171FF01CB71942D85C69D46E136F2649D9"
+    },
+    {
+      "Path": "crates/ocg-core/src/control/observability.rs",
+      "SHA256": "978D7D2A288B8A25938229C78996121125C69BE1F0089CE37F19481B498DA109"
+    },
+    {
+      "Path": "crates/ocg-core/src/control/mod.rs",
+      "SHA256": "96316C1F0E3A8811CB381ECA43AB78B46FF75F0BA5B92FA9063B7CBC11A6A102"
+    },
+    {
+      "Path": "crates/ocg-core/src/command_code_usage.rs",
+      "SHA256": "6BBABB0638FA7B50FE1F80976E12AFBFDA7C9700D70AC1B2FF13844C2BA878DD"
+    },
+    {
+      "Path": "crates/ocg-core/src/alias_publication/tests.rs",
+      "SHA256": "4690CE90BC29909B7D1A2AAA7C05F652B4DAA3D8AA995B6764DE65E29CB087F4"
+    },
+    {
+      "Path": "crates/ocg-core/src/alias.rs",
+      "SHA256": "1E85697AAA6027166DD28B82448558FD3B7F6A4E13BCEC7E8F840B544B1587E5"
+    },
+    {
+      "Path": "crates/ocg-core/src/account_control.rs",
+      "SHA256": "B93D4686EE74BC8AA7D189190987580BEECF6F02DE33CE0C346A7BC60F1005C7"
+    },
+    {
+      "Path": "crates/ocg-core/src/destination_projection/tests.rs",
+      "SHA256": "957CF6DFDDBA6ADD4415E7FF90B4AF1DA7586830726C0A3A690F573C96FE4E55"
+    },
+    {
+      "Path": "crates/ocg-core/src/destination_projection/store.rs",
+      "SHA256": "D5B16EB464917EC80D5F6D73119F8484EECB323096860B4A4E8CED9EEB40D56E"
+    },
+    {
+      "Path": "crates/ocg-core/src/desktop.rs",
+      "SHA256": "7591081559AA7416D37056989FF2483D6469E3EC78441DC2490F9E94F486408D"
+    },
+    {
+      "Path": "crates/ocg-core/src/db.rs",
+      "SHA256": "3232A363D198805EF31DA01B1011FE87E930581A47D92E7365413E49106BA3B0"
+    },
+    {
+      "Path": "crates/ocg-core/src/byok_application_host.rs",
+      "SHA256": "4948CF5FB611055C3BA1DD3B2029363B77CD9FC47B524E57B5100897D0E1EA95"
+    },
+    {
+      "Path": "crates/ocg-core/src/browser/tests.rs",
+      "SHA256": "3BF378234D1AF32AC54D69CF1904C9B6C26381002012F0831B3918BAC8A005D9"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution.rs",
+      "SHA256": "E54A91BC30F2130A761FA9AC62F83762C13A4B0617BF317CE1C3182C9BE9EAF7"
+    },
+    {
+      "Path": "crates/ocg-core/src/api_balance/tests.rs",
+      "SHA256": "A6AE9875FC806CB93399644A780AD2945959FBC4D8B731EC2160ADDC393317AA"
+    },
+    {
+      "Path": "crates/ocg-core/src/alias_publication.rs",
+      "SHA256": "BC643D39DE0D44A29231FF8945A028A009CC8B02D59FD6E20B29AE2925686738"
+    },
+    {
+      "Path": "crates/ocg-core/src/byok_application.rs",
+      "SHA256": "306242CE133EA2AA0CF93A473A53839FB65D8331C63B0DC00D3B5EEAAC2E67B1"
+    },
+    {
+      "Path": "crates/ocg-core/src/billing/tests.rs",
+      "SHA256": "62E28FBB92F693A39C2E3CE1E0A19EC2F4C812ED6FEA14FE1EB73CADC884F686"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_runtime/tests.rs",
+      "SHA256": "A457878FC0C06EC9B4D24C998C44DA8B9339528AAF5E4B0A639D66C91DE6B1B9"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_runtime/host.rs",
+      "SHA256": "21E39F44CDA916222FD4F29AECE9E829F27D433C09D99380CB93D5FF4C7021C0"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_observation.rs",
+      "SHA256": "BADA4985B586D335FA2C19342C8B7D19F9D0DFD2253678D97A81CF9205E68469"
+    },
+    {
+      "Path": "crates/ocg-core/src/usage_sync/tests.rs",
+      "SHA256": "82A63662D9CC3A0C9B0A7DC4A9374DFBF02BCAE4B372644B924F362AEFF368A8"
+    },
+    {
+      "Path": "crates/ocg-core/src/usage_sync/reactive.rs",
+      "SHA256": "C8E10B8F650D3BDC5633956FC3079C5B244AD5C2BCBA2573A868F2A06E7C3197"
+    },
+    {
+      "Path": "crates/ocg-core/src/official_service/tests.rs",
+      "SHA256": "581AA618A2696D3BB2E857683E7DB59AB5C409B773EC828237E7A587207FC8D5"
+    },
+    {
+      "Path": "crates/ocg-core/src/official_protocols.rs",
+      "SHA256": "04AEE9F3494902CD7F74D913B1568A022C3C8F128144CBFEDB0F6CA4E3246A0F"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_cli_import.rs",
+      "SHA256": "38FB6C867121D6E42A155803596339723A6D450D24A41D000E158CA739D11943"
+    },
+    {
+      "Path": "crates/ocg-core/src/command_code_usage/tests.rs",
+      "SHA256": "82950E9DCC18CC9390FDDEE6AD0072642DE836A4A043163ABA11E80D3565CD1D"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_projection/digest.rs",
+      "SHA256": "93596822FFA41C9F8CA7620BD3911C45D0636E3200DA85AA2F3FAC31B5054F5B"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_projection/build.rs",
+      "SHA256": "ADC1D25E9DCBC12BB3373B7B36397FD9F78B8227A42E69B0670ADFE19E7D954D"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_projection/tests.rs",
+      "SHA256": "2CA932518B9857BE2D60597F44DF7AD333FE3DEFCC2D8D596351E61A7C041E7B"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_projection/native_targets.rs",
+      "SHA256": "74EB769A2FA2CA9FE00840FAECD27D4A8CFAFEA3879FDB222A44CB4063192FC0"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_projection/endpoints.rs",
+      "SHA256": "0837C7AA3A409A2626293FEAA852B43D9ED24A3A77125AABBD5007032AE55538"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_projection/types.rs",
+      "SHA256": "7A66B35004FF89D33CF4AAB4464F58BEEC91A1C863140D9E5922872BCD6BEC1B"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_projection/yaml.rs",
+      "SHA256": "0B24941D2934F9392FF80BA35754BC3E101B4522DD5CD0C4CDD4368979AAF0CA"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_quota.rs",
+      "SHA256": "AA2EE3B98B0AC823EB88D012ED06EC764F3740798991608E897D2BC6DC87C2BA"
+    },
+    {
+      "Path": "crates/ocg-core/src/byok_application_host/tests.rs",
+      "SHA256": "588A353C98596537B75CA73DA01852E8EE6FC783FD7197197EF98815D0095D07"
+    },
+    {
+      "Path": "crates/ocg-core/src/byok_application_host/receipt.rs",
+      "SHA256": "472349AD5F833E2D75DAFE5E6E489A00CB9AA453E6E37ECA4D538EB0D4F8CF26"
+    },
+    {
+      "Path": "crates/ocg-core/src/byok_application_host/paths.rs",
+      "SHA256": "B1804B356A73BD1749A594A751EE7C57A9919DF854047B88DAA45F38A8E14549"
+    },
+    {
+      "Path": "crates/ocg-core/src/byok_application_host/lock.rs",
+      "SHA256": "240A3C0EAE6EC3F106F12AF1B43AD0DE9F45797FD73AB232F2498395B184D80C"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_runtime/extract.rs",
+      "SHA256": "88791E71D1D7A03A97688DB91AFA00CB1040445968264D41E6578E39EB1160B0"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_runtime/device.rs",
+      "SHA256": "04A0FA1629BF9162EBF904E21B4019E597C6224F41482D44A2BB5BD005497B6F"
+    },
+    {
+      "Path": "crates/ocg-core/src/account_control/tests.rs",
+      "SHA256": "6A429387960308858D13C125C6930FF5D375762AEBA64C75C3D5DB54062CBC07"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa.rs",
+      "SHA256": "A82BFBF702A167BAA45F7C2379EB47D184D402C1F8FEBE992C8B4FA9DE22D833"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_cli_import/tests.rs",
+      "SHA256": "2A9F4D59EFECC9DAF6B70754F3720A52DA10D9D851C1FF95813D507E8E5406AB"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/usage_tests.rs",
+      "SHA256": "E5188CB9F45B125899269E903BF947171DCF5065A1A4E647BC1DA05853B953C6"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/usage_store.rs",
+      "SHA256": "B94360623D395AB1FD5408B4167C2E623E60F87130C0C14B6C31DCD3ED3610C0"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/tests.rs",
+      "SHA256": "EDA6F72ABAAB93AA4E5FB3D29BC25301FBBE18BC81378A6463B88C17D0D4F020"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/settings_store.rs",
+      "SHA256": "801AFF7AD07F98EDF2B93422BFC16251DC235979C5D0E4BF90E1A7091FA8A101"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/routing_credentials.rs",
+      "SHA256": "B40B66F0E2AF6FC7CF0D99B596CB796698415381DBC8485071508F115570B397"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/routing_cards.rs",
+      "SHA256": "A217096BF2D64631B6E599163D08A0B0DB3271B5021290529AB838A3C22D98BB"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/tests.rs",
+      "SHA256": "58EAE6FBDA49B191A67220FCEF3B458F09A563AA4C470492B6EABE0262E4572E"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/store.rs",
+      "SHA256": "0C526A45E4DCB01AD6D3B4D58F7DF99B1D9D053148005E6AB3A97A64102F0257"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_runtime/host/tests.rs",
+      "SHA256": "62914DEB8E9FDCA394C482B213164CE1659F9099627AC5251DF15BF46FD34692"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_runtime/host/supervisor.rs",
+      "SHA256": "3B8D2C58DBB781CFB2F322D3259DA37EF703A661412E585461037E449CA2ECFC"
+    },
+    {
+      "Path": "crates/ocg-core/src/usage_sync/reactive/tests.rs",
+      "SHA256": "A85696F506C6430EAA4F82F6D3A8079BDFCFA012E262FAD7320E5E5E4D73351A"
+    },
+    {
+      "Path": "crates/ocg-core/src/usage_sync/provider_refresh.rs",
+      "SHA256": "B839221507D652FDB7CBF40372DBC367568E1942B33DD0DD99333072071999EC"
+    },
+    {
+      "Path": "crates/ocg-core/src/usage_sync/provider_adapter.rs",
+      "SHA256": "E644A8908EC14F8EA051191E30D191F23DCD855E2580F3B56D93751B106883B2"
+    },
+    {
+      "Path": "crates/ocg-core/src/usage_http.rs",
+      "SHA256": "16BF05F3A4D8912D19EA91579B5516DAE1A0E4EE0C6A47A8C789157C40F9F170"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_observation/tests.rs",
+      "SHA256": "42A63C5A7AD20406DDCB9984B1440310D8ADF5E62F36261E0E47412047793B15"
+    },
+    {
+      "Path": "crates/ocg-core/src/byok_application_host/fs.rs",
+      "SHA256": "8B20A97988889AAB54C7A63735C25B6B44A9AB022027B3CE38E60AD850279BE9"
+    },
+    {
+      "Path": "crates/ocg-core/src/byok_application_host/lock/tests.rs",
+      "SHA256": "86A654CA915FAF6E305C81A2C08A2A37C26A831876EF827CFFF3C94E6A1EF4CB"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_policy.rs",
+      "SHA256": "CF60252FCE7600C594D9B9E9F3F1677DB94B51DAD3A3BA960D094C476F1AC046"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_projection/build/placement_tests.rs",
+      "SHA256": "AD137A125D0C43086460AE76179268590A3AB1DDA7688658BE5ADC5293793F33"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_projection/auth_id.rs",
+      "SHA256": "BB572CEAEDB4821AFF6C1FFC28E2E640AA889532F9A4551FB473DEF781BCE8A7"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/identity.rs",
+      "SHA256": "0219B01E1129043EBA05006F624CA0983C75502D9BDF57A5FB7A7A9EBEE2A24F"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_quota/tests.rs",
+      "SHA256": "420C37B330418A949FEF24F0F2254A11222E1096F2D2F3157AFBD9D080207841"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_projection.rs",
+      "SHA256": "E7D44349D459D9573B2EC9C94306F18A9D5B148B34E6810470913F73B816E1BD"
+    },
+    {
+      "Path": "crates/ocg-core/src/official_protocols/tests.rs",
+      "SHA256": "6347122561BE14F8AF539ECF703F59E017FCF52506054817DF240320D2E3F403"
+    },
+    {
+      "Path": "crates/ocg-core/src/official_api.rs",
+      "SHA256": "BC9EE5B13260311E64D92AA236CC739EC55386C911271F0D4BE79C184EF19EF3"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_runtime/device/tests.rs",
+      "SHA256": "505A3BCFC28A828B8A6C2CEE0D9EB6F17704E03E86C2EE3839092115097C7034"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/contract_store.rs",
+      "SHA256": "57C38174DD501DBA04ED8D9077579240AF3665E0799C0A31B314A22757F51A48"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/catalog_edit.rs",
+      "SHA256": "1E680E53439B62C43D5D1A73AAB0A786E30D4D650237AEC547D282F8FAF93DA9"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/billing_tests.rs",
+      "SHA256": "96CFBC7C2A66A880DD73C525EA80BD86FB749D55D61E17961C8CAF00B949CCF1"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/billing.rs",
+      "SHA256": "B50F483E7809D720C3682AF4FDAA3A2655348BDE11E4CE2F3A35BC3FF9F9BAF5"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/store/tests.rs",
+      "SHA256": "2745B46C91E07D70B9883ACA24614749C2C5D25BF5803EE5FB47CB45B4845F5C"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/ready.rs",
+      "SHA256": "8E1FF62A24AA8E4582076D5312231B72DA6AC2B249460855941F60F7D36BD6FF"
+    },
+    {
+      "Path": "crates/ocg-core/src/byok_application_host/adapters/zcode.rs",
+      "SHA256": "E88F4D72962E77B3981A7F4F082EE7962C441983AA979E6B5E067C914418F01C"
+    },
+    {
+      "Path": "crates/ocg-core/src/byok_application_host/adapters/tests.rs",
+      "SHA256": "68E427258544228A0B48F16CB13B495D43C51AEBE49E38C8A1C687B11A47DFD8"
+    },
+    {
+      "Path": "crates/ocg-core/src/byok_application_host/adapters/mod.rs",
+      "SHA256": "627656DE5813742413B825B0F67844C4C0E80666C0A7E3A532C688DB8606BDF8"
+    },
+    {
+      "Path": "crates/ocg-core/src/byok_application_host/adapters/minimax.rs",
+      "SHA256": "B63F4E138790AB00D2D167E17A5EFE547EB2EC1DCBF44D9B0ABDCD46D5BD2DA6"
+    },
+    {
+      "Path": "crates/ocg-core/src/byok_application_host/adapters/kimi.rs",
+      "SHA256": "1BD00ABC3EDC0FC62B1501065DDC9786CD10EA3445C7C413E9E4AC05D4D44481"
+    },
+    {
+      "Path": "crates/ocg-core/src/byok_application_host/adapters/codex.rs",
+      "SHA256": "C2D59DE13A82D8E2F984FB54EF78E03A3F7AA7975BECCA5323117DA0B575DF36"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/artifact.rs",
+      "SHA256": "5A9267E59DC3FBF788F25ECAC7F4B27B666D90C5E832D6EE65D0545C51D4ACED"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/routing_cards/tests.rs",
+      "SHA256": "623FDE08AAEB4833C585E99312B831685B12AB7E783D6B196EC60897F234F0B8"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/quota_recovery.rs",
+      "SHA256": "707CCDF509369EE8C8BD1E648B702CDDDA481277039FAD4D8FD89E34DA86366E"
+    },
+    {
+      "Path": "crates/ocg-core/src/usage_http/tests.rs",
+      "SHA256": "CCE0DCA8E45E2A531E911DB9EEB0CCA105B888E0DF14EE8DD878B8940AFF3E97"
+    },
+    {
+      "Path": "crates/ocg-core/src/upstream_limit.rs",
+      "SHA256": "906601C6A07235089488D5FCB018E6C9E0C04CAFAC3435EE3E1C33A30D7AF72D"
+    },
+    {
+      "Path": "crates/ocg-core/src/state.rs",
+      "SHA256": "9D3BF0E4509D14EA536A26641000EBA016D1EE1FF5E993D96B1DC9F3D0B7772D"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/destination_commands/tests.rs",
+      "SHA256": "F6FB608E40B4C6D3D69CFB23B885DC76FB687009ACAA0501A4314DDB27257975"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/custom_store.rs",
+      "SHA256": "652F36DD28DE0AD5B40F9CF7629BDF6BE234C0BBC514FB810418E8D2898DF101"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/credit_lifecycle.rs",
+      "SHA256": "46496D13FCBF3170C729BCD7818D80CAB9BE944A615F8BFF598E14A0E14F1238"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/cpa_tests.rs",
+      "SHA256": "2E3447ECC77D62E983A0D7DB9C808C082D5088F2B69B395A8889BECA2261E570"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/cpa.rs",
+      "SHA256": "849E82DDD43A31F191E884FFB1D017EEFEF1C5808F790574765C68E8D4ADD9F0"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/contract_tests.rs",
+      "SHA256": "33B7C256E22837E67FB3E99DD72483F8F3D1653AD8FD6EEF21107078632A79DD"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/lifecycle.rs",
+      "SHA256": "39CBFD4331CC3BD3563E7463D1AEACD71F324ECEA4749B192EF4E2536C0BE699"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/import_tests.rs",
+      "SHA256": "908670AC13DD9E54B0A108138A8E924560A321C04FAD3C0800A01DE3562C13ED"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/import_store.rs",
+      "SHA256": "7C3526619122CC4D09736A5643FC669F457A2C8FE1D818D53D7072AEF8C328E1"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/identity_v57.rs",
+      "SHA256": "7457032018C090E59F04E4DA36C734FD7B913014CAA5B668558569272C6BCB1C"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/identity.rs",
+      "SHA256": "690E235061C002741A6E65E75F6EC01F1207C77E042CF0F5579A02A20C9BB20C"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/http_routes.rs",
+      "SHA256": "0D1E44B36F92F4933561A5B831B87AC1F6A67D04F37BABF686F9E918C20CCFFB"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/device/tests.rs",
+      "SHA256": "F1C2D2818D677B0580C24ED84A939E69AE5CEB7475039AD32B2B6A8E47B77747"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/callback.rs",
+      "SHA256": "34F9D35F1E57D536C647E14090F384D3CA4D258B961213D7F662DA6FE26950CA"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/identity/authority.rs",
+      "SHA256": "3E6F607B10F7BAF067920E0B8A326F80632195EC8DCC0059F88B0B44AFB510BE"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/explain.rs",
+      "SHA256": "35E7E3270E3B68E886D4549A49EE3C2BB99F3D2DC3221B12FBB4CC79E91ACE97"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/identity/tests.rs",
+      "SHA256": "6D8841D48D7E109FD6E659DC2524084088511D8ECB55D09A02456F3C8503D93C"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/identity/explain_resolution.rs",
+      "SHA256": "9B86EAE50AFE921D1F4D8B8F018DDD5C6A64B79768B1874A863174B302E6888C"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_policy/wire.rs",
+      "SHA256": "555C9746DCD7BF34535315DEF8C6150319F654F75548DE0032F60B6FFFFB31FD"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_policy/tests.rs",
+      "SHA256": "87D989BABF5F511EE1B13B028C5657E880B60BD7EDEB5604886DFF5EF3C6AD50"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_policy/store.rs",
+      "SHA256": "095A24885367A6FE68FDAFD22B5347AB93C12964AE31C65CAC0792672DF944B2"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_policy/evidence.rs",
+      "SHA256": "0C40C821982F799FDA445258E6CEB7B38CC811415D754A095C55AE7701E94F37"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_policy/decide.rs",
+      "SHA256": "F5806CA430EE336E2EFADA1089AD56A8995A5FC422D8FA10D4BA26E0078AA58B"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_policy/auth.rs",
+      "SHA256": "153A72420C10A7BC7CF85ADA1175EC0E4DF3304EF45B541DB9EA12FC20F75FF8"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/device.rs",
+      "SHA256": "1D5DC89D6E52ACC5D1DC885537C7BC14B664AC5350A2E8ADC1DD7CF584E846BC"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/native.rs",
+      "SHA256": "0669D124578A2E279A7C4B359E0446216AE4C96DA3B6CD0FB5609431F08392AF"
+    },
+    {
+      "Path": "crates/ocg-core/src/custom_http/tests.rs",
+      "SHA256": "51CAC5EE6FB3B4F5F5ABDA0BB49305314B8295FC83C09311CB1C5DD7B811FEA7"
+    },
+    {
+      "Path": "crates/ocg-core/src/custom_http/origin_grant.rs",
+      "SHA256": "45AECF4D622AF974E1F95AEA9ACDEFB37408F66DC95FA26D83FC632668CC3237"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/billing/tests.rs",
+      "SHA256": "978D3BAA9AA878778BADE4016A15D82061ED028D1DBF90B56E5D645339190A6A"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/account_store.rs",
+      "SHA256": "3CFEAEEA06D72216B9A36545B2525883ED269002B4DA7B26515474F870B19981"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/access_key_store.rs",
+      "SHA256": "FD9FFA51335315EB3E5315350057676FE4FB521969A7BC98D8A96FA264D18D7A"
+    },
+    {
+      "Path": "crates/ocg-core/src/official_api/tests.rs",
+      "SHA256": "BFE465CDDC894038F2E9CB0286132AD64DAB8F70F25E927DAFC817E65DE1832F"
+    },
+    {
+      "Path": "crates/ocg-core/src/official_api/pricing.rs",
+      "SHA256": "2B650B835DEB1444F93132E214592E2B1044A6647F16F90B97BA2E358406560C"
+    },
+    {
+      "Path": "crates/ocg-core/src/official_api/balance.rs",
+      "SHA256": "A5896C0A47BF4A63F32B13F178C2670700ABD3397FB7B5FACFEE2041BCE0E9F1"
+    },
+    {
+      "Path": "crates/ocg-core/src/model_metadata.rs",
+      "SHA256": "CF224B7DC6FBCAB6321659BE2F7D01693192F3B283E7ECCC53F4400BDD7E1DD4"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/ready/tests.rs",
+      "SHA256": "FF3E0D0823C214CEFDA73993FE4FF3978E85BAC1C88EF2296DF6D9439716FEA1"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/project.rs",
+      "SHA256": "76148F0DC2D75D25ED2410AEE7DC38B331DC29E052A7AA8D01BAB8946ABA2E2E"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/artifact/tests.rs",
+      "SHA256": "012B705902E78BE27C1C2E8DE010E129A30F92DA81EFD6A1F96EB8DDE3680148"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/types.rs",
+      "SHA256": "8B48F1ED868B434E7D497B088E44FB9A233E35FCDFDFD3D1F2275299507398DC"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/quota_recovery/tests.rs",
+      "SHA256": "46AF79AC6D639F31070971E642116CE49F7D3C83A3E2386461A49B88D4E2F3C3"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/platform_tests.rs",
+      "SHA256": "D7C03AFEADD11C2A07B5C8C495240C2D2F586953F8C6A521EC413507F5921B44"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/platform.rs",
+      "SHA256": "4F413A2620B239045563FD85F12D51AA969048C236039CA177BA3A9C1459950F"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/open_guard.rs",
+      "SHA256": "167BEEDB4224894D803A541DEA286A83E94EABDFA20624413DCB23E47BD4B4F2"
+    },
+    {
+      "Path": "crates/ocg-core/src/state/tests.rs",
+      "SHA256": "D0A16383A0561B6F275DD8AA009845C187768B179D3CAABD14A48E2DB4040936"
+    },
+    {
+      "Path": "crates/ocg-core/src/runtime_log.rs",
+      "SHA256": "D4043347313A77E8B6243410E03F2DC8C7E7F768D5763A7B894D18ABBDC1CAA0"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/http_routes/tests.rs",
+      "SHA256": "DEE85353B3D902196AAB2FCE368BCC6C24191670BB4C8C0ECAE3F5E3C71D129C"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/dynamic_tests.rs",
+      "SHA256": "27BD0D276DEB92335394DAF28B9DC5DF0C0ADDABFBD28AFEDB601BD02D32AF41"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/dynamic_store.rs",
+      "SHA256": "DEA8C5E7A5847BBD703B2E67AE2C3524DD03EE485BA36229504ABCE397D8454A"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/migration_tests.rs",
+      "SHA256": "176265CA504CABF283ED82A67B8DACB074C97073BCFFB460BA0B2253D9869EBD"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/migrations.rs",
+      "SHA256": "034473D2223F3F53DBA78ABDA59AD2FC0EBCA88449A8A9DCCF490EED99F73D56"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/log_tests.rs",
+      "SHA256": "44531AE9A15C9D44C32EB8F5585907A1EE4D849D744B8703720EA8043F136ACA"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/log_store.rs",
+      "SHA256": "4E7A54452FE722F3393329E1FB88E44D2C8DA5F6DD37AB9D7CBD697A5CB1CB91"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/native_binding.rs",
+      "SHA256": "B8BEA4FB3B313E37039CEE3D6E3CA57AE0EAEEB2683E876CF0EF596EDE728C10"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/explain/tests.rs",
+      "SHA256": "30D199516EF1300605A452858A4546204354BFA89F4EA105EEBDA9F2FB631D05"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/identity/explain_resolution/tests.rs",
+      "SHA256": "615BD29CBFDD00301B3CAF288B0F728C79FA268E742EF08FCB4EDD0EFD6B3169"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/project/tests.rs",
+      "SHA256": "58D66EFB332DF58C16067BDD3CD2781CE5FC991FC04A8B6BD8A75A7099C8E3FE"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/native/tests.rs",
+      "SHA256": "569676F912235CD179062A2DBF3D399F6587D601809CAD5C58AFB8915D29C01E"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/io.rs",
+      "SHA256": "67A6A5C7444C0478B084EA0E9C7EE8E42205E09449B6CB0AE0F65B56AF283D04"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_test_endpoints.rs",
+      "SHA256": "ABDC56DD58A0E709A7EA4A6010DE53E5EF93686C509ECC542B3B862DD348EDAF"
+    },
+    {
+      "Path": "crates/ocg-core/src/custom_http/origin_grant/tests.rs",
+      "SHA256": "9953C3BAB4738E661C238F29D0A5CC82483F579F615E1991C93E1CDCEE82D29B"
+    },
+    {
+      "Path": "crates/ocg-core/src/custom_http/dns.rs",
+      "SHA256": "F2A9C9A75A7704C219C8E38D10685999F4BF0F29FCBDFA4C0CFE13AA82B37108"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/credentials.rs",
+      "SHA256": "C044A9958DE05EBEADDB0891252EA6E2D4003E33F5EE10C37E3A03D692C02B74"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/dynamic_store/tests.rs",
+      "SHA256": "44F5A282C1E13F1F07D5F6A7F433F230421311BB7DDC870B4703EBE2DBC03B86"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/destination_store.rs",
+      "SHA256": "8B606BC6E42E6298E6FFBE103B79E8C38487993DE1C9DC9EB3C2C747C1B6049C"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/destination_commands.rs",
+      "SHA256": "0C92EE21B3BD20CB4C8B04B767101C5EB0D972F3168D4770BA7020C186665889"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/official_api.rs",
+      "SHA256": "697865F925714FB370BCEB7AC6C2BB86258DC348B086B4E3C95E212B401C7DB8"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/open_guard/tests.rs",
+      "SHA256": "A054DE436CA8F15488DE8AE0C027E0114530507C33270CD6341D1D74AE8ABF47"
+    },
+    {
+      "Path": "crates/ocg-core/src/goat.rs",
+      "SHA256": "21F6C17CA3986978EED9D2DC2356CEC63B8AA1A30617F585562EDCECFC7F850E"
+    },
+    {
+      "Path": "crates/ocg-core/src/model_metadata/tests.rs",
+      "SHA256": "5C6E3D0B0270DF410CBF067EECFA0ADD58025F105F44C291B5889B1031B26F92"
+    },
+    {
+      "Path": "crates/ocg-core/src/modelsdev.rs",
+      "SHA256": "ECCDE72BDD33F80464F40EBAF6872FA578A1966C85EECCC18633389DDD41666D"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/io/tests.rs",
+      "SHA256": "CF4F41BBDE48653C51486606E00A83AD6F506DBC20A67E1EFACC9D7706F3D3FF"
+    },
+    {
+      "Path": "crates/ocg-core/src/crypto.rs",
+      "SHA256": "656CC3FCB29EEDE772B03185E76EB0DAE2C41D35E64013F306EE87C1681855EB"
+    },
+    {
+      "Path": "crates/ocg-core/src/custom.rs",
+      "SHA256": "F446CAE172C4F1B7821AE0FBA1E6E93B3FC03FC7E4091ED53B460430180FF324"
+    },
+    {
+      "Path": "crates/ocg-core/src/http_client.rs",
+      "SHA256": "969D793ED0398D4ABFD4502066D848D3956A4EF95A30F85A1D6F5552637E95AA"
+    },
+    {
+      "Path": "crates/ocg-core/src/host_router.rs",
+      "SHA256": "EBE9D5D2A98AAB1E5C524FBBB52A618065CE9A882CE88C730E84920103244A10"
+    },
+    {
+      "Path": "crates/ocg-core/src/host_gateway.rs",
+      "SHA256": "42E6750DDDF679A9B3FCD724D29A3F9F5A7AC8292DABB06A3F13DC44CFF21041"
+    },
+    {
+      "Path": "crates/ocg-core/src/go_usage.rs",
+      "SHA256": "04DE7186DDC54E3DE8DBB2770DCD62CCDBB59D346231AF7984E5B2326279A95A"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/types/tests.rs",
+      "SHA256": "535D0247A609460A92FD5652499F0E08FB8C6DEA2DFC50A62C8C5E9B7A5EE92B"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/temporary_policy.rs",
+      "SHA256": "987AEC64A3C8A490D639059C293FFCB627AB5F1B4892C5352D9BA52F08AF9BB8"
+    },
+    {
+      "Path": "crates/ocg-core/src/runtime_log/tests.rs",
+      "SHA256": "C02E38B8A0E808357C0A10E8787A451CD2F6C14AC61C8D6AC1AACA4DDFDA2195"
+    },
+    {
+      "Path": "crates/ocg-core/src/routing_snapshot.rs",
+      "SHA256": "5E46BE00065C323866C50E7BADCD6C36870D63E9E61EA4F272D8EF95E605D2BB"
+    },
+    {
+      "Path": "crates/ocg-core/src/custom/tests.rs",
+      "SHA256": "A523FFCFCAA1FA77D69C36F61001A35896C68421C2CA3B6324EC000F2B29EC78"
+    },
+    {
+      "Path": "crates/ocg-core/src/custom_http/dns/tests.rs",
+      "SHA256": "8452628FF855B69BB160042F40E58F3234B553A5C21CCFF28FBB065A1143453F"
+    },
+    {
+      "Path": "crates/ocg-core/src/db/native_binding/tests.rs",
+      "SHA256": "E9AA194D6F07E8A40AB3AF91E3C5E0DCBCD46C7EA014C9FBFD32EC9C92CAC560"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/billing.rs",
+      "SHA256": "89FCB573A35250BD46738AC87237F72CC2B4F83F33A61C3D6B3AEEF57B5A4160"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/bindings/tests.rs",
+      "SHA256": "0036BE45B61D984B49A7DD242FF4BC23DAA53A2F020C75AEC8E82269B751668F"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/catalog.rs",
+      "SHA256": "869B147315300DDB6018B3FD1F76EA4CE1DA46A7B0645E328A0984E3CABB3EB5"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_test_endpoints/tests.rs",
+      "SHA256": "9B89DBCE64845D03C9ACD5A2943A838B408C7609BA6BB8B0875A1F98AEFDB2FA"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/credentials/tests.rs",
+      "SHA256": "43451A51EECECDC39A33F79F96EC13C45DBFDAF3BE268B9F8C3B42A2C4D4F290"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/cpa.rs",
+      "SHA256": "DAD0958EB9DA0C4FA69091439F7E587C06FC2DE71008AC7F969D4199C5D427E6"
+    },
+    {
+      "Path": "crates/ocg-core/src/goat/tests.rs",
+      "SHA256": "61D8D63CA07DE34526418C511A40503995F1D64F39B0A44FB986AA76B254D74E"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway_runtime.rs",
+      "SHA256": "4BA2433A35DB7A8008DAAB82131CD0FDA780F94A320780229799FD93E233785F"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway_keys.rs",
+      "SHA256": "87777A2A2CC5971979DDD5B8C90DF8C267FAE8A5E72A7728365C55D4FAD2DECF"
+    },
+    {
+      "Path": "crates/ocg-core/src/modelsdev/tests.rs",
+      "SHA256": "F4A66A905A8C13432AC30B37E52F82A13D9D7ABCFBFB36A12B57A9B6B5C6DF24"
+    },
+    {
+      "Path": "crates/ocg-core/src/models.rs",
+      "SHA256": "1BD363E93F2F7C2B8DA871EDD245FBE212E17C7D7757F4094556E0FEF6CE2E59"
+    },
+    {
+      "Path": "crates/ocg-core/src/protocol_probe.rs",
+      "SHA256": "DB431A0673E2920B499C11CF8621AF45EA59F156500AE05E751F92A24F575638"
+    },
+    {
+      "Path": "crates/ocg-core/src/go_usage/tests.rs",
+      "SHA256": "641DA7429F5CD7C0EB67F9BF5523C5598EE1FA703458B41FB8F7F46F79865A1F"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/usage_refresh.rs",
+      "SHA256": "EDA1F6247364FA294BAE9B37BCC266676848AC6FDBFB049941B7E279FA124523"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/usage.rs",
+      "SHA256": "15B6E1DF06A26B23462C993E16435A6F595DD06587AD199071DA2A1105946F2A"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/updater.rs",
+      "SHA256": "2B8CCE49B3069794D657231A3D4FD62E257FDFF973C9F0B37D1569F0D22FAFEA"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/types.rs",
+      "SHA256": "8B831F830D3CE193B4E8D0972A049D744BA7DE0C143C26B7CE1E2545C5AC3A0C"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/temporary_policy/tests.rs",
+      "SHA256": "1F67A9AA34060561B7429A1CB587A502CBDE0D3EE7070F3BA81B4A5C5059758D"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/templates.rs",
+      "SHA256": "7D93C852CFF939EEFC36EA7C45415E38C85A6BE3185A1FA413E98802D0CFE0C2"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/routing_cards.rs",
+      "SHA256": "439E2972A5CEAF6E90A4CAF7A882FFF06A8C370E5A74C4DD2BDE1510611ADF78"
+    },
+    {
+      "Path": "crates/ocg-core/src/routing_snapshot/tests.rs",
+      "SHA256": "2DC757FE63FB6C6875B6D4A99B5A5C27E7E7695C09CEBE687DB00A8D8C7FCCAF"
+    },
+    {
+      "Path": "crates/ocg-core/src/routing_runtime.rs",
+      "SHA256": "CD872D93593C1714A72F64DF6B244E4B3ABFA825A2C59ABA7E5073703FED2764"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/billing/tests.rs",
+      "SHA256": "63092F23B35C98B172E506C122C7BFC4A73D6C2B15D744F83AF2F1BBC355E357"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/applications.rs",
+      "SHA256": "21BA16C15137A21388ED361503A70FEC1224876893B9EAD6464638D00660B51A"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/catalog/tests.rs",
+      "SHA256": "7064C1758757B24B7AC59D9897398E580EBE8013E95344AD5C692074DE72AB54"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/byok_applications.rs",
+      "SHA256": "606CCEF6E0F2423CD18488781A2ADD181D8BC992A3F20A94A71D17AB6511F325"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/connections.rs",
+      "SHA256": "2EB0DDD0E9CD22A6110F1FAAB227EE99BF9B3340D7913BC0777A2B09A1A7BB27"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/cpa/tests.rs",
+      "SHA256": "E356AFF03CB5294530F07CF0FA43B4AC911C1DC9AB52E67768CD9A1911EA5A62"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/model_metadata.rs",
+      "SHA256": "49A53972AF12737C1C28AADAEB95C03702F1976E6D31CE860DDB9B09D10F0328"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/mod.rs",
+      "SHA256": "B42A51F75EDA056B66DB0762BA63405E2438A9550FDC0613EC41F9AD3C135B53"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/identities.rs",
+      "SHA256": "A741A22D4EDD21ED533714253A11B010B9DDB22BDB921552226D44C27E04D6A3"
+    },
+    {
+      "Path": "crates/ocg-core/src/models/tests.rs",
+      "SHA256": "953E1285B4FAC2D066E62B06DB70A0332AE86C1D24A6A2B47CE38E0242596146"
+    },
+    {
+      "Path": "crates/ocg-core/src/lib.rs",
+      "SHA256": "CC81F6B5759C916753242818C36E489C463FA7BE86FCB23E8FF888025DB0B4C4"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/platform_keys.rs",
+      "SHA256": "A5FDA6DAA6E5ADDBBF582501C3BFE07A61D118F90DF4DDF9E88B6F971534CBE7"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/onboarding.rs",
+      "SHA256": "8F019461192B143F1F1224C8240ADB719528FB13013BB4AD6FA33ABDDB6FF261"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/applications/tests.rs",
+      "SHA256": "C0D2176B437652B2AF9B318525DD26CA8498C98B26F01CA142C891FD122B615A"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/bindings.rs",
+      "SHA256": "D256DA27F4621D6946F500E131DD6FE4E10939B4755B47F230EDAB52C7E5CB74"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/destinations.rs",
+      "SHA256": "3E6F410BC5A83CF44B7BF20727D6EECA7F3CC2FB8BAC861DA6B5854CEDF243BE"
+    },
+    {
+      "Path": "crates/ocg-core/src/protocol_probe/tests.rs",
+      "SHA256": "BD322E8E70BAD5ED5B3731122DAFC941D50B44E00EF7A60EF23973940083D83E"
+    },
+    {
+      "Path": "crates/ocg-core/src/private_file.rs",
+      "SHA256": "326CA41ED9E66E253B700F5E0A11067D5FF6D54A7AB2C7C3B8701D77FD3903B7"
+    },
+    {
+      "Path": "crates/ocg-core/src/pricing.rs",
+      "SHA256": "266C4DAFCE64E05F2AA2983B796B11CD25B74B30BC075EA6EBF6A29E6AFC2BDB"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway_keys/tests.rs",
+      "SHA256": "E3BD703F918946E65F93BC1A4B572F56B4487E527C0C5D43FADB2ECD4073FC22"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway_clock.rs",
+      "SHA256": "69DE8BAEEA33A2FD12832558D1633B63B115D90A670C8C796B3AB7324585824F"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/connections/tests.rs",
+      "SHA256": "6D3A985EF207D9A2DBED44C1554B00E446E5CD44F3F64032EFE310089E3ECCCE"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/official_api.rs",
+      "SHA256": "95182CFA84B274B81461833025C36B6BF4539903D53FF07277E37B588016A73E"
+    },
+    {
+      "Path": "crates/ocg-core/src/platform/tests.rs",
+      "SHA256": "2B121D369E72E3A5D86224F360AD9CE5BCE394C1941D8DAD4310794731F6A3CB"
+    },
+    {
+      "Path": "crates/ocg-core/src/platform/refresh.rs",
+      "SHA256": "D6C28AB76317E2D2350C6548665FEE103AE6BF8235E686BFDF6A43EDAC3F9E31"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/types/tests.rs",
+      "SHA256": "B97C7ED496ED48A589789FEDA417BCECD1715BAC08139F97CC98B917232EEB33"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/settings.rs",
+      "SHA256": "2539CA1C2D11C7F5B8800E4BF3A511445420CF986C6E8D10F260FBB484143119"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/proxy_test.rs",
+      "SHA256": "BD81A58C3AE70E005EF99532469B630F58BBAC7BF69A0552F090BEFC2E86D96E"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/providers.rs",
+      "SHA256": "AD38909F21362F17DF82AD082E1E01AB7C0C94E557FAA754D71E3893FC99AADE"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/pricing.rs",
+      "SHA256": "A820F6FA20A13339A031BA93FE27BC7A5A0C88E5A07FD0451F0419AAB04DDA23"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/platforms.rs",
+      "SHA256": "7B6A90A30F58183991E80FD0FD7AEF780A7DB94D9B7A87E6E413112B440E9CA8"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/routing_cards/tests.rs",
+      "SHA256": "2A920938D72C5E535F39552934EB906DAD90331BD5370F0EA92B7F26D7861753"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/routing.rs",
+      "SHA256": "0CBAF2E7C877552A2F2608F7D156B6D9F20EEC8AA96365E6ACC3FF18C1AB0CD1"
+    },
+    {
+      "Path": "crates/ocg-core/src/routing_runtime/tests.rs",
+      "SHA256": "E9AC53A41CDEB632106B396E67690334602423BCA6AD451C2B88B4476ED01EC7"
+    },
+    {
+      "Path": "crates/ocg-core/src/route_availability.rs",
+      "SHA256": "5CB64C4D13D2193B9C67F191C3CB6BDC4B7BDCBABF8678A03D0439B635622B8B"
+    },
+    {
+      "Path": "crates/ocg-core/src/redaction.rs",
+      "SHA256": "DBF6F3F4B2F504A1C27C5800406D3470A4ADBD578127A30F596660E1637C347F"
+    },
+    {
+      "Path": "crates/ocg-core/src/quota_recovery.rs",
+      "SHA256": "8BE7ED04F0C4D5647AC7CA2B64266D74A40B07B83C70ADD1D98786CA79AFD884"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/byok_applications/tests.rs",
+      "SHA256": "C44DB5C3C40F7E7D1DBACB80BAE26FAAB4FB26F15E5288AC9795F6E66520B72B"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/destination_catalog.rs",
+      "SHA256": "80E65B2C8923B3B91A5858CE2DF7F6265A023F38E91174F9FF31EA9287AAB61B"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/identities/tests.rs",
+      "SHA256": "B1EA097445A18067B83B3FFE0A792FB601A01ABBBDA959775952B1FA1424FFF6"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/publication.rs",
+      "SHA256": "73FD7C3D1BE8B44BE82D1990A2D78C173939CD33A391304F64089F3AB819AB8B"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/destinations/tests.rs",
+      "SHA256": "FB8F976C43AC4A87FC6BC92AC6372A5A55E7390E21C37C7532C0ECC5FC54F510"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/routing/tests.rs",
+      "SHA256": "EB459661212CF077FDC29DFB9F42C73D1FDE8E8E908D3FCA07285209D237E199"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/onboarding/tests.rs",
+      "SHA256": "421307C234A3BCB8A8F2D7634DFF3A4D6784CCD11D915F69A13E9C2532598105"
+    },
+    {
+      "Path": "crates/ocg-core/src/destination_projection.rs",
+      "SHA256": "4A50EBE93F0D126FD293B4CE50615E270E36099F637ADFBBE3B27796EC500127"
+    },
+    {
+      "Path": "crates/ocg-core/src/dsh_application.rs",
+      "SHA256": "08A6A7DF66A86273A5C7FDBA3A7A0C92FFD5513A37E09EE774ADD9AA28C73C93"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/free_models.rs",
+      "SHA256": "510C77833712AD888B5D386E56F4947A415D63672802A24E25242ADFAB20CC31"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/forwarder.rs",
+      "SHA256": "5585DB3078BDEB1F0DABA98246E90B1BCC5EB46E205C3E647D55B771970EE392"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/protocol.rs",
+      "SHA256": "DF39851C5CCC9446A8E50B7D963F838A9E2DF457E47B5E01C70E13139D3C2C74"
+    },
+    {
+      "Path": "crates/ocg-core/src/kernel/zen.rs",
+      "SHA256": "FDDA0AB5D70F0210037C2C89CA03237AF23D030EC45EC176D3D0DF5B6AF18417"
+    },
+    {
+      "Path": "crates/ocg-core/src/kernel/protocol.rs",
+      "SHA256": "1797853FC9997F98199B61AF21D7C533BA57C13EFF1ACC5C55469FE69FB8D910"
+    },
+    {
+      "Path": "crates/ocg-core/src/kernel/pricing.rs",
+      "SHA256": "208BA95289C70D323A8493296837F48AC98172AE4418D9D2039C8ED1B09D134C"
+    },
+    {
+      "Path": "crates/ocg-core/src/kernel/mod.rs",
+      "SHA256": "E95B025D35DC91D36309A244247F9704DEDB6CAB82CDC1160BE8F6C70DBC4531"
+    },
+    {
+      "Path": "crates/ocg-core/src/kernel/ids.rs",
+      "SHA256": "B3EFEB89081059339E455B07547BE90A8620E4F7FBA34F6F0305A9A092E9A03A"
+    },
+    {
+      "Path": "crates/ocg-core/src/kernel/catalog.rs",
+      "SHA256": "48B2112BAA8D70E1E7FE108057D936B10A2AAE956A7767B35ACB7A236BA7A58B"
+    },
+    {
+      "Path": "crates/ocg-core/src/pricing/tests.rs",
+      "SHA256": "619679F1E140B0F5C03855CF2211FB2A9D539B7A369CE2CDC439439672CEAF1A"
+    },
+    {
+      "Path": "crates/ocg-core/src/platform.rs",
+      "SHA256": "2D8018EE9598A55EFBF78CB4D2CA9FE19ED1D7598F927AF6E5461E7F8BCED6C0"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/wire.rs",
+      "SHA256": "51C6A6CFC2915B80A3621FD4278DB90435438D340BF0CAC21041CA729B05CD23"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/tests.rs",
+      "SHA256": "B9A801FC2E7D87AAF0C8CF1BAD6F94325CD60AD30767C6E70960315D78C90F9F"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/routing.rs",
+      "SHA256": "40A2340A9DAE1AF868AE1AEE7326BB34AE5677B220553F145529B681E7122920"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/response.rs",
+      "SHA256": "FB3EF701E872C2B17D195E6A6875BF2C25F4CBE45562ED1CC9BDB71511096FE2"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/recovery.rs",
+      "SHA256": "7C2151047C1078E7E24FB9866ABAF7001DBED5032E4307DF589F4E62AACB9C4B"
+    },
+    {
+      "Path": "crates/ocg-core/src/platform/refresh/tests.rs",
+      "SHA256": "A5F0CBB49F6CE37A1C4B64C478E4E633AE7C40E17D85F1D3CA2718BC60B14B1E"
+    },
+    {
+      "Path": "crates/ocg-core/src/platform/reader.rs",
+      "SHA256": "19406D51C3CE5860B8ED07146B6BB009535B6CEB7439D590A54868742720F8A1"
+    },
+    {
+      "Path": "crates/ocg-core/src/platform/import.rs",
+      "SHA256": "D8433B53BE3A0CB76FA20CF31FB276147A3968B8F1156EED5E9E56B2D8E46725"
+    },
+    {
+      "Path": "crates/ocg-core/src/provider.rs",
+      "SHA256": "C47644E4A4657DF115B8D5D12D7DBD31F5EDF59685909E785EF1D3060E15BF61"
+    },
+    {
+      "Path": "crates/ocg-core/src/provider_contracts.rs",
+      "SHA256": "396ADE58223C278681D6DD2CA4BFF01694E6A1EFB79A93E4FFA105A88BBA5EF1"
+    },
+    {
+      "Path": "crates/ocg-core/src/quota_recovery/tests.rs",
+      "SHA256": "537726E97BAF572F2792C35CAD98C7D16DC8CF42FC5F491ECE97A299A9166BEC"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/browser.rs",
+      "SHA256": "20A991A1253D650FA380DDC1AC788799D5CDA73FD416B1124E8C09B045808275"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/auth.rs",
+      "SHA256": "E65BB53AD86174FAC451A0B2C975D2EA634564DEB51A063610C63E2EAE8DBFB0"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/account_verify.rs",
+      "SHA256": "4FCA61CC446408FE644969ADAF27163CEEAA02929473781A1A7CE2DB2B5BF2A9"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/platforms/tests.rs",
+      "SHA256": "76A62DAD80C905AA24ED35C2D5DA746F757332A49B06DC805DC5A8E38A3723F8"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/observability.rs",
+      "SHA256": "27C4E4779572348E57C05BB81E854375D754B54224C6952BAC6A81BEAFBD13D7"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/mod.rs",
+      "SHA256": "3B197E494FAB306671628BD77A331E382A2CC840AB766DE87DB114875234D8F9"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/managed_key_verify.rs",
+      "SHA256": "CCB9E4C8A02662C9C50A6B57E542CCD2AF0D97EF5A67A15C73AD98611A720655"
+    },
+    {
+      "Path": "crates/ocg-core/src/dsh_application_host/tests.rs",
+      "SHA256": "610C4566A0495F4CEED59636CADD35EAC4042074B4310C927FFB7F01779E9571"
+    },
+    {
+      "Path": "crates/ocg-core/src/dsh_application_host/runtime.rs",
+      "SHA256": "239F324A895CDF16EA54580A8575100A80FC181E75D7156B0C970C98BEFC0C68"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/cpa.rs",
+      "SHA256": "59E3801E62D4B2469B0CCE5D021F48388FC1B3B373C7B69437AF8ABA19468AEF"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/destination_catalog/tests.rs",
+      "SHA256": "716DF1A372093F26B20E48FEC91B92BB161267F9216AF217C1FF6DC4E92144E5"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v4/publication/tests.rs",
+      "SHA256": "E74843ED15CB983169B90DA6C9C2BD26B302EA405019CE5CE40612B6C4B0C74C"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/limit.rs",
+      "SHA256": "B48A41F15120B6185E5053733C7D9CD3F801CDBAC2473EFA49E18C744DEFE2AE"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/handler.rs",
+      "SHA256": "F230B35654AD38E70E20AEDFEA694C65E13DFE052DE1B845A5EC7FD8AAF3C649"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/listener.rs",
+      "SHA256": "35BAB09A0A63DFCB727499491AA4946D64F049CFD6B8C2667120DCB19DC8B56D"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/policy.rs",
+      "SHA256": "41AEA3DCFFA35FB7BB1900592E739C3C144D998A1388B2B814935F748EC14E30"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/protocol/tests.rs",
+      "SHA256": "A6885B288325DFD09C014B7096DA876FC37D0E87D27197456B5FC71399BB347C"
+    },
+    {
+      "Path": "crates/ocg-core/src/dsh_application_host/auth.rs",
+      "SHA256": "78F609D654B5E83A6DA52018E77EDE5E6CBFA55C259A0D63286C4CBE06E0D205"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/protocol_stream.rs",
+      "SHA256": "44482F8AF01CFACB73781F30E4126236122544DE6000A16876289D77D2D2D1A0"
+    },
+    {
+      "Path": "crates/ocg-core/src/platform/import/tests.rs",
+      "SHA256": "2BD3595F360A07F5EF717001C355CD3C40C038559F977EF9EDA94FBE674031F3"
+    },
+    {
+      "Path": "crates/ocg-core/src/plan_usage.rs",
+      "SHA256": "5BA74277C3A31325E15148C2A72FC8C5B6640311E808CBE161A377EE2FE77E70"
+    },
+    {
+      "Path": "crates/ocg-core/src/provider_contracts/tests.rs",
+      "SHA256": "531366D4338962404BD2B7BF396C070895E0A4B7EBEEEA6F86CCF71F9AC5A52E"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/command_code_usage_refresh.rs",
+      "SHA256": "4648545115095A30E069C564B61904576052759C9AD670FEF5E9EAE62FD0CFC5"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/connection.rs",
+      "SHA256": "81BB90452D113C7E7EF1966833494A80D57A51E1139A8F5BDC4ABC1722C6EA28"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/forwarder/tests.rs",
+      "SHA256": "3CA8B09FB9CCAC47ED0FAC1E70167D023E0C7473C0913E683DD63ABA5E134C98"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/forwarder/stages.rs",
+      "SHA256": "6F88FC93676A06AA3F8C177173525002598DC0CABA9F0098AA7A067FB69F0289"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/forwarder/sse_usage.rs",
+      "SHA256": "371D78DC93A60B45C102092551CC4EE2CE0F779C8D3B3C144D1372C14E14B5F9"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/recovery/tests.rs",
+      "SHA256": "C0ED8B2C4F73F68C4440DB7FCA5298DB4EE2147C4175F3E0859EBE6AFBA2F3C9"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/recovery/context.rs",
+      "SHA256": "10E913C147A6435E5966BC4E17FFE000FF8D6056D0E74689DD6F4008CBFAE39C"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/account_verify/tests.rs",
+      "SHA256": "88027DD08B9AC1283B1F5CCCF9678558F06EB75B039A4000A148D8E91864C9CE"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/account_transfer.rs",
+      "SHA256": "AC67032373F1CEAEC2BE4AF8E9F155B15213A69849F8C37D3737BEB86F363D21"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/materialize/tests.rs",
+      "SHA256": "23C33EC3BE4E62EE5CF57C3EDA54B1AA93101709353247EC71BC51D45D67A9A4"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/protocol_stream/tests.rs",
+      "SHA256": "B77F52963EBD01BB11362CF39693E7CF6A6DE5CFA539B773729FFA0CBD737E9D"
+    },
+    {
+      "Path": "crates/ocg-core/src/dsh_application_host/runtime/tests.rs",
+      "SHA256": "D8FCC674E6BF64F740BE100D690AD16B72B878C605597DC3067E1CF4ECF9B8C7"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/managed_key_verify/tests.rs",
+      "SHA256": "23DF76CD4A8719F22A553E9D38937BB937BD67102624EC1900012A41A01336E3"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/keys.rs",
+      "SHA256": "AB1DA7D217A461A0AE3614D31A23084D6958C613DCCAF5AF3624E516CAC1EB41"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/dynamic_providers.rs",
+      "SHA256": "8DD31E10A5FCE8B11614FB05BA2AA9239CA69E342E11DE9D6CF8E026754366F7"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/diagnostics.rs",
+      "SHA256": "3E822E5288C5298145036AB5E693A70FBCBFAC12842AC9EECC783F025360D6D8"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/cpa/device_tests.rs",
+      "SHA256": "CC46550624A9C283979C867C2840B7AB9FF25D9A2853F61219D1FFA543680C6F"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/cpa/cli_import_tests.rs",
+      "SHA256": "94123E4B11F0EF963304F0697B1E6846D5FC5174D368CBD513766B11A1ED8445"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/attempt_pricing.rs",
+      "SHA256": "8D5BFDF8B6B73371EEB85E9DB9807810920146739A14AE7AA9FC0DD046809B6B"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/provider_adapter.rs",
+      "SHA256": "187680ABD0454742A3266D324A5C631A67C162E3EB6024614D05A7ADCCD2E531"
+    },
+    {
+      "Path": "crates/ocg-core/src/official_service.rs",
+      "SHA256": "7D8F3C1E121F32FF77631CD1D6CDE5B1D42F0664B7E1BB4A0D50438D726B1253"
+    },
+    {
+      "Path": "crates/ocg-core/src/plan_usage/tests.rs",
+      "SHA256": "C61658F49411AE54B6E9E46EEA3E9D13B352130C4F80D89B33B92FA80B331DF8"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_session.rs",
+      "SHA256": "66B2C02692943AB7A1A2567949B877607BBB57BB013A1CB37D22DF0BBD72C93F"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/policy/tests.rs",
+      "SHA256": "E103273845A5FFF69E5465D1A77EB040E1305B4FD6CC2C545277F9175E18AD1D"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/mod.rs",
+      "SHA256": "0A0D2D2D1CE0921A08D10842EB4ABDAB59A8FA95575EB62303A2CA122808EFC5"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/materialize.rs",
+      "SHA256": "E4E59EE24541605D84C436CC5498BFC7C2A37B8FFBAB15538F460AC27E002467"
+    },
+    {
+      "Path": "crates/ocg-core/src/dsh_application_host/auth/tests.rs",
+      "SHA256": "C5C9E28384F2D975415B6BD01C103AA04C4012EE2C55EBAC20211A1F8BB8F55A"
+    },
+    {
+      "Path": "crates/ocg-core/src/custom_http.rs",
+      "SHA256": "1EA977A4167903ABCEF979C4B50F0C29CBD42AF54E19141A5452904AF70E0C86"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard.rs",
+      "SHA256": "5047424652D5EBCAFB037CEBF6E4EAC76CB30580B51D7A0874DFBBD8ED709000"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/account_model_test.rs",
+      "SHA256": "8ECB1FF07F3C75B6DA1538E8392A874F24B8A5681F8A648CB4CCD691500017BE"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/custom_discovery.rs",
+      "SHA256": "34D6D9CBA536F2166366D79385662C3D553550004F97B324C9B5BF7B66ED33CE"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/dynamic_providers/tests.rs",
+      "SHA256": "236D783E26EF3E85DB7905C35BF920D52C4929AAC046F1476C22A90EE254D8A6"
+    },
+    {
+      "Path": "crates/ocg-core/src/dynamic.rs",
+      "SHA256": "4C9F8703CA6BE37FF8F407B2D98864E780E34DD578F9D89395B448EA7F74A336"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/attempt.rs",
+      "SHA256": "F731F0C7CBBD41C647E2A9AE66022E52F8FF6E836E78A5B9EDB2E42FBC070CBF"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/account_transfer/portable.rs",
+      "SHA256": "51A2090FE9B706139418358D21B0E24720981F8012FBDD235AC70DCEC87DD22E"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/account_transfer/new_model.rs",
+      "SHA256": "0D8F4290AB50C03333CDF44A83340723CC4E1E41BCC3E64F56EA0CB3A25501AC"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/account_transfer/tests.rs",
+      "SHA256": "E678DB981E406D14A3DF75E9B2711CCA5E9D84A1ADBC58967E7A1DCFD4B87EB0"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/attempt_pricing/tests.rs",
+      "SHA256": "B7505DF0BBCD3BE7525C0D5674BF863ED3FDC690C7C8401A041C9F85BE8299F0"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/debug_capture.rs",
+      "SHA256": "2FD5D695340490446190B4F07290D97AE696DD53DD98CBA99FA8A6B781777872"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/diagnostics/tests.rs",
+      "SHA256": "CE2C0FB8CE987E33488E9FD812CECD46B6561B0DCA26A09F287D6865D2A969F2"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/forwarder/sse_usage/tests.rs",
+      "SHA256": "B50BEA17D9A92FA8743E8359B56120C21F948F331A869F9D09F48FC77DD8D54C"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/forwarder/settlement.rs",
+      "SHA256": "A9119EA2BC249FD8280B3F2E49EA7B8238B1A1D4DC638D14054806FD5DAF524E"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/recovery/context/tests.rs",
+      "SHA256": "113A02A19E72ECBA37431682414EC050A31C11AD4F4D604825D4FE8765ED5D4D"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/cpa_ingress.rs",
+      "SHA256": "FDD8EF5071C55058E87FAA36B57639FADAE6A7847A3E5CD6F35E6A00A4E6B7E3"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/failure.rs",
+      "SHA256": "F64D209DEB5499F7473E8174DD6B80D97BD7217036F25AEE6D9311D815C6D626"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/forwarder/attempt_http.rs",
+      "SHA256": "EF6A617705870CF36CD9D6F822E1B13F648BE809A2E63C01BFA97570B6CA09C3"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/forwarder/live_send.rs",
+      "SHA256": "A8F45A6733A9DD4B62044CB693C0B0C368FA6BFC756F4FA7C2834AF27ECEB312"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/forwarder/response_class.rs",
+      "SHA256": "DE9D03459ABDAA2ABFBD73617C7D50E731F0875F6D69BCA22B902298B60B1670"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/accounts.rs",
+      "SHA256": "59F6B6B3386214EF778210B4AE5F02B7562888546A83C684F9175A78D4CE3784"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_v3/account_model_test/tests.rs",
+      "SHA256": "44D6678297C413F00529E68B447A5FF97F2455F7A494823FD3C9FF79D29D50FD"
+    },
+    {
+      "Path": "crates/ocg-core/src/dsh_application_host.rs",
+      "SHA256": "9862B39C1B06DEB715A7990AA300E1D16837B6F174D4AB330C4E47C05FEC2623"
+    },
+    {
+      "Path": "crates/ocg-core/src/dynamic/tests.rs",
+      "SHA256": "3E211E586937F20C0973114581F51BCB7468896AA09F457E6251BFCA2DD37C22"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/provider_adapter/tests.rs",
+      "SHA256": "4AD82B47FEA40CD78238FACE9460D2AB2D3613947131B3FB40ED0978539E2052"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/classify.rs",
+      "SHA256": "74074D0708411A503AAFB6BE8AA233AE06FFD0C12678A56CAAD103FB09FC82F2"
+    },
+    {
+      "Path": "crates/ocg-core/src/dashboard_session/tests.rs",
+      "SHA256": "40D896BA064C4A3CDDD0763E9760D70E5103E09E1F6CC1CE7BAC26CA1872091F"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/executor.rs",
+      "SHA256": "F66433F8E20321022F02BA2C978429A9584BFECE8974F54EF566725E13EAE9B9"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/forwarder/attempt_record.rs",
+      "SHA256": "A17E43C4FC52D70B65D434AF4D6D90DDDF0F1C82A8D0039DB27C47528F579AAA"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/forwarder/identity.rs",
+      "SHA256": "5CC24CEDF4DC350D7FBBC71109CA00B93DF6EE6CDA6FB75A14BB7B742D46063E"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/cpa_ingress/tests.rs",
+      "SHA256": "56CA0AAE41A649FC80F9CF66B10D1136E0284961DC9578A66601E6BFB5F2528F"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/debug_capture/tests.rs",
+      "SHA256": "23F5186B544282E87D01CC9FDD2BCAB0951234D38D0350292CB740BB18F4F51C"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/forwarder/identity/tests.rs",
+      "SHA256": "185118A5B1CBF9455E57CAB9B3EEB7928B7485CFED8471E65867D3905FBF67F9"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/failure/decode.rs",
+      "SHA256": "132DB84D44EAC546C311690EE22E6881D7190F3A81559331E218A4D073755846"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/failure/tests.rs",
+      "SHA256": "B16AC94BCF19E4BBC8522CF3487910A016032EB4ABF6CFF54DF19D54955BC7FF"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/forwarder/attempt_http/tests.rs",
+      "SHA256": "8340806E7AC884A6E3F0E809B134292227881B1DF85916FB7C2711A48F66F5D1"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/forwarder/live_send/tests.rs",
+      "SHA256": "3811435F5B21EED52669EC5D90E687CEB2867B0C2A15AD109049234DE710CF91"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/forwarder/settlement/tests.rs",
+      "SHA256": "1072A10B98A79F8DBB534BC4C1D06E1F2A22BB0A9091CDF6E199F352E7A7C66C"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/classify/tests.rs",
+      "SHA256": "D43CF3EE7C46B30320AA1C91D810F9C5C1539D6AEEAED6A92D7E4D30BC34491B"
+    },
+    {
+      "Path": "crates/ocg-core/src/gateway/executor/tests.rs",
+      "SHA256": "57A77C57D0ABC85D6AB9F4DF27BFFA131588E61B1E5C24C6C702E24C80101992"
+    }
+  ]
+}

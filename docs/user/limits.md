@@ -2,6 +2,8 @@
 
 # Limits
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
 This page lists explicit errors and unimplemented surfaces. The preferred and
 supported protocol matrix lives in
 [Protocol conversion](protocol-conversion.md).

@@ -33,7 +33,7 @@ impl ServeLock {
             Ok(()) => Ok(Self { _file: file }),
             Err(error) if lock_is_contended(&error) => {
                 bail!(
-                    "another ocg-manager-cli serve process holds {}. Stop that process, or use api --endpoint against its listener. This command did not open the database.",
+                    "another ocg serve process holds {}. Stop that process, or use api --endpoint against its listener. This command did not open the database.",
                     path.display()
                 )
             }

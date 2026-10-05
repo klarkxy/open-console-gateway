@@ -2,7 +2,11 @@
 
 # 安装与首次启动
 
-安装本地 Gateway，启动它，用完就把浏览器标签页关掉。剩下的，主要是让操作系统相信小作坊开发者也是真实存在的。
+> 历史范围：`open-console-gateway` 这一代已发布的桌面安装包。不是当前的 `ocg` 包。本页不定义这一代的安装器，也不记录测试或已完成的迁移。
+
+这一代是无界面 `ocg` CLI（Windows 上为 `ocg.exe`，Linux 与 macOS 上为 `ocg`）。`ocg3` 与 `open-console-gateway` 是同一项目的两个代际分支，产品名仍是 Open Console Gateway。执行底座是该进程拥有的一个本地 CPA。自定义 HTTP 供应商仍是该本地 CPA 上的供应商路由。默认数据根是 `~/.ocg3`。启动不打开、不复制、不移动、不删除、也不接管 `~/.ocg-mgr` 或 `~/.ocg-mgr-cli`。GPUI/Ely GUI 推迟。完整 CLI 验收尚未完成。命令见 [CLI 指南](cli.zh-CN.md)。设计见[架构](../architecture.zh-CN.md)。
+
+下面的 NSIS、DMG、deb 和 AppImage 步骤安装的是那一代的桌面应用及其浏览器面板。它的数据目录是 `~/.ocg-mgr`（Windows 为 `%USERPROFILE%\.ocg-mgr`）。该目录不是 `~/.ocg3`。除非在卸载确认页选择 **删除应用数据**，这些步骤不移动也不删除已有数据目录。该应用的静默卸载和应用内更新从不删除它。
 
 ## Windows 10/11 x64
 

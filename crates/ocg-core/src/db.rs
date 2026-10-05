@@ -49,6 +49,19 @@ pub struct Database {
     pub(crate) log_level: crate::runtime_log::Level,
 }
 
+impl Database {
+    /// Persist one accepted official usage body on this connection.
+    ///
+    /// Caller holds `self.conn` with no transaction open. The policy helper
+    /// begins its immediate transaction on that same connection.
+    pub(crate) fn apply_official_plan(
+        &self,
+        commit: &crate::cpa_quota::OfficialPlanCommit,
+    ) -> std::result::Result<crate::cpa_policy::QuotaApply, crate::cpa_policy::PolicyFault> {
+        crate::cpa_quota::apply_sharing(&self.conn, commit)
+    }
+}
+
 pub(crate) mod account_store;
 pub(crate) mod billing;
 mod catalog_edit;
@@ -61,6 +74,7 @@ pub(crate) mod dynamic_store;
 pub(crate) mod http_routes;
 pub(crate) mod identity;
 pub(crate) mod identity_v57;
+pub(crate) mod native_binding;
 mod official_api;
 mod open_guard;
 pub(crate) mod platform;
@@ -615,6 +629,7 @@ pub(crate) use contract_store::invalidate_probe_evidence_on;
 use contract_store::*;
 
 pub(super) mod lifecycle;
+pub(crate) use lifecycle::probe_snapshot_ciphertext;
 pub use lifecycle::{peek_app_config, peek_schema_version};
 
 mod migrations;
@@ -800,7 +815,7 @@ pub(crate) fn insert_account_columns(
 
 mod access_key_store;
 mod import_store;
-mod log_store;
+pub(crate) mod log_store;
 mod usage_store;
 // Re-exported only so the sibling test module can reach it through `super::*`;
 // nothing in the non-test build resolves this binding.

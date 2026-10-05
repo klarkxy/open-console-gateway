@@ -2,6 +2,8 @@
 
 # Gateway 行为
 
+> 适用范围：本页保留当前实现或 OCG2 已发布版本的操作参考，不定义 OCG3 新架构。CPA 底层迁移目标见[架构](../architecture.zh-CN.md)；其中界面步骤不适用于当前 CLI 阶段。
+
 Open Console Gateway 在 `127.0.0.1:9042` 只暴露一个 HTTP 入口，同时讲四种客户端协议，并把请求转给 OpenCode Go、Zen Free、Command Code GOAT、MiniMax CN、Kimi Code CN、Ollama Cloud 或 Custom API 中胜出的合格账号卡。
 
 Ollama Cloud 是可路由的密封固定源 Plan（`https://ollama.com`）：只走 Chat Completions，Bearer。已保存或原始目录 ID 不会进入 `GET /v1/models`，也不会加入 Go Alias 注册表。实际上游 429 走通用冷却与回退。

@@ -14,8 +14,8 @@ use crate::custom;
 use crate::custom::validate_custom_endpoint_url;
 use crate::dynamic::{DynamicProviderRuntime, collides_with_known_id, validate_definition};
 use crate::models::{
-    Account as ModelAccount, AccountCustomConfig, AccountCustomConfigInput, AccountModelCapability,
-    AccountType, NEW_READY_KEY_ACCOUNT_ENABLED, normalize_account_notes,
+    Account as ModelAccount, AccountCustomConfigInput, AccountType, NEW_READY_KEY_ACCOUNT_ENABLED,
+    normalize_account_notes,
 };
 use crate::redaction::redact_known_secret;
 use crate::state::CoreState;
@@ -99,54 +99,34 @@ pub(super) async fn discover_models(
     }))
 }
 
+/// Draft endpoint check. A body with no saved account, credential, or CAS cannot
+/// open a provider connection. Callers save the destination and use its model test.
 pub(super) async fn test_provider(
     State(state): State<CoreState>,
     body: Bytes,
 ) -> Result<Json<ProviderDefinitionTestResponse>, V3ApiError> {
     let input = parse_json::<ProviderDefinitionTestRequest>(&body)?;
-    let captured = ControlRevision::from_state(&state);
-    let config = state.config();
-    let endpoint = validate_custom_endpoint_url(&input.endpoint_url)
-        .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
     let auth_kind = DynamicAuthKind::from(input.auth_kind);
     let key = required_probe_key(&state, auth_kind, input.key.as_deref())?;
-    let public_model = ocg_domain::provider::validate_custom_model_id(&input.public_model)
-        .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
-    let upstream_model = ocg_domain::provider::validate_custom_model_id(&input.upstream_model)
-        .map_err(|error| V3ApiError::invalid_request_at(&state, error.to_string()))?;
-    let custom_config = AccountCustomConfig {
-        account_id: String::new(),
-        endpoint_url: endpoint,
-        upstream_protocol: input.upstream_protocol.into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-    };
-    let capability = AccountModelCapability {
-        account_id: String::new(),
-        public_model,
-        protocol: input.upstream_protocol.into(),
-        verified_at: None,
-        source: "manual".into(),
-        upstream_model,
-    };
-    let result = custom::probe_connection_with_auth(
-        &config,
-        &custom_config,
-        &capability,
-        auth_kind.upstream_auth(),
-        &key,
-    )
-    .await;
-    let (ok, error) = match result {
-        Ok(()) => (true, None),
-        Err(failure) => (false, Some(redact_known_secret(&failure.message, &key))),
-    };
-    Ok(Json(ProviderDefinitionTestResponse {
-        ok,
-        error,
-        revision: captured.revision,
-        process_generation: captured.process_generation,
-    }))
+    let endpoint_error = validate_custom_endpoint_url(&input.endpoint_url)
+        .err()
+        .map(|error| error.to_string());
+    let public_error = ocg_domain::provider::validate_custom_model_id(&input.public_model)
+        .err()
+        .map(|error| error.to_string());
+    let upstream_error = ocg_domain::provider::validate_custom_model_id(&input.upstream_model)
+        .err()
+        .map(|error| error.to_string());
+    if let Some(message) = endpoint_error.or(public_error).or(upstream_error) {
+        return Err(V3ApiError::invalid_request_at(
+            &state,
+            redact_known_secret(&message, &key),
+        ));
+    }
+    Err(V3ApiError::precondition_failed_at(
+        &state,
+        "save the destination and credential, then use its model test",
+    ))
 }
 
 fn create_locked(
@@ -564,3 +544,6 @@ fn to_wire(
         process_generation,
     }
 }
+
+#[cfg(test)]
+mod tests;

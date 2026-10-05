@@ -2,6 +2,8 @@
 
 # Routing, Cost, And Failover
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
 A request resolves model identity from the saved destination catalog, then selects credentials in their global order. Supplier, credential and model enablement, protocol selection, model scope and explicit endpoint grants all constrain sending. Invalid configuration fails explicitly; there is no fallback to reconstructed legacy accounts. Each logical request freezes model mappings and transport configuration, while every send rechecks current authorization, Key version, cooldown and any persisted quota-recovery state. Changes invalidate an old candidate rather than silently redirecting it.
 
 On **Accounts**, card order followed by Key order inside each card is the saved routing priority. Drag a card to move its Keys together, or move a Key within its card or to another card of the same supplier. Create another card for that supplier to arrange `A1 → B1 → A2`; both A cards use the same saved supplier configuration. Adjacent cards remain separate. Priority, round-robin and sticky routing retain their existing policies.

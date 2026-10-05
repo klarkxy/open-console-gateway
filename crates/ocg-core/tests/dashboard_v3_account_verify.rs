@@ -521,6 +521,7 @@ async fn dashboard_v3_v2_login_cookie_authorizes_account_verify() {
         .next()
         .unwrap()
         .to_string();
+    harness.ensure_owned_plane().await;
     let verified = harness
         .client
         .post(format!(
@@ -552,6 +553,7 @@ async fn dashboard_v3_account_verify_cas_rejects_missing_malformed_and_stale_bef
         &[CUSTOM_MODEL],
     )
     .await;
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
     let path = verify_path(&custom_id);
 
@@ -605,6 +607,7 @@ async fn go_and_zen_verify_are_not_required_no_ops_without_a_revision_bump() {
     let harness = start_loopback("verify-not-required").await;
     let origin = start_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     let go_id = create_go_account(&harness).await;
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
 
     let (status, go) = send_json(
@@ -651,6 +654,7 @@ async fn unknown_offerings_fail_closed_without_touching_goat_or_upstream() {
         )
         .unwrap();
     }
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
 
     let (status, unknown) = send_json(
@@ -697,6 +701,7 @@ async fn goat_verify_is_not_applicable_and_never_fetches_the_public_catalog() {
     )
     .unwrap();
     let id = create_goat_account(&harness).await;
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
 
     let (status, response) = send_json(
@@ -1168,6 +1173,7 @@ async fn custom_verify_success_persists_verified_without_flipping_enable_and_bum
         &[CUSTOM_MODEL, CUSTOM_MODEL_2],
     )
     .await;
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
 
     let (status, body) = send_json(
@@ -1240,6 +1246,7 @@ async fn custom_verify_x_api_key_does_not_forward_dashboard_auth() {
         &[CUSTOM_MODEL],
     )
     .await;
+    harness.ensure_owned_plane().await;
     let (status, body) = send_json(
         &harness,
         Method::POST,
@@ -1290,6 +1297,7 @@ async fn custom_verify_probes_only_the_single_declared_protocol() {
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
     let id = created["account"]["id"].as_str().unwrap().to_string();
+    harness.ensure_owned_plane().await;
 
     let (status, body) = send_json(
         &harness,
@@ -1334,6 +1342,7 @@ async fn custom_verify_failure_401_429_redirect_and_oversize_persist_failed_with
         &[CUSTOM_MODEL],
     )
     .await;
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
     let (status, body) = send_json(
         &harness,
@@ -1378,6 +1387,7 @@ async fn custom_verify_failure_401_429_redirect_and_oversize_persist_failed_with
         &[CUSTOM_MODEL],
     )
     .await;
+    harness.reapply_owned_plane().await;
     let (status, body) = send_json(
         &harness,
         Method::POST,
@@ -1411,6 +1421,7 @@ async fn custom_verify_failure_401_429_redirect_and_oversize_persist_failed_with
         &[CUSTOM_MODEL],
     )
     .await;
+    harness.reapply_owned_plane().await;
     let (status, body) = send_json(
         &harness,
         Method::POST,
@@ -1438,6 +1449,7 @@ async fn custom_verify_failure_401_429_redirect_and_oversize_persist_failed_with
         &[CUSTOM_MODEL],
     )
     .await;
+    harness.reapply_owned_plane().await;
     let (status, body) = send_json(
         &harness,
         Method::POST,
@@ -1479,6 +1491,7 @@ async fn stale_after_network_does_not_commit_or_bump() {
         &[CUSTOM_MODEL],
     )
     .await;
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
     let verify = tokio::spawn({
         let client = harness.client.clone();
@@ -1536,6 +1549,7 @@ async fn concurrent_custom_verifies_certify_once() {
         &[CUSTOM_MODEL],
     )
     .await;
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
     let body = cas(&harness, json!({}));
     let spawn_verify = || {
@@ -1619,6 +1633,7 @@ async fn retired_v2_account_verify_does_not_mutate() {
         .await
         .unwrap();
     V3Harness::assert_v2_removed(v2_custom.status(), &v2_custom.json().await.unwrap());
+    harness.ensure_owned_plane().await;
     let (status, v3_custom) = send_json(
         &harness,
         Method::POST,
@@ -1676,6 +1691,7 @@ async fn custom_verify_debug_seam_is_process_generation_keyed_and_loopback_only(
             })
         },
     );
+    first.ensure_owned_plane().await;
 
     let (status, first_body) = send_json(
         &first,
@@ -1695,6 +1711,7 @@ async fn custom_verify_debug_seam_is_process_generation_keyed_and_loopback_only(
         Some("first-harness-probe")
     );
 
+    second.ensure_owned_plane().await;
     let (status, second_body) = send_json(
         &second,
         Method::POST,

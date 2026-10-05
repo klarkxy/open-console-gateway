@@ -1,0 +1,63 @@
+diff --git a/diff-a/internal/runtime/executor/codex_executor_auth.go b/diff-b/internal/runtime/executor/codex_executor_auth.go
+index 1111111..2222222 100644
+--- a/diff-a/internal/runtime/executor/codex_executor_auth.go
++++ b/diff-b/internal/runtime/executor/codex_executor_auth.go
+@@ -32,6 +32,20 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
+ 		return auth, nil
+ 	}
+ 	svc := codexauth.NewCodexAuthWithProxyURL(e.cfg, auth.ProxyURL)
++	tokenRaw, baseRaw := "", ""
++	if auth.Metadata != nil {
++		tokenRaw, _ = auth.Metadata["token_url"].(string)
++		baseRaw, _ = auth.Metadata["base_url"].(string)
++	}
++	if strings.TrimSpace(tokenRaw) != "" {
++		svc.SetLoopbackTokenURL(tokenRaw)
++	}
++	if loopbackHTTPEndpoint(baseRaw) && !loopbackHTTPEndpoint(tokenRaw) {
++		return nil, statusErr{code: 401, msg: "blocked unknown token host"}
++	}
++	if strings.TrimSpace(tokenRaw) != "" && !loopbackHTTPEndpoint(tokenRaw) {
++		return nil, statusErr{code: 401, msg: "blocked unknown token host"}
++	}
+ 	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
+ 	if err != nil {
+ 		return nil, err
+@@ -86,6 +100,11 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
+ 	if a.Attributes != nil {
+ 		apiKey = a.Attributes["api_key"]
+ 		baseURL = a.Attributes["base_url"]
+ 	}
++	if strings.TrimSpace(baseURL) == "" && a.Metadata != nil {
++		if value, _ := a.Metadata["base_url"].(string); strings.TrimSpace(value) != "" {
++			baseURL = strings.TrimSpace(value)
++		}
++	}
+ 	if apiKey == "" && a.Metadata != nil {
+ 		if v, ok := a.Metadata["access_token"].(string); ok {
+@@ -95,6 +114,25 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
+ 	return
+ }
+ 
++func loopbackHTTPEndpoint(raw string) bool {
++	raw = strings.TrimSpace(raw)
++	if !strings.HasPrefix(raw, "http://") && !strings.HasPrefix(raw, "https://") {
++		return false
++	}
++	rest := raw
++	if i := strings.Index(rest, "://"); i >= 0 {
++		rest = rest[i+3:]
++	}
++	host := rest
++	if i := strings.IndexAny(host, "/?#"); i >= 0 {
++		host = host[:i]
++	}
++	if i := strings.Index(host, ":"); i >= 0 {
++		host = host[:i]
++	}
++	return host == "127.0.0.1" || host == "localhost"
++}
++
+ func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.CodexKey {
+ 	if e == nil {
+ 		return nil

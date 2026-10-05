@@ -25,7 +25,9 @@ pub(super) async fn put_settings(
     body: Bytes,
 ) -> Result<Json<MutationAck>, V3ApiError> {
     let update = parse_mutation_json::<SettingsUpdate>(&body)?;
-    update_settings(&state, update).await.map(Json)
+    let ack = update_settings(&state, update).await?;
+    crate::cpa_execution::note_product_apply(&state).await;
+    Ok(Json(ack))
 }
 
 /// Validates, then commits one settings patch. Bumps the unified revision

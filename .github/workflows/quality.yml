@@ -66,5 +66,5 @@ jobs:
           workspaces: ". -> target"
           cache-on-failure: true
           save-if: ${{ github.event_name != 'pull_request' }}
-      - run: cargo test -p ocg-manager-cli --locked
-      - run: cargo clippy -p ocg-manager-cli --all-targets --locked -- -D warnings
+      - run: cargo test -p ocg-cli --locked
+      - run: cargo clippy -p ocg-cli --all-targets --locked -- -D warnings

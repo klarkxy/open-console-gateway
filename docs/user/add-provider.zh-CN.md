@@ -2,6 +2,8 @@
 
 # 新增供应商
 
+> 适用范围：本页保留当前实现或 OCG2 已发布版本的操作参考，不定义 OCG3 新架构。CPA 底层迁移目标见[架构](../architecture.zh-CN.md)；其中界面步骤不适用于当前 CLI 阶段。
+
 当你希望 Open Console Gateway 把请求路由到另一个上游服务时，先判断走哪条路径：
 
 | 目标 | 路径 | 是否修改仓库 |
@@ -91,7 +93,7 @@ OCG 根据协议派生鉴权。它不会同时发送两类鉴权头，不会在 
 
 提交贡献前，请写清上游来源、鉴权方式、目录来源、支持的模型/协议组合、流式行为、错误语义、额度/价格来源，以及不产生费用的验证方案。在完整路由与控制面路径真正存在前，让新家族保持 fail closed。
 
-仓库架构细节继续阅读[扩展 Open Console Gateway](../maintainer/extending.zh-CN.md)与[运行时不变量](../maintainer/runtime-invariants.zh-CN.md)。
+仓库架构细节继续阅读[OCG3 架构](../architecture.zh-CN.md)与[迁移边界](../maintainer/cpa-migration.zh-CN.md)。
 
 ---
 

@@ -414,12 +414,11 @@ async fn dashboard_v3_stopped_gateway_status_redacts_account_secret_from_last_er
         )
         .unwrap();
 
-    let installed = harness.state.gateway.lock().take();
+    let parked = harness.state.gateway.lock().take();
     assert!(
         harness.state.gateway.lock().is_none(),
         "gateway status lastError is only surfaced when the listener slot is empty"
     );
-    drop(installed);
 
     let (status, body) = harness
         .get_json(&format!("{}/gateway/status", harness.v3_base))
@@ -446,6 +445,7 @@ async fn dashboard_v3_stopped_gateway_status_redacts_account_secret_from_last_er
     assert_secret_free(&body, &[ACCOUNT_SECRET, primary.as_str()]);
     assert_snapshot_tokens(&body, &harness);
 
+    *harness.state.gateway.lock() = parked;
     harness.stop();
 }
 

@@ -2,14 +2,11 @@
 
 # Docker
 
-Open Console Gateway runs headlessly in Docker, serving the same dashboard and gateway
-on port `9042`. Pull the image from GHCR anonymously — it ships `linux/amd64`
-and `linux/arm64`, and Docker picks the right variant. Save the release's
-`compose.example.yaml` as `compose.yaml`, add `.env` if needed, and run the
-commands below; they pin one release through a `VERSION` shell variable, and
-the pinned value matches the `compose.example.yaml` shipped with that release
-— substitute the latest release when you run them. You can also use a
-checkout of the matching tag.
+> Historical scope: published Docker layout of the `open-console-gateway` generation. Not the current `ocg` package. This page does not define a Docker workflow for this generation, and it does not record a test or a completed migration.
+
+This generation is the headless `ocg` CLI (`ocg.exe` on Windows, `ocg` on Linux and macOS). `ocg3` and `open-console-gateway` are two generation branches of one project; the product name stays Open Console Gateway. Execution is one local CPA owned by that process. Custom HTTP providers remain provider routes on that local CPA. The default data root is `~/.ocg3`. A launch does not open, copy, move, delete, or adopt `~/.ocg-mgr` or `~/.ocg-mgr-cli`. The GPUI/Ely GUI is postponed. Whole CLI acceptance is pending. Commands are in the [CLI guide](cli.md). Design is in the [architecture](../architecture.md).
+
+The image names, profiles, and commands below are that published container. It served the dashboard and gateway on port `9042`. The GHCR images shipped `linux/amd64` and `linux/arm64`. The published instructions saved that release's `compose.example.yaml` as `compose.yaml`, added `.env` when needed, and pinned one release with a `VERSION` shell variable matching the `compose.example.yaml` shipped with that release. A checkout of the matching tag was the other published path. Those tags are not a current `ocg` package.
 
 ```bash
 VERSION=2.6.2
@@ -23,7 +20,7 @@ docker compose up -d --no-build
 docker compose ps
 ```
 
-Image tags move; decide how pinned you want to be.
+Image tags of that generation moved. The published advice was to decide how pinned to be.
 
 ## Choosing An Image
 
@@ -34,14 +31,14 @@ workflow use these image names.
 
 - The checkout's `compose.yaml` defaults to `latest`; the Release
   `compose.example.yaml` pins its matching full version.
-- For repeatable production deployments, set `OCG_IMAGE` in `.env` to a full
+- Repeatable deployments of that generation set `OCG_IMAGE` in `.env` to a full
   release tag such as `ghcr.io/klarkxy/opencode-go-mgr:<version>`.
 - Full-version and `sha-<commit>` tags identify one release and are intended
   not to move; `latest` does. Only a digest such as
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` is truly immutable.
-- To build the current checkout instead, set `OCG_IMAGE=ocg-manager:local`
-  and run `docker compose up -d --build`. `NPM_REGISTRY` and
-  `CARGO_REGISTRY` are build arguments for that source-build path only.
+- A source build of that generation set `OCG_IMAGE=ocg-manager:local`
+  and ran `docker compose up -d --build`. `NPM_REGISTRY` and
+  `CARGO_REGISTRY` were build arguments for that path only.
 
 | Variable | Scope | Meaning |
 | --- | --- | --- |
@@ -51,8 +48,6 @@ workflow use these image names.
 | `OCG_ADMIN_USERNAME` + `OCG_ADMIN_PASSWORD` | First start | Optional administrator bootstrap; both or neither. |
 | `OCG_CLIENT_ROOT_URL` | Runtime | Read-only external client root override. |
 | `OCG_MAX_REQUEST_BODY_BYTES` | Runtime | Maximum gateway JSON request body size in bytes; defaults to 64 MiB. |
-| `OCG_CPA_BASE_URL` | Compose CPA profile | Read-only CPA sibling URL; leave at `http://cpa:8317`. |
-| `CPA_MANAGEMENT_PASSWORD` | Compose CPA profile | CPA Management API password; keep only in the deployment's `.env`. |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` | Runtime | Standard proxy variables used by `Automatic (system / environment)` outbound proxy mode. |
 | `OCG_MANAGER_ENCRYPTION_KEY` | Runtime restore | Original explicit obfuscation key, when one was used. |
 | `NPM_REGISTRY` + `CARGO_REGISTRY` | Source build | Dependency registries used only by `--build`. |
@@ -60,11 +55,11 @@ workflow use these image names.
 Most deployments need only the main service. Add the browser sidecar only
 when you need managed onboarding or website login on a headless host.
 
-## Optional Local CPA
+## Previous-generation Compose CPA profile
 
-CPA is an optional **local** subscription-runtime sibling. It is off by
-default. Before enabling it, copy the included template next to your Compose
-file and set a distinct CPA inference key:
+The published Compose file had an optional `cpa` profile. It was off unless that profile was selected. It started a separate CPA container, image `eceasy/cli-proxy-api:v7.2.145`, not `latest`. OCG reached it at `http://cpa:8317` when `OCG_CPA_BASE_URL` was set to that origin. `CPA_MANAGEMENT_PASSWORD` was the management password for that container. That profile is not a product mode of this generation. Do not select it, and do not set a remote CPA URL. There is no `OCG_CPA_BASE_URL` switch.
+
+The published enable steps were:
 
 ```bash
 cp cpa-config.example.yaml cpa-config.yaml
@@ -74,23 +69,11 @@ docker compose --profile cpa up -d
 docker compose --profile cpa ps
 ```
 
-The fixed image is `eceasy/cli-proxy-api:v7.2.145`; it deliberately does not
-use `latest`. CPA's inference port `8317` is published only to the private
-`cpa-private` bridge, where OCG reaches `http://cpa:8317`. The only host ports
-are CPA's OAuth callback ports `1455`, `54545`, and `51121`, each bound to
-`127.0.0.1`. Do not add a public `8317` mapping, Docker socket mount, or a
-remote CPA URL.
+Inference port `8317` was published only on the private `cpa-private` bridge. The host ports were the OAuth callback ports `1455`, `54545`, and `51121`, each bound to `127.0.0.1`. The file did not publish `8317` on the host and did not mount the Docker socket.
 
-CPA keeps OAuth data in the `cpa-auth` volume at `/root/.cli-proxy-api`. OCG
-does not read or copy those files. Back up `cpa-auth` separately from
-`ocg-data` and `ocg-browser-profiles`; restoring it requires the matching CPA
-configuration and keys. `docker compose down` preserves all three named
-volumes, while `docker compose down -v` permanently deletes them.
+OAuth data for that profile lived in the `cpa-auth` volume at `/root/.cli-proxy-api`. OCG did not read or copy those files. `cpa-auth` is separate from `ocg-data` and `ocg-browser-profiles`. `docker compose down` kept the named volumes. `docker compose down -v` deleted them. This page does not activate or delete a stored volume. A saved base URL, management password, or inference key from that layout stays stored until an explicit migration. That migration is not implemented.
 
-Open **Extensions → CPA** after the container is running. Save the same CPA
-inference key from `cpa-config.yaml` and the Management password, run
-the application-level test, and perform OAuth inside CPA. The OCG container
-does not start, stop, upgrade, or health-check CPA on your behalf.
+The published dashboard step opened **Extensions → CPA**, saved the inference key from `cpa-config.yaml` and the management password, and ran the application-level test. The OCG container did not start, stop, upgrade, or health-check that CPA. That connection form is not a current step.
 
 ## Optional Remote Browser
 
@@ -198,14 +181,13 @@ port `9042`. Open `http://127.0.0.1:<OCG_PORT>/dashboard/` and sign in. Use
   sensitive. Configure log rotation on the Docker host if its defaults are not
   bounded.
 
-Routine operational checks:
+Published operational checks for that container, not for the `ocg` CLI:
 
 ```bash
 docker compose config --quiet
 docker compose ps
 docker compose logs --tail=100 -f ocg-manager
 docker compose --profile browser logs --tail=100 -f browser
-docker compose --profile cpa logs --tail=100 -f cpa
 curl --fail http://127.0.0.1:9042/dashboard/
 ```
 

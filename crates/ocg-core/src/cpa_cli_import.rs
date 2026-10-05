@@ -67,6 +67,18 @@ impl CliRoots {
         })
     }
 
+    /// Fresh directory for tests. Production import keeps `from_env`.
+    #[cfg(test)]
+    pub(crate) fn synthetic(root: PathBuf) -> Self {
+        Self {
+            home: root.clone(),
+            codex: root.join(".codex"),
+            claude: root.join(".claude"),
+            kimi: root.join(".kimi-code"),
+            grok: root.join(".grok"),
+        }
+    }
+
     fn source(&self, provider: CpaOAuthProvider) -> (&'static str, ImportResult<PathBuf>) {
         match provider {
             CpaOAuthProvider::Codex => ("Codex CLI", Ok(self.codex.join("auth.json"))),

@@ -20,6 +20,7 @@ async fn stalled_error_body_keeps_known_status_and_account_at_deadline() {
         },
     )
     .await;
+    h.ensure_owned_plane().await;
     let (status, _) = tokio::time::timeout(
         Duration::from_secs(5),
         protocol_call(h.port, "/v1/messages", "minimax-m2.7"),
@@ -49,6 +50,7 @@ async fn fallback_does_not_restart_the_non_stream_deadline() {
         },
     )
     .await;
+    h.ensure_owned_plane().await;
     let (status, _) = tokio::time::timeout(
         Duration::from_secs(5),
         protocol_call(h.port, "/v1/messages", "minimax-m2.7"),
@@ -93,6 +95,7 @@ async fn partial_stream_frames_do_not_extend_pre_output_deadline_or_leave_stream
         },
     )
     .await;
+    h.ensure_owned_plane().await;
     let (status, body) = tokio::time::timeout(
         Duration::from_secs(3),
         protocol_stream_call(h.port, "/v1/messages", "minimax-m2.7"),

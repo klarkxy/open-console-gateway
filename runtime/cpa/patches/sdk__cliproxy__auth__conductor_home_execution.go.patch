@@ -1,0 +1,53 @@
+diff --git a/diff-a/sdk/cliproxy/auth/conductor_home_execution.go b/diff-b/sdk/cliproxy/auth/conductor_home_execution.go
+index 545a3fe..abb7f69 100644
+--- a/diff-a/sdk/cliproxy/auth/conductor_home_execution.go
++++ b/diff-b/sdk/cliproxy/auth/conductor_home_execution.go
+@@ -12,6 +12,10 @@ import (
+ )
+ 
+ func (m *Manager) executeHome(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, countTokens bool) (cliproxyexecutor.Response, error) {
++	ctx = NoteOCGSourceFormat(ctx, opts.SourceFormat.String())
++	if !countTokens {
++		ctx = ensureRequestStop(ctx)
++	}
+ 	if unlockSession := m.lockHomeWebsocketSession(ctx, opts); unlockSession != nil {
+ 		defer unlockSession()
+ 	}
+@@ -228,14 +232,20 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
+ 				return effectiveAuth.Clone(), AccessTokenSHA256(effectiveAuth)
+ 			}
+ 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+-			executorCtx := execCtx
+-			if countTokens {
+-				executorCtx = withAccessTokenFingerprintObserver(execCtx, setEffectiveAuth)
+-			}
+ 			executor := executorForAuth(selection.Executor, preparedAuth)
+ 			execute := func() (cliproxyexecutor.Response, error) {
+ 				if countTokens {
+-					return executor.CountTokens(executorCtx, preparedAuth, execReq, execOpts)
++					var errGate error
++					execCtx, errGate = m.beforeGenerationSend(execCtx, preparedAuth, GenerationKindCount, execReq.Model, routeModel)
++					if errGate != nil {
++						return cliproxyexecutor.Response{}, errGate
++					}
++					return executor.CountTokens(withAccessTokenFingerprintObserver(execCtx, setEffectiveAuth), preparedAuth, execReq, execOpts)
++				}
++				var errGate error
++				execCtx, errGate = m.beforeGenerationSend(execCtx, preparedAuth, GenerationKindExecute, execReq.Model, routeModel)
++				if errGate != nil {
++					return cliproxyexecutor.Response{}, errGate
+ 				}
+ 				return executor.Execute(execCtx, preparedAuth, execReq, execOpts)
+ 			}
+@@ -273,6 +283,11 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
+ 			action, okAction := matchRequestScopedErrorAction(preparedAuth, errExecute, m.runtimeConfigSnapshot())
+ 			applyRequestScopedActionToResult(action, okAction, &result)
+ 			m.reportHomeResult(execCtx, result, preparedAuth)
++			if requestStopped(execCtx) {
++				releaseAttempt()
++				selection.End("attempt_stopped")
++				return cliproxyexecutor.Response{}, wrapRequestStopError(errExecute)
++			}
+ 			lastErr = errExecute
+ 			if okAction {
+ 				if isRequestScopedStop(action, okAction) {

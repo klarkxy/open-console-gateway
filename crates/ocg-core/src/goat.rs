@@ -8,7 +8,8 @@ use crate::http_client;
 use crate::models::AppConfig;
 use crate::official_protocols::parse_catalog_supported_endpoints_baseline;
 use crate::provider::{
-    COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_MODELS_PATH, ConnectionVerificationStatus,
+    COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_MODELS_PATH, COMMAND_CODE_PROVIDER_ID,
+    ConnectionVerificationStatus, OPENCODE_GO_BASE_URL, OPENCODE_PROVIDER_ID,
     parse_provider_models_catalog,
 };
 use std::collections::HashMap;
@@ -156,6 +157,27 @@ pub fn official_goat_models_url() -> String {
     )
 }
 
+fn official_opencode_go_models_url() -> String {
+    opencode_go_models_url_for_base(OPENCODE_GO_BASE_URL)
+}
+
+/// Rewrite only an official models URL. A debug catalog origin or any other
+/// built URL is returned unchanged, and `rewrite` is not called.
+fn select_catalog_outbound(
+    built: String,
+    official: &str,
+    rewrite: impl FnOnce(&str) -> Result<Option<String>, String>,
+) -> Result<String, GoatVerifyFailure> {
+    if built != official {
+        return Ok(built);
+    }
+    match rewrite(&built) {
+        Ok(Some(url)) => Ok(url),
+        Ok(None) => Ok(built),
+        Err(message) => Err(GoatVerifyFailure { message }),
+    }
+}
+
 pub fn goat_models_url_for_base(base: &str) -> String {
     format!(
         "{}{}",
@@ -252,7 +274,11 @@ pub async fn refresh_command_code_catalog_discovery(
     config: &AppConfig,
     base_url: &str,
 ) -> Result<ProviderCatalogDiscovery, GoatVerifyFailure> {
-    let url = goat_models_url_for_base(base_url);
+    let official = official_goat_models_url();
+    let built = goat_models_url_for_base(base_url);
+    let url = select_catalog_outbound(built, &official, |canonical| {
+        crate::cpa_test_endpoints::rewrite_url(COMMAND_CODE_PROVIDER_ID, canonical)
+    })?;
     probe_public_provider_catalog_at_url(config, &url, "Command Code").await
 }
 
@@ -356,7 +382,11 @@ pub async fn refresh_opencode_go_catalog_discovery(
     config: &AppConfig,
     base_url: &str,
 ) -> Result<ProviderCatalogDiscovery, GoatVerifyFailure> {
-    let url = opencode_go_models_url_for_base(base_url);
+    let official = official_opencode_go_models_url();
+    let built = opencode_go_models_url_for_base(base_url);
+    let url = select_catalog_outbound(built, &official, |canonical| {
+        crate::cpa_test_endpoints::rewrite_url(OPENCODE_PROVIDER_ID, canonical)
+    })?;
     probe_public_provider_catalog_at_url(config, &url, "OpenCode Go").await
 }
 
@@ -439,94 +469,4 @@ async fn read_limited_body(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn runtime(
-        enabled: bool,
-        verification_status: ConnectionVerificationStatus,
-    ) -> GoatAccountRuntime {
-        GoatAccountRuntime {
-            account_id: "goat-1".into(),
-            enabled,
-            verification_status,
-            setup_ready: true,
-            has_key: true,
-        }
-    }
-
-    #[test]
-    fn account_eligibility_does_not_reinterpret_the_provider_model_preset() {
-        let pending = runtime(true, ConnectionVerificationStatus::Pending);
-        assert!(pending.eligible());
-        assert!(pending.serves("any-model-in-the-provider-contract"));
-        assert_eq!(
-            pending.serves("any-model-in-the-provider-contract"),
-            pending.eligible()
-        );
-        let disabled = runtime(false, ConnectionVerificationStatus::Verified);
-        assert!(!disabled.eligible());
-        assert!(!disabled.serves("any-model-in-the-provider-contract"));
-        let mut missing_key = runtime(true, ConnectionVerificationStatus::Verified);
-        missing_key.has_key = false;
-        assert!(!missing_key.eligible());
-        assert_eq!(missing_key.serves("catalog-model"), missing_key.eligible());
-    }
-
-    #[test]
-    fn opencode_go_models_url_keeps_the_official_v1_segment() {
-        assert_eq!(
-            opencode_go_models_url_for_base("https://opencode.ai/zen/go"),
-            "https://opencode.ai/zen/go/v1/models"
-        );
-        assert_eq!(
-            opencode_go_models_url_for_base("http://127.0.0.1:9/provider/v1/"),
-            "http://127.0.0.1:9/provider/v1/models"
-        );
-    }
-
-    #[test]
-    fn goat_catalog_discovery_keeps_supported_endpoints_metadata() {
-        let discovery = parse_provider_catalog_discovery(
-            br#"{
-                "object":"list",
-                "data":[
-                    {"id":"xiaomi/mimo-v2.6-flash","supported_endpoints":["/chat/completions","/responses"]},
-                    {"id":"claude-sonnet-4-6","supported_endpoints":["/messages"]}
-                ]
-            }"#,
-            "Command Code",
-        )
-        .unwrap();
-        assert_eq!(
-            discovery.models,
-            vec![
-                "xiaomi/mimo-v2.6-flash".to_string(),
-                "claude-sonnet-4-6".to_string()
-            ]
-        );
-        assert_eq!(
-            discovery
-                .protocol_baseline
-                .protocols_for("command-code", "xiaomi/mimo-v2.6-flash"),
-            Some(vec![
-                crate::provider::UpstreamProtocolKind::ChatCompletions,
-                crate::provider::UpstreamProtocolKind::Responses
-            ])
-        );
-    }
-
-    #[test]
-    fn go_catalog_discovery_does_not_invent_protocol_lists() {
-        let discovery = parse_provider_catalog_discovery(
-            br#"{"object":"list","data":[{"id":"mimo-v2.6-flash"}]}"#,
-            "OpenCode Go",
-        )
-        .unwrap();
-        assert_eq!(discovery.models, vec!["mimo-v2.6-flash".to_string()]);
-        assert_eq!(
-            discovery.protocol_baseline,
-            OfficialProtocolBaseline::Unavailable
-        );
-    }
-}
+mod tests;

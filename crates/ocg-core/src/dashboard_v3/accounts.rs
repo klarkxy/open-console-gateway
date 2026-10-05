@@ -56,7 +56,9 @@ pub(super) async fn create_account(
     body: Bytes,
 ) -> Result<Json<AccountMutation>, V3ApiError> {
     let input = parse_mutation_json::<AccountCreate>(&body)?;
-    create_account_locked(&state, input).map(Json)
+    finish_product_save(&state, create_account_locked(&state, input))
+        .await
+        .map(Json)
 }
 
 pub(super) async fn create_managed_account(
@@ -64,7 +66,8 @@ pub(super) async fn create_managed_account(
     body: Bytes,
 ) -> Result<(StatusCode, Json<AccountMutation>), V3ApiError> {
     let input = parse_mutation_json::<AccountManagedCreate>(&body)?;
-    create_managed_locked(&state, input).map(|mutation| (StatusCode::CREATED, Json(mutation)))
+    let saved = finish_product_save(&state, create_managed_locked(&state, input)).await?;
+    Ok((StatusCode::CREATED, Json(saved)))
 }
 
 pub(super) async fn update_account(
@@ -73,7 +76,9 @@ pub(super) async fn update_account(
     body: Bytes,
 ) -> Result<Json<AccountMutation>, V3ApiError> {
     let input = parse_mutation_json::<AccountUpdate>(&body)?;
-    update_account_locked(&state, &id, input).map(Json)
+    finish_product_save(&state, update_account_locked(&state, &id, input))
+        .await
+        .map(Json)
 }
 
 pub(super) async fn delete_account(
@@ -82,9 +87,12 @@ pub(super) async fn delete_account(
     body: Bytes,
 ) -> Result<Json<AccountMutation>, V3ApiError> {
     let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
-    delete_account_locked(&state, &id, &expectation)
-        .await
-        .map(Json)
+    finish_product_save(
+        &state,
+        delete_account_locked(&state, &id, &expectation).await,
+    )
+    .await
+    .map(Json)
 }
 
 pub(super) async fn reorder_accounts(
@@ -92,7 +100,9 @@ pub(super) async fn reorder_accounts(
     body: Bytes,
 ) -> Result<Json<AccountList>, V3ApiError> {
     let input = parse_mutation_json::<AccountOrder>(&body)?;
-    reorder_accounts_locked(&state, input).map(Json)
+    finish_product_save(&state, reorder_accounts_locked(&state, input))
+        .await
+        .map(Json)
 }
 
 pub(super) async fn toggle_account(
@@ -101,7 +111,9 @@ pub(super) async fn toggle_account(
     body: Bytes,
 ) -> Result<Json<AccountMutation>, V3ApiError> {
     let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
-    toggle_account_locked(&state, &id, &expectation).map(Json)
+    finish_product_save(&state, toggle_account_locked(&state, &id, &expectation))
+        .await
+        .map(Json)
 }
 
 pub(super) async fn advance_account_setup(
@@ -110,7 +122,9 @@ pub(super) async fn advance_account_setup(
     body: Bytes,
 ) -> Result<Json<AccountMutation>, V3ApiError> {
     let input = parse_mutation_json::<AccountSetupUpdate>(&body)?;
-    advance_setup_locked(&state, &id, input).map(Json)
+    finish_product_save(&state, advance_setup_locked(&state, &id, input))
+        .await
+        .map(Json)
 }
 
 pub(super) async fn reset_account_cooldown(
@@ -119,7 +133,9 @@ pub(super) async fn reset_account_cooldown(
     body: Bytes,
 ) -> Result<Json<AccountMutation>, V3ApiError> {
     let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
-    reset_cooldown_locked(&state, &id, &expectation).map(Json)
+    finish_product_save(&state, reset_cooldown_locked(&state, &id, &expectation))
+        .await
+        .map(Json)
 }
 
 pub(super) async fn put_account_custom_config(
@@ -128,7 +144,9 @@ pub(super) async fn put_account_custom_config(
     body: Bytes,
 ) -> Result<Json<AccountMutation>, V3ApiError> {
     let input = parse_mutation_json::<AccountCustomConfigUpdate>(&body)?;
-    put_custom_config_locked(&state, &id, input).map(Json)
+    finish_product_save(&state, put_custom_config_locked(&state, &id, input))
+        .await
+        .map(Json)
 }
 
 pub(super) async fn put_account_model_capabilities(
@@ -137,7 +155,18 @@ pub(super) async fn put_account_model_capabilities(
     body: Bytes,
 ) -> Result<Json<AccountMutation>, V3ApiError> {
     let input = parse_mutation_json::<AccountModelCapabilitiesUpdate>(&body)?;
-    put_capabilities_locked(&state, &id, input).map(Json)
+    finish_product_save(&state, put_capabilities_locked(&state, &id, input))
+        .await
+        .map(Json)
+}
+
+async fn finish_product_save<T>(
+    state: &CoreState,
+    saved: Result<T, V3ApiError>,
+) -> Result<T, V3ApiError> {
+    let saved = saved?;
+    crate::cpa_execution::note_product_apply(state).await;
+    Ok(saved)
 }
 
 fn create_dynamic_account_locked(

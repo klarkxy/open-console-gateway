@@ -1,0 +1,17 @@
+diff --git a/diff-a/internal/runtime/executor/codex_websockets_execute.go b/diff-b/internal/runtime/executor/codex_websockets_execute.go
+index 6801c9d..ce3fd2d 100644
+--- a/diff-a/internal/runtime/executor/codex_websockets_execute.go
++++ b/diff-b/internal/runtime/executor/codex_websockets_execute.go
+@@ -150,7 +150,11 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
+ 		}
+ 		if respHS != nil && respHS.StatusCode == http.StatusUpgradeRequired {
+ 			if opts.ExecutionLifecycle == nil && !cliproxyexecutor.DownstreamWebsocket(ctx) {
+-				return e.CodexExecutor.Execute(ctx, auth, req, opts)
++				admitted, errGate := cliproxyauth.AdmitInternalGeneration(ctx, auth, req.Model)
++				if errGate != nil {
++					return resp, errGate
++				}
++				return e.CodexExecutor.Execute(admitted, auth, req, opts)
+ 			}
+ 			if cliproxyexecutor.UpstreamAttempted(dialCtx) {
+ 				cliproxyexecutor.MarkUpstreamAttempt(ctx)

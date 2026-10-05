@@ -14,12 +14,15 @@ use crate::gateway::protocol::CustomRouteSpec;
 use crate::kernel::protocol::ApiFormat;
 use crate::models::Account as ModelAccount;
 use crate::provider::{
-    ProviderAdapterKind, UpstreamProtocolKind, builtin_provider, is_cpa_external_integration,
-    plan_requires_custom_config,
+    CPA_ACCOUNT_ID, CPA_PROVIDER_ID, CredentialKind, ProviderAdapterKind, UpstreamProtocolKind,
+    builtin_provider, plan_requires_custom_config,
 };
 use crate::provider_contracts::{ContractScope, protocol_from_api, select_upstream_protocol};
 use crate::state::CoreState;
-use ocg_domain::destination::{AdapterKind, AuthScheme, CatalogModel, Destination};
+use ocg_domain::credential::credential_id_for_legacy_account;
+use ocg_domain::destination::{
+    AdapterKind, AuthScheme, CatalogModel, Credential, Destination, LegacyDestinationRef,
+};
 
 use super::accounts::load_model_account;
 use super::types::{AccountModelTestRequest, AccountModelTestResponse, AccountUpstreamProtocol};
@@ -38,17 +41,21 @@ pub(super) async fn test_account_model(
             state: &state,
             config: &prepared.config,
             account: &prepared.account,
-            adapter: prepared.adapter,
             public_model: &prepared.public_model,
-            model_id: &prepared.upstream_model,
             protocol: prepared.protocol,
-            custom_route: prepared.custom_route,
+            message: prepared.message.as_deref(),
+            max_tokens: prepared.max_tokens,
         },
     )
     .await
     {
         Ok(status) => (true, Some(status), None),
-        Err((status, message)) => (false, status, Some(message)),
+        Err(crate::protocol_probe::ProtocolRequestError::Provider { status, message }) => {
+            (false, status, Some(message))
+        }
+        Err(crate::protocol_probe::ProtocolRequestError::NotSent(message)) => {
+            return Err(V3ApiError::service_unavailable(&state, message));
+        }
     };
     Ok(Json(AccountModelTestResponse {
         account_id: prepared.account.id,
@@ -68,8 +75,30 @@ struct PreparedAccountModelTest {
     public_model: String,
     upstream_model: String,
     protocol: UpstreamProtocolKind,
-    /// Route chosen once here. Later transport construction consumes it.
+    /// Selected provider route. The validated hop does not send to this URL.
+    #[cfg_attr(not(test), allow(dead_code))]
     custom_route: Option<CustomRouteSpec>,
+    /// Supplied user text. Absent leaves the minimal verification text.
+    message: Option<String>,
+    /// Supplied completion bound. Absent leaves the minimal verification budget.
+    max_tokens: Option<u32>,
+}
+
+impl std::fmt::Debug for PreparedAccountModelTest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedAccountModelTest")
+            .field("account", &"[redacted]")
+            .field("config", &"[redacted]")
+            .field("message", &"[redacted]")
+            .field("adapter", &self.adapter)
+            .field("public_model", &self.public_model)
+            .field("upstream_model", &self.upstream_model)
+            .field("protocol", &self.protocol)
+            .field("custom_route", &self.custom_route)
+            .field("max_tokens", &self.max_tokens)
+            .finish()
+    }
 }
 
 fn prepare_account_model_test(
@@ -77,6 +106,16 @@ fn prepare_account_model_test(
     id: &str,
     input: AccountModelTestRequest,
 ) -> Result<PreparedAccountModelTest, V3ApiError> {
+    if input.max_tokens == Some(0) {
+        return Err(V3ApiError::invalid_request_at(
+            state,
+            "maxTokens must be positive",
+        ));
+    }
+    // A supplied message does not choose another account. Only supplied fields
+    // override the minimal verification body on the validated hop.
+    let message = input.message.clone();
+    let max_tokens = input.max_tokens;
     let account = load_model_account(state, id)?;
     if !account.setup_step.is_ready() {
         return Err(V3ApiError::precondition_failed_at(
@@ -90,20 +129,52 @@ fn prepare_account_model_test(
     }
     let projection = crate::destination_projection::load_runtime(&state.db.lock())
         .map_err(V3ApiError::internal)?;
-    let destination = projection
+    let credential = projection
         .credentials
         .iter()
-        .find(|credential| credential.legacy_account_id == id)
-        .and_then(|credential| {
-            projection
-                .destinations
-                .iter()
-                .find(|destination| destination.id == credential.destination_id)
-        });
+        .find(|credential| credential.legacy_account_id == id);
+    let destination = credential.and_then(|credential| {
+        projection
+            .destinations
+            .iter()
+            .find(|destination| destination.id == credential.destination_id)
+    });
     if let Some(destination) = destination.filter(|destination| {
         destination.adapter == AdapterKind::Http && !destination.capabilities.observer
     }) {
-        return prepare_http_destination_model_test(state, account, destination, model_id);
+        return prepare_http_destination_model_test(
+            state,
+            account,
+            destination,
+            model_id,
+            message,
+            max_tokens,
+        );
+    }
+    if let Some(destination) =
+        destination.filter(|destination| owned_native_destination(destination))
+    {
+        let credential = credential.expect("owned destination was found from this credential");
+        if !owned_native_credential(&account, credential, destination) {
+            return Err(V3ApiError::precondition_failed_at(
+                state,
+                "owned native destination credential is not the selected binding",
+            ));
+        }
+        return prepare_owned_native_model_test(
+            state,
+            account,
+            destination,
+            model_id,
+            message,
+            max_tokens,
+        );
+    }
+    if dedicated_cpa_catalog(&account, destination) {
+        return Err(V3ApiError::precondition_failed_at(
+            state,
+            RETIRED_CPA_MODEL_TEST,
+        ));
     }
     let plan = builtin_provider(&account.provider_id)
         .ok_or_else(|| V3ApiError::invalid_request_at(state, "unknown provider offering"))?;
@@ -128,11 +199,7 @@ fn prepare_account_model_test(
             "model is not routable for this provider",
         ));
     }
-    let client = if is_cpa_external_integration(&account.provider_id) {
-        ApiFormat::ChatCompletions
-    } else {
-        ApiFormat::Gemini
-    };
+    let client = ApiFormat::Gemini;
     let selected = select_upstream_protocol(contract, client, model_id)
         .map_err(|error| V3ApiError::invalid_request_at(state, error.message))?;
     let protocol = protocol_from_api(selected).ok_or_else(|| {
@@ -147,6 +214,8 @@ fn prepare_account_model_test(
         upstream_model: model_id.to_string(),
         protocol,
         custom_route: None,
+        message,
+        max_tokens,
     })
 }
 
@@ -155,6 +224,8 @@ fn prepare_http_destination_model_test(
     account: ModelAccount,
     destination: &Destination,
     model_id: &str,
+    message: Option<String>,
+    max_tokens: Option<u32>,
 ) -> Result<PreparedAccountModelTest, V3ApiError> {
     let mapping = destination
         .catalog
@@ -186,7 +257,95 @@ fn prepare_http_destination_model_test(
                 AuthScheme::None => ocg_domain::dynamic::DynamicAuthKind::None,
             },
         }),
+        message,
+        max_tokens,
     })
+}
+
+const RETIRED_CPA_MODEL_TEST: &str = "dedicated CPA catalog is retired and is not routable";
+
+fn owned_native_destination(destination: &Destination) -> bool {
+    destination.adapter == AdapterKind::Cpa
+        && destination.auth_scheme == AuthScheme::None
+        && !destination.capabilities.observer
+        && !destination.capabilities.external_integration
+        && destination.id == crate::db::native_binding::owned_destination_id()
+        && matches!(
+            &destination.legacy,
+            LegacyDestinationRef::Builtin(id)
+                if id == crate::db::native_binding::OWNED_NATIVE_LEGACY_ID
+        )
+}
+
+fn owned_native_credential(
+    account: &ModelAccount,
+    credential: &Credential,
+    destination: &Destination,
+) -> bool {
+    account.id != CPA_ACCOUNT_ID
+        && account.credential_kind == CredentialKind::None
+        && !credential.has_secret
+        && credential.legacy_account_id == account.id
+        && credential.destination_id == destination.id
+        && credential.id == credential_id_for_legacy_account(&account.id).to_string()
+}
+
+fn dedicated_cpa_catalog(account: &ModelAccount, destination: Option<&Destination>) -> bool {
+    account.id == CPA_ACCOUNT_ID
+        || account.provider_id == CPA_PROVIDER_ID
+        || destination.is_some_and(|destination| destination.adapter == AdapterKind::Cpa)
+}
+
+fn prepare_owned_native_model_test(
+    state: &CoreState,
+    account: ModelAccount,
+    destination: &Destination,
+    model_id: &str,
+    message: Option<String>,
+    max_tokens: Option<u32>,
+) -> Result<PreparedAccountModelTest, V3ApiError> {
+    let mapping = destination
+        .catalog
+        .iter()
+        .find(|model| model.public_model == model_id)
+        .ok_or_else(|| {
+            V3ApiError::invalid_request_at(state, "model is not declared for this account")
+        })?;
+    let protocol = selected_owned_native_protocol(mapping).ok_or_else(|| {
+        V3ApiError::invalid_request_at(state, "model is not routable for this provider")
+    })?;
+    Ok(PreparedAccountModelTest {
+        account,
+        config: state.config(),
+        adapter: ProviderAdapterKind::Cpa,
+        public_model: mapping.public_model.clone(),
+        upstream_model: mapping.upstream_model.clone(),
+        protocol,
+        // The existing validated hop does not send to a provider URL.
+        custom_route: None,
+        message,
+        max_tokens,
+    })
+}
+
+fn selected_owned_native_protocol(model: &CatalogModel) -> Option<UpstreamProtocolKind> {
+    let advertised: Vec<UpstreamProtocolKind> = model
+        .protocols
+        .iter()
+        .copied()
+        .filter(|protocol| {
+            matches!(
+                protocol,
+                UpstreamProtocolKind::ChatCompletions
+                    | UpstreamProtocolKind::Responses
+                    | UpstreamProtocolKind::Messages
+            )
+        })
+        .collect();
+    model
+        .preferred
+        .filter(|protocol| advertised.contains(protocol))
+        .or_else(|| advertised.first().copied())
 }
 
 fn selected_http_test_protocol(

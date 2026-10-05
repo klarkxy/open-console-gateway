@@ -1,0 +1,30 @@
+{
+  "commit": "6fecc6e5567912661654a4eaf9b8f5436facd1c2",
+  "version": "v8.0.10",
+  "files": {
+    "sdk/cliproxy/auth/conductor.go": "72b7f0c2886fe24dc9f6cb5b80a5d65428bafc4af761c5e949b1600319d60b80",
+    "sdk/cliproxy/auth/conductor_cooldown.go": "1726efbdb0d2ba64a3d08c421243d4c016c1f1e7634fb8d6df83f85cafdccf50",
+    "sdk/cliproxy/auth/conductor_execution.go": "a48bd341a62dff6190bf4878532ce80773423e5d0c3e87384ed231feba00368a",
+    "sdk/cliproxy/auth/conductor_home.go": "662a3898a202f5e7b21cc3a39c9db70c0dc6fd62b38adbc3c9674880e88155b6",
+    "sdk/cliproxy/auth/conductor_home_execution.go": "c342becdece7dadf7f22ad9a169103075099bd90ec27e41e783d2a8bb9415111",
+    "sdk/cliproxy/auth/conductor_stream.go": "144961139f738a0d8de75693700c34bb8d398150d21090fb34b159db5b122564",
+    "sdk/cliproxy/builder.go": "ddae07d2daa495a07261a5db8731b38bf7391207e6a1bd50268fc0a56358a530",
+    "sdk/cliproxy/service.go": "c94445ba46734fb33c36ae1cc4d78a6150761b07a3297208dfb9af86e15e4c9a",
+    "sdk/cliproxy/service_config.go": "a171eb23780590c3be6f68dcb7f2f33891a4b16f630cde6bbad117d75ded7008",
+    "internal/runtime/executor/openai_compat_executor.go": "5c4b4a8d65a5e8379f6f4aff10d5d7916aa41e201247b74b5bdd0663b1a4680d",
+    "internal/runtime/executor/codex_websockets_execute.go": "48e9dfd21c1bc7fabc5b0cb60e1df80e6d73ce6b50a87743c81c36484ea09512",
+    "internal/runtime/executor/codex_websockets_stream.go": "73b87acddd28c318f537b301e2e9a5d04be02beaf1dca8c8a5253abb3d6e40a2",
+    "internal/runtime/executor/antigravity_executor_execute.go": "caae220ae3c7c3794f30549c6ad75c09ef3d015b7b67fb7334bcbb2e1bd86c41",
+    "internal/store/objectstore.go": "0a8a098b2d58c7c2cfde156e9fe01f58d0e06230ff213df1c2202cbd2ffe632f",
+    "internal/watcher/synthesizer/config.go": "28395c13b1aed1fd02e417445d27d26d98f048034c6a2b2694ab11d02ff7047b",
+    "sdk/api/handlers/handlers.go": "216e67fb5e9be8fadc22320c4dfe5d3d21141f953a90e00f9405e23421de3793",
+    "sdk/cliproxy/auth/selector.go": "c69712370d0aaf2b5157d30c93b33f375224ac4e1e1bc5b03c23adaac110444f",
+    "sdk/cliproxy/service_lifecycle.go": "b17e1d1febe4465842cc9dd1a708244cae7ed414b7bdd1e611cf5bd7f46546c0",
+    "internal/runtime/executor/codex_executor_execute.go": "cb9bd40bea2ab44076ffb3b056949e74d596977b5cf5132299ed6365a81a13b1",
+    "internal/runtime/executor/codex_executor_stream.go": "a66a8be0dc1557b8275a6b5c918dbc1040d2e06205ee27de67a84d76e3ae08e4",
+    "internal/runtime/executor/codex_executor_auth.go": "87f3727c7336bc38050dac463988ec5a6d65ac7fa505e7ac45515dc70578a4d4",
+    "internal/runtime/executor/antigravity_executor_stream.go": "85ddae011ada08ff9e405d5662df014416a96bb3eb5ac81e57a4386fa477d893",
+    "internal/runtime/executor/claude_executor_request.go": "74c353d802b78f229bf0f90a0a679bfb830df6437f266997ea7b489aa3cee7d7",
+    "internal/auth/codex/openai_auth.go": "5cc22d65b901458359da2c154e5ed6541d066acdad16bafa6c1b8c9f5286d3a1"
+  }
+}

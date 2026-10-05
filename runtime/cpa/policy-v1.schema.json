@@ -1,0 +1,33 @@
+{
+  "protocolVersion": 1,
+  "operations": ["admit", "result", "ready"],
+  "actions": ["allow", "skip", "stop"],
+  "unavailableIsBool": true,
+  "registrationEpoch": "decimal-string",
+  "kinds": ["accepted", "validated"],
+  "outcomes": ["success", "explicit_rejection", "uncertain", "cancelled", "deadline", "local_failure"],
+  "errorCodes": [
+    "none",
+    "validation",
+    "transport",
+    "provider_rejected",
+    "body_lost",
+    "stream_lost",
+    "cancelled",
+    "deadline",
+    "usage_observation",
+    "parser",
+    "unknown"
+  ],
+  "readyOmitsSelectedAuth": true,
+  "readyResponse": ["protocolVersion", "policyReady", "processGeneration", "projectionRevision", "projectionDigest", "reason", "unavailable", "endpointPins"],
+  "attemptIdentity": ["requestId", "attemptId", "authId", "credentialId", "credentialVersion", "providerId", "publicModel", "upstreamModel", "registrationEpoch", "materialRevision", "kind"],
+  "admitOperation": ["callableProtocol", "generationKind"],
+  "callableProtocols": ["chat_completions", "responses", "messages"],
+  "generationKinds": ["execute", "refresh-resend", "stream", "stream-refresh", "stream-bootstrap", "internal", "count-tokens"],
+  "endpointPinFields": ["protocol", "endpointId", "origin", "endpointFingerprint", "httpMethod"],
+  "maxEndpointPins": 32,
+  "resultAdds": ["endpointPin"],
+  "authRefNativeFacts": ["rawProviderLabel", "effectiveSubtype", "effectiveMode", "effectiveGenerationBase", "effectiveAuthKind"],
+  "executionFacts": ["sent", "status", "bodyComplete", "streamStarted", "outcome", "errorCode", "responseBody"]
+}

@@ -841,6 +841,22 @@
       "additionalProperties": false,
       "description": "POST `/accounts/{id}/model-tests` body. This is an operational test, so it\nintentionally carries no CAS tokens and has no account mutation effect.",
       "properties": {
+        "maxTokens": {
+          "description": "Positive completion bound. Absent keeps the existing minimal verification body.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "Optional user message. Absent keeps the existing minimal verification body.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "modelId": {
           "type": "string"
         }
@@ -1916,9 +1932,20 @@
       ],
       "type": "object"
     },
+    "CpaControlTarget": {
+      "description": "Retired compatibility selector for shared CPA operations.\n`owned` is this process's child. `integration` remains parseable so an\nexplicit historical request is refused before any I/O. It is not a product\nmode and is omitted from the generated schema.",
+      "oneOf": [
+        {
+          "enum": [
+            "owned"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "CpaIntegration": {
       "additionalProperties": false,
-      "description": "Secret-free singleton configuration for the local CPA external integration.",
+      "description": "Secret-free snapshot of the owned local CPA runtime.\n\n`management_key_configured`, `inference_key_configured`, `enabled`,\n`account_id`, `model_count`, and `models_refreshed_at` are retired\ncompatibility outputs. They stay false, empty, or null and do not describe\na remote key, account, or catalog. `legacy_migration_required` is independent\nof `runtime_unavailable_reason`.",
       "properties": {
         "accountId": {
           "type": [
@@ -1958,6 +1985,10 @@
             "string",
             "null"
           ]
+        },
+        "legacyMigrationRequired": {
+          "description": "True when a stored historical remote CPA row still exists.\nRedacted, and not a runtime-health value.",
+          "type": "boolean"
         },
         "managementKeyConfigured": {
           "type": "boolean"
@@ -2020,6 +2051,7 @@
         "updateAvailable",
         "currentOperation",
         "runtimeUnavailableReason",
+        "legacyMigrationRequired",
         "revision",
         "processGeneration"
       ],
@@ -2027,15 +2059,8 @@
     },
     "CpaIntegrationUpdate": {
       "additionalProperties": false,
-      "description": "PUT CPA configuration. Secret fields are write-only; omission preserves\ntheir existing encrypted values.",
+      "description": "PUT owned CPA configuration.\n\n`base_url`, `management_key`, and `inference_key` are retired compatibility\ninputs. Serde still accepts them and the handler refuses them before I/O.\nThey are omitted from the generated schema. Omission of `target` always\naddresses the owned child. A saved historical row does not select a target.",
       "properties": {
-        "baseUrl": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "enabled": {
           "default": null,
           "type": [
@@ -2048,24 +2073,22 @@
           "minimum": 0,
           "type": "integer"
         },
-        "inferenceKey": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "managementKey": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "processGeneration": {
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CpaControlTarget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Retired compatibility selector. Absent always means owned. A saved\nhistorical row does not choose a target. `integration` is refused\nbefore I/O."
         }
       },
       "required": [
@@ -2326,6 +2349,31 @@
       "additionalProperties": false,
       "description": "Secret-free CPA runtime snapshot. `supported` is true only on an\ninstalled desktop Host on Windows x64, macOS, or Linux x64.",
       "properties": {
+        "appliedDigest": {
+          "default": null,
+          "description": "64 lowercase hex, or absent when the plane has no digest yet.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "appliedRevision": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "applyStatus": {
+          "default": null,
+          "description": "`not_prepared`, `installed`, `apply_pending`, `applied`, `apply_failed`, or `stopped`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "assetSha256": {
           "type": [
             "string",
@@ -2335,6 +2383,16 @@
         "baseUrl": {
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "childProcessGeneration": {
+          "default": null,
+          "description": "Owned child generation. Distinct from `process_generation`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
             "null"
           ]
         },
@@ -2350,6 +2408,23 @@
             "null"
           ]
         },
+        "desiredDigest": {
+          "default": null,
+          "description": "64 lowercase hex, or absent when the plane has no digest yet.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "desiredRevision": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "desiredRunning": {
           "description": "Last explicit Start/Stop intent for the OCG-owned child. True means the\nnext Open Console Gateway process should restore that child once.",
           "type": "boolean"
@@ -2359,6 +2434,10 @@
             "string",
             "null"
           ]
+        },
+        "executionUnavailable": {
+          "default": false,
+          "type": "boolean"
         },
         "installed": {
           "type": "boolean"
@@ -2374,6 +2453,10 @@
         },
         "phase": {
           "$ref": "#/$defs/CpaRuntimePhase"
+        },
+        "policyReady": {
+          "default": false,
+          "type": "boolean"
         },
         "port": {
           "format": "uint16",
@@ -2433,6 +2516,14 @@
         "latestVersion",
         "updateAvailable",
         "currentOperation",
+        "childProcessGeneration",
+        "desiredRevision",
+        "appliedRevision",
+        "desiredDigest",
+        "appliedDigest",
+        "applyStatus",
+        "policyReady",
+        "executionUnavailable",
         "revision",
         "processGeneration"
       ],
@@ -2481,6 +2572,14 @@
       "additionalProperties": false,
       "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
       "properties": {
+        "artifactDir": {
+          "default": null,
+          "description": "Directory that contains `manifest.json` and the pinned host executable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "expectedRevision": {
           "format": "uint64",
           "minimum": 0,
@@ -2497,6 +2596,17 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CpaControlTarget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -2626,28 +2736,18 @@
     },
     "CpaTestRequest": {
       "additionalProperties": false,
-      "description": "Operational connection test. Optional write-only values allow testing a\nfirst-time configuration without persisting it.",
+      "description": "Operational connection test against the owned child.\n\n`base_url`, `management_key`, and `inference_key` are retired compatibility\ninputs. Serde still accepts them and the handler refuses them before I/O.\nThey are omitted from the generated schema.",
       "properties": {
-        "baseUrl": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "inferenceKey": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "managementKey": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CpaControlTarget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "type": "object"
@@ -5003,7 +5103,7 @@
     },
     "ProtocolProbeRequest": {
       "additionalProperties": false,
-      "description": "POST protocol-probe body. `accountId` is a deprecated compatibility field\nand is ignored; the provider chooses eligible accounts automatically.\n`protocols` is the required explicit probe set.",
+      "description": "POST protocol-probe body. Supplied `accountId` selects that account and is\nnot ignored. `protocols` is the required explicit probe set.",
       "properties": {
         "accountId": {
           "type": [
@@ -5044,7 +5144,7 @@
       "description": "Protocol-probe mutation result. Identity strings are always present;\n`contract` is required `T | null` on the wire.",
       "properties": {
         "accountId": {
-          "description": "Deprecated compatibility field. Provider-level probes can use different\naccounts per protocol, so this is always `null`.",
+          "description": "Actual id of the selected account. This is not always `null`.",
           "type": [
             "string",
             "null"
@@ -7649,6 +7749,9 @@
     },
     {
       "$ref": "#/$defs/AccountImportResult"
+    },
+    {
+      "$ref": "#/$defs/CpaControlTarget"
     },
     {
       "$ref": "#/$defs/CpaIntegration"

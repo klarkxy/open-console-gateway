@@ -1,0 +1,49 @@
+diff --git a/diff-a/sdk/cliproxy/service.go b/diff-b/sdk/cliproxy/service.go
+index bc2cd72..0cf6bc0 100644
+--- a/diff-a/sdk/cliproxy/service.go
++++ b/diff-b/sdk/cliproxy/service.go
+@@ -44,6 +44,8 @@ type Service struct {
+ 	authRegWaiters         map[string]chan struct{}
+ 	configSequence         uint64
+ 	appliedRoutingState    *routingRuntimeState
++	keepInjectedSelector   bool
++	configFileReloader     func(path string) error
+ 
+ 	// configPath is the path to the configuration file.
+ 	configPath string
+@@ -149,3 +151,35 @@ func (s *Service) ResultPolicy() coreauth.ResultPolicy {
+ 	}
+ 	return s.coreManager.ResultPolicy()
+ }
++
++// CoreAuthManager returns the execution manager owned by the service.
++func (s *Service) CoreAuthManager() *coreauth.Manager {
++	if s == nil {
++		return nil
++	}
++	return s.coreManager
++}
++
++// SetGenerationBoundary installs the per-attempt policy hook before requests run.
++func (s *Service) SetGenerationBoundary(boundary coreauth.GenerationBoundary) {
++	if s == nil || s.coreManager == nil {
++		return
++	}
++	s.coreManager.SetGenerationBoundary(boundary)
++}
++
++// ApplyRuntimeConfig applies a configuration update through the existing service path.
++func (s *Service) ApplyRuntimeConfig(ctx context.Context, cfg *config.Config) bool {
++	if s == nil {
++		return false
++	}
++	return s.applyConfigUpdateWithAuthSynthesis(ctx, cfg, true)
++}
++
++// SetConfigFileReloader installs the host callback for watcher config changes.
++func (s *Service) SetConfigFileReloader(reloader func(path string) error) {
++	if s == nil {
++		return
++	}
++	s.configFileReloader = reloader
++}

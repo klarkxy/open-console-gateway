@@ -2,7 +2,6 @@ use crate::gateway::diagnostics::{
     ErrorDiagnostic, REQUEST_ID_HEADER, RequestTrace, emit_failure, log_request_failure,
     serialize_diagnostic,
 };
-use crate::gateway::executor::GatewayExecutor;
 use crate::gateway::forwarder::UpstreamPayloadTooLargeResponse;
 use crate::gateway::materialize::{mapping_adapter_kind, mapping_is_custom_http_catalog};
 use crate::gateway::protocol::{ProtocolError, parse_client_request, parse_gemini_request};
@@ -124,7 +123,17 @@ pub async fn chat_completions(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    proxy_handler(state, trace, headers, body, ApiFormat::ChatCompletions).await
+    let (_path, query) = super::cpa_ingress::public_target(&trace.path);
+    proxy_handler(
+        state,
+        trace,
+        headers,
+        body,
+        ApiFormat::ChatCompletions,
+        super::cpa_ingress::PublicPath::ChatCompletions,
+        &query,
+    )
+    .await
 }
 
 pub async fn responses(
@@ -133,7 +142,17 @@ pub async fn responses(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    proxy_handler(state, trace, headers, body, ApiFormat::Responses).await
+    let (_path, query) = super::cpa_ingress::public_target(&trace.path);
+    proxy_handler(
+        state,
+        trace,
+        headers,
+        body,
+        ApiFormat::Responses,
+        super::cpa_ingress::PublicPath::Responses,
+        &query,
+    )
+    .await
 }
 
 pub async fn messages(
@@ -142,7 +161,38 @@ pub async fn messages(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    proxy_handler(state, trace, headers, body, ApiFormat::Messages).await
+    let (_path, query) = super::cpa_ingress::public_target(&trace.path);
+    proxy_handler(
+        state,
+        trace,
+        headers,
+        body,
+        ApiFormat::Messages,
+        super::cpa_ingress::PublicPath::Messages,
+        &query,
+    )
+    .await
+}
+
+/// Anthropic SDK `count_tokens`, mounted at `POST /v1/messages/count_tokens`.
+/// This is a count hop, not a generation.
+pub async fn messages_count_tokens(
+    State(state): State<CoreState>,
+    Extension(trace): Extension<RequestTrace>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    let (_path, query) = super::cpa_ingress::public_target(&trace.path);
+    proxy_handler(
+        state,
+        trace,
+        headers,
+        body,
+        ApiFormat::Messages,
+        super::cpa_ingress::PublicPath::MessagesCount,
+        &query,
+    )
+    .await
 }
 
 pub async fn gemini_model_action(
@@ -173,19 +223,47 @@ pub async fn gemini_model_action(
             Some(client_body_bytes),
         );
     }
+    let (path, query) = super::cpa_ingress::public_target(&trace.path);
     match action {
         "generateContent" => {
-            gemini_proxy_handler(state, trace, headers, body, model.to_string(), false).await
+            gemini_proxy_handler(
+                state,
+                trace,
+                headers,
+                body,
+                model.to_string(),
+                false,
+                &path,
+                &query,
+            )
+            .await
         }
         "streamGenerateContent" => {
-            gemini_proxy_handler(state, trace, headers, body, model.to_string(), true).await
+            gemini_proxy_handler(
+                state,
+                trace,
+                headers,
+                body,
+                model.to_string(),
+                true,
+                &path,
+                &query,
+            )
+            .await
         }
-        "countTokens" => gemini_expected_fallback(
-            &state,
-            &headers,
-            StatusCode::NOT_IMPLEMENTED,
-            "Gemini countTokens is not available; Gemini CLI falls back to local estimation",
-        ),
+        "countTokens" => {
+            gemini_proxy_handler(
+                state,
+                trace,
+                headers,
+                body,
+                model.to_string(),
+                false,
+                &path,
+                &query,
+            )
+            .await
+        }
         "embedContent" => gemini_error(
             &state,
             &trace,
@@ -633,8 +711,10 @@ async fn proxy_handler(
     headers: HeaderMap,
     body: Bytes,
     client_format: ApiFormat,
+    path: super::cpa_ingress::PublicPath,
+    query: &str,
 ) -> axum::response::Response {
-    proxy_handler_inner(state, trace, headers, body, client_format).await
+    proxy_handler_inner(state, trace, headers, body, client_format, path, query).await
 }
 
 async fn proxy_handler_inner(
@@ -643,10 +723,14 @@ async fn proxy_handler_inner(
     headers: HeaderMap,
     body: Bytes,
     client_format: ApiFormat,
+    path: super::cpa_ingress::PublicPath,
+    query: &str,
 ) -> axum::response::Response {
     let client_body_bytes = body.len();
 
-    let Some(client_key_id) = extract_client_key_id(&headers, &state) else {
+    // Fingerprint the matched access key before the first await. Do not look
+    // the key up again by id after this point.
+    let Some(client) = authenticate_client(&headers, &state) else {
         return protocol_error_response(
             client_format,
             StatusCode::UNAUTHORIZED,
@@ -670,18 +754,17 @@ async fn proxy_handler_inner(
             );
         }
     };
-    let client_model = parsed.requested_model.clone();
-    let routing_model = parsed.requested_model.clone();
-    GatewayExecutor::run(
+    super::cpa_ingress::forward_public(
         state,
-        trace,
-        client_body,
-        headers,
-        client_format,
-        parsed,
-        client_model,
-        routing_model,
-        Some(client_key_id),
+        super::cpa_ingress::PublicHop {
+            trace,
+            headers,
+            body: client_body,
+            parsed,
+            client,
+            path,
+            query: query.to_string(),
+        },
     )
     .await
 }
@@ -693,9 +776,13 @@ async fn gemini_proxy_handler(
     body: Bytes,
     model: String,
     stream: bool,
+    path: &str,
+    query: &str,
 ) -> axum::response::Response {
     let client_body_bytes = body.len();
-    let Some(client_key_id) = extract_client_key_id(&headers, &state) else {
+    // Same matched capture as the other generation and count handlers, before
+    // the first await.
+    let Some(client) = authenticate_client(&headers, &state) else {
         return protocol_error_response(
             ApiFormat::Gemini,
             StatusCode::UNAUTHORIZED,
@@ -717,18 +804,17 @@ async fn gemini_proxy_handler(
             );
         }
     };
-    let client_model = parsed.requested_model.clone();
-    let routing_model = parsed.requested_model.clone();
-    GatewayExecutor::run(
+    super::cpa_ingress::forward_public(
         state,
-        trace,
-        body,
-        headers,
-        ApiFormat::Gemini,
-        parsed,
-        client_model,
-        routing_model,
-        Some(client_key_id),
+        super::cpa_ingress::PublicHop {
+            trace,
+            headers,
+            body,
+            parsed,
+            client,
+            path: super::cpa_ingress::PublicPath::Gemini(path.to_string()),
+            query: query.to_string(),
+        },
     )
     .await
 }
@@ -759,6 +845,32 @@ fn candidate_key_values(headers: &HeaderMap) -> Vec<&str> {
         }
     }
     candidates
+}
+
+/// First matching candidate, in header order. The fingerprint is
+/// `cpa_runtime::fingerprint_key` of that matched access-key value, computed
+/// while the snapshot read is held. Callers keep this value across later
+/// awaits and must not hash the key again by id.
+pub(crate) fn authenticate_client(
+    headers: &HeaderMap,
+    state: &CoreState,
+) -> Option<super::cpa_ingress::ClientAccess> {
+    let candidates = candidate_key_values(headers);
+    let (key_id, captured_key_fingerprint) = {
+        let snapshot = state.credential_snapshot.read();
+        candidates.into_iter().find_map(|value| {
+            snapshot
+                .get(value)
+                .map(|entry| (entry.id.clone(), crate::cpa_runtime::fingerprint_key(value)))
+        })?
+    };
+    if key_id.is_empty() || captured_key_fingerprint.is_empty() {
+        return None;
+    }
+    Some(super::cpa_ingress::ClientAccess {
+        key_id,
+        captured_key_fingerprint,
+    })
 }
 
 /// Extracts the id of the credential that authenticates this request.
@@ -811,23 +923,6 @@ fn gemini_error(
         client_body_bytes,
         None,
     )
-}
-
-fn gemini_expected_fallback(
-    state: &CoreState,
-    headers: &HeaderMap,
-    status: StatusCode,
-    message: &str,
-) -> axum::response::Response {
-    if !check_auth(headers, state) {
-        return protocol_error_response(
-            ApiFormat::Gemini,
-            StatusCode::UNAUTHORIZED,
-            "invalid gateway key",
-            None,
-        );
-    }
-    protocol_error_response(ApiFormat::Gemini, status, message, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1073,14 +1168,20 @@ mod tests {
             .lock()
             .upsert_cpa_integration(&account, crate::cpa::DEFAULT_CPA_BASE_URL, &management)
             .unwrap();
-        state
+        let retired = state
             .activate_cpa_model_catalog(
                 vec!["grok-4.5".into()],
                 crate::cpa::DEFAULT_CPA_BASE_URL,
                 now,
             )
-            .unwrap();
-        assert_eq!(active_cpa_model_ids(&state).as_slice(), ["grok-4.5"]);
+            .unwrap_err();
+        assert!(
+            retired
+                .to_string()
+                .contains(crate::state::RETIRED_CPA_CATALOG),
+            "{retired}"
+        );
+        assert!(active_cpa_model_ids(&state).is_empty());
 
         state
             .db

@@ -8,8 +8,33 @@ use chrono::Utc;
 use serde_json::json;
 use std::sync::Arc;
 
+fn stored_catalog_row(state: &CoreState) -> (String, String, String) {
+    state
+        .db
+        .lock()
+        .conn
+        .query_row(
+            "SELECT models_json, refreshed_at, source_url
+             FROM provider_model_catalogs WHERE provider_id = 'cpa'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap()
+}
+
+fn table_count(state: &CoreState, table: &str) -> i64 {
+    state
+        .db
+        .lock()
+        .conn
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
 #[tokio::test]
-async fn cpa_selection_receipt_uses_the_write_revision_and_stale_cas_writes_nothing() {
+async fn retired_shared_catalog_get_is_nonroutable_and_put_preserves_bytes() {
     let dir = std::env::temp_dir().join(format!("ocg-cpa-select-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let db = Database::open(dir.clone()).unwrap();
@@ -21,6 +46,12 @@ async fn cpa_selection_receipt_uses_the_write_revision_and_stale_cas_writes_noth
         )
         .unwrap(),
     );
+    let empty = get_models(State(state.clone())).await.unwrap().0;
+    assert!(empty.models.is_empty());
+    assert!(empty.source_url.is_none());
+    assert!(empty.refreshed_at.is_none());
+
+    let refreshed_at = Utc::now();
     state
         .db
         .lock()
@@ -28,7 +59,7 @@ async fn cpa_selection_receipt_uses_the_write_revision_and_stale_cas_writes_noth
             &[
                 CpaCatalogModel {
                     id: "alpha".into(),
-                    owned_by: None,
+                    owned_by: Some("pool".into()),
                     enabled: true,
                 },
                 CpaCatalogModel {
@@ -38,58 +69,97 @@ async fn cpa_selection_receipt_uses_the_write_revision_and_stale_cas_writes_noth
                 },
             ],
             "https://cpa.invalid/models",
-            Utc::now(),
+            refreshed_at,
         )
         .unwrap();
-    let before = state.settings_revision();
+    let stored = stored_catalog_row(&state);
+    assert!(stored.0.contains("\"enabled\":true"), "{}", stored.0);
+    let revision = state.settings_revision();
     let generation = state.process_generation();
-    let updated = put_models(
-        State(state.clone()),
-        Bytes::from(
-            serde_json::to_vec(&json!({
-                "expectedRevision": before,
-                "processGeneration": generation,
-                "enabledIds": ["beta"],
-            }))
-            .unwrap(),
-        ),
-    )
-    .await
-    .unwrap()
-    .0;
-    assert_eq!(updated.revision.revision, before + 1);
-    assert_eq!(updated.revision.revision, state.settings_revision());
-    assert_eq!(updated.revision.process_generation, generation);
-    let enabled: Vec<_> = updated
-        .models
-        .iter()
-        .filter(|model| model.enabled)
-        .map(|model| model.id.as_str())
-        .collect();
-    assert_eq!(enabled, vec!["beta"]);
-    let stale = put_models(
-        State(state.clone()),
-        Bytes::from(
-            serde_json::to_vec(&json!({
-                "expectedRevision": before,
-                "processGeneration": generation,
-                "enabledIds": ["alpha"],
-            }))
-            .unwrap(),
-        ),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(stale.into_response().status(), StatusCode::CONFLICT);
+    let credentials = table_count(&state, "credentials");
+    let grants = table_count(&state, "credential_grants");
+    let destination_models = table_count(&state, "destination_models");
+
     let current = get_models(State(state.clone())).await.unwrap().0;
-    let enabled: Vec<_> = current
-        .models
-        .iter()
-        .filter(|model| model.enabled)
-        .map(|model| model.id.as_str())
-        .collect();
-    assert_eq!(enabled, vec!["beta"]);
-    assert_eq!(current.revision.revision, updated.revision.revision);
+    assert_eq!(current.revision.revision, revision);
+    assert_eq!(current.revision.process_generation, generation);
+    assert_eq!(
+        current.source_url.as_deref(),
+        Some("https://cpa.invalid/models")
+    );
+    let shown =
+        chrono::DateTime::parse_from_rfc3339(current.refreshed_at.as_deref().unwrap()).unwrap();
+    let raw = chrono::DateTime::parse_from_rfc3339(&stored.1).unwrap();
+    assert_eq!(shown, raw);
+    assert!(current.models.iter().all(|model| !model.enabled));
+    assert_eq!(current.models[0].id, "alpha");
+    assert_eq!(current.models[0].owned_by.as_deref(), Some("pool"));
+    assert_eq!(current.models[1].id, "beta");
+    assert!(current.models[1].owned_by.is_none());
+    assert_eq!(stored_catalog_row(&state), stored);
+    assert!(state.cpa_model_catalog().is_empty());
+
+    for body in [
+        json!({
+            "expectedRevision": revision,
+            "processGeneration": generation,
+            "enabledIds": ["beta"],
+        }),
+        json!({
+            "expectedRevision": revision.wrapping_sub(1),
+            "processGeneration": generation,
+            "enabledIds": ["alpha"],
+        }),
+        json!({
+            "expectedRevision": revision,
+            "processGeneration": generation,
+            "enabledIds": [],
+        }),
+    ] {
+        let error = put_models(
+            State(state.clone()),
+            Bytes::from(serde_json::to_vec(&body).unwrap()),
+        )
+        .await
+        .unwrap_err();
+        let text = format!("{error:?}");
+        assert!(text.contains(crate::state::RETIRED_CPA_CATALOG), "{text}");
+        assert_eq!(
+            error.into_response().status(),
+            StatusCode::PRECONDITION_FAILED
+        );
+    }
+
+    let missing_revision = put_models(State(state.clone()), Bytes::from_static(b"{}"))
+        .await
+        .unwrap_err();
+    let missing_text = format!("{missing_revision:?}");
+    assert!(
+        missing_text.contains("expectedRevision is required"),
+        "{missing_text}"
+    );
+    assert_eq!(
+        missing_revision.into_response().status(),
+        StatusCode::BAD_REQUEST
+    );
+    let invalid = put_models(State(state.clone()), Bytes::from_static(b"not-json"))
+        .await
+        .unwrap_err();
+    assert_eq!(invalid.into_response().status(), StatusCode::BAD_REQUEST);
+
+    assert_eq!(state.settings_revision(), revision);
+    assert_eq!(state.process_generation(), generation);
+    assert_eq!(stored_catalog_row(&state), stored);
+    assert_eq!(table_count(&state, "credentials"), credentials);
+    assert_eq!(table_count(&state, "credential_grants"), grants);
+    assert_eq!(
+        table_count(&state, "destination_models"),
+        destination_models
+    );
+    assert!(state.cpa_model_catalog().is_empty());
+    let after = get_models(State(state.clone())).await.unwrap().0;
+    assert!(after.models.iter().all(|model| !model.enabled));
+    assert_eq!(after.models.len(), 2);
     drop(state);
     let _ = std::fs::remove_dir_all(dir);
 }

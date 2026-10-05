@@ -436,8 +436,15 @@ impl Database {
     }
 
     /// Commit a V3 managed-key verification as one all-or-nothing SQLite
-    /// transaction. The initial row fingerprint is checked by the first write,
-    /// before the candidate ciphertext can replace a concurrent V2 update.
+    /// transaction. The captured row fingerprint is checked by the first write,
+    /// before the candidate ciphertext can replace a concurrent update.
+    ///
+    /// A changed ciphertext uses the same identity bump as credential rotation:
+    /// `credential_version` and `auth_state_version` advance together and
+    /// `rotated_at` is set, in this statement. The bump compares the captured
+    /// ciphertext with the candidate, and the WHERE clause requires that
+    /// captured ciphertext to still be the stored one. Completing the ciphertext
+    /// already stored does not bump either version again.
     pub fn commit_managed_key_verification(
         &self,
         id: &str,
@@ -455,7 +462,12 @@ impl Database {
         let changed = tx.execute(
             "UPDATE credentials
              SET key_cipher = ?1, enabled = 0, auth_error = NULL, last_error = NULL,
-                 quota_recovery_json = NULL, updated_at = ?2
+                 quota_recovery_json = NULL, updated_at = ?2,
+                 credential_version = COALESCE(credential_version, 1)
+                     + CASE WHEN ?4 = ?1 THEN 0 ELSE 1 END,
+                 auth_state_version = COALESCE(auth_state_version, 1)
+                     + CASE WHEN ?4 = ?1 THEN 0 ELSE 1 END,
+                 rotated_at = CASE WHEN ?4 = ?1 THEN rotated_at ELSE ?2 END
              WHERE legacy_account_id = ?3 AND key_cipher = ?4 AND updated_at = ?5
                AND provider_id = ?6
                AND account_type = ?7 AND setup_step = ?8",

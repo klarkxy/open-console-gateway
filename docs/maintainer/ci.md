@@ -14,9 +14,11 @@ no Compose job. Two jobs:
   `cargo test --workspace --locked --no-fail-fast --features ocg-core/ollama-cloud-loopback-test`,
   then `cargo clippy --workspace --all-targets --locked` with the same feature
   and `-D warnings`.
-- **windows-cli** (`windows-latest`, 30 minutes) — `cargo test -p ocg-manager-cli --locked`
-  and `cargo clippy -p ocg-manager-cli --all-targets --locked -- -D warnings`.
-  This job does not pass the Ollama loopback feature.
+- **windows-cli** (`windows-latest`, 30 minutes) — `cargo test -p ocg-cli --locked`
+  and `cargo clippy -p ocg-cli --all-targets --locked -- -D warnings`.
+  The package builds the `ocg` binary. This job does not pass the Ollama loopback feature.
+  Both package references in `.github/workflows/quality.yml` are `ocg-cli`.
+  This page does not record a CI run.
 
 Rust DTO schema tests inside the workspace test are the V3/V4 contract gate.
 `scripts/cli-acceptance.mjs` is not a job in this file.
@@ -32,7 +34,7 @@ Preflight and build still run `pnpm/action-setup`, `pnpm install --frozen-lockfi
 Windows GUI smoke reads the version from `package.json`. The build job still
 passes `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, and
 `TAURI_UPDATER_PUBLIC_KEY`. This branch has no root `package.json` and no
-`src-tauri/` tree, so those steps cannot publish `ocg-manager-cli`.
+`src-tauri/` tree, so those steps cannot publish the `ocg` binary from package `ocg-cli`.
 
 The same file still contains desktop package smokes (installer, DMG, AppImage)
 and an updater-manifest step from that older publisher. Those steps were not
@@ -46,12 +48,6 @@ with a tag. This pass read that header and the resolve-job header only. Image
 names, digests, and platform results were not re-checked. It is not a
 publication path for the current CLI.
 
-## pages.yml
-
-The file triggers on `workflow_dispatch` and on pushes to `main` that touch
-the workflow, `docs/**`, or `scripts/build-pages.mjs`. The job runs
-`node scripts/build-pages.mjs`. That script is not in `scripts/` on this
-branch. This page does not treat the workflow as a verified publisher.
 
 ## What CI does not cover
 

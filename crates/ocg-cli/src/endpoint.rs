@@ -126,7 +126,11 @@ pub fn route_allowed(path: &str) -> bool {
         )
         || matches!(
             path,
-            "/v1/chat/completions" | "/v1/responses" | "/v1/messages" | "/v1/models"
+            "/v1/chat/completions"
+                | "/v1/responses"
+                | "/v1/messages"
+                | "/v1/messages/count_tokens"
+                | "/v1/models"
         )
         || has_action_suffix(path, "/v1/models/")
         || has_action_suffix(path, "/v1beta/models/")
@@ -141,7 +145,11 @@ pub fn is_inference(path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
     matches!(
         path,
-        "/v1/chat/completions" | "/v1/responses" | "/v1/messages" | "/v1/models"
+        "/v1/chat/completions"
+            | "/v1/responses"
+            | "/v1/messages"
+            | "/v1/messages/count_tokens"
+            | "/v1/models"
     ) || has_action_suffix(path, "/v1/models/")
         || has_action_suffix(path, "/v1beta/models/")
 }

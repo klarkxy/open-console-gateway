@@ -3,7 +3,7 @@
 //! Catalog, contracts, model capabilities, and saved Zen models are local
 //! reads. Zen enablement and provider-scope protocol switches share the V3
 //! CAS envelope. Zen catalog refresh uses the fixed official keyless directory.
-//! Every built-in Provider scope shares the crate-root protocol-probe transport.
+//! Every built-in Provider scope shares the one private CPA validation hop.
 //! Custom scopes hide the Provider Test action; account-page tests use V3 model-tests.
 
 use axum::Json;
@@ -29,7 +29,7 @@ use crate::kernel::ids::is_free_model;
 #[cfg(debug_assertions)]
 use crate::kernel::zen::{ZEN_MODELS_SOURCE_URL, parse_catalog};
 use crate::kernel::zen::{ZenFreeModelCatalog, model_views};
-use crate::models::{Account as ModelAccount, AppConfig, ForwardLog, UpstreamChannel};
+use crate::models::{Account as ModelAccount, AppConfig, UpstreamChannel};
 use crate::protocol_probe::{self, ProtocolProbeContext, ProtocolProbeRunError};
 use crate::provider::{
     BUILTIN_PROVIDERS, BuiltinProvider, COMMAND_CODE_PROVIDER_ID, CUSTOM_PROVIDER_ID,
@@ -868,9 +868,7 @@ pub(super) async fn run_provider_protocol_probes(
             state: &state,
             config: &prepared.config,
             accounts: &prepared.accounts,
-            adapter: prepared.adapter,
             model_id: &prepared.model_id,
-            custom_route: None,
             now: prepared.now,
         },
         &prepared.scope,
@@ -881,8 +879,8 @@ pub(super) async fn run_provider_protocol_probes(
     .map_err(|error| match error {
         ProtocolProbeRunError::Apply(message) => V3ApiError::invalid_request_at(&state, message),
         ProtocolProbeRunError::Evidence(message) => V3ApiError::internal(message),
+        ProtocolProbeRunError::NotSent(message) => V3ApiError::service_unavailable(&state, message),
     })?;
-    log_protocol_probe_requests(&state, &prepared, &outcomes);
     let observations: Vec<_> = outcomes
         .iter()
         .filter_map(|outcome| outcome.observation.clone())
@@ -918,7 +916,7 @@ pub(super) async fn run_provider_protocol_probes(
                 .find(|model| model.model_id == prepared.model_id)
         });
     Ok(Json(ProtocolProbeResponse {
-        account_id: None,
+        account_id: prepared.accounts.first().map(|account| account.id.clone()),
         provider_id: prepared.provider_id,
         model_id: prepared.model_id.clone(),
         results: outcomes
@@ -966,94 +964,9 @@ fn persist_probe_results(
     Ok(())
 }
 
-fn log_protocol_probe_requests(
-    state: &CoreState,
-    prepared: &PreparedProtocolProbe,
-    outcomes: &[protocol_probe::ProtocolProbeOutcome],
-) {
-    let request_id = format!("ocg-probe-{}", uuid::Uuid::new_v4());
-    let db = state.db.lock();
-    let mut attempt_number = 0_i64;
-    for outcome in outcomes {
-        for attempt in &outcome.attempts {
-            attempt_number += 1;
-            let Some(account) = prepared
-                .accounts
-                .iter()
-                .find(|account| account.id == attempt.account_id)
-            else {
-                continue;
-            };
-            let result = if attempt.success {
-                "succeeded"
-            } else {
-                "failed"
-            };
-            let protocol = attempt.protocol.as_str();
-            let diagnostic = serde_json::json!({
-                "event": "protocol_probe",
-                "outcome": result,
-                "attempt": attempt_number,
-                "duration_ms": attempt.duration_ms,
-                "provider_id": prepared.provider_id,
-                "account_id": account.id,
-                "model_id": prepared.model_id,
-                "client_format": protocol,
-                "upstream_format": protocol,
-                "upstream_error": attempt.error });
-            let log = ForwardLog {
-                id: 0,
-                timestamp: prepared.now,
-                model: prepared.model_id.clone(),
-                account_id: account.id.clone(),
-                account_name: account.name.clone(),
-                route_account_id: Some(account.id.clone()),
-                provider_id: Some(prepared.provider_id.clone()),
-
-                credential_account_id: (prepared.adapter != ProviderAdapterKind::ZenFree)
-                    .then(|| account.id.clone()),
-                client_key_id: None,
-                client_key_name: None,
-                status: if attempt.success { "success" } else { "error" }.to_string(),
-                http_status: attempt.http_status,
-                route: String::new(),
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                cached_tokens: 0,
-                cache_creation_tokens: 0,
-                cost: None,
-                raw_cost_usd: None,
-                quota_debit: None,
-                effective_paid_cost_usd: None,
-                pricing_revision_id: None,
-                quota_multiplier: None,
-                local_adjustment_multiplier: None,
-                service_tier: None,
-                cost_state: "not_applicable".to_string(),
-                error_message: attempt.error.clone(),
-                request_id: Some(request_id.clone()),
-                attempt: Some(attempt_number),
-                error_source: None,
-                error_stage: (!attempt.success).then(|| "protocol_probe".to_string()),
-                duration_ms: Some(attempt.duration_ms),
-                diagnostic: Some(diagnostic),
-            };
-            if let Err(error) = db.log_forward(&log) {
-                let _ = db.log_gateway(
-                    "error",
-                    "observability",
-                    "Failed to persist a protocol probe request log.",
-                );
-                eprintln!("failed to persist protocol probe request log: {error}");
-            }
-        }
-    }
-}
-
 struct PreparedProtocolProbe {
     provider_id: String,
     accounts: Vec<ModelAccount>,
-    adapter: ProviderAdapterKind,
     config: AppConfig,
     scope: ContractScope,
     model_id: String,
@@ -1089,11 +1002,8 @@ fn prepare_protocol_probe(
     provider_id: &str,
     input: &ProtocolProbeRequest,
 ) -> Result<PreparedProtocolProbe, V3ApiError> {
-    if provider_id == CUSTOM_PROVIDER_ID {
-        return Err(V3ApiError::invalid_request_at(
-            state,
-            "protocol probes for Custom API are account-owned",
-        ));
+    if let Err(message) = protocol_probe::reject_provider_wide_custom_probe(provider_id) {
+        return Err(V3ApiError::invalid_request_at(state, message));
     }
     let descriptor = provider_contracts::provider_scope_descriptor(provider_id)
         .ok_or_else(|| V3ApiError::not_found_at(state, "provider not found"))?;
@@ -1166,12 +1076,10 @@ fn prepare_protocol_probe(
     if channel == UpstreamChannel::Free && free_channel_is_exhausted_at(&all_accounts, now) {
         accounts.clear();
     }
-    if accounts.is_empty() {
-        return Err(V3ApiError::invalid_request_at(
-            state,
-            "no eligible provider accounts are available for protocol probes",
-        ));
-    }
+    let selected =
+        protocol_probe::select_single_probe_account(&accounts, input.account_id.as_deref())
+            .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
+    let accounts = vec![selected.clone()];
     let mut existing = HashMap::new();
     {
         let db = state.db.lock();
@@ -1186,7 +1094,6 @@ fn prepare_protocol_probe(
     Ok(PreparedProtocolProbe {
         provider_id: provider_id.to_string(),
         accounts,
-        adapter,
         config: state.config(),
         scope,
         model_id: model_id.to_string(),

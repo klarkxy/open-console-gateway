@@ -117,6 +117,7 @@ async fn proxy_list_matches_the_materialized_upstream_id_in_both_directions() {
     config.proxy_list_models = vec![UPSTREAM_MODEL.into()];
     config.proxy_list_direction = ProxyListDirection::Whitelist;
     h.state.set_config(config.clone()).unwrap();
+    h.adopt_owned_plane().await;
     let (status, body) = h.protocol("/v1/chat/completions", ROUTE_MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let proxy_log = sorted_logs(&h.state).pop().unwrap();
@@ -136,6 +137,7 @@ async fn proxy_list_matches_the_materialized_upstream_id_in_both_directions() {
 
     config.proxy_list_direction = ProxyListDirection::Blacklist;
     h.state.set_config(config).unwrap();
+    h.adopt_owned_plane().await;
     let (status, body) = h.protocol("/v1/chat/completions", ROUTE_MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(journal.listeners(), ["proxy", "origin"]);
@@ -186,6 +188,7 @@ fn evidence(
 async fn strict_priority_and_reorder_across_three_upstreams_stops_on_success() {
     let ThreeLabs { h, journal, ids } =
         bind_three_dynamic_labs(ok(), ok(), ok(), RoutingMode::StrictPriority, false).await;
+    h.adopt_owned_plane().await;
 
     let (status, body) = h.protocol("/v1/chat/completions", ROUTE_MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -206,6 +209,7 @@ async fn strict_priority_and_reorder_across_three_upstreams_stops_on_success() {
     );
 
     reorder_first(&h.state, &[ids[2].clone(), ids[0].clone(), ids[1].clone()]);
+    h.adopt_owned_plane().await;
     let (status, body) = h.protocol("/v1/chat/completions", ROUTE_MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(journal.listeners(), ["lab-a", "lab-c"]);
@@ -236,6 +240,7 @@ async fn fallthrough_429_then_403_then_success_across_three_upstreams() {
         false,
     )
     .await;
+    h.adopt_owned_plane().await;
 
     let (status, body) = h.protocol("/v1/chat/completions", ROUTE_MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -279,6 +284,7 @@ async fn http_5xx_does_not_fall_through_across_distinct_upstreams() {
         false,
     )
     .await;
+    h.adopt_owned_plane().await;
 
     let (status, _body) = h.protocol("/v1/chat/completions", ROUTE_MODEL).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -311,6 +317,7 @@ async fn disabled_account_and_model_scope_never_call_upstream() {
             models: vec!["other-model".into()],
         }),
     );
+    h.adopt_owned_plane().await;
 
     let (status, body) = h.protocol("/v1/chat/completions", ROUTE_MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -425,6 +432,7 @@ async fn unknown_custom_429_does_not_invent_shared_pool_exhaustion() {
         &h.state,
         &[first_id.clone(), sibling_id.clone(), third_id.clone()],
     );
+    h.adopt_owned_plane().await;
 
     let (status, body) = h.protocol("/v1/chat/completions", ROUTE_MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -469,6 +477,7 @@ async fn unknown_custom_429_does_not_invent_shared_pool_exhaustion() {
 #[tokio::test]
 async fn round_robin_and_sticky_current_behavior_across_three_upstreams() {
     let rr = bind_three_dynamic_labs(ok(), ok(), ok(), RoutingMode::RoundRobin, false).await;
+    rr.h.adopt_owned_plane().await;
     for _ in 0..3 {
         let (status, body) = rr.h.protocol("/v1/chat/completions", ROUTE_MODEL).await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -485,6 +494,7 @@ async fn round_robin_and_sticky_current_behavior_across_three_upstreams() {
     );
 
     let sticky = bind_three_dynamic_labs(ok(), ok(), ok(), RoutingMode::StickyGlobal, false).await;
+    sticky.h.adopt_owned_plane().await;
     assert_eq!(
         sticky
             .h
@@ -493,6 +503,8 @@ async fn round_robin_and_sticky_current_behavior_across_three_upstreams() {
             .0,
         StatusCode::OK
     );
+    // The accepted plane stays up across this live enable change. A second
+    // start would replace the child before the sticky card can be observed.
     sticky.h.set_enabled(&sticky.ids[0], false);
     assert_eq!(
         sticky
@@ -572,6 +584,7 @@ async fn custom_chat_responses_messages_use_configured_protocol_and_auth() {
     for lab in labs {
         h.push_stop(lab.stop);
     }
+    h.adopt_owned_plane().await;
 
     let (status, body) = h.protocol("/v1/chat/completions", "lab-chat").await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -637,6 +650,7 @@ async fn mixed_go_and_goat_loopback_chain_uses_distinct_origins() {
     h.attach_goat_route(goat_id.clone(), goat_url);
     h.push_stop(stop_go);
     h.push_stop(stop_goat);
+    h.adopt_owned_plane().await;
 
     let (status, body) = h
         .protocol(

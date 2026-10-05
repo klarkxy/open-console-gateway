@@ -1,0 +1,88 @@
+diff --git a/diff-a/sdk/cliproxy/auth/selector.go b/diff-b/sdk/cliproxy/auth/selector.go
+index 1111111..2222222 100644
+--- a/diff-a/sdk/cliproxy/auth/selector.go
++++ b/diff-b/sdk/cliproxy/auth/selector.go
+@@ -1036,7 +1036,8 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+ 	fallbackAuths := highestPriorityAuths(available)
+ 
+ 	modelKey := canonicalModelKey(model)
+-	cacheKey := provider + "::" + primaryID + "::" + modelKey
++	cacheKey := sessionAffinityCacheKey(provider, primaryID, modelKey)
++	globalSession := primaryID == "header:ocg-sticky-global"
+ 	isFork := false
+ 	if opts.Metadata != nil {
+ 		if forkFlag, ok := opts.Metadata[cliproxyexecutor.IsForkMetadataKey].(bool); ok && forkFlag {
+@@ -1047,4 +1047,4 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+ 	fallbackKey := ""
+ 	if fallbackID != "" && fallbackID != primaryID {
+-		fallbackKey = provider + "::" + fallbackID + "::" + modelKey
++		fallbackKey = sessionAffinityCacheKey(provider, fallbackID, modelKey)
+ 	}
+@@ -1056,12 +1058,20 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+ 	}
+ 
+ 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
++		if globalSession && cachedAuthMissesModel(auths, cachedAuthID, model) {
++			auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
++			if err != nil || auth == nil {
++				return auth, err
++			}
++			entry.Infof("session-affinity: global binding ineligible for model, temporary fallback | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
++			return auth, nil
++		}
+ 		for _, auth := range available {
+ 			if auth.ID == cachedAuthID {
+ 				bind(auth.ID)
+ 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+ 				return auth, nil
+ 			}
+ 		}
+ 		// Cached auth not available, reselect via fallback selector for even distribution
+ 		auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+@@ -1110,4 +1121,38 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+ 	return auth, nil
+ }
+ 
++func sessionAffinityCacheKey(provider, primaryID, modelKey string) string {
++	if primaryID == "header:ocg-sticky-global" {
++		return provider + "::" + primaryID
++	}
++	return provider + "::" + primaryID + "::" + modelKey
++}
++
++func cachedAuthMissesModel(auths []*Auth, authID, model string) bool {
++	var cached *Auth
++	for _, auth := range auths {
++		if auth != nil && auth.ID == authID {
++			cached = auth
++			break
++		}
++	}
++	if cached == nil {
++		cached = &Auth{ID: authID}
++	}
++	return !ocgAuthSupportsModel(cached, model)
++}
++
++func ocgAuthSupportsModel(auth *Auth, model string) bool {
++	modelKey := canonicalModelKey(model)
++	if auth == nil || modelKey == "" {
++		return true
++	}
++	set := supportedModelSetForAuth(auth.ID)
++	if len(set) == 0 {
++		return false
++	}
++	_, ok := set[modelKey]
++	return ok
++}
++
+ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth, entry *log.Entry) (*Auth, bool, error) {
+@@ -1535,5 +1546,5 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
+-	cacheKey := ns + "::" + primaryID + "::" + nsModel
++	cacheKey := sessionAffinityCacheKey(ns, primaryID, nsModel)
+ 	var fallbackKey string
+ 	if fallbackID != "" && fallbackID != primaryID && !isSubagentSession(primaryID, fallbackID) {
+-		fallbackKey = ns + "::" + fallbackID + "::" + nsModel
++		fallbackKey = sessionAffinityCacheKey(ns, fallbackID, nsModel)
+ 	}

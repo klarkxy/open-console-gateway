@@ -1081,3 +1081,239 @@ fn zen_activation_preflight_failure_rolls_back_catalog_and_preserves_all_active_
     drop(state);
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn retired_cpa_catalog_startup_and_direct_setters_preserve_stored_rows() {
+    use super::{CpaSelectionError, RETIRED_CPA_CATALOG};
+    use crate::db::CpaCatalogModel;
+
+    let dir = temp_data_dir("retired-cpa-catalog");
+    let db = Database::open(dir.clone()).expect("test database should open");
+    db.replace_cpa_model_catalog(
+        &[
+            CpaCatalogModel {
+                id: "alpha".into(),
+                owned_by: Some("pool".into()),
+                enabled: true,
+            },
+            CpaCatalogModel {
+                id: "beta".into(),
+                owned_by: None,
+                enabled: false,
+            },
+        ],
+        "https://cpa.invalid/models",
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    let stored_before: String = db
+        .conn
+        .query_row(
+            "SELECT models_json FROM provider_model_catalogs WHERE provider_id = 'cpa'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        stored_before.contains("\"enabled\":true"),
+        "{stored_before}"
+    );
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+    let state = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
+    assert!(
+        state.cpa_model_catalog().is_empty(),
+        "stored enabled ids are not installed as the live route list"
+    );
+    let revision = state.settings_revision();
+    let generation = state.process_generation();
+    let credentials: i64 = state
+        .db
+        .lock()
+        .conn
+        .query_row("SELECT COUNT(*) FROM credentials", [], |row| row.get(0))
+        .unwrap();
+    let grants: i64 = state
+        .db
+        .lock()
+        .conn
+        .query_row("SELECT COUNT(*) FROM credential_grants", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let destination_models: i64 = state
+        .db
+        .lock()
+        .conn
+        .query_row("SELECT COUNT(*) FROM destination_models", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+
+    let routing = state
+        .set_cpa_model_routing(&["alpha".into()])
+        .expect_err("direct routing setter is retired");
+    assert_eq!(routing.to_string(), RETIRED_CPA_CATALOG);
+    let activated = state
+        .activate_cpa_model_catalog(
+            vec![CpaCatalogModel {
+                id: "gamma".into(),
+                owned_by: None,
+                enabled: true,
+            }],
+            "https://cpa.invalid/other",
+            chrono::Utc::now(),
+        )
+        .expect_err("activation is retired");
+    assert_eq!(activated.to_string(), RETIRED_CPA_CATALOG);
+    let matched = state
+        .replace_cpa_model_selection(revision, generation, &["alpha".into()])
+        .expect_err("a matching CAS still writes nothing");
+    assert!(
+        matches!(matched, CpaSelectionError::Unavailable(message) if message == RETIRED_CPA_CATALOG)
+    );
+    let stale = state
+        .replace_cpa_model_selection(revision.wrapping_sub(1), generation, &["beta".into()])
+        .expect_err("a stale CAS writes nothing");
+    assert!(matches!(stale, CpaSelectionError::RevisionConflict));
+    let locked = state
+        .replace_cpa_model_selection_locked(&["alpha".into()])
+        .expect_err("the locked setter is retired");
+    assert!(
+        matches!(locked, CpaSelectionError::Unavailable(message) if message == RETIRED_CPA_CATALOG)
+    );
+
+    assert!(state.cpa_model_catalog().is_empty());
+    assert_eq!(state.settings_revision(), revision);
+    assert_eq!(state.process_generation(), generation);
+    let stored_after: String = state
+        .db
+        .lock()
+        .conn
+        .query_row(
+            "SELECT models_json FROM provider_model_catalogs WHERE provider_id = 'cpa'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_after, stored_before);
+    let credentials_after: i64 = state
+        .db
+        .lock()
+        .conn
+        .query_row("SELECT COUNT(*) FROM credentials", [], |row| row.get(0))
+        .unwrap();
+    let grants_after: i64 = state
+        .db
+        .lock()
+        .conn
+        .query_row("SELECT COUNT(*) FROM credential_grants", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let destination_models_after: i64 = state
+        .db
+        .lock()
+        .conn
+        .query_row("SELECT COUNT(*) FROM destination_models", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(credentials_after, credentials);
+    assert_eq!(grants_after, grants);
+    assert_eq!(destination_models_after, destination_models);
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn fresh_configuration_state(label: &str) -> (CoreStateInner, PathBuf) {
+    let dir = temp_data_dir(label);
+    let db = Database::open(dir.clone()).expect("test database should open");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+    let state = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
+    (state, dir)
+}
+
+#[test]
+fn commit_configuration_update_malformed_policy_rolls_back_before_install() {
+    let (state, dir) = fresh_configuration_state("policy-compile-rollback");
+    let revision = state.settings_revision();
+    let before_policy = state.recovery.policy_snapshot();
+    let contracts = state.provider_contracts();
+    state
+        .db
+        .lock()
+        .set_setting(crate::gateway::policy::SETTING_KEY, "{")
+        .unwrap();
+    let error = state
+        .commit_configuration_update(|db| {
+            db.set_setting("commit_boundary_marker", "rolled-back")?;
+            Ok(())
+        })
+        .expect_err("malformed temporary policy");
+    assert!(
+        error
+            .to_string()
+            .contains("temporary_unavailability_v1 is not a valid policy document")
+    );
+    assert!(
+        state
+            .db
+            .lock()
+            .get_setting("commit_boundary_marker")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        state
+            .db
+            .lock()
+            .get_setting(crate::gateway::policy::SETTING_KEY)
+            .unwrap()
+            .as_deref(),
+        Some("{")
+    );
+    assert_eq!(state.settings_revision(), revision);
+    assert_eq!(state.recovery.policy_snapshot(), before_policy);
+    assert!(Arc::ptr_eq(&state.provider_contracts(), &contracts));
+    assert!(state.settings_update.try_lock().is_some());
+    assert!(state.db.try_lock().is_some());
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn commit_configuration_update_installs_compiled_policy_and_advances_revision() {
+    let (state, dir) = fresh_configuration_state("policy-compile-install");
+    let revision = state.settings_revision();
+    let before_policy = state.recovery.policy_snapshot();
+    let contracts = state.provider_contracts();
+    state
+        .commit_configuration_update(|db| {
+            db.set_setting("commit_boundary_marker", "kept")?;
+            Ok(())
+        })
+        .expect("configuration commit");
+    assert_eq!(
+        state
+            .db
+            .lock()
+            .get_setting("commit_boundary_marker")
+            .unwrap()
+            .as_deref(),
+        Some("kept")
+    );
+    assert_eq!(state.settings_revision(), revision + 1);
+    let installed = state.recovery.policy_snapshot();
+    let expected =
+        crate::gateway::policy::compile_published(&state.db.lock(), &before_policy).unwrap();
+    assert_eq!(installed, expected);
+    assert_eq!(
+        installed.epoch,
+        before_policy.epoch.saturating_add(1).max(1)
+    );
+    assert!(!Arc::ptr_eq(&state.provider_contracts(), &contracts));
+    assert!(state.settings_update.try_lock().is_some());
+    assert!(state.db.try_lock().is_some());
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}

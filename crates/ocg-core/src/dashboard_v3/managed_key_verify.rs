@@ -1,28 +1,26 @@
 //! POST `/accounts/{id}/setup/verify-key` — managed onboarding Key verification.
 //!
-//! Preserves V2 eligibility, Go protocol-correct non-stream ping, proxy /
-//! no-redirect / auth-isolation / timeout / body-bound behavior, and the
-//! ready+enabled vs pending transitions. Locks are not held across the
-//! network: CAS and the account contract are captured, then rechecked before
-//! any persist so a stale in-flight request has no DB/session/runtime effect.
+//! A changed candidate advances credential identity and the product settings
+//! revision in the stage write. Completion accepts that post-stage receipt and
+//! still conflicts when a later writer moves revision, generation, ciphertext,
+//! update time, credential id, version, binding, or setup. Locks are released
+//! before the owned apply await and before the validated pin. Apply or pin
+//! failure performs no provider send and leaves the encrypted candidate pending.
 
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
-use futures_util::StreamExt;
 #[cfg(debug_assertions)]
 use parking_lot::Mutex;
 use std::time::Duration;
 
-use crate::custom;
 use crate::db::{
     ManagedKeyVerificationCas, ManagedKeyVerificationCommit, ManagedKeyVerificationRateLimit,
     ManagedKeyVerificationWrite,
 };
 use crate::gateway::failure::decode::temporary_429_until;
-use crate::http_client;
 use crate::kernel::protocol::{ApiFormat, supported_model_protocol_profiles};
 use crate::models::{
     Account as ModelAccount, AccountSetupStep as ModelSetupStep, AccountType as ModelAccountType,
@@ -36,11 +34,9 @@ use crate::state::CoreState;
 
 use super::types::{
     Account, AccountCustomConfig, AccountManagedKeyVerify, AccountModelCapability, AccountMutation,
-    MutationExpectation,
 };
 use super::{V3ApiError, check_expectation, parse_mutation_json};
 
-const MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_KEY_CHARS: usize = 4096;
 
 #[cfg(debug_assertions)]
@@ -62,10 +58,11 @@ impl Drop for ManagedKeyVerifyTargetGuard {
     }
 }
 
-/// Bind a loopback verification base URL to one `CoreState` process generation.
+/// Retain the installer so existing debug builds still link.
 ///
-/// Compiled out of release production. Non-loopback, credentialed, query, or
-/// fragment URLs are rejected and do not install an override.
+/// The production send no longer uses this URL. Verification goes to the owned
+/// CPA hop. Non-loopback, credentialed, query, or fragment URLs are rejected
+/// and do not install an override.
 #[cfg(debug_assertions)]
 #[must_use]
 pub fn install_managed_key_verify_target_for_tests(
@@ -85,6 +82,7 @@ pub fn install_managed_key_verify_target_for_tests(
 }
 
 #[cfg(debug_assertions)]
+#[cfg_attr(not(test), allow(dead_code))]
 fn debug_managed_key_verify_target(process_generation: u64) -> Option<String> {
     MANAGED_KEY_VERIFY_TARGET_OVERRIDES
         .lock()
@@ -135,16 +133,6 @@ fn host_is_exact_loopback(parsed: &reqwest::Url) -> bool {
     rendered.eq_ignore_ascii_case("localhost")
 }
 
-fn verification_base_url(process_generation: u64, configured: &str) -> String {
-    #[cfg(debug_assertions)]
-    if let Some(url) = debug_managed_key_verify_target(process_generation) {
-        return url;
-    }
-    #[cfg(not(debug_assertions))]
-    let _ = process_generation;
-    configured.to_string()
-}
-
 pub(super) async fn verify_managed_account_key(
     State(state): State<CoreState>,
     Path(id): Path<String>,
@@ -160,27 +148,100 @@ pub(super) async fn verify_managed_account_key(
     }
     let key_cipher = state.encrypt_key(&key).map_err(V3ApiError::internal)?;
 
-    let prepared = {
+    let staged = {
         let _settings_update = state.settings_update.lock();
         check_expectation(&state, &input.expectation)?;
-        prepare_managed_key_verify(&state, &id, key, key_cipher)?
+        let prepared = prepare_managed_key_verify(&state, &id, key, key_cipher)?;
+        stage_managed_candidate(&state, &id, prepared)?
     };
 
-    let outcome = execute_managed_key_verify(&prepared).await;
-    commit_managed_key_verify(&state, &id, &input.expectation, &prepared, outcome)
+    let outcome = match await_owned_projection(&state, &staged).await {
+        Ok(()) => execute_managed_key_verify(&state, &staged).await,
+        Err(message) => VerifyOutcome::UpstreamFailed { message },
+    };
+    let revision_before_completion = state.settings_revision();
+    let result = commit_managed_key_verify(&state, &id, &staged, outcome);
+    if state.settings_revision() != revision_before_completion {
+        #[cfg(test)]
+        assert_product_locks_released(&state);
+        // The completion row is already committed. A later apply failure stays
+        // in the runtime log and does not replace this result.
+        crate::cpa_execution::note_product_apply(&state).await;
+    }
+    result
+}
+
+#[cfg(test)]
+fn assert_product_locks_released(state: &CoreState) {
+    assert!(
+        state.settings_update.try_lock().is_some(),
+        "settings revision lock held across await"
+    );
+    assert!(
+        state.db.try_lock().is_some(),
+        "database lock held across await"
+    );
+}
+
+async fn await_owned_projection(
+    state: &CoreState,
+    staged: &StagedManagedKey,
+) -> Result<(), String> {
+    #[cfg(test)]
+    assert_product_locks_released(state);
+    match crate::cpa_execution::schedule_owned_apply(state).await {
+        Ok(_) => Ok(()),
+        Err(error) => Err(redact_verify_detail(
+            &format!("owned apply is unavailable: {error}"),
+            &staged.key,
+            &staged.config,
+        )),
+    }
 }
 
 struct PreparedVerify {
+    account_name: String,
+    pre_stage_cas: ManagedKeyVerificationCas,
+    existing_generic_cooldown_until: Option<DateTime<Utc>>,
+    key: String,
+    key_cipher: String,
+    config: AppConfig,
+    protocol: UpstreamProtocolKind,
+    public_model: String,
+}
+
+impl std::fmt::Debug for PreparedVerify {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedVerify")
+            .field("account_name", &self.account_name)
+            .field("public_model", &self.public_model)
+            .field("protocol", &self.protocol)
+            .field("key", &"[redacted]")
+            .field("key_cipher", &"[redacted]")
+            .finish_non_exhaustive()
+    }
+}
+
+struct StagedManagedKey {
     account_name: String,
     account_cas: ManagedKeyVerificationCas,
     existing_generic_cooldown_until: Option<DateTime<Utc>>,
     key: String,
     key_cipher: String,
     config: AppConfig,
-    target_url: String,
-    body: Vec<u8>,
+    protocol: UpstreamProtocolKind,
+    public_model: String,
+    credential_id: String,
+    credential_version: u64,
+    binding_id: String,
+    /// Settings revision after the stage bump. Completion accepts this
+    /// self-change and conflicts if another writer advanced it.
+    product_revision: u64,
+    process_generation: u64,
 }
 
+#[derive(Debug)]
 enum VerifyOutcome {
     Success,
     RateLimited {
@@ -209,23 +270,72 @@ fn prepare_managed_key_verify(
     let account = load_waiting_managed_account(state, id)?;
     ensure_managed_registration(state, &account)?;
     ensure_plan_can_enable(state, &account)?;
-    let (_protocol, path, body) = go_verification_request()?;
-    let config = state.config();
-    let base = verification_base_url(
-        state.process_generation(),
-        &crate::gateway::free_models::opencode_go_base_url(&config.upstream_base_url),
-    );
-    validate_upstream_url(&base)
-        .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
+    let persisted = crate::protocol_probe::load_persisted_credential(state, id)
+        .map_err(|message| V3ApiError::conflict_at(state, message))?;
+    if !persisted.binding_enabled {
+        return Err(V3ApiError::conflict_at(
+            state,
+            "credential binding is disabled",
+        ));
+    }
+    let (protocol, public_model) = managed_verification_target()?;
     Ok(PreparedVerify {
         account_name: account.name.clone(),
-        account_cas: ManagedKeyVerificationCas::from_account(&account),
+        pre_stage_cas: ManagedKeyVerificationCas::from_account(&account),
         existing_generic_cooldown_until: account.cooldown_generic_until,
         key,
         key_cipher,
-        config,
-        target_url: join_upstream(&base, path),
-        body,
+        config: state.config(),
+        protocol,
+        public_model,
+    })
+}
+
+fn stage_managed_candidate(
+    state: &CoreState,
+    id: &str,
+    prepared: PreparedVerify,
+) -> Result<StagedManagedKey, V3ApiError> {
+    let committed = state
+        .db
+        .lock()
+        .commit_managed_key_verification(
+            id,
+            &prepared.pre_stage_cas,
+            &prepared.key_cipher,
+            &ManagedKeyVerificationWrite::Pending,
+        )
+        .map_err(|error| map_complete_error(state, error))?;
+    if committed == ManagedKeyVerificationCommit::Conflict {
+        return Err(key_changed_conflict(state));
+    }
+    let account = load_waiting_managed_account(state, id)?;
+    if account.key_cipher != prepared.key_cipher {
+        return Err(key_changed_conflict(state));
+    }
+    let persisted = crate::protocol_probe::load_persisted_credential(state, id)
+        .map_err(|message| V3ApiError::conflict_at(state, message))?;
+    if !persisted.binding_enabled {
+        return Err(V3ApiError::conflict_at(
+            state,
+            "credential binding is disabled",
+        ));
+    }
+    let product_revision = state.bump_settings_revision();
+    Ok(StagedManagedKey {
+        account_name: prepared.account_name,
+        account_cas: ManagedKeyVerificationCas::from_account(&account),
+        existing_generic_cooldown_until: prepared.existing_generic_cooldown_until,
+        key: prepared.key,
+        key_cipher: prepared.key_cipher,
+        config: prepared.config,
+        protocol: prepared.protocol,
+        public_model: prepared.public_model,
+        credential_id: persisted.credential_id,
+        credential_version: persisted.credential_version,
+        binding_id: persisted.binding_id,
+        product_revision,
+        process_generation: state.process_generation(),
     })
 }
 
@@ -281,7 +391,7 @@ fn map_enablement_error(state: &CoreState, error: ProviderBindingError) -> V3Api
     }
 }
 
-fn go_verification_request() -> Result<(UpstreamProtocolKind, &'static str, Vec<u8>), V3ApiError> {
+fn managed_verification_target() -> Result<(UpstreamProtocolKind, String), V3ApiError> {
     let Some((canonical, preferred, _)) = supported_model_protocol_profiles()
         .find(|(model_id, _, _)| *model_id == DEFAULT_ACCOUNT_TEST_MODEL)
     else {
@@ -292,12 +402,7 @@ fn go_verification_request() -> Result<(UpstreamProtocolKind, &'static str, Vec<
     let protocol = upstream_protocol_for_api(preferred).ok_or_else(|| {
         V3ApiError::internal("default OpenCode Go verification model has no upstream protocol")
     })?;
-    let path = preferred.upstream_path().ok_or_else(|| {
-        V3ApiError::internal("default OpenCode Go verification model has no upstream path")
-    })?;
-    let body = custom::minimal_verification_body(protocol, canonical)
-        .map_err(|error| V3ApiError::internal(error.message))?;
-    Ok((protocol, path, body))
+    Ok((protocol, canonical.to_string()))
 }
 
 fn upstream_protocol_for_api(format: ApiFormat) -> Option<UpstreamProtocolKind> {
@@ -309,81 +414,46 @@ fn upstream_protocol_for_api(format: ApiFormat) -> Option<UpstreamProtocolKind> 
     }
 }
 
-fn join_upstream(base: &str, path: &str) -> String {
-    format!("{}{path}", base.trim_end_matches('/'))
-}
-
-fn validate_upstream_url(url: &str) -> Result<(), String> {
-    let parsed =
-        reqwest::Url::parse(url).map_err(|error| format!("invalid upstream URL: {error}"))?;
-    match parsed.scheme() {
-        "https" => Ok(()),
-        "http" if is_loopback(&parsed) => Ok(()),
-        _ => Err("upstream must use https, except loopback http".to_string()),
-    }
-}
-
-fn is_loopback(url: &reqwest::Url) -> bool {
-    matches!(
-        url.host_str(),
-        Some("localhost") | Some("127.0.0.1") | Some("::1") | Some("[::1]")
+async fn execute_managed_key_verify(state: &CoreState, staged: &StagedManagedKey) -> VerifyOutcome {
+    #[cfg(test)]
+    assert_product_locks_released(state);
+    let timeout = Duration::from_secs(staged.config.non_stream_timeout_secs);
+    let response = match crate::protocol_probe::send_validated_generation(
+        state,
+        &crate::protocol_probe::ValidatedGeneration {
+            credential_id: staged.credential_id.clone(),
+            credential_version: staged.credential_version,
+            binding_id: staged.binding_id.clone(),
+            public_model: staged.public_model.clone(),
+            protocol: staged.protocol,
+        },
+        timeout,
     )
-}
-
-async fn execute_managed_key_verify(prepared: &PreparedVerify) -> VerifyOutcome {
-    let client = match http_client::configured_builder(&prepared.config).and_then(|builder| {
-        builder
-            .connect_timeout(Duration::from_secs(prepared.config.connect_timeout_secs))
-            .redirect(http_client::no_redirect_policy())
-            .build()
-            .map_err(Into::into)
-    }) {
-        Ok(client) => client,
-        Err(error) => {
-            return VerifyOutcome::UpstreamFailed {
-                message: redact_verify_detail(
-                    &format!(
-                        "key verification request failed; the account remains pending: {error}"
-                    ),
-                    &prepared.key,
-                    &prepared.config,
-                ),
-            };
-        }
-    };
-
-    let response = match client
-        .post(&prepared.target_url)
-        .bearer_auth(&prepared.key)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(prepared.body.clone())
-        .timeout(Duration::from_secs(prepared.config.non_stream_timeout_secs))
-        .send()
-        .await
+    .await
     {
         Ok(response) => response,
-        Err(error) => {
+        Err(crate::protocol_probe::ValidatedSendError::NotSent(message)) => {
             return VerifyOutcome::UpstreamFailed {
-                message: network_error_message(&error, &prepared.key, &prepared.config, true),
+                message: redact_verify_detail(&message, &staged.key, &staged.config),
             };
         }
     };
+    classify_managed_response(staged, response)
+}
 
-    let status = response.status();
-    let retry_after = response
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let body = match read_managed_key_verification_response(response).await {
-        Ok(body) => body,
-        Err(error) => {
-            return VerifyOutcome::UpstreamFailed {
-                message: network_error_message(&error, &prepared.key, &prepared.config, false),
-            };
-        }
+fn classify_managed_response(
+    staged: &StagedManagedKey,
+    response: crate::protocol_probe::ValidatedHttpResult,
+) -> VerifyOutcome {
+    let Ok(status) = StatusCode::from_u16(response.status) else {
+        return VerifyOutcome::UpstreamFailed {
+            message: format!(
+                "key verification upstream returned {}; the account remains pending",
+                response.status
+            ),
+        };
     };
-
+    let body = String::from_utf8_lossy(&response.body).into_owned();
     if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
         VerifyOutcome::AuthFailed { status, body }
     } else if status.is_server_error() {
@@ -393,83 +463,35 @@ async fn execute_managed_key_verify(prepared: &PreparedVerify) -> VerifyOutcome 
             ),
         }
     } else if status == StatusCode::TOO_MANY_REQUESTS {
-        VerifyOutcome::RateLimited { body, retry_after }
+        VerifyOutcome::RateLimited {
+            body,
+            retry_after: response.retry_after,
+        }
     } else if status.is_success() {
-        VerifyOutcome::Success
+        match crate::protocol_probe::protocol_shaped_success(
+            response.status,
+            &response.body,
+            staged.protocol,
+        ) {
+            Ok(()) => VerifyOutcome::Success,
+            Err(message) => VerifyOutcome::ClientFailed {
+                status,
+                body: message,
+            },
+        }
     } else {
         VerifyOutcome::ClientFailed { status, body }
     }
 }
 
-fn network_error_message(
-    error: &reqwest::Error,
-    key: &str,
-    config: &AppConfig,
-    request_phase: bool,
-) -> String {
-    if error.is_timeout() {
-        if request_phase {
-            "key verification timed out; the account remains pending".to_string()
-        } else {
-            "key verification response timed out; the account remains pending".to_string()
-        }
-    } else if request_phase {
-        redact_verify_detail(
-            &format!(
-                "key verification request failed; the account remains pending: {}",
-                format_error_chain(error)
-            ),
-            key,
-            config,
-        )
-    } else {
-        redact_verify_detail(
-            &format!(
-                "failed to read key verification response: {}",
-                format_error_chain(error)
-            ),
-            key,
-            config,
-        )
-    }
-}
-
-async fn read_managed_key_verification_response(
-    response: reqwest::Response,
-) -> Result<String, reqwest::Error> {
-    let read_limit = MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES.saturating_add(1);
-    let capacity = response
-        .content_length()
-        .and_then(|length| usize::try_from(length).ok())
-        .map_or(read_limit, |length| length.min(read_limit));
-    let mut body = Vec::with_capacity(capacity);
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        let remaining = read_limit.saturating_sub(body.len());
-        if remaining == 0 {
-            break;
-        }
-        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-        if body.len() == read_limit {
-            break;
-        }
-    }
-
-    let truncated = body.len() > MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES;
-    body.truncate(MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES);
-    let mut text = String::from_utf8_lossy(&body).into_owned();
-    if truncated {
-        text.push_str("\n<key verification response truncated>");
-    }
-    Ok(text)
+fn saved_pending(detail: impl Into<String>) -> String {
+    format!("saved pending candidate; {}", detail.into())
 }
 
 fn commit_managed_key_verify(
     state: &CoreState,
     id: &str,
-    expectation: &MutationExpectation,
-    prepared: &PreparedVerify,
+    prepared: &StagedManagedKey,
     outcome: VerifyOutcome,
 ) -> Result<Json<AccountMutation>, V3ApiError> {
     enum ResponseKind {
@@ -480,9 +502,22 @@ fn commit_managed_key_verify(
 
     let (result, refresh_usage) = {
         let _settings_update = state.settings_update.lock();
-        check_expectation(state, expectation)?;
+        if state.settings_revision() != prepared.product_revision
+            || state.process_generation() != prepared.process_generation
+        {
+            return Err(V3ApiError::revision_conflict(state));
+        }
         let account = load_waiting_managed_account(state, id)?;
         ensure_plan_can_enable(state, &account)?;
+        let persisted = crate::protocol_probe::load_persisted_credential(state, id)
+            .map_err(|message| V3ApiError::conflict_at(state, message))?;
+        if persisted.credential_id != prepared.credential_id
+            || persisted.credential_version != prepared.credential_version
+            || persisted.binding_id != prepared.binding_id
+            || !persisted.binding_enabled
+        {
+            return Err(key_changed_conflict(state));
+        }
 
         let (write, response_kind, rate_limited) = match outcome {
             VerifyOutcome::Success => (
@@ -498,9 +533,10 @@ fn commit_managed_key_verify(
                     sanitize_upstream_error_value_with_known_secret(&body, &prepared.key)
                         .to_string();
                 let retry_until = temporary_429_until(retry_after.as_deref(), Utc::now());
-                // A 429 without a declared window must only update the generic
-                // slot. Keep a longer generic wait captured with the account;
-                // named quota-window slots remain untouched by the DB commit.
+                // HTTP 429 is the existing temporary cooldown, not a trusted
+                // plan parser. Named quota windows and quota-recovery JSON stay
+                // empty so a generic 429 cannot become durable Plan authority.
+                // Keep a longer generic wait captured with the account.
                 let until = prepared
                     .existing_generic_cooldown_until
                     .filter(|existing| existing > &retry_until)
@@ -582,12 +618,17 @@ fn commit_managed_key_verify(
                     rate_limited,
                 )
             }
-            ResponseKind::InvalidRequest(message) => {
-                (Err(V3ApiError::invalid_request_at(state, message)), false)
-            }
-            ResponseKind::OutboundFailed(message) => {
-                (Err(V3ApiError::outbound_failed(state, message)), false)
-            }
+            ResponseKind::InvalidRequest(message) => (
+                Err(V3ApiError::invalid_request_at(
+                    state,
+                    saved_pending(message),
+                )),
+                false,
+            ),
+            ResponseKind::OutboundFailed(message) => (
+                Err(V3ApiError::outbound_failed(state, saved_pending(message))),
+                false,
+            ),
         }
     };
     if refresh_usage {
@@ -749,17 +790,6 @@ fn short_body(body: &str) -> String {
         .collect()
 }
 
-fn format_error_chain(error: &(dyn std::error::Error + 'static)) -> String {
-    let mut message = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        message.push_str(": ");
-        message.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    message
-}
-
 fn redact_verify_detail(text: &str, key: &str, config: &AppConfig) -> String {
     let mut redacted = redact_text(text);
     redacted = redact_known_secret(&redacted, key);
@@ -829,3 +859,6 @@ mod target_override_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -1,13 +1,14 @@
-//! Local CPA catalog projection and routing selection.
+//! Historical shared CPA catalog.
 //!
-//! Reads and writes the persisted snapshot only. Refreshing models from CPA
-//! stays on the V3 adapter; this slice never issues outbound requests.
+//! `GET` returns the stored snapshot as nonroutable. `PUT` does not change
+//! the snapshot, revision, grants, or routes. Owned-native models stay on
+//! the destination-scoped APIs. This slice never issues outbound requests.
 
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::State;
 
-use crate::dashboard_v3::{ControlRevision, V3ApiError, check_expectation, parse_mutation_json};
+use crate::dashboard_v3::{ControlRevision, V3ApiError, parse_mutation_json};
 use crate::state::CoreState;
 
 use super::types::{CpaCatalog, CpaCatalogEntry, CpaCatalogUpdate};
@@ -23,24 +24,13 @@ pub(super) async fn put_models(
     State(state): State<CoreState>,
     body: Bytes,
 ) -> Result<Json<CpaCatalog>, V3ApiError> {
-    let input = parse_mutation_json::<CpaCatalogUpdate>(&body)?;
+    // The body shape stays the same. A valid selection still cannot write.
+    let _input = parse_mutation_json::<CpaCatalogUpdate>(&body)?;
     let _settings_update = state.settings_update.lock();
-    check_expectation(&state, &input.expectation)?;
-    state
-        .replace_cpa_model_selection_locked(&input.enabled_ids)
-        .map_err(|error| match error {
-            crate::state::CpaSelectionError::RevisionConflict => {
-                V3ApiError::revision_conflict(&state)
-            }
-            crate::state::CpaSelectionError::Invalid(message) => {
-                V3ApiError::invalid_request_at(&state, message)
-            }
-            crate::state::CpaSelectionError::Unavailable(message) => {
-                V3ApiError::precondition_failed_at(&state, message)
-            }
-            crate::state::CpaSelectionError::Internal(error) => V3ApiError::internal(error),
-        })?;
-    Ok(Json(catalog_payload(&state)?))
+    Err(V3ApiError::precondition_failed_at(
+        &state,
+        crate::state::RETIRED_CPA_CATALOG,
+    ))
 }
 
 fn catalog_payload(state: &CoreState) -> Result<CpaCatalog, V3ApiError> {
@@ -58,7 +48,8 @@ fn catalog_payload(state: &CoreState) -> Result<CpaCatalog, V3ApiError> {
                     .map(|model| CpaCatalogEntry {
                         id: model.id.clone(),
                         owned_by: model.owned_by.clone(),
-                        enabled: model.enabled,
+                        // Stored `enabled` is historical. The read is not a route grant.
+                        enabled: false,
                     })
                     .collect()
             })

@@ -2625,3 +2625,64 @@ fn usage_refresh_dtos_are_camel_case_secret_free_and_append_only() {
     );
     assert_secret_free(&throttle_value);
 }
+
+#[test]
+fn cpa_runtime_accepts_older_payloads_and_structured_fields() {
+    let legacy = serde_json::json!({
+        "supported": false,
+        "unavailableReason": null,
+        "installed": false,
+        "running": false,
+        "desiredRunning": false,
+        "owned": false,
+        "currentVersion": null,
+        "previousVersion": null,
+        "assetSha256": null,
+        "port": null,
+        "baseUrl": null,
+        "phase": "idle",
+        "error": null,
+        "latestVersion": "v8.0.10",
+        "updateAvailable": false,
+        "currentOperation": "applied",
+        "revision": 1,
+        "processGeneration": 2
+    });
+    let mut runtime: CpaRuntime = serde_json::from_value(legacy).unwrap();
+    assert!(!runtime.policy_ready);
+    assert!(!runtime.execution_unavailable);
+    assert!(runtime.child_process_generation.is_none());
+    assert!(runtime.apply_status.is_none());
+    runtime.child_process_generation = Some(11);
+    runtime.desired_revision = Some(4);
+    runtime.applied_revision = Some(3);
+    runtime.desired_digest = Some("ab".repeat(32));
+    runtime.applied_digest = Some("cd".repeat(32));
+    runtime.apply_status = Some("applied".into());
+    runtime.policy_ready = true;
+    runtime.execution_unavailable = false;
+    runtime.current_operation = Some("applied".into());
+    let value = serde_json::to_value(&runtime).unwrap();
+    assert_eq!(value["childProcessGeneration"], 11);
+    assert_eq!(value["desiredRevision"], 4);
+    assert_eq!(value["appliedRevision"], 3);
+    assert_eq!(value["applyStatus"], "applied");
+    assert_eq!(value["policyReady"], true);
+    assert_eq!(value["executionUnavailable"], false);
+    assert_eq!(value["currentOperation"], "applied");
+    assert!(!value.to_string().contains("child="));
+
+    let install = serde_json::json!({
+        "expectedRevision": 1,
+        "processGeneration": 2,
+        "artifactDir": "runtime-build",
+        "target": "owned"
+    });
+    let parsed: CpaRuntimeInstall = serde_json::from_value(install).unwrap();
+    assert_eq!(parsed.artifact_dir.as_deref(), Some("runtime-build"));
+    assert_eq!(parsed.target, Some(CpaControlTarget::Owned));
+    let absent = serde_json::json!({"expectedRevision": 1, "processGeneration": 2});
+    let parsed: CpaRuntimeInstall = serde_json::from_value(absent).unwrap();
+    assert!(parsed.artifact_dir.is_none());
+    assert!(parsed.target.is_none());
+}

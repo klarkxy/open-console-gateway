@@ -5,3 +5,8 @@
 # Keep pinned upstream resources byte-identical across Windows checkouts.
 resources/codex-byok/prompt.md text eol=lf
 resources/codex-byok/LICENSE text eol=lf
+
+# CPA input hashes must survive checkout on another operating system.
+runtime/cpa/** -text
+# Patch context whitespace is part of the patch, not source indentation.
+runtime/cpa/patches/*.patch -whitespace

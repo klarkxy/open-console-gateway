@@ -53,7 +53,7 @@ pub(super) async fn get_restrictions(
     State(state): State<CoreState>,
 ) -> Result<Json<TemporaryPolicyRestrictions>, V3ApiError> {
     let _settings_update = state.settings_update.lock();
-    Ok(Json(restrictions_locked(&state)))
+    Ok(Json(restrictions_locked(&state)?))
 }
 
 pub(super) async fn clear_restriction(
@@ -64,10 +64,16 @@ pub(super) async fn clear_restriction(
     let input = parse_mutation_json::<TemporaryPolicyClearRequest>(&body)?;
     let _settings_update = state.settings_update.lock();
     check_expectation(&state, &input.expectation)?;
+    if crate::cpa_quota::is_plan_restriction_id(&id) {
+        return Err(V3ApiError::invalid_request_at(
+            &state,
+            "official quota restrictions clear only from a newer official observation",
+        ));
+    }
     state
         .clear_temporary_restriction_locked(&id)
         .map_err(|error| map_policy_error(&state, error))?;
-    Ok(Json(restrictions_locked(&state)))
+    Ok(Json(restrictions_locked(&state)?))
 }
 
 fn map_policy_error(state: &CoreState, error: crate::state::TemporaryPolicyError) -> V3ApiError {
@@ -99,17 +105,65 @@ fn configuration_locked(
     }))
 }
 
-fn restrictions_locked(state: &CoreState) -> TemporaryPolicyRestrictions {
-    let (_, mono) = state.sample_gateway_clock();
-    TemporaryPolicyRestrictions {
-        revision: ControlRevision::from_state(state),
-        restrictions: state
-            .recovery
-            .list_restrictions(mono)
-            .into_iter()
-            .map(restriction_to_dto)
-            .collect(),
+fn restrictions_locked(state: &CoreState) -> Result<TemporaryPolicyRestrictions, V3ApiError> {
+    let (now, mono) = state.sample_gateway_clock();
+    let mut restrictions: Vec<_> = state
+        .recovery
+        .list_restrictions(mono)
+        .into_iter()
+        .map(restriction_to_dto)
+        .collect();
+    let plans = {
+        let db = state.db.lock();
+        crate::cpa_quota::present_all(&db.conn, now)
+            .map_err(|_| V3ApiError::internal("official quota policy could not be read"))?
+    };
+    let mut plans: Vec<_> = plans.into_values().collect();
+    plans.sort_by(|left, right| left.credential_id.cmp(&right.credential_id));
+    for plan in plans {
+        restrictions.extend(plan_rows(&plan, now));
     }
+    Ok(TemporaryPolicyRestrictions {
+        revision: ControlRevision::from_state(state),
+        restrictions,
+    })
+}
+
+fn plan_rows(
+    plan: &crate::cpa_quota::EffectivePlan,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<TemporaryPolicyRestriction> {
+    plan.rows
+        .iter()
+        .map(|row| {
+            let wait = row.next_retry_at.signed_duration_since(now).num_seconds();
+            TemporaryPolicyRestriction {
+                id: row.id.clone(),
+                rule_id: "official-quota".to_string(),
+                rule_generation: 1,
+                source: TemporaryPolicySource::Global,
+                credential_id: plan.credential_id.clone(),
+                destination_id: plan.destination_id.clone(),
+                scope: if row.public_model.is_some() {
+                    TemporaryPolicyScope::CredentialModel
+                } else {
+                    TemporaryPolicyScope::Credential
+                },
+                upstream_model: row.public_model.clone(),
+                state: match row.status {
+                    crate::cpa_quota::PlanStatus::Waiting => {
+                        TemporaryPolicyRestrictionState::Waiting
+                    }
+                    crate::cpa_quota::PlanStatus::Ready => TemporaryPolicyRestrictionState::Ready,
+                    crate::cpa_quota::PlanStatus::Probing => {
+                        TemporaryPolicyRestrictionState::Probing
+                    }
+                },
+                next_probe_in_seconds: if wait > 0 { Some(wait as u64) } else { None },
+                probe_in_flight: row.probe_in_flight,
+            }
+        })
+        .collect()
 }
 
 fn rule_from_dto(rule: &TemporaryPolicyRule) -> Result<ConfiguredRule, PolicyDocumentError> {

@@ -2,37 +2,25 @@
 
 # 维护者指南
 
-本指南面向改代码、发版、调试 Gateway 和验证桌面安装包的人。它记录 HEAD 上实际实现的架构与运行契约。
+先阅读 [CPA 架构](architecture.zh-CN.md)、[迁移边界](maintainer/cpa-migration.zh-CN.md)与[已完成验证](maintainer/cpa-validation.zh-CN.md)。它们定义新版本；旧内核仍留在源码中等待迁移。
 
-## 章节
+[原生 GUI 章节](architecture.zh-CN.md#9-原生桌面-gui)统一定义已确定的 GPUI/Ely 布局、共享控制/生命周期边界及 Windows/Linux/macOS 验证目标。概念图和平台目标不是运行验收证据；当前分支尚无 GPUI GUI。
 
-- [仓库结构](maintainer/layout.zh-CN.md) — crate 与目录结构。
-- [开发](maintainer/development.zh-CN.md) — 开发循环与检查。
-- [架构](maintainer/architecture.zh-CN.md) — 依赖边界、适配器身份、请求流转与文字图。
-- [Dashboard API](maintainer/dashboard-api.zh-CN.md) — V4 接口、挂回的兼容处理器、CAS token 与变更规则。
-- [状态、凭据与生命周期](maintainer/state-and-lifecycle.zh-CN.md) — `CoreState`、锁顺序、凭据与持久化。
-- [HTTP 路由](maintainer/http-routes.zh-CN.md) — 推理路由、V3/V4 路径、V2 墓碑与 auth/session 路由。
-- [运行时不变式](maintainer/runtime-invariants.zh-CN.md) — Gateway、别名、Zen Free、套餐目录、访问 Key、代理与用量同步的详细语义。
-- [存储与迁移](maintainer/storage-migration.zh-CN.md) — SQLite schema 与迁移、备份与运维手册。
-- [扩展 Open Console Gateway](maintainer/extending.zh-CN.md) — 静态密封的供应商扩展步骤。
-- [本机 BYOK 应用](maintainer/byok-applications.zh-CN.md) — 客户端格式基线、所有权、恢复和隔离验证。
-- [发布产物](maintainer/release-artifacts.zh-CN.md) — 支持的平台矩阵与包名。
-- [CI 工作流](maintainer/ci.zh-CN.md) — quality、release 与 container 工作流。
-- [发布流程](maintainer/releasing.zh-CN.md) — 版本 bump、tag、构建与发布检查清单。
-- [已知缺口与明确非目标](maintainer/known-debt.zh-CN.md) — 已记录的缺口与有意不做的事项。
-- [RFC：重新设计账号与供应商模型](maintainer/account-model-unification.zh-CN.md) — 已落地的 Destination / Credential 模型、遗留表删除、V3 墓碑，以及走到 HEAD 的迁移。
-- [编码约定](maintainer/conventions.zh-CN.md) — crate DAG、安全边界与文档归属。
+## 当前实现参考
 
-## 方案
+- [开发](maintainer/development.zh-CN.md) — 当前 Rust CLI 构建与检查。
+- [CLI](user/cli.zh-CN.md) — 已实现命令与操作。
+- [HTTP 合约](maintainer/dashboard-api.zh-CN.md)与[路由](maintainer/http-routes.zh-CN.md) — 现有 V4/CAS 行为，不表示 CPA 迁移已完成。
+- [存储迁移](maintainer/storage-migration.zh-CN.md) — 当前加密、备份与回滚。
+- [应用接入](maintainer/byok-applications.zh-CN.md) — 客户端专用行为，不是另一套执行架构。
+- [约定](maintainer/conventions.zh-CN.md) — 设计/源码区分与文档规则。
+- [CI](maintainer/ci.zh-CN.md) — 当前检查与旧发布器限制。
+- [工作检查点 — 2026-10-05](maintainer/work-checkpoint-2026-10-05.zh-CN.md) — 暂停的 CLI 工作、证据及重装后续接步骤。
 
-- [Codex 接入](maintainer/codex-integration-proposal.zh-CN.md) — OpenCodex 调研与保留登录的接入方案，尚未实现。
+## 历史发布参考
 
-## 阅读路径
+[发布产物](maintainer/release-artifacts.zh-CN.md)与[发布流程](maintainer/releasing.zh-CN.md)描述以前的桌面发行，不是 CPA 底层 OCG3 可用的发布器。发布说明保留在 releases/。
 
-- **贡献者** — `layout` → `development` → `architecture` → `state-and-lifecycle` → `http-routes` → `conventions`。
-- **发版负责人** — `release-artifacts` → `ci` → `releasing` → `known-debt`。
-- **UI / 主题工作** — 先读 `DESIGN.md`，再改 `src/theme.ts` 与对应 Vue 页面。
+本次文档更新记录原生 GUI 方向，不实现 GUI、不迁移运行时/数据库，也不发布。实施时保留完整 CLI 与共享 V4/CAS 控制操作；替换执行职责时保留兼容/安全保证，不另建外层重试调度器。
 
----
-
-[文档索引](README.zh-CN.md) · [English](MAINTAINER.md)
+[文档索引](README.zh-CN.md) · [助手指引](../AGENTS.md)

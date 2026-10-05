@@ -20,7 +20,9 @@ pub(super) async fn patch(
     body: Bytes,
 ) -> Result<Json<BindingPatchResult>, V3ApiError> {
     let input = parse_mutation_json::<BindingPatchRequest>(&body)?;
-    patch_locked(&state, &id, input).map(Json)
+    let saved = patch_locked(&state, &id, input)?;
+    crate::cpa_execution::note_product_apply(&state).await;
+    Ok(Json(saved))
 }
 
 fn patch_locked(
@@ -127,11 +129,30 @@ fn reject_meaningless_binding_mutation(
             "CPA Subscription Pool settings must use the external-integration endpoint",
         ));
     }
-    if record.account.is_zen_free() || record.account.credential_kind == CredentialKind::None {
+    if record.account.is_zen_free() {
         return Err(V3ApiError::invalid_request_at(
             state,
             "anonymous and no-auth bindings cannot be edited",
         ));
     }
+    if record.account.credential_kind == CredentialKind::None {
+        let allowed = {
+            let db = state.db.lock();
+            crate::cpa_execution::specialized_native_binding_allowed(
+                &db.conn,
+                &record.credential_id,
+            )
+            .map_err(V3ApiError::internal)?
+        };
+        if !allowed {
+            return Err(V3ApiError::invalid_request_at(
+                state,
+                "anonymous and no-auth bindings cannot be edited",
+            ));
+        }
+    }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

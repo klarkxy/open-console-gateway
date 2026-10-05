@@ -2,6 +2,8 @@
 
 # New API and Sub2API accounts
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
 For a site installed under a path such as `/chat`, enter that site's root as `/chat` or `/chat/v1`. Adding and refreshing a Key requests `/chat/v1/models`; Chat inference uses `/chat/v1/chat/completions`, with matching Responses and Messages paths. When an unlinked Key's original Custom connection is empty and still uses the same route and model mappings, the Key returns to that connection; shared or edited connections are preserved.
 
 Each site is **one account** with multiple Keys. **Add Key** asks for a name and the Key only. Saving fetches that Key's models from the site and then associates the Key. On New API, **Import Keys from site** uses the saved management credential to list remote tokens, read each full Key, create local Custom Keys, and associate them. Tokens that already exist locally, are disabled, or cannot return a full Key or models are skipped. New API and Sub2API already convert Chat Completions, Messages, and Responses, so OCG does not ask for a protocol or open the Providers model matrix for that Key. If association fails after creation, the form shows that the Key already exists and retries only association. Reloading keeps the standalone Key available under Link existing Key. An uncertain creation result must be reconciled against the account list before creating again.

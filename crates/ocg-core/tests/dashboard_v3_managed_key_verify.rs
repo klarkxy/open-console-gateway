@@ -845,6 +845,10 @@ async fn dashboard_v3_managed_key_verify_success_401_429_5xx_network_and_oversiz
                 .unwrap()
             );
         }
+        // The debug target installer is not the production hop. Adopt after the
+        // waiting row exists. Do not copy that loopback into upstream_base_url:
+        // the OpenCode face stays the sealed official origin.
+        harness.ensure_owned_plane().await;
         let before = harness.state.settings_revision();
         let verification_started_at = Utc::now();
         let (http_status, response) = send_json(
@@ -942,12 +946,13 @@ async fn dashboard_v3_managed_key_verify_success_401_429_5xx_network_and_oversiz
     }
 
     insert_managed_waiting(&harness, "network");
-    let before = harness.state.settings_revision();
     let dead = closed_proxy_addr().await;
     let _dead_target = install_managed_key_verify_target_for_tests(
         harness.state.process_generation(),
         format!("{dead}/"),
     );
+    harness.ensure_owned_plane().await;
+    let before = harness.state.settings_revision();
     let (status, body) = send_json(
         &harness,
         Method::POST,
@@ -969,6 +974,7 @@ async fn dashboard_v3_managed_key_verify_success_401_429_5xx_network_and_oversiz
         origin.url.clone(),
     );
     insert_managed_waiting(&harness, "oversize");
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
     let (status, body) = send_json(
         &harness,
@@ -1010,6 +1016,7 @@ async fn dashboard_v3_managed_key_verify_429_uses_retry_after_without_body_quota
         origin.url.clone(),
     );
     insert_managed_waiting(&harness, "retry-after");
+    harness.ensure_owned_plane().await;
     let before = Utc::now();
 
     let (status, body) = send_json(
@@ -1066,6 +1073,7 @@ async fn dashboard_v3_managed_key_verify_429_preserves_longer_existing_cooldowns
         )
         .unwrap();
     }
+    harness.ensure_owned_plane().await;
 
     let (status, body) = send_json(
         &harness,
@@ -1105,6 +1113,7 @@ async fn dashboard_v3_managed_key_verify_does_not_follow_redirects_or_echo_upstr
         origin.url.clone(),
     );
     insert_managed_waiting(&harness, "managed-1");
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
 
     let (status, body) = send_json(
@@ -1146,6 +1155,7 @@ async fn dashboard_v3_stale_during_network_has_no_side_effect() {
         origin.url.clone(),
     );
     insert_managed_waiting(&harness, "managed-1");
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
     let generation = harness.state.process_generation();
     let body = cas(&harness, json!({ "key": OPAQUE_KEY }));
@@ -1206,6 +1216,7 @@ async fn in_flight_v3_verify_completes_when_retired_v2_verify_is_gone() {
         v3_origin.url.clone(),
     );
     insert_managed_waiting(&harness, "managed-1");
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
     let v3_body = cas(&harness, json!({ "key": OPAQUE_KEY }));
     let v3_path = verify_path("managed-1");
@@ -1269,6 +1280,7 @@ async fn dashboard_v3_concurrent_verify_key_bumps_revision_once() {
         origin.url.clone(),
     );
     insert_managed_waiting(&harness, "managed-1");
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
     let body = cas(&harness, json!({ "key": OPAQUE_KEY }));
     let path = verify_path("managed-1");
@@ -1322,6 +1334,7 @@ async fn dashboard_v3_managed_key_verify_list_blacklist_uses_default_proxy_leg()
     config.proxy_list_direction = ProxyListDirection::Blacklist;
     config.proxy_url = dead_proxy;
     harness.state.set_config(config).unwrap();
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
 
     let (status, body) = send_json(
@@ -1376,6 +1389,7 @@ async fn retired_v2_verify_key_does_not_complete() {
     assert_eq!(v2_account.setup_step, ModelSetupStep::KeyVerification);
     assert!(!v2_account.enabled);
 
+    harness.ensure_owned_plane().await;
     let (status, body) = send_json(
         &harness,
         Method::POST,
@@ -1431,6 +1445,8 @@ async fn dashboard_v3_overrides_are_generation_isolated() {
         harness_b.state.process_generation(),
         origin_b.url.clone(),
     );
+    harness_a.ensure_owned_plane().await;
+    harness_b.ensure_owned_plane().await;
 
     let path_a = verify_path("managed-a");
     let path_b = verify_path("managed-b");
@@ -1536,6 +1552,7 @@ async fn dashboard_v3_managed_key_verify_times_out_without_completing_setup() {
         origin.url.clone(),
     );
     insert_managed_waiting(&harness, "managed-1");
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
 
     let (status, body) = send_json(
@@ -1571,6 +1588,7 @@ async fn dashboard_v3_managed_key_verify_list_whitelist_uses_direct_default_leg(
     config.proxy_list_direction = ProxyListDirection::Whitelist;
     config.proxy_url = dead_proxy;
     harness.state.set_config(config).unwrap();
+    harness.ensure_owned_plane().await;
     let before = harness.state.settings_revision();
 
     let (status, body) = send_json(

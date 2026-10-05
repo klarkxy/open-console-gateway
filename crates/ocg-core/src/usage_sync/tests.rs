@@ -10,7 +10,7 @@ use crate::provider::{
 };
 use crate::state::{CoreState, CoreStateInner};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 
 fn fixed(ts: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(ts)
@@ -1640,6 +1640,85 @@ async fn goat_key_windows_are_independent_and_usage_failure_is_fail_soft() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+fn official_body() -> Vec<u8> {
+    br#"{"usage":{"rolling":{"status":"rate-limited","percent":0,"resetsAt":"2026-10-04T00:01:30Z"},"weekly":{"status":"ok","percent":0,"resetsAt":"2026-10-06T00:00:00Z"},"monthly":{"status":"ok","percent":1,"resetsAt":"2026-11-13T00:00:00Z"}},"note":"sk-planted-secret"}"#
+        .to_vec()
+}
+
+async fn refresh_with_hook(
+    hook: crate::cpa_quota::OfficialPlanHook,
+    capture_fence: bool,
+    inject_body: bool,
+) -> (
+    Result<OfficialUsageRefreshSuccess, OfficialUsageRefreshError>,
+    usize,
+    Option<Vec<u8>>,
+) {
+    let host = FakeUsageHost::new();
+    host.insert_ready_go("go-1", "sk-test");
+    host.inner
+        .capture_plan_fence
+        .store(capture_fence, AtomicOrdering::SeqCst);
+    *host.inner.plan_hook.lock() = hook;
+    if inject_body {
+        host.inner
+            .runtime
+            .set_official_body_for_test(official_body());
+    }
+    host.inner.runtime.set_fetch_for_test(|_config, _key| {
+        let snapshot = sample_snapshot();
+        Box::pin(async move { Ok(snapshot) })
+    });
+    let result = refresh_official_usage(&host, "go-1", UsageSyncTrigger::Manual).await;
+    let reconciles = host.inner.reconcile_count.load(AtomicOrdering::SeqCst);
+    let seen = host.inner.seen_body.lock().clone();
+    (result, reconciles, seen)
+}
+
+#[tokio::test]
+async fn official_quota_hook_uses_the_accepted_body_and_does_not_mint_from_minutes() {
+    let (applied, reconciles, seen) =
+        refresh_with_hook(crate::cpa_quota::OfficialPlanHook::Applied, true, true).await;
+    let applied = applied.unwrap();
+    assert_eq!(applied.source, "official_go_usage");
+    assert_eq!(reconciles, 0);
+    assert_eq!(seen.as_deref(), Some(official_body().as_slice()));
+    let text = std::str::from_utf8(seen.as_ref().unwrap()).unwrap();
+    assert!(text.contains("2026-10-04T00:01:30Z"));
+    assert_ne!(sample_snapshot().rolling_resets_in_minutes, 1);
+
+    let (unhooked, reconciles, seen) =
+        refresh_with_hook(crate::cpa_quota::OfficialPlanHook::Unhooked, true, true).await;
+    assert!(unhooked.is_ok());
+    assert_eq!(reconciles, 1);
+    assert_eq!(seen.as_deref(), Some(official_body().as_slice()));
+
+    let (missing_body, reconciles, seen) =
+        refresh_with_hook(crate::cpa_quota::OfficialPlanHook::Applied, false, false).await;
+    assert!(missing_body.is_ok());
+    assert_eq!(reconciles, 1);
+    assert!(seen.is_none());
+
+    let (stale, reconciles, seen) =
+        refresh_with_hook(crate::cpa_quota::OfficialPlanHook::Stale, true, true).await;
+    assert!(matches!(stale, Err(OfficialUsageRefreshError::Conflict(_))));
+    assert_eq!(reconciles, 0);
+    assert_eq!(seen.as_deref(), Some(official_body().as_slice()));
+
+    let (rejected, reconciles, seen) =
+        refresh_with_hook(crate::cpa_quota::OfficialPlanHook::Rejected, true, true).await;
+    match rejected {
+        Err(OfficialUsageRefreshError::Internal(message)) => {
+            assert!(message.contains("official quota evidence was not accepted"));
+            assert!(!message.contains("sk-planted-secret"));
+            assert!(!message.contains("2026-10-04T00:01:30Z"));
+        }
+        other => panic!("expected rejected evidence, got {other:?}"),
+    }
+    assert_eq!(reconciles, 0);
+    assert_eq!(seen.as_deref(), Some(official_body().as_slice()));
+}
+
 struct FakeUsageInner {
     runtime: UsageSyncRuntime,
     settings_update: ParkingMutex<()>,
@@ -1648,6 +1727,10 @@ struct FakeUsageInner {
     accounts: ParkingMutex<HashMap<String, Account>>,
     sync: ParkingMutex<HashMap<String, ProviderUsageSyncState>>,
     decrypts: ParkingMutex<HashMap<String, String>>,
+    capture_plan_fence: AtomicBool,
+    reconcile_count: AtomicUsize,
+    plan_hook: ParkingMutex<crate::cpa_quota::OfficialPlanHook>,
+    seen_body: ParkingMutex<Option<Vec<u8>>>,
 }
 
 #[derive(Clone)]
@@ -1666,6 +1749,10 @@ impl FakeUsageHost {
                 accounts: ParkingMutex::new(HashMap::new()),
                 sync: ParkingMutex::new(HashMap::new()),
                 decrypts: ParkingMutex::new(HashMap::new()),
+                capture_plan_fence: AtomicBool::new(false),
+                reconcile_count: AtomicUsize::new(0),
+                plan_hook: ParkingMutex::new(crate::cpa_quota::OfficialPlanHook::Unhooked),
+                seen_body: ParkingMutex::new(None),
             }),
         }
     }
@@ -1833,6 +1920,40 @@ impl UsageSyncStore for FakeUsageInner {
     }
     fn log_gateway(&self, _level: &str, _category: &str, _message: &str) -> anyhow::Result<()> {
         Ok(())
+    }
+    fn capture_usage_identity(
+        &self,
+        account_id: &str,
+    ) -> anyhow::Result<Option<UsageRefreshIdentity>> {
+        if !self.capture_plan_fence.load(AtomicOrdering::Relaxed) {
+            return Ok(None);
+        }
+        let Some(account) = self.accounts.lock().get(account_id).cloned() else {
+            return Ok(None);
+        };
+        Ok(Some(UsageRefreshIdentity {
+            credential: crate::routing_snapshot::ExecutionCredential::from(&account),
+            updated_at: "captured".to_string(),
+        }))
+    }
+    fn usage_identity_is_current(&self, _identity: &UsageRefreshIdentity) -> anyhow::Result<bool> {
+        Ok(self.capture_plan_fence.load(AtomicOrdering::Relaxed))
+    }
+    fn reconcile_authoritative_usage(
+        &self,
+        _account_id: &str,
+        _snapshot: &GoUsageSnapshot,
+        _now: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        self.reconcile_count.fetch_add(1, AtomicOrdering::SeqCst);
+        Ok(())
+    }
+    fn apply_official_plan_observation(
+        &self,
+        commit: &crate::usage_sync::OfficialPlanCommit,
+    ) -> crate::usage_sync::OfficialPlanHook {
+        *self.seen_body.lock() = Some(commit.body.clone());
+        *self.plan_hook.lock()
     }
 }
 

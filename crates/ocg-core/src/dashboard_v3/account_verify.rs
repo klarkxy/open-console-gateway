@@ -9,6 +9,7 @@ use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use chrono::Utc;
+use std::time::Duration;
 
 use crate::custom::{self, CustomVerificationContract, CustomVerifyFailure};
 use crate::models::{
@@ -162,6 +163,8 @@ struct CustomVerificationJob {
     contract: CustomVerificationContract,
     custom_config: ModelCustomConfig,
     first_capability: ModelCapability,
+    /// Plaintext is only for the debug loopback probe seam. The CPA hop does not send it.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     api_key: String,
 }
 
@@ -269,16 +272,51 @@ fn capture_custom_verification_job(
     })
 }
 
+enum CustomProbeFinish {
+    Verified,
+    Failed(CustomVerifyFailure),
+    NotSent(String),
+}
+
+/// A hop that never reached a provider response must not be stored as a failed
+/// or verified connection. Only a completed provider response commits.
+fn persisted_verification_status(
+    finish: &CustomProbeFinish,
+) -> Option<ConnectionVerificationStatus> {
+    match finish {
+        CustomProbeFinish::Verified => Some(ConnectionVerificationStatus::Verified),
+        CustomProbeFinish::Failed(_) => Some(ConnectionVerificationStatus::Failed),
+        CustomProbeFinish::NotSent(_) => None,
+    }
+}
+
 async fn complete_custom_verification(
     state: &CoreState,
     job: CustomVerificationJob,
 ) -> Result<Json<AccountMutation>, V3ApiError> {
-    let result = run_custom_probe(&job).await;
+    let finish = run_custom_probe(state, &job).await;
+    if persisted_verification_status(&finish).is_none() {
+        let CustomProbeFinish::NotSent(message) = finish else {
+            return Err(V3ApiError::service_unavailable(
+                state,
+                "validated hop was not sent",
+            ));
+        };
+        return Err(V3ApiError::service_unavailable(state, message));
+    }
     let _settings_update = state.settings_update.lock();
     check_expectation(state, &job.expectation)?;
-    let (status, error) = match result {
-        Ok(()) => (ConnectionVerificationStatus::Verified, None),
-        Err(failure) => (ConnectionVerificationStatus::Failed, Some(failure.message)),
+    let (status, error) = match finish {
+        CustomProbeFinish::Verified => (ConnectionVerificationStatus::Verified, None),
+        CustomProbeFinish::Failed(failure) => {
+            (ConnectionVerificationStatus::Failed, Some(failure.message))
+        }
+        CustomProbeFinish::NotSent(_) => {
+            return Err(V3ApiError::service_unavailable(
+                state,
+                "validated hop was not sent",
+            ));
+        }
     };
     let verified_at = (status == ConnectionVerificationStatus::Verified).then(Utc::now);
     let committed = state
@@ -302,35 +340,60 @@ async fn complete_custom_verification(
     mutation_at(state, account, revision).map(Json)
 }
 
-async fn run_custom_probe(job: &CustomVerificationJob) -> Result<(), CustomVerifyFailure> {
+async fn run_custom_probe(state: &CoreState, job: &CustomVerificationJob) -> CustomProbeFinish {
     #[cfg(debug_assertions)]
     {
         if let Some(probe) = custom_verify_probe::override_for(job.process_generation)
             && custom_verify_probe::base_url_is_loopback(&job.custom_config.endpoint_url)
         {
-            return probe(
+            return match probe(
                 &job.config,
                 &job.custom_config,
                 &job.first_capability,
                 &job.api_key,
-            );
+            ) {
+                Ok(()) => CustomProbeFinish::Verified,
+                Err(failure) => CustomProbeFinish::Failed(failure),
+            };
         }
-        return custom::probe_custom_connection(
-            &job.config,
-            &job.custom_config,
-            &job.first_capability,
-            &job.api_key,
-        )
-        .await;
     }
-    #[cfg(not(debug_assertions))]
+    let persisted = match crate::protocol_probe::load_persisted_credential(state, &job.account.id) {
+        Ok(persisted) => persisted,
+        Err(message) => return CustomProbeFinish::NotSent(message),
+    };
+    if !persisted.binding_enabled {
+        return CustomProbeFinish::NotSent("credential binding is disabled".to_string());
+    }
+    let timeout = Duration::from_secs(job.config.non_stream_timeout_secs.min(30));
+    let protocol = job.custom_config.upstream_protocol;
+    match crate::protocol_probe::send_validated_generation(
+        state,
+        &crate::protocol_probe::ValidatedGeneration {
+            credential_id: persisted.credential_id,
+            credential_version: persisted.credential_version,
+            binding_id: persisted.binding_id,
+            public_model: job.first_capability.public_model.clone(),
+            protocol,
+        },
+        timeout,
+    )
+    .await
     {
-        custom::probe_custom_connection(
-            &job.config,
-            &job.custom_config,
-            &job.first_capability,
-            &job.api_key,
-        )
-        .await
+        Err(crate::protocol_probe::ValidatedSendError::NotSent(message)) => {
+            CustomProbeFinish::NotSent(message)
+        }
+        Ok(response) => {
+            match crate::protocol_probe::protocol_shaped_success(
+                response.status,
+                &response.body,
+                protocol,
+            ) {
+                Ok(()) => CustomProbeFinish::Verified,
+                Err(message) => CustomProbeFinish::Failed(CustomVerifyFailure { message }),
+            }
+        }
     }
 }
+
+#[cfg(test)]
+mod tests;

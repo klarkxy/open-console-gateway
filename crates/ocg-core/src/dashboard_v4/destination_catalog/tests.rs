@@ -303,6 +303,85 @@ fn message_endpoint_id(fixture: &Fixture) -> String {
     .unwrap()
 }
 
+fn grant_chat_model(fixture: &Fixture, public_model: &str) {
+    let state = fixture.state.as_ref().unwrap();
+    let db = state.db.lock();
+    let snapshot = RoutingSnapshot::load(&db).unwrap();
+    let destination = snapshot
+        .projection
+        .destinations
+        .iter()
+        .find(|row| row.id == fixture.destination_id())
+        .unwrap();
+    let model = destination
+        .catalog
+        .iter()
+        .find(|row| row.public_model == public_model)
+        .unwrap();
+    let credential = snapshot
+        .credentials
+        .iter()
+        .find(|row| row.id == fixture.account_id)
+        .unwrap();
+    let endpoint_id = crate::gateway::materialize::endpoint_id_for_target(
+        credential,
+        destination,
+        model,
+        crate::gateway::protocol::ApiFormat::ChatCompletions,
+    )
+    .unwrap();
+    db.conn
+        .execute(
+            "INSERT OR IGNORE INTO credential_grants (credential_id, kind, value)
+             SELECT id, 'endpoint_id', ?2 FROM credentials WHERE legacy_account_id = ?1",
+            rusqlite::params![fixture.account_id, endpoint_id],
+        )
+        .unwrap();
+}
+
+fn grant_alias_keep_override(fixture: &Fixture) {
+    let state = fixture.state.as_ref().unwrap();
+    let db = state.db.lock();
+    let snapshot = RoutingSnapshot::load(&db).unwrap();
+    let destination = snapshot
+        .projection
+        .destinations
+        .iter()
+        .find(|row| row.id == fixture.destination_id())
+        .unwrap();
+    let model = destination
+        .catalog
+        .iter()
+        .find(|row| row.public_model == "alias-keep")
+        .unwrap();
+    let credential = snapshot
+        .credentials
+        .iter()
+        .find(|row| row.id == fixture.account_id)
+        .unwrap();
+    let endpoint_id = crate::gateway::materialize::endpoint_id_for_target(
+        credential,
+        destination,
+        model,
+        crate::gateway::protocol::ApiFormat::Messages,
+    )
+    .unwrap();
+    db.conn
+        .execute(
+            "INSERT OR IGNORE INTO credential_grants (credential_id, kind, value)
+             SELECT id, 'endpoint_id', ?2 FROM credentials WHERE legacy_account_id = ?1",
+            rusqlite::params![fixture.account_id, endpoint_id],
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT OR IGNORE INTO credential_grants (credential_id, kind, value)
+             SELECT id, 'origin', ?2 FROM credentials WHERE legacy_account_id = ?1",
+            rusqlite::params![fixture.account_id, "https://override.example"],
+        )
+        .unwrap();
+}
+
 fn grant_message_endpoint(fixture: &Fixture) {
     let endpoint_id = message_endpoint_id(fixture);
     fixture
@@ -345,20 +424,162 @@ async fn test_once(
     fixture: &Fixture,
     expectation: MutationExpectation,
 ) -> Result<DestinationModelTestResult, V3ApiError> {
+    test_public(fixture, expectation, "multi-model", ProtocolDto::Messages).await
+}
+
+async fn test_public(
+    fixture: &Fixture,
+    expectation: MutationExpectation,
+    public_model: &str,
+    protocol: ProtocolDto,
+) -> Result<DestinationModelTestResult, V3ApiError> {
     test_model(
         State(fixture.state.as_ref().unwrap().clone()),
         Path(fixture.destination_id()),
         Bytes::from(
             serde_json::to_vec(&DestinationModelTestRequest {
                 expectation,
-                public_model: "multi-model".into(),
-                protocol: ProtocolDto::Messages,
+                public_model: public_model.into(),
+                protocol,
             })
             .unwrap(),
         ),
     )
     .await
     .map(|value| value.0)
+}
+
+fn error_text(error: &V3ApiError) -> String {
+    format!("{error:?}")
+}
+
+async fn assert_silent(requests: &mut mpsc::UnboundedReceiver<String>) {
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), requests.recv())
+            .await
+            .is_err(),
+        "model test must not open a provider connection"
+    );
+}
+
+fn credential_admission_row(fixture: &Fixture) -> (i64, String, String) {
+    fixture
+        .state
+        .as_ref()
+        .unwrap()
+        .db
+        .lock()
+        .conn
+        .query_row(
+            "SELECT enabled, account_type, setup_step FROM credentials WHERE legacy_account_id = ?1",
+            [&fixture.account_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap()
+}
+
+fn verification_stamp(fixture: &Fixture) -> (String, Option<String>, String) {
+    fixture
+        .state
+        .as_ref()
+        .unwrap()
+        .db
+        .lock()
+        .conn
+        .query_row(
+            "SELECT verification_status, connection_verified_at, setup_step
+             FROM credentials WHERE legacy_account_id = ?1",
+            [&fixture.account_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap()
+}
+
+fn set_credential_column(fixture: &Fixture, sql: &str, value: &str) {
+    fixture
+        .state
+        .as_ref()
+        .unwrap()
+        .db
+        .lock()
+        .conn
+        .execute(sql, rusqlite::params![fixture.account_id, value])
+        .unwrap();
+}
+
+fn insert_keyed_account(
+    fixture: &Fixture,
+    account_type: AccountType,
+    step: AccountSetupStep,
+    enabled: bool,
+    key: &str,
+) {
+    let now = Utc::now();
+    fixture
+        .state
+        .as_ref()
+        .unwrap()
+        .db
+        .lock()
+        .create_account(&Account {
+            id: fixture.account_id.clone(),
+            provider_id: fixture.provider_id.clone(),
+            credential_kind: CredentialKind::ApiKey,
+            quota_scope: QuotaScope::Key,
+            name: fixture.account_id.clone(),
+            username: None,
+            password_cipher: None,
+            key_cipher: fixture.cipher.encrypt(key).unwrap(),
+            enabled,
+            account_type,
+            setup_step: step,
+            referral_code: None,
+            purchase_date: String::new(),
+            expires_on: String::new(),
+            cooldown_until: None,
+            cooldown_generic_until: None,
+            cooldown_5h_until: None,
+            cooldown_week_until: None,
+            cooldown_month_until: None,
+            cooldown_free_until: None,
+            last_error: None,
+            auth_error: None,
+            notes: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+}
+
+fn assert_forwarded_pin_refusal(text: &str) {
+    assert!(text.contains("preconditionFailed"), "{text}");
+    assert!(
+        text.contains("validated protocol pin is not enforced"),
+        "{text}"
+    );
+    assert!(!text.contains("save an enabled"), "{text}");
+}
+
+fn assert_local_model_refusal(text: &str) {
+    assert!(
+        text.contains("save an enabled credential") || text.contains("keyless credential"),
+        "{text}"
+    );
+    assert!(!text.contains("validated protocol pin"), "{text}");
+}
+
+fn use_local_chat_model(fixture: &Fixture) {
+    replace_catalog(
+        fixture,
+        &[CatalogModel {
+            public_model: "local-model".into(),
+            upstream_model: "local-upstream".into(),
+            protocols: vec![Protocol::ChatCompletions],
+            preferred: Some(Protocol::ChatCompletions),
+            enabled: false,
+            upstream_override: None,
+        }],
+    );
 }
 
 #[tokio::test]
@@ -693,7 +914,7 @@ async fn catalog_update_rejects_invalid_models_protocols_and_stale_cas_without_w
 }
 
 #[tokio::test]
-async fn model_test_uses_selected_messages_route_and_preserves_catalog_switches() {
+async fn model_test_exact_persisted_credential_does_not_direct_post_or_mark_success() {
     let (endpoint, mut requests, task) = start_models_upstream(vec![
         r#"{"type":"message","role":"assistant","content":[]}"#.into(),
     ])
@@ -709,31 +930,524 @@ async fn model_test_uses_selected_messages_route_and_preserves_catalog_switches(
     add_multi_route_model(&fixture);
     grant_message_endpoint(&fixture);
     let before = stored_catalog(&fixture);
+    let stamp = verification_stamp(&fixture);
 
-    let result = test_once(&fixture, fixture.expectation()).await.unwrap();
-    assert!(
-        result.ok,
-        "model test should accept a protocol-valid response"
-    );
-    assert_eq!(result.protocol, ProtocolDto::Messages);
-    let request = requests.recv().await.unwrap();
-    assert!(
-        request.starts_with("POST /anthropic/v1/messages HTTP/1.1\r\n"),
-        "{request}"
-    );
-    assert!(
-        request
-            .to_ascii_lowercase()
-            .contains(&format!("x-api-key: {SECRET}").to_ascii_lowercase()),
-        "{request}"
-    );
-    assert!(!request.to_ascii_lowercase().contains("authorization:"));
+    let error = test_once(&fixture, fixture.expectation())
+        .await
+        .expect_err("a refused pin is not protocol success");
+    let text = error_text(&error);
+    assert_forwarded_pin_refusal(&text);
+    assert!(!text.contains(SECRET), "{text}");
+    assert_silent(&mut requests).await;
     assert_eq!(
         stored_catalog(&fixture),
         before,
         "probe must not alter switches"
     );
-    task.await.unwrap();
+    assert_eq!(verification_stamp(&fixture), stamp);
+    let model = stored_catalog(&fixture)
+        .into_iter()
+        .find(|row| row.public_model == "multi-model")
+        .unwrap();
+    assert!(model.enabled);
+    assert_eq!(model.preferred, Some(Protocol::ChatCompletions));
+    task.abort();
+}
+
+#[tokio::test]
+async fn model_test_keyless_pending_and_refused_rows_send_nothing() {
+    let (endpoint, mut requests, task) =
+        start_models_upstream(vec![r#"{"id":"ok","choices":[]}"#.into()]).await;
+
+    let missing = fixture(
+        "keyless-missing",
+        &endpoint,
+        DynamicAuthKind::None,
+        false,
+        false,
+    );
+    use_local_chat_model(&missing);
+    let missing_error = test_public(
+        &missing,
+        missing.expectation(),
+        "local-model",
+        ProtocolDto::ChatCompletions,
+    )
+    .await
+    .expect_err("no persisted keyless row");
+    assert_local_model_refusal(&error_text(&missing_error));
+
+    let keyed_none = fixture(
+        "keyless-keyed",
+        &endpoint,
+        DynamicAuthKind::None,
+        false,
+        false,
+    );
+    use_local_chat_model(&keyed_none);
+    let keyed_now = Utc::now();
+    keyed_none
+        .state
+        .as_ref()
+        .unwrap()
+        .db
+        .lock()
+        .create_account(&Account {
+            id: keyed_none.account_id.clone(),
+            provider_id: keyed_none.provider_id.clone(),
+            credential_kind: CredentialKind::None,
+            quota_scope: QuotaScope::Key,
+            name: keyed_none.account_id.clone(),
+            username: None,
+            password_cipher: None,
+            key_cipher: keyed_none.cipher.encrypt(SECRET).unwrap(),
+            enabled: true,
+            account_type: AccountType::Key,
+            setup_step: AccountSetupStep::Ready,
+            referral_code: None,
+            purchase_date: String::new(),
+            expires_on: String::new(),
+            cooldown_until: None,
+            cooldown_generic_until: None,
+            cooldown_5h_until: None,
+            cooldown_week_until: None,
+            cooldown_month_until: None,
+            cooldown_free_until: None,
+            last_error: None,
+            auth_error: None,
+            notes: None,
+            created_at: keyed_now,
+            updated_at: keyed_now,
+        })
+        .unwrap();
+    grant_chat_model(&keyed_none, "local-model");
+    let keyed_error = test_public(
+        &keyed_none,
+        keyed_none.expectation(),
+        "local-model",
+        ProtocolDto::ChatCompletions,
+    )
+    .await
+    .expect_err("a keyed row is not a keyless binding");
+    let keyed_text = error_text(&keyed_error);
+    assert_local_model_refusal(&keyed_text);
+    assert!(!keyed_text.contains(SECRET), "{keyed_text}");
+
+    let keyless = fixture(
+        "keyless-real",
+        &endpoint,
+        DynamicAuthKind::None,
+        false,
+        false,
+    );
+    use_local_chat_model(&keyless);
+    let now = Utc::now();
+    keyless
+        .state
+        .as_ref()
+        .unwrap()
+        .db
+        .lock()
+        .create_account(&Account {
+            id: keyless.account_id.clone(),
+            provider_id: keyless.provider_id.clone(),
+            credential_kind: CredentialKind::None,
+            quota_scope: QuotaScope::Key,
+            name: keyless.account_id.clone(),
+            username: None,
+            password_cipher: None,
+            key_cipher: String::new(),
+            enabled: true,
+            account_type: AccountType::Key,
+            setup_step: AccountSetupStep::Ready,
+            referral_code: None,
+            purchase_date: String::new(),
+            expires_on: String::new(),
+            cooldown_until: None,
+            cooldown_generic_until: None,
+            cooldown_5h_until: None,
+            cooldown_week_until: None,
+            cooldown_month_until: None,
+            cooldown_free_until: None,
+            last_error: None,
+            auth_error: None,
+            notes: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+    grant_chat_model(&keyless, "local-model");
+    let keyless_before = stored_catalog(&keyless);
+    let keyless_error = test_public(
+        &keyless,
+        keyless.expectation(),
+        "local-model",
+        ProtocolDto::ChatCompletions,
+    )
+    .await
+    .expect_err("unavailable host refuses the forwarded keyless row");
+    // Refusal evidence only. Empty-material admission belongs to the route
+    // projection pin, which this test does not claim to satisfy.
+    assert_forwarded_pin_refusal(&error_text(&keyless_error));
+    assert_eq!(stored_catalog(&keyless), keyless_before);
+    let (status, verified_at, step) = verification_stamp(&keyless);
+    assert_ne!(status, "verified");
+    assert!(verified_at.is_none());
+    assert_eq!(step, "ready");
+
+    let pending = fixture(
+        "managed-pending",
+        &endpoint,
+        DynamicAuthKind::Bearer,
+        false,
+        false,
+    );
+    install_chat_and_messages_routes(&pending);
+    add_multi_route_model(&pending);
+    insert_keyed_account(
+        &pending,
+        AccountType::Managed,
+        AccountSetupStep::KeyVerification,
+        false,
+        SECRET,
+    );
+    grant_message_endpoint(&pending);
+    let pending_catalog = stored_catalog(&pending);
+    let pending_error = test_once(&pending, pending.expectation())
+        .await
+        .expect_err("managed pending still stops at the unavailable pin");
+    let pending_text = error_text(&pending_error);
+    assert_forwarded_pin_refusal(&pending_text);
+    assert!(!pending_text.contains(SECRET), "{pending_text}");
+    assert_eq!(stored_catalog(&pending), pending_catalog);
+    let (pending_enabled, pending_type, pending_step) = credential_admission_row(&pending);
+    assert_eq!(pending_enabled, 0);
+    assert_eq!(pending_type, "managed");
+    assert_eq!(pending_step, "key_verification");
+    let (status, verified_at, step) = verification_stamp(&pending);
+    assert_ne!(status, "verified");
+    assert!(verified_at.is_none());
+    assert_eq!(step, "key_verification");
+
+    let substitute = fixture(
+        "ordinary-key-verification",
+        &endpoint,
+        DynamicAuthKind::Bearer,
+        true,
+        false,
+    );
+    install_chat_and_messages_routes(&substitute);
+    add_multi_route_model(&substitute);
+    grant_message_endpoint(&substitute);
+    set_credential_column(
+        &substitute,
+        "UPDATE credentials SET setup_step = ?2 WHERE legacy_account_id = ?1",
+        "key_verification",
+    );
+    let substitute_text = error_text(
+        &test_once(&substitute, substitute.expectation())
+            .await
+            .expect_err("an enabled ordinary key_verification row is not the managed candidate"),
+    );
+    assert_local_model_refusal(&substitute_text);
+    assert_eq!(verification_stamp(&substitute).2, "key_verification");
+
+    let incomplete = fixture(
+        "incomplete-payment",
+        &endpoint,
+        DynamicAuthKind::Bearer,
+        true,
+        false,
+    );
+    install_chat_and_messages_routes(&incomplete);
+    add_multi_route_model(&incomplete);
+    grant_message_endpoint(&incomplete);
+    set_credential_column(
+        &incomplete,
+        "UPDATE credentials SET setup_step = ?2 WHERE legacy_account_id = ?1",
+        "payment",
+    );
+    let incomplete_error = test_once(&incomplete, incomplete.expectation())
+        .await
+        .expect_err("incomplete setup refuses before the pin");
+    assert_local_model_refusal(&error_text(&incomplete_error));
+    assert_eq!(verification_stamp(&incomplete).2, "payment");
+
+    let disabled = fixture(
+        "disabled-ready",
+        &endpoint,
+        DynamicAuthKind::Bearer,
+        true,
+        false,
+    );
+    install_chat_and_messages_routes(&disabled);
+    add_multi_route_model(&disabled);
+    grant_message_endpoint(&disabled);
+    disabled
+        .state
+        .as_ref()
+        .unwrap()
+        .db
+        .lock()
+        .conn
+        .execute(
+            "UPDATE credentials SET enabled = 0 WHERE legacy_account_id = ?1",
+            [&disabled.account_id],
+        )
+        .unwrap();
+    assert_local_model_refusal(&error_text(
+        &test_once(&disabled, disabled.expectation())
+            .await
+            .expect_err("disabled Ready refuses before the pin"),
+    ));
+
+    assert_silent(&mut requests).await;
+    task.abort();
+}
+
+#[tokio::test]
+async fn model_test_binding_and_ordinary_disabled_ready_refuse_before_send() {
+    let (endpoint, mut requests, task) =
+        start_models_upstream(vec![r#"{"id":"ok","choices":[]}"#.into()]).await;
+
+    let disabled_binding = fixture(
+        "binding-disabled",
+        &endpoint,
+        DynamicAuthKind::Bearer,
+        true,
+        false,
+    );
+    install_chat_and_messages_routes(&disabled_binding);
+    add_multi_route_model(&disabled_binding);
+    grant_message_endpoint(&disabled_binding);
+    let binding_catalog = stored_catalog(&disabled_binding);
+    disabled_binding
+        .state
+        .as_ref()
+        .unwrap()
+        .db
+        .lock()
+        .conn
+        .execute(
+            "UPDATE credentials SET binding_enabled = 0 WHERE legacy_account_id = ?1",
+            [&disabled_binding.account_id],
+        )
+        .unwrap();
+    assert_local_model_refusal(&error_text(
+        &test_once(&disabled_binding, disabled_binding.expectation())
+            .await
+            .expect_err("a disabled binding refuses before the pin"),
+    ));
+    assert_eq!(stored_catalog(&disabled_binding), binding_catalog);
+    assert_eq!(verification_stamp(&disabled_binding).2, "ready");
+
+    let missing_binding = fixture(
+        "binding-missing",
+        &endpoint,
+        DynamicAuthKind::Bearer,
+        true,
+        false,
+    );
+    install_chat_and_messages_routes(&missing_binding);
+    add_multi_route_model(&missing_binding);
+    grant_message_endpoint(&missing_binding);
+    missing_binding
+        .state
+        .as_ref()
+        .unwrap()
+        .db
+        .lock()
+        .conn
+        .execute(
+            "UPDATE credentials SET binding_id = '' WHERE legacy_account_id = ?1",
+            [&missing_binding.account_id],
+        )
+        .unwrap();
+    assert_local_model_refusal(&error_text(
+        &test_once(&missing_binding, missing_binding.expectation())
+            .await
+            .expect_err("an empty binding refuses before the pin"),
+    ));
+
+    let enabled_managed = fixture(
+        "managed-enabled-pending",
+        &endpoint,
+        DynamicAuthKind::Bearer,
+        false,
+        false,
+    );
+    install_chat_and_messages_routes(&enabled_managed);
+    add_multi_route_model(&enabled_managed);
+    insert_keyed_account(
+        &enabled_managed,
+        AccountType::Managed,
+        AccountSetupStep::KeyVerification,
+        true,
+        SECRET,
+    );
+    grant_message_endpoint(&enabled_managed);
+    let enabled_managed_text = error_text(
+        &test_once(&enabled_managed, enabled_managed.expectation())
+            .await
+            .expect_err("an enabled managed key_verification row is outside the narrow candidate"),
+    );
+    assert_local_model_refusal(&enabled_managed_text);
+    assert!(
+        !enabled_managed_text.contains(SECRET),
+        "{enabled_managed_text}"
+    );
+    let (enabled, account_type, step) = credential_admission_row(&enabled_managed);
+    assert_eq!(enabled, 1);
+    assert_eq!(account_type, "managed");
+    assert_eq!(step, "key_verification");
+
+    let disabled_ready = fixture(
+        "ordinary-disabled-ready",
+        &endpoint,
+        DynamicAuthKind::Bearer,
+        true,
+        false,
+    );
+    install_chat_and_messages_routes(&disabled_ready);
+    add_multi_route_model(&disabled_ready);
+    grant_message_endpoint(&disabled_ready);
+    disabled_ready
+        .state
+        .as_ref()
+        .unwrap()
+        .db
+        .lock()
+        .conn
+        .execute(
+            "UPDATE credentials SET enabled = 0 WHERE legacy_account_id = ?1",
+            [&disabled_ready.account_id],
+        )
+        .unwrap();
+    assert_local_model_refusal(&error_text(
+        &test_once(&disabled_ready, disabled_ready.expectation())
+            .await
+            .expect_err("ordinary disabled Ready refuses before the pin"),
+    ));
+    let (enabled, account_type, step) = credential_admission_row(&disabled_ready);
+    assert_eq!(enabled, 0);
+    assert_eq!(account_type, "key");
+    assert_eq!(step, "ready");
+
+    assert_silent(&mut requests).await;
+    task.abort();
+}
+
+#[tokio::test]
+async fn model_test_scope_protocol_and_stale_cas_send_nothing() {
+    let (endpoint, mut requests, task) =
+        start_models_upstream(vec![r#"{"id":"ok","choices":[]}"#.into()]).await;
+    let fixture = fixture(
+        "model-test-fence",
+        &endpoint,
+        DynamicAuthKind::Bearer,
+        true,
+        false,
+    );
+    install_chat_and_messages_routes(&fixture);
+    add_multi_route_model(&fixture);
+    grant_message_endpoint(&fixture);
+    let before = stored_catalog(&fixture);
+
+    let wrong_protocol = test_public(
+        &fixture,
+        fixture.expectation(),
+        "multi-model",
+        ProtocolDto::Responses,
+    )
+    .await
+    .expect_err("unconfigured protocol");
+    assert!(
+        error_text(&wrong_protocol).contains("invalidRequest"),
+        "{}",
+        error_text(&wrong_protocol)
+    );
+
+    let scope = serde_json::to_string(&ocg_domain::credential::ModelScope::Only {
+        models: vec!["other-model".into()],
+    })
+    .unwrap();
+    set_credential_column(
+        &fixture,
+        "UPDATE credentials SET scope_json = ?2 WHERE legacy_account_id = ?1",
+        &scope,
+    );
+    let scoped = test_once(&fixture, fixture.expectation())
+        .await
+        .expect_err("model scope miss");
+    assert_local_model_refusal(&error_text(&scoped));
+    set_credential_column(
+        &fixture,
+        "UPDATE credentials SET scope_json = ?2 WHERE legacy_account_id = ?1",
+        &serde_json::to_string(&ocg_domain::credential::ModelScope::All).unwrap(),
+    );
+
+    let stale = fixture.expectation();
+    fixture.state.as_ref().unwrap().bump_settings_revision();
+    let stale_error = test_once(&fixture, stale).await.expect_err("stale CAS");
+    assert!(
+        error_text(&stale_error).contains("revisionConflict"),
+        "{}",
+        error_text(&stale_error)
+    );
+    assert_eq!(stored_catalog(&fixture), before);
+    assert_silent(&mut requests).await;
+    task.abort();
+}
+
+#[tokio::test]
+async fn model_test_post_send_fence_rejects_a_rotated_credential_without_a_provider_send() {
+    let (endpoint, mut requests, task) = start_models_upstream(vec![
+        r#"{"type":"message","role":"assistant","content":[]}"#.into(),
+    ])
+    .await;
+    let fixture = fixture(
+        "model-test-rotate",
+        &endpoint,
+        DynamicAuthKind::Bearer,
+        true,
+        false,
+    );
+    install_chat_and_messages_routes(&fixture);
+    add_multi_route_model(&fixture);
+    grant_message_endpoint(&fixture);
+    let before = stored_catalog(&fixture);
+    let state = fixture.state.as_ref().unwrap().clone();
+    let expectation = fixture.expectation();
+    let selected = {
+        let _settings = state.settings_update.lock();
+        prepare_destination_model_test(
+            &state,
+            &fixture.destination_id(),
+            &expectation,
+            "multi-model",
+            Protocol::Messages,
+        )
+        .unwrap()
+    };
+    state
+        .db
+        .lock()
+        .rotate_account_credential(
+            &fixture.account_id,
+            &fixture.cipher.encrypt("rotated-secret").unwrap(),
+        )
+        .unwrap();
+    let fenced = {
+        let _settings = state.settings_update.lock();
+        recheck_model_test_fence(&state, &fixture.destination_id(), &expectation, &selected)
+    };
+    assert!(
+        fenced.is_err(),
+        "rotated material must not pass the old fence"
+    );
+    assert_eq!(stored_catalog(&fixture), before);
+    assert_silent(&mut requests).await;
+    task.abort();
 }
 
 #[tokio::test]
@@ -793,7 +1507,10 @@ async fn model_test_refuses_revoked_selected_endpoint_or_origin_without_outbound
             }
         }
 
-        assert!(test_once(&fixture, fixture.expectation()).await.is_err());
+        let revoked = test_once(&fixture, fixture.expectation())
+            .await
+            .expect_err("revoked grant");
+        assert_local_model_refusal(&error_text(&revoked));
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(100), requests.recv())
                 .await
@@ -962,4 +1679,257 @@ fn refresh_receipt_stays_with_its_commit_when_a_later_mutation_advances_revision
             .map(|model| model.public_model.clone())
             .collect::<Vec<_>>()
     );
+}
+
+/// Skip-spawn owned plane. The empty task fills `GatewayHandle`; it is not a child process.
+struct OwnedApplyGuard {
+    _shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+}
+
+impl OwnedApplyGuard {
+    fn arm(state: &CoreState) -> Self {
+        crate::cpa_execution::set_skip_spawn(true);
+        crate::cpa_execution::set_fail_ready(false);
+        crate::cpa_execution::set_test_password(Some("synthetic-management".to_string()));
+        crate::cpa_execution::set_before_apply_commit(None);
+        crate::cpa_execution::set_artifact_dir(
+            state,
+            crate::cpa_execution::documented_runtime_dir(),
+        );
+        let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async {});
+        *state.gateway.lock() = Some(crate::gateway_runtime::GatewayHandle {
+            port: 9,
+            listen_addr: "127.0.0.1:9".parse().unwrap(),
+            dashboard_is_local: true,
+            shutdown,
+            task,
+        });
+        Self {
+            _shutdown_rx: shutdown_rx,
+        }
+    }
+}
+
+impl Drop for OwnedApplyGuard {
+    fn drop(&mut self) {
+        crate::cpa_execution::set_skip_spawn(false);
+        crate::cpa_execution::set_fail_ready(false);
+        crate::cpa_execution::set_test_password(None);
+        crate::cpa_execution::set_before_apply_commit(None);
+    }
+}
+
+fn projection_catalog_fixture(label: &str) -> Fixture {
+    fixture(
+        label,
+        "https://projection.example/v1/chat/completions",
+        DynamicAuthKind::Bearer,
+        true,
+        false,
+    )
+}
+
+fn alias_keep_enabled(fixture: &Fixture) -> bool {
+    stored_catalog(fixture)
+        .into_iter()
+        .find(|model| model.public_model == "alias-keep")
+        .unwrap()
+        .enabled
+}
+
+async fn started_plane(state: &CoreState) -> crate::cpa_execution::ExecutionReport {
+    let started =
+        crate::cpa_execution::start(state, state.settings_revision(), state.process_generation())
+            .await
+            .expect("owned plane start");
+    assert_eq!(started.apply_status, "applied");
+    assert!(started.desired_running);
+    started
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn catalog_update_keeps_the_saved_receipt_and_applies_enabled() {
+    let fixture = projection_catalog_fixture("projection-catalog");
+    let state = fixture.state.as_ref().unwrap().clone();
+    let _plane = OwnedApplyGuard::arm(&state);
+    let started = started_plane(&state).await;
+    grant_alias_keep_override(&fixture);
+    let saved = update_once(
+        &fixture,
+        vec![DestinationCatalogModelUpdate {
+            public_model: "alias-keep".into(),
+            enabled: Some(true),
+            protocols: None,
+            preferred: None,
+        }],
+        Vec::new(),
+    )
+    .await
+    .expect("catalog update");
+    assert_eq!(saved.revision.revision, state.settings_revision());
+    assert_eq!(
+        saved.revision.process_generation,
+        state.process_generation()
+    );
+    assert!(
+        saved
+            .destination
+            .catalog
+            .iter()
+            .any(|model| { model.public_model == "alias-keep" && model.enabled })
+    );
+    assert!(alias_keep_enabled(&fixture));
+    let applied = crate::cpa_execution::execution_report(&state);
+    assert_eq!(applied.desired_revision, started.desired_revision + 1);
+    assert_eq!(applied.applied_revision, applied.desired_revision);
+    assert_eq!(applied.apply_status, "applied");
+    assert!(state.settings_update.try_lock().is_some());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn catalog_update_stale_cas_does_not_apply() {
+    let fixture = projection_catalog_fixture("projection-catalog-stale");
+    let state = fixture.state.as_ref().unwrap().clone();
+    let _plane = OwnedApplyGuard::arm(&state);
+    let started = started_plane(&state).await;
+    let revision = state.settings_revision();
+    let error = update(
+        State(state.clone()),
+        Path(fixture.destination_id()),
+        Bytes::from(
+            serde_json::to_vec(&DestinationCatalogUpdate {
+                expectation: MutationExpectation {
+                    expected_revision: revision + 1,
+                    process_generation: state.process_generation(),
+                },
+                updates: vec![DestinationCatalogModelUpdate {
+                    public_model: "alias-keep".into(),
+                    enabled: Some(true),
+                    protocols: None,
+                    preferred: None,
+                }],
+                remove_models: Vec::new(),
+            })
+            .unwrap(),
+        ),
+    )
+    .await
+    .expect_err("stale catalog update");
+    assert!(format!("{error:?}").contains("revisionConflict"));
+    assert!(!alias_keep_enabled(&fixture));
+    assert_eq!(state.settings_revision(), revision);
+    let after = crate::cpa_execution::execution_report(&state);
+    assert_eq!(after.desired_revision, started.desired_revision);
+    assert_eq!(after.applied_revision, started.applied_revision);
+    assert_eq!(after.apply_status, started.apply_status);
+    assert!(state.settings_update.try_lock().is_some());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn catalog_update_empty_input_does_not_apply() {
+    let fixture = projection_catalog_fixture("projection-catalog-empty");
+    let state = fixture.state.as_ref().unwrap().clone();
+    let _plane = OwnedApplyGuard::arm(&state);
+    let started = started_plane(&state).await;
+    let revision = state.settings_revision();
+    let error = update_once(&fixture, Vec::new(), Vec::new())
+        .await
+        .expect_err("empty catalog update");
+    assert!(format!("{error:?}").contains("catalog update is empty"));
+    assert!(!alias_keep_enabled(&fixture));
+    assert_eq!(state.settings_revision(), revision);
+    let after = crate::cpa_execution::execution_report(&state);
+    assert_eq!(after.desired_revision, started.desired_revision);
+    assert_eq!(after.applied_revision, started.applied_revision);
+    assert_eq!(after.apply_status, started.apply_status);
+    assert!(state.settings_update.try_lock().is_some());
+}
+
+fn plant_malformed_quota_policy(state: &CoreState) {
+    state
+        .db
+        .lock()
+        .conn
+        .execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            rusqlite::params![crate::cpa_policy::SETTINGS_KEY, "{"],
+        )
+        .unwrap();
+}
+
+struct ReceiptFailGuard;
+
+impl ReceiptFailGuard {
+    fn arm() -> Self {
+        super::super::destinations::fail_next_mutation_receipt();
+        Self
+    }
+}
+
+impl Drop for ReceiptFailGuard {
+    fn drop(&mut self) {
+        super::super::destinations::clear_mutation_receipt_failure();
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn catalog_update_malformed_quota_policy_refuses_before_commit() {
+    let fixture = projection_catalog_fixture("projection-quota-refuse");
+    let state = fixture.state.as_ref().unwrap().clone();
+    let _plane = OwnedApplyGuard::arm(&state);
+    let started = started_plane(&state).await;
+    let revision = state.settings_revision();
+    plant_malformed_quota_policy(&state);
+    let error = update_once(
+        &fixture,
+        vec![DestinationCatalogModelUpdate {
+            public_model: "alias-keep".into(),
+            enabled: Some(true),
+            protocols: None,
+            preferred: None,
+        }],
+        Vec::new(),
+    )
+    .await
+    .expect_err("malformed quota policy");
+    assert!(format!("{error:?}").contains("official quota policy could not be read"));
+    assert!(!alias_keep_enabled(&fixture));
+    assert_eq!(state.settings_revision(), revision);
+    let after = crate::cpa_execution::execution_report(&state);
+    assert_eq!(after.desired_revision, started.desired_revision);
+    assert_eq!(after.applied_revision, started.applied_revision);
+    assert_eq!(after.apply_status, started.apply_status);
+    assert!(state.settings_update.try_lock().is_some());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn catalog_update_receipt_failure_after_commit_still_applies() {
+    let fixture = projection_catalog_fixture("projection-receipt-fail");
+    let state = fixture.state.as_ref().unwrap().clone();
+    let _plane = OwnedApplyGuard::arm(&state);
+    let started = started_plane(&state).await;
+    grant_alias_keep_override(&fixture);
+    let revision = state.settings_revision();
+    let _receipt_fail = ReceiptFailGuard::arm();
+    let error = update_once(
+        &fixture,
+        vec![DestinationCatalogModelUpdate {
+            public_model: "alias-keep".into(),
+            enabled: Some(true),
+            protocols: None,
+            preferred: None,
+        }],
+        Vec::new(),
+    )
+    .await
+    .expect_err("receipt read");
+    assert!(format!("{error:?}").contains("official quota policy could not be read"));
+    assert!(alias_keep_enabled(&fixture));
+    assert!(state.settings_revision() > revision);
+    let applied = crate::cpa_execution::execution_report(&state);
+    assert_eq!(applied.desired_revision, started.desired_revision + 1);
+    assert_eq!(applied.applied_revision, applied.desired_revision);
+    assert_eq!(applied.apply_status, "applied");
+    assert!(state.settings_update.try_lock().is_some());
 }

@@ -182,6 +182,7 @@ async fn exact_account_probe_keeps_target_and_honors_live_authorization() {
             Some("pre-existing cooldown"),
         )
         .unwrap();
+    harness::adopt_owned_plane(&harness.state).await;
     let before_revision = harness.state.settings_revision();
     let before = harness
         .state
@@ -336,6 +337,7 @@ async fn custom_model_test_uses_the_declared_protocol_and_route_without_secrets(
     assert_eq!(status, StatusCode::OK, "{created}");
     let account = created["account"]["id"].as_str().unwrap();
     harness.enable_account(account);
+    harness::adopt_owned_plane(&harness.state).await;
     let before_revision = harness.state.settings_revision();
     let (status, body) = send_json(
         &harness,
@@ -502,6 +504,7 @@ async fn dynamic_exact_account_probes_preserve_auth_and_honor_disablement() {
                 Some("pre-existing cooldown"),
             )
             .unwrap();
+        harness::adopt_owned_plane(&harness.state).await;
         let before_revision = harness.state.settings_revision();
         let before = harness
             .state
@@ -657,4 +660,76 @@ async fn dynamic_unknown_model_fails_before_outbound() {
     assert_eq!(body["code"], ERROR_INVALID_REQUEST);
     assert!(origin.calls.lock().unwrap().is_empty());
     harness.stop();
+}
+
+#[tokio::test]
+async fn stale_plane_revision_does_not_replace_the_applied_pin() {
+    let harness = start_loopback("account-model-test-stale-cas").await;
+    refreshed_go_catalog::persist_refreshed_go_catalog(&harness.state);
+    let origin = start_origin().await;
+    point_upstream(&harness, &origin);
+    let _account = create_go_account(&harness, "Stale", SIBLING_KEY).await;
+    harness::adopt_owned_plane(&harness.state).await;
+    harness::refuse_stale_revision(&harness.state).await;
+    harness.stop();
+}
+
+#[tokio::test]
+async fn adopted_plane_close_reopen_preserves_run_intent() {
+    let harness = start_loopback("account-model-test-keep-intent").await;
+    refreshed_go_catalog::persist_refreshed_go_catalog(&harness.state);
+    let origin = start_origin().await;
+    point_upstream(&harness, &origin);
+    let _account = create_go_account(&harness, "Reopen", SIBLING_KEY).await;
+    harness::adopt_owned_plane(&harness.state).await;
+
+    let state = harness.state.clone();
+    let before = ocg_core::cpa_execution::execution_report(&state);
+    let revision = state.settings_revision();
+    let generation = state.process_generation();
+    let managed_before = ocg_core::cpa_runtime::load_managed(&state.data_dir())
+        .unwrap()
+        .expect("applied plane writes a managed runtime record");
+    assert!(before.desired_running);
+    assert_eq!(before.apply_status, "applied");
+    assert!(before.policy_ready);
+    assert!(managed_before.desired_running);
+
+    let dir = harness.close_keep_dir();
+    let exited = ocg_core::cpa_execution::execution_report(&state);
+    let managed_after_exit = ocg_core::cpa_runtime::load_managed(&state.data_dir())
+        .unwrap()
+        .expect("host exit keeps the managed runtime record");
+    assert!(exited.desired_running);
+    assert_eq!(exited.apply_status, before.apply_status);
+    assert_eq!(exited.policy_ready, before.policy_ready);
+    assert_eq!(exited.desired_revision, before.desired_revision);
+    assert_eq!(exited.applied_revision, before.applied_revision);
+    assert_eq!(exited.desired_digest, before.desired_digest);
+    assert_eq!(exited.applied_digest, before.applied_digest);
+    assert!(managed_after_exit.desired_running);
+    assert!(!exited.running);
+    assert!(!exited.listener_bound);
+    assert!(state.gateway.lock().is_none());
+    assert_eq!(state.settings_revision(), revision);
+    assert_eq!(state.process_generation(), generation);
+    drop(state);
+
+    let reopened = harness::start_on_existing_dir(dir).await;
+    let opened = ocg_core::cpa_execution::execution_report(&reopened.state);
+    let managed_reopened = ocg_core::cpa_runtime::load_managed(&reopened.state.data_dir())
+        .unwrap()
+        .expect("reopen reads the same managed runtime record");
+    assert!(opened.desired_running);
+    assert_eq!(opened.apply_status, before.apply_status);
+    assert!(opened.policy_ready);
+    assert_eq!(opened.desired_revision, before.desired_revision);
+    assert_eq!(opened.applied_revision, before.applied_revision);
+    assert_eq!(opened.desired_digest, before.desired_digest);
+    assert_eq!(opened.applied_digest, before.applied_digest);
+    assert!(managed_reopened.desired_running);
+    assert!(!opened.running);
+    assert!(!opened.inference_ready);
+    assert!(opened.listener_bound);
+    reopened.stop();
 }

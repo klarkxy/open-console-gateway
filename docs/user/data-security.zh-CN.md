@@ -2,6 +2,8 @@
 
 # 数据与安全
 
+> 适用范围：本页保留当前实现或 OCG2 已发布版本的操作参考，不定义 OCG3 新架构。CPA 底层迁移目标见[架构](../architecture.zh-CN.md)；其中界面步骤不适用于当前 CLI 阶段。
+
 Open Console Gateway 把 Key、密码和浏览器会话存在本地磁盘。请保护数据目录：丢失后没有远端恢复。
 
 - **GUI 数据目录**：Windows `%USERPROFILE%\.ocg-mgr`；macOS / Linux `~/.ocg-mgr`。CLI 数据默认 `~/.ocg-mgr-cli`（所有平台一致），可用 `--data-dir <path>` 覆盖。

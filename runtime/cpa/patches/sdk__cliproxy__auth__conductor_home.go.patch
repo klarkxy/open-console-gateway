@@ -1,0 +1,42 @@
+diff --git a/diff-a/sdk/cliproxy/auth/conductor_home.go b/diff-b/sdk/cliproxy/auth/conductor_home.go
+index 9d51809..d278b6c 100644
+--- a/diff-a/sdk/cliproxy/auth/conductor_home.go
++++ b/diff-b/sdk/cliproxy/auth/conductor_home.go
+@@ -1422,6 +1422,16 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
+ 			execReq := req
+ 			execReq.Model = upstreamModel
+ 			creditsCtx = syncMetadataSessionToContext(creditsCtx, creditsOpts.Metadata)
++			creditsCtx = NoteOCGSourceFormat(creditsCtx, creditsOpts.SourceFormat.String())
++			var errGate error
++			creditsCtx, errGate = m.beforeGenerationSend(creditsCtx, c.auth, GenerationKindExecute, execReq.Model, routeModel)
++			if errGate != nil {
++				_, skip := generationGateError(errGate)
++				if skip {
++					break
++				}
++				return cliproxyexecutor.Response{}, false, errGate
++			}
+ 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
+ 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: creditsOpts}
+ 			if errExec != nil {
+@@ -1433,12 +1443,20 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
+ 					result.CredentialScope = true
+ 				}
+ 				m.MarkResult(creditsCtx, result)
++				if requestStopped(creditsCtx) {
++					return cliproxyexecutor.Response{}, false, wrapRequestStopError(errExec)
++				}
+ 				if result.CredentialScope {
+ 					break
+ 				}
+ 				continue
+ 			}
+ 			m.MarkResult(creditsCtx, result)
++			if requestStopped(creditsCtx) {
++				attemptAliasResult := resolveAttemptAliasResult(routing, c.auth, routeModel, upstreamModel, aliasResult)
++				rewriteForceMappedResponse(&resp, attemptAliasResult)
++				return resp, true, nil
++			}
+ 			attemptAliasResult := resolveAttemptAliasResult(routing, c.auth, routeModel, upstreamModel, aliasResult)
+ 			rewriteForceMappedResponse(&resp, attemptAliasResult)
+ 			return resp, true, nil

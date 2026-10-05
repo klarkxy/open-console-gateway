@@ -502,6 +502,68 @@ impl Database {
     }
 }
 
+/// Insert one `forward_logs` row on a caller-owned connection or transaction.
+///
+/// `Database::log_forward` always uses the database's own connection, so it
+/// cannot join the policy settings transaction. This sibling keeps that
+/// method unchanged and passes the same v26 statement through.
+/// The CPA result transaction calls this; that caller is not wired in this leaf.
+#[allow(dead_code)]
+pub(crate) fn insert_forward_log_on(
+    conn: &Connection,
+    row: &ForwardLogInsertRow<'_>,
+) -> Result<i64> {
+    ocg_infra::sqlite_logs::insert_forward_log(conn, row).map_err(Into::into)
+}
+
+/// Lowest `forward_logs` id for this logical request and diagnostic attempt id.
+///
+/// There is no unique index on the pair. The lookup is the idempotence check
+/// and must run on the same transaction as the insert.
+/// The CPA result transaction calls this; that caller is not wired in this leaf.
+#[allow(dead_code)]
+pub(crate) fn find_forward_log_attempt_on(
+    conn: &Connection,
+    request_id: &str,
+    attempt_id: &str,
+) -> Result<Option<i64>> {
+    conn.query_row(
+        "SELECT id FROM forward_logs
+         WHERE request_id = ?1
+           AND json_extract(diagnostic_json, '$.attempt_id') = ?2
+         ORDER BY id ASC
+         LIMIT 1",
+        params![request_id, attempt_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+/// CPA rows already stored for this logical request and attempt ordinal.
+///
+/// Each item is `(row id, diagnostic attempt id)`. A null attempt id means the
+/// diagnostic was cleared after the row was written.
+/// The CPA result transaction calls this; that caller is not wired in this leaf.
+#[allow(dead_code)]
+pub(crate) fn cpa_forward_logs_for_ordinal_on(
+    conn: &Connection,
+    request_id: &str,
+    ordinal: i64,
+) -> Result<Vec<(i64, Option<String>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, json_extract(diagnostic_json, '$.attempt_id')
+         FROM forward_logs
+         WHERE request_id = ?1 AND attempt = ?2 AND error_source = 'cpa'
+         ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map(params![request_id, ordinal], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
 fn forward_log_filter(options: &ForwardLogQueryOptions<'_>) -> (String, Vec<Value>) {
     let mut filter = String::new();
     let mut params = Vec::new();

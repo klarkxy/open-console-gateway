@@ -167,6 +167,7 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "AccountImportDisposition",
     "AccountImportRequest",
     "AccountImportResult",
+    "CpaControlTarget",
     "CpaIntegration",
     "CpaIntegrationUpdate",
     "CpaTestRequest",
@@ -1102,6 +1103,12 @@ pub struct AccountVerify {
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccountModelTestRequest {
     pub model_id: String,
+    /// Optional user message. Absent keeps the existing minimal verification body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Positive completion bound. Absent keeps the existing minimal verification body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 /// Result of one exact-account, one-model operational request. Error text is
@@ -1650,9 +1657,8 @@ pub struct ModelProtocolOverridesUpdate {
     pub authorize_credential_ids: Vec<String>,
 }
 
-/// POST protocol-probe body. `accountId` is a deprecated compatibility field
-/// and is ignored; the provider chooses eligible accounts automatically.
-/// `protocols` is the required explicit probe set.
+/// POST protocol-probe body. Supplied `accountId` selects that account and is
+/// not ignored. `protocols` is the required explicit probe set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
@@ -1682,8 +1688,7 @@ pub struct ProtocolProbeResult {
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProtocolProbeResponse {
-    /// Deprecated compatibility field. Provider-level probes can use different
-    /// accounts per protocol, so this is always `null`.
+    /// Actual id of the selected account. This is not always `null`.
     pub account_id: Option<String>,
     pub provider_id: String,
     pub model_id: String,
@@ -2602,7 +2607,13 @@ impl From<OllamaBillingTier> for crate::provider::OllamaBillingTier {
     }
 }
 
-/// Secret-free singleton configuration for the local CPA external integration.
+/// Secret-free snapshot of the owned local CPA runtime.
+///
+/// `management_key_configured`, `inference_key_configured`, `enabled`,
+/// `account_id`, `model_count`, and `models_refreshed_at` are retired
+/// compatibility outputs. They stay false, empty, or null and do not describe
+/// a remote key, account, or catalog. `legacy_migration_required` is independent
+/// of `runtime_unavailable_reason`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
@@ -2624,40 +2635,83 @@ pub struct CpaIntegration {
     pub update_available: bool,
     pub current_operation: Option<String>,
     pub runtime_unavailable_reason: Option<String>,
+    /// True when a stored historical remote CPA row still exists.
+    /// Redacted, and not a runtime-health value.
+    pub legacy_migration_required: bool,
     pub revision: u64,
     pub process_generation: u64,
 }
 
-/// PUT CPA configuration. Secret fields are write-only; omission preserves
-/// their existing encrypted values.
+/// Retired compatibility selector for shared CPA operations.
+/// `owned` is this process's child. `integration` remains parseable so an
+/// explicit historical request is refused before any I/O. It is not a product
+/// mode and is omitted from the generated schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum CpaControlTarget {
+    Owned,
+    /// Retired compatibility variant. Serde still accepts `integration`.
+    #[schemars(skip)]
+    Integration,
+}
+
+/// PUT owned CPA configuration.
+///
+/// `base_url`, `management_key`, and `inference_key` are retired compatibility
+/// inputs. Serde still accepts them and the handler refuses them before I/O.
+/// They are omitted from the generated schema. Omission of `target` always
+/// addresses the owned child. A saved historical row does not select a target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CpaIntegrationUpdate {
     #[serde(flatten)]
     pub expectation: MutationExpectation,
+    /// Retired compatibility input. Refused before I/O. Omitted from schema.
     #[serde(default)]
+    #[schemars(skip)]
     pub base_url: Option<String>,
+    /// Retired compatibility input. Refused before I/O. Omitted from schema.
     #[serde(default)]
+    #[schemars(skip)]
     pub management_key: Option<String>,
+    /// Retired compatibility input. Refused before I/O. Omitted from schema.
     #[serde(default)]
+    #[schemars(skip)]
     pub inference_key: Option<String>,
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// Retired compatibility selector. Absent always means owned. A saved
+    /// historical row does not choose a target. `integration` is refused
+    /// before I/O.
+    #[serde(default)]
+    pub target: Option<CpaControlTarget>,
 }
 
-/// Operational connection test. Optional write-only values allow testing a
-/// first-time configuration without persisting it.
+/// Operational connection test against the owned child.
+///
+/// `base_url`, `management_key`, and `inference_key` are retired compatibility
+/// inputs. Serde still accepts them and the handler refuses them before I/O.
+/// They are omitted from the generated schema.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CpaTestRequest {
+    /// Retired compatibility input. Refused before I/O. Omitted from schema.
     #[serde(default)]
+    #[schemars(skip)]
     pub base_url: Option<String>,
+    /// Retired compatibility input. Refused before I/O. Omitted from schema.
     #[serde(default)]
+    #[schemars(skip)]
     pub management_key: Option<String>,
+    /// Retired compatibility input. Refused before I/O. Omitted from schema.
     #[serde(default)]
+    #[schemars(skip)]
     pub inference_key: Option<String>,
+    #[serde(default)]
+    pub target: Option<CpaControlTarget>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2891,6 +2945,26 @@ pub struct CpaRuntime {
     pub latest_version: Option<String>,
     pub update_available: bool,
     pub current_operation: Option<String>,
+    /// Owned child generation. Distinct from `process_generation`.
+    #[serde(default)]
+    pub child_process_generation: Option<u64>,
+    #[serde(default)]
+    pub desired_revision: Option<u64>,
+    #[serde(default)]
+    pub applied_revision: Option<u64>,
+    /// 64 lowercase hex, or absent when the plane has no digest yet.
+    #[serde(default)]
+    pub desired_digest: Option<String>,
+    /// 64 lowercase hex, or absent when the plane has no digest yet.
+    #[serde(default)]
+    pub applied_digest: Option<String>,
+    /// `not_prepared`, `installed`, `apply_pending`, `applied`, `apply_failed`, or `stopped`.
+    #[serde(default)]
+    pub apply_status: Option<String>,
+    #[serde(default)]
+    pub policy_ready: bool,
+    #[serde(default)]
+    pub execution_unavailable: bool,
     pub revision: u64,
     pub process_generation: u64,
 }
@@ -2927,6 +3001,11 @@ pub struct CpaRuntimeInstall {
     pub expectation: MutationExpectation,
     #[serde(default)]
     pub expected_version: Option<String>,
+    /// Directory that contains `manifest.json` and the pinned host executable.
+    #[serde(default)]
+    pub artifact_dir: Option<String>,
+    #[serde(default)]
+    pub target: Option<CpaControlTarget>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -95,6 +95,7 @@ async fn issue58_refreshed_go_models_reach_correct_upstream_and_preserve_client_
             assert_eq!(status, StatusCode::OK, "{model} {path}: {body}");
             assert_eq!(body["model"], model);
         }
+        h.ensure_owned_plane().await;
         let (status, body) = gemini_call(h.port, model).await;
         assert_eq!(status, StatusCode::OK, "{model} Gemini: {body}");
         let calls = h.calls.lock().unwrap();

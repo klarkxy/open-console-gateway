@@ -1,0 +1,32 @@
+diff --git a/diff-a/internal/watcher/synthesizer/config.go b/diff-b/internal/watcher/synthesizer/config.go
+index 786522f..c651daf 100644
+--- a/diff-a/internal/watcher/synthesizer/config.go
++++ b/diff-b/internal/watcher/synthesizer/config.go
+@@ -315,6 +315,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
+ 			proxyURL := strings.TrimSpace(entry.ProxyURL)
+ 			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
+ 			id, token := idGen.Next(idKind, key, base, proxyURL)
++			if configured := strings.TrimSpace(compat.Name); configured != "" {
++				id = configured
++			}
+ 			attrs := map[string]string{
+ 				"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
+ 				"base_url":     base,
+@@ -335,4 +338,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
+ 			if key != "" {
+ 				attrs["api_key"] = key
+ 			}
++			if key == "" {
++				attrs["auth_kind"] = "apikey"
++			}
+ 			if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
+@@ -361,6 +367,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
+ 		if createdEntries == 0 {
+ 			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
+ 			id, token := idGen.Next(idKind, base)
++			if configured := strings.TrimSpace(compat.Name); configured != "" {
++				id = configured
++			}
+ 			attrs := map[string]string{
+ 				"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
+ 				"base_url":     base,

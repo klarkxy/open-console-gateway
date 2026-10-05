@@ -2,6 +2,8 @@
 
 # Add a Provider
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
 Use this guide when you want Open Console Gateway to route to another upstream service. There are three different integration paths:
 
 | Goal | Path | Repository change |
@@ -92,7 +94,7 @@ A built-in integration is appropriate only when the Provider needs product-owned
 
 Before opening a contribution, write down the upstream origin, auth scheme, catalog source, supported model/protocol pairs, streaming behavior, error semantics, quota/price source, and a non-billable validation plan. Keep the new family fail-closed until its complete routing and control-plane path exists.
 
-For repository architecture details, continue with [Extending Open Console Gateway](../maintainer/extending.md) and [Runtime invariants](../maintainer/runtime-invariants.md).
+For repository architecture details, continue with [OCG3 architecture](../architecture.md) and [migration boundaries](../maintainer/cpa-migration.md).
 
 ---
 

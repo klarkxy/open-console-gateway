@@ -1,35 +1,35 @@
-//! Read-only `GET /routing/explain` prediction.
+//! Read-only `GET /routing/explain`.
 //!
-//! Reuses live alias resolution, materialization, availability, and selector
-//! policy. Never sends, decrypts, probes, writes cooldown, or advances sticky
-//! / round-robin / conversation state.
+//! One `explain_owned_routes` call. The response copies the revision and routing
+//! mode captured inside that read. It does not select, decrypt, admit, or send.
 
 use axum::Json;
 use axum::extract::{FromRequestParts, Query, State};
 use axum::http::request::Parts;
-use bytes::Bytes;
+use chrono::{DateTime, Utc};
+use ocg_domain::ids::model_ids_match;
 use serde::Deserialize;
-use serde_json::json;
-use std::collections::HashMap;
+use serde_json::Value;
 
+use crate::cpa_execution::ExecutionError;
+use crate::cpa_execution::explain::{
+    GrantFact, HistoricalPlacement, MaterialFact, OwnedRoutingFacts, QueryMapping, QueryResolution,
+    QueryResolutionKind, RouteExclusion, RouteFact, RoutePlane, RoutePosture,
+    RoutingProductChannel, RuntimeFacts, Spelling, explain_owned_routes,
+};
+use crate::cpa_policy::{ResetEvidence, ScopedQuotaView, Subject};
 use crate::dashboard_v3::{ControlRevision, RoutingMode as RoutingModeDto, V3ApiError};
-use crate::gateway::handler::runtime_catalog_snapshot;
-use crate::gateway::materialize::{
-    RouteRejection, RouteRejectionCode, materialize_execution_routes, protocol_error_from_resolve,
-    resolved_alias_from_model,
-};
-use crate::gateway::protocol::{ParsedClientRequest, parse_client_request, parse_gemini_request};
-use crate::kernel::protocol::ApiFormat;
-use crate::models::{RoutingMode, UpstreamChannel};
-use crate::routing_runtime::{
-    CandidateAvailability, RoutingCandidate, assess_candidate_availability,
-};
+use crate::models::RoutingMode;
 use crate::state::CoreState;
 
 use super::types::{
-    RoutingChannel, RoutingClientProtocol, RoutingConversationBinding, RoutingEligibleCandidate,
-    RoutingExclusion, RoutingExclusionCode, RoutingExplanation, RoutingResolvedKind,
-    RoutingResolvedMapping, RoutingResolvedModel, RuntimeOnlyUncertainty,
+    RoutingChannel, RoutingClientProtocol, RoutingConfiguredRoute, RoutingConversationBinding,
+    RoutingEligibleCandidate, RoutingExclusion, RoutingExclusionCode, RoutingExplanation,
+    RoutingGrantDisposition, RoutingHistoricalPlacement, RoutingMaterialFact, RoutingNativePin,
+    RoutingOperationFact, RoutingOwnedProjection, RoutingPlaneTuple, RoutingQuotaEvidence,
+    RoutingQuotaFact, RoutingQuotaState, RoutingResolvedKind, RoutingResolvedMapping,
+    RoutingResolvedModel, RoutingRouteAuthority, RoutingRoutePlane, RoutingRoutePosture,
+    RoutingSpelling, RuntimeOnlyUncertainty,
 };
 
 #[derive(Debug, Deserialize)]
@@ -91,6 +91,17 @@ fn parse_client_protocol(value: &str) -> Option<RoutingClientProtocol> {
     }
 }
 
+/// Public Gemini uses the existing chat completions callable association.
+fn callable_protocol(protocol: RoutingClientProtocol) -> &'static str {
+    match protocol {
+        RoutingClientProtocol::ChatCompletions | RoutingClientProtocol::Gemini => {
+            "chat_completions"
+        }
+        RoutingClientProtocol::Responses => "responses",
+        RoutingClientProtocol::Messages => "messages",
+    }
+}
+
 fn routing_mode_dto(mode: RoutingMode) -> RoutingModeDto {
     match mode {
         RoutingMode::StrictPriority => RoutingModeDto::StrictPriority,
@@ -99,358 +110,572 @@ fn routing_mode_dto(mode: RoutingMode) -> RoutingModeDto {
     }
 }
 
-fn channel_dto(channel: UpstreamChannel) -> RoutingChannel {
-    match channel {
-        UpstreamChannel::Go => RoutingChannel::Go,
-        UpstreamChannel::Free => RoutingChannel::Free,
-    }
-}
-
-fn exclusion_code(code: RouteRejectionCode) -> RoutingExclusionCode {
-    match code.as_str() {
-        "mapping_protocol_incompatible" => RoutingExclusionCode::MappingProtocolIncompatible,
-        "credential_disabled" => RoutingExclusionCode::CredentialDisabled,
-        "binding_disabled" => RoutingExclusionCode::BindingDisabled,
-        "model_scope_denied" => RoutingExclusionCode::ModelScopeDenied,
-        "goat_not_eligible" => RoutingExclusionCode::GoatNotEligible,
-        "goat_unverified" => RoutingExclusionCode::GoatUnverified,
-        "candidate_materialization_failed" => RoutingExclusionCode::CandidateMaterializationFailed,
-        "production_route_unsupported" => RoutingExclusionCode::ProductionRouteUnsupported,
-        other => unreachable!("unmapped materialize rejection code {other}"),
-    }
-}
-
-fn availability_code(reason: CandidateAvailability) -> Option<RoutingExclusionCode> {
-    match reason {
-        CandidateAvailability::Available => None,
-        CandidateAvailability::AccountDisabled => Some(RoutingExclusionCode::AccountDisabled),
-        CandidateAvailability::SetupNotReady => Some(RoutingExclusionCode::SetupNotReady),
-        CandidateAvailability::ChannelMismatch => Some(RoutingExclusionCode::ChannelMismatch),
-        CandidateAvailability::CredentialMissing => Some(RoutingExclusionCode::CredentialMissing),
-        CandidateAvailability::AuthError => Some(RoutingExclusionCode::AuthError),
-        CandidateAvailability::CoolingDown => Some(RoutingExclusionCode::CoolingDown),
-        CandidateAvailability::FreeChannelUnavailable => {
-            Some(RoutingExclusionCode::FreeChannelUnavailable)
-        }
-        CandidateAvailability::QuotaWaiting => Some(RoutingExclusionCode::QuotaWaiting),
-        CandidateAvailability::QuotaProbing => Some(RoutingExclusionCode::QuotaProbing),
-    }
-}
-
-fn from_rejection(rejection: &RouteRejection) -> RoutingExclusion {
-    RoutingExclusion {
-        code: exclusion_code(rejection.code),
-        detail: rejection.detail.clone(),
-        account_id: rejection.account_id.clone(),
-        provider_id: rejection.provider_id.clone(),
-        upstream_model: rejection.upstream_model.clone(),
-    }
-}
-
-fn availability_exclusion(
-    candidate: &RoutingCandidate<crate::routing_snapshot::ExecutionCredential>,
-    reason: CandidateAvailability,
-) -> RoutingExclusion {
-    RoutingExclusion {
-        code: availability_code(reason).expect("unavailable reason"),
-        detail: format!(
-            "account `{}`: {}",
-            candidate.account.id,
-            reason.as_str().replace('_', " ")
-        ),
-        account_id: Some(candidate.account.id.clone()),
-        provider_id: Some(candidate.account.provider_id.clone()),
-        upstream_model: Some(candidate.resolved_model.clone()),
-    }
-}
-
-fn protocol_dto(protocol: ApiFormat) -> RoutingClientProtocol {
-    match protocol {
-        ApiFormat::ChatCompletions => RoutingClientProtocol::ChatCompletions,
-        ApiFormat::Responses => RoutingClientProtocol::Responses,
-        ApiFormat::Messages => RoutingClientProtocol::Messages,
-        ApiFormat::Gemini => RoutingClientProtocol::Gemini,
-    }
-}
-
-fn eligible_candidate(
-    candidate: &RoutingCandidate<crate::routing_snapshot::ExecutionCredential>,
-    upstream_protocol: ApiFormat,
-    routing_rank: u32,
-    destination: Option<&(String, String)>,
-) -> RoutingEligibleCandidate {
-    RoutingEligibleCandidate {
-        account_id: candidate.account.id.clone(),
-        account_name: candidate.account.name.clone(),
-        provider_id: candidate.account.provider_id.clone(),
-        destination_id: destination.map(|(id, _)| id.clone()),
-        destination_name: destination.map(|(_, name)| name.clone()),
-        adapter_kind: candidate.adapter.as_str().to_string(),
-        channel: channel_dto(candidate.channel),
-        resolved_model: candidate.resolved_model.clone(),
-        upstream_protocol: protocol_dto(upstream_protocol),
-        routing_rank,
-    }
-}
-
-const RUNTIME_UNCERTAINTY: [RuntimeOnlyUncertainty; 5] = [
-    RuntimeOnlyUncertainty::StateChangedAfterSnapshot,
-    RuntimeOnlyUncertainty::ConversationBindingNotEvaluated,
-    RuntimeOnlyUncertainty::RetryExclusionsNotApplied,
-    RuntimeOnlyUncertainty::CredentialRecheckPending,
-    RuntimeOnlyUncertainty::UpstreamResultUnknown,
-];
-
-fn minimal_parsed_request(
-    protocol: RoutingClientProtocol,
-    model: &str,
-) -> Result<ParsedClientRequest, crate::gateway::protocol::ProtocolError> {
-    match protocol {
-        RoutingClientProtocol::Gemini => parse_gemini_request(
-            model.to_string(),
-            false,
-            Bytes::from(
-                serde_json::to_vec(&json!({
-                    "contents": [{"role": "user", "parts": [{"text": "hi"}]}]
-                }))
-                .expect("minimal Gemini body"),
-            ),
-        ),
-        RoutingClientProtocol::Responses => parse_client_request(
-            ApiFormat::Responses,
-            Bytes::from(
-                serde_json::to_vec(&json!({
-                    "model": model,
-                    "input": "hi",
-                    "store": false
-                }))
-                .expect("minimal Responses body"),
-            ),
-        ),
-        RoutingClientProtocol::Messages => parse_client_request(
-            ApiFormat::Messages,
-            Bytes::from(
-                serde_json::to_vec(&json!({
-                    "model": model,
-                    "max_tokens": 16,
-                    "messages": [{"role": "user", "content": "hi"}]
-                }))
-                .expect("minimal Messages body"),
-            ),
-        ),
-        RoutingClientProtocol::ChatCompletions => parse_client_request(
-            ApiFormat::ChatCompletions,
-            Bytes::from(
-                serde_json::to_vec(&json!({
-                    "model": model,
-                    "messages": [{"role": "user", "content": "hi"}]
-                }))
-                .expect("minimal ChatCompletions body"),
-            ),
-        ),
-    }
-}
-
 fn explain_model(
     state: &CoreState,
     model: &str,
     protocol: RoutingClientProtocol,
 ) -> Result<RoutingExplanation, V3ApiError> {
-    let _settings_update = state.settings_update.lock();
-    let (wall, mono) = state.sample_gateway_clock();
-    let config = state.config();
-    let snapshot = runtime_catalog_snapshot(state).map_err(V3ApiError::internal)?;
-    let resolved = snapshot.resolve(model).map_err(|error| {
-        V3ApiError::invalid_request_at(state, protocol_error_from_resolve(error).message)
-    })?;
-    let parsed = minimal_parsed_request(protocol, model)
-        .map_err(|error| V3ApiError::invalid_request_at(state, error.message))?;
-
-    let projection = &snapshot.routing.projection;
-    let accounts = &snapshot.routing.credentials;
-    let free_cooldown = state
-        .db
-        .lock()
-        .free_channel_cooldown_until_at(wall)
-        .map_err(V3ApiError::internal)?;
-    let destination_names = projection
-        .destinations
-        .iter()
-        .map(|destination| (destination.id.as_str(), destination.name.as_str()))
-        .collect::<HashMap<_, _>>();
-    let destination_by_account = projection
-        .credentials
-        .iter()
-        .filter_map(|credential| {
-            destination_names
-                .get(credential.destination_id.as_str())
-                .map(|name| {
-                    (
-                        credential.legacy_account_id.as_str(),
-                        (credential.destination_id.clone(), (*name).to_string()),
-                    )
-                })
-        })
-        .collect::<HashMap<_, _>>();
-    let routing_rank_by_account = accounts
-        .iter()
-        .enumerate()
-        .map(|(index, account)| (account.id.as_str(), index as u32))
-        .collect::<HashMap<_, _>>();
-    let free_available = free_cooldown.is_none()
-        && !crate::destination_projection::free_channel_exhausted(projection, wall);
-    let cpa_base = crate::cpa::env_base_url().map_err(V3ApiError::internal)?;
-    let mut route_set = materialize_execution_routes(
-        &snapshot.routing,
-        &config,
-        &parsed,
-        &resolved,
-        model,
-        model,
-        cpa_base.as_deref(),
-    )
-    .map_err(|error| V3ApiError::invalid_request_at(state, error.message))?;
-    let mut authorization_exclusions = std::collections::HashSet::new();
-    for route in &mut route_set.routes {
-        if !assess_candidate_availability(&route.routing, free_available, wall).is_available() {
-            continue;
-        }
-        let selection =
-            crate::gateway::forwarder::LiveSendSelection::from_execution(route, model, model);
-        if let Err(error) = crate::gateway::forwarder::verify_execution_authorization(
-            &snapshot.routing,
-            &selection,
-            &route.spec,
-            wall,
-            free_available,
-        ) {
-            authorization_exclusions.insert(route.routing.account.id.clone());
-            route.routing.account.enabled = false;
-            route_set.rejections.push(RouteRejection {
-                code: RouteRejectionCode::ProductionRouteUnsupported,
-                detail: error.to_string(),
-                account_id: Some(route.routing.account.id.clone()),
-                provider_id: Some(route.routing.account.provider_id.clone()),
-                upstream_model: Some(route.plan.model.clone()),
-            });
-        }
-    }
-
-    let mut exclusions: Vec<RoutingExclusion> =
-        route_set.rejections.iter().map(from_rejection).collect();
-    let mut eligible = Vec::new();
-    for route in &route_set.routes {
-        if authorization_exclusions.contains(&route.routing.account.id) {
-            continue;
-        }
-        let reason = assess_candidate_availability(&route.routing, free_available, wall);
-        if reason.is_available() {
-            eligible.push(eligible_candidate(
-                &route.routing,
-                route.plan.upstream,
-                routing_rank_by_account
-                    .get(route.routing.account.id.as_str())
-                    .copied()
-                    .unwrap_or(u32::MAX),
-                destination_by_account.get(route.routing.account.id.as_str()),
-            ));
-            if route
-                .routing
-                .account
-                .quota_recovery
-                .as_ref()
-                .is_some_and(|recovery| recovery.due_at(wall))
-                && !route.routing.account.quota_probe
-            {
-                exclusions.push(RoutingExclusion {
-                    code: RoutingExclusionCode::QuotaDue,
-                    detail: format!(
-                        "account `{}`: quota recovery is due for one trial",
-                        route.routing.account.id
-                    ),
-                    account_id: Some(route.routing.account.id.clone()),
-                    provider_id: Some(route.routing.account.provider_id.clone()),
-                    upstream_model: Some(route.routing.resolved_model.clone()),
-                });
-            }
-        } else {
-            exclusions.push(availability_exclusion(&route.routing, reason));
-        }
-    }
-
-    let routing_candidates = route_set
-        .routes
-        .iter()
-        .map(|route| route.routing.clone())
-        .collect::<Vec<_>>();
-    let first_pick = state
-        .routing
-        .preview_candidate_index_at(
-            &routing_candidates,
-            config.routing_mode,
-            false,
-            None,
-            &[],
-            free_available,
-            wall,
-            mono,
-        )
-        .map_err(V3ApiError::internal)?
-        .and_then(|index| route_set.routes.get(index))
-        .map(|route| {
-            eligible_candidate(
-                &route.routing,
-                route.plan.upstream,
-                routing_rank_by_account
-                    .get(route.routing.account.id.as_str())
-                    .copied()
-                    .unwrap_or(u32::MAX),
-                destination_by_account.get(route.routing.account.id.as_str()),
-            )
-        });
-
-    let resolved_dto = match &resolved {
-        crate::alias::ResolvedModel::Alias {
-            alias, mappings, ..
-        } => RoutingResolvedModel {
-            kind: RoutingResolvedKind::Alias,
-            alias: Some((*alias).to_string()),
-            mappings: mappings
-                .iter()
-                .map(|mapping| mapping_dto(mapping, &snapshot))
-                .collect(),
-        },
-        crate::alias::ResolvedModel::PinnedRaw { mapping, .. } => RoutingResolvedModel {
-            kind: RoutingResolvedKind::PinnedRaw,
-            alias: resolved_alias_from_model(&resolved),
-            mappings: vec![mapping_dto(mapping, &snapshot)],
-        },
-    };
-
-    Ok(RoutingExplanation {
-        requested_model: model.to_string(),
-        client_protocol: protocol,
-        resolved: resolved_dto,
-        revision: ControlRevision::from_state(state),
-        observed_at: wall.to_rfc3339(),
-        routing_mode: routing_mode_dto(config.routing_mode),
-        conversation_sticky: config.conversation_sticky,
-        conversation_binding: RoutingConversationBinding::NotEvaluated,
-        eligible,
-        exclusions,
-        expected_base_policy_first_pick: first_pick,
-        runtime_only_uncertainty: RUNTIME_UNCERTAINTY.to_vec(),
-    })
+    explain_model_at(state, model, protocol, Utc::now())
 }
 
-fn mapping_dto(
-    mapping: &crate::alias::ProviderMapping,
-    snapshot: &crate::gateway::handler::RuntimeCatalogSnapshot,
-) -> RoutingResolvedMapping {
-    RoutingResolvedMapping {
-        provider_id: snapshot.output_provider_id(&mapping.provider_id),
-        upstream_model: mapping.upstream_model.clone(),
-        routeable: mapping.routeable,
+fn explain_model_at(
+    state: &CoreState,
+    model: &str,
+    protocol: RoutingClientProtocol,
+    now: DateTime<Utc>,
+) -> Result<RoutingExplanation, V3ApiError> {
+    let facts = explain_owned_routes(state, model, callable_protocol(protocol), now)
+        .map_err(|error| execution_error(state, error))?;
+    let Some(kind) = facts.resolution.kind else {
+        return Err(V3ApiError::invalid_request_at(
+            state,
+            "model is unknown or ambiguous",
+        ));
+    };
+    if !facts.resolution.known || facts.resolution.ambiguous {
+        return Err(V3ApiError::invalid_request_at(
+            state,
+            "model is unknown or ambiguous",
+        ));
+    }
+    Ok(explanation_from_facts(&facts, protocol, kind))
+}
+
+fn explanation_from_facts(
+    facts: &OwnedRoutingFacts,
+    protocol: RoutingClientProtocol,
+    kind: QueryResolutionKind,
+) -> RoutingExplanation {
+    let captured = &facts.captured;
+    RoutingExplanation {
+        requested_model: facts.requested_model.clone(),
+        client_protocol: protocol,
+        resolved: resolved_model(facts, kind),
+        revision: ControlRevision {
+            revision: captured.settings_revision,
+            process_generation: captured.process_generation,
+            pricing_revision: captured.pricing_revision.clone(),
+        },
+        observed_at: facts.evaluated_at.to_rfc3339(),
+        routing_mode: routing_mode_dto(captured.routing_mode),
+        conversation_sticky: captured.conversation_sticky,
+        conversation_binding: RoutingConversationBinding::NotEvaluated,
+        eligible: facts
+            .applied
+            .iter()
+            .filter(|route| public_eligible(route, &facts.runtime, &facts.resolution))
+            .map(eligible_candidate)
+            .collect(),
+        exclusions: facts
+            .applied
+            .iter()
+            .flat_map(|route| applied_exclusions(route, &facts.runtime, &facts.resolution))
+            .collect(),
+        expected_base_policy_first_pick: None,
+        runtime_only_uncertainty: uncertainties(facts),
+        desired_routes: facts
+            .desired
+            .iter()
+            .map(|route| RoutingConfiguredRoute {
+                authority: authority_of(route),
+            })
+            .collect(),
+        owned_projection: projection_of(facts),
+    }
+}
+
+fn execution_error(state: &CoreState, error: ExecutionError) -> V3ApiError {
+    match error {
+        ExecutionError::Invalid(message) => V3ApiError::invalid_request_at(state, message),
+        other => V3ApiError::internal_at(state, other),
+    }
+}
+
+fn public_eligible(
+    route: &RouteFact,
+    runtime: &RuntimeFacts,
+    resolution: &QueryResolution,
+) -> bool {
+    route.plane == RoutePlane::Applied
+        && route.client_configuration_eligible
+        && matches!(route.posture, RoutePosture::Client)
+        && !route.validation_only
+        && runtime.owned_running
+        && !runtime.state_changed
+        && runtime.origin_verified
+        && runtime.verified_ready
+        && runtime.policy_ready
+        && runtime.pin_capabilities_ready
+        && runtime.tuple_aligned
+        && !runtime.policy_malformed
+        && !runtime.unavailable
+        && !runtime.poisoned
+        && !runtime.stopped
+        && !route.known_restriction_blocks
+        && !route.trial_pending
+        && !matches!(route.quota, ScopedQuotaView::Malformed)
+        && !route.migration_required
+        && !matches!(route.historical_placement, HistoricalPlacement::Remote)
+        && selected_routeable(route, resolution)
+}
+
+fn selected_routeable(route: &RouteFact, resolution: &QueryResolution) -> bool {
+    resolution
+        .mappings
+        .iter()
+        .any(|mapping| mapping.routeable && mapping_identity_matches(route, mapping))
+}
+
+fn mapping_identity_matches(route: &RouteFact, mapping: &QueryMapping) -> bool {
+    route.destination_id == mapping.destination_id
+        && route.provider_id == mapping.provider_id
+        && model_ids_match(&route.upstream_model, &mapping.upstream_model)
+}
+
+fn resolved_model(facts: &OwnedRoutingFacts, kind: QueryResolutionKind) -> RoutingResolvedModel {
+    let kind = match kind {
+        QueryResolutionKind::Alias => RoutingResolvedKind::Alias,
+        QueryResolutionKind::PinnedRaw => RoutingResolvedKind::PinnedRaw,
+    };
+    RoutingResolvedModel {
+        kind,
+        alias: facts.resolution.alias.clone(),
+        mappings: facts
+            .resolution
+            .mappings
+            .iter()
+            .map(|mapping| RoutingResolvedMapping {
+                provider_id: mapping.provider_id.clone(),
+                upstream_model: mapping.upstream_model.clone(),
+                routeable: mapping.routeable,
+                destination_id: mapping.destination_id.clone(),
+                adapter_kind: mapping.adapter_kind.clone(),
+                migration_required: mapping.migration_required,
+            })
+            .collect(),
+    }
+}
+
+fn uncertainties(facts: &OwnedRoutingFacts) -> Vec<RuntimeOnlyUncertainty> {
+    let mut out = vec![RuntimeOnlyUncertainty::ConversationBindingNotEvaluated];
+    if facts
+        .desired
+        .iter()
+        .chain(facts.applied.iter())
+        .any(|route| route.secret_recheck_pending)
+    {
+        out.push(RuntimeOnlyUncertainty::CredentialRecheckPending);
+    }
+    for item in &facts.uncertainties {
+        match item.as_str() {
+            "cpa_selection_not_evaluated" => {
+                push_uncertainty(&mut out, RuntimeOnlyUncertainty::CpaSelectionNotEvaluated);
+            }
+            "quota_trial_not_evaluated" => {
+                push_uncertainty(&mut out, RuntimeOnlyUncertainty::QuotaTrialNotEvaluated);
+            }
+            _ => {}
+        }
+    }
+    if facts.runtime.state_changed {
+        push_uncertainty(&mut out, RuntimeOnlyUncertainty::StateChangedAfterSnapshot);
+    }
+    out
+}
+
+fn push_uncertainty(out: &mut Vec<RuntimeOnlyUncertainty>, item: RuntimeOnlyUncertainty) {
+    if !out.contains(&item) {
+        out.push(item);
+    }
+}
+
+fn applied_exclusions(
+    route: &RouteFact,
+    runtime: &RuntimeFacts,
+    resolution: &QueryResolution,
+) -> Vec<RoutingExclusion> {
+    if public_eligible(route, runtime, resolution) {
+        return Vec::new();
+    }
+    let mut codes = Vec::new();
+    for item in &route.exclusions {
+        push_code(&mut codes, authority_code(*item));
+    }
+    if route.validation_only {
+        push_code(&mut codes, RoutingExclusionCode::ValidationOnly);
+    }
+    if route.known_restriction_blocks {
+        push_code(&mut codes, RoutingExclusionCode::QuotaKnownReset);
+    }
+    if route.trial_pending {
+        push_code(&mut codes, RoutingExclusionCode::QuotaUnknownReset);
+    }
+    if matches!(route.quota, ScopedQuotaView::Malformed) {
+        push_code(&mut codes, RoutingExclusionCode::QuotaMalformed);
+    }
+    if route.migration_required || matches!(route.historical_placement, HistoricalPlacement::Remote)
+    {
+        push_code(&mut codes, RoutingExclusionCode::MigrationRequired);
+    }
+    if runtime.poisoned {
+        push_code(&mut codes, RoutingExclusionCode::Untrusted);
+    }
+    if runtime.policy_malformed {
+        push_code(&mut codes, RoutingExclusionCode::PolicyMalformed);
+    }
+    if runtime.unavailable {
+        push_code(&mut codes, RoutingExclusionCode::ConfigurationUnavailable);
+    }
+    if runtime.stopped {
+        push_code(&mut codes, RoutingExclusionCode::Stopped);
+    }
+    if runtime.state_changed {
+        push_code(&mut codes, RoutingExclusionCode::StateChanged);
+    }
+    if !runtime.owned_running {
+        push_code(&mut codes, RoutingExclusionCode::OwnedNotRunning);
+    }
+    if !runtime.origin_verified {
+        push_code(&mut codes, RoutingExclusionCode::OriginUnverified);
+    }
+    if !runtime.verified_ready {
+        push_code(&mut codes, RoutingExclusionCode::NotReady);
+    }
+    if !runtime.policy_ready {
+        push_code(&mut codes, RoutingExclusionCode::PolicyNotReady);
+    }
+    if !runtime.pin_capabilities_ready {
+        push_code(&mut codes, RoutingExclusionCode::PinCapabilities);
+    }
+    if !runtime.tuple_aligned {
+        push_code(&mut codes, RoutingExclusionCode::TupleUnaligned);
+    }
+    if !resolution
+        .mappings
+        .iter()
+        .any(|mapping| mapping_identity_matches(route, mapping))
+    {
+        push_code(&mut codes, RoutingExclusionCode::Model);
+    }
+    if codes.is_empty() {
+        push_code(&mut codes, RoutingExclusionCode::ConfigurationUnavailable);
+    }
+    let authority = Some(authority_of(route));
+    codes
+        .into_iter()
+        .map(|code| RoutingExclusion {
+            detail: format!("{} for `{}`", code_label(code), subject_label(route)),
+            account_id: nonempty(&route.legacy_account_id)
+                .or_else(|| nonempty(&route.credential_id)),
+            provider_id: nonempty(&route.provider_id),
+            upstream_model: nonempty(&route.upstream_model),
+            authority: authority.clone(),
+            code,
+        })
+        .collect()
+}
+
+fn eligible_candidate(route: &RouteFact) -> RoutingEligibleCandidate {
+    RoutingEligibleCandidate {
+        account_id: subject_label(route),
+        account_name: route.account_label.clone(),
+        provider_id: route.provider_id.clone(),
+        destination_id: nonempty(&route.destination_id),
+        destination_name: nonempty(&route.destination_label),
+        adapter_kind: route.adapter_kind.clone(),
+        channel: channel_of(route.channel),
+        resolved_model: if route.upstream_model.is_empty() {
+            route.public_model.clone()
+        } else {
+            route.upstream_model.clone()
+        },
+        upstream_protocol: protocol_from_route(&route.protocol),
+        routing_rank: route.routing_rank,
+        authority: authority_of(route),
+    }
+}
+
+fn protocol_from_route(protocol: &str) -> RoutingClientProtocol {
+    match protocol {
+        "responses" => RoutingClientProtocol::Responses,
+        "messages" => RoutingClientProtocol::Messages,
+        _ => RoutingClientProtocol::ChatCompletions,
+    }
+}
+
+fn projection_of(facts: &OwnedRoutingFacts) -> RoutingOwnedProjection {
+    let runtime = &facts.runtime;
+    RoutingOwnedProjection {
+        desired: RoutingPlaneTuple {
+            generation: facts.projection.desired.generation,
+            revision: facts.projection.desired.revision,
+            digest: facts.projection.desired.digest.clone(),
+        },
+        applied: RoutingPlaneTuple {
+            generation: facts.projection.applied.generation,
+            revision: facts.projection.applied.revision,
+            digest: facts.projection.applied.digest.clone(),
+        },
+        apply_status: facts.projection.apply_status.clone(),
+        desired_running: facts.projection.desired_running,
+        runtime_child_generation: facts.projection.runtime_child_generation,
+        unavailable: runtime.unavailable,
+        state_changed: runtime.state_changed,
+        stopped: runtime.stopped,
+        poisoned: runtime.poisoned,
+        origin_verified: runtime.origin_verified,
+        verified_ready: runtime.verified_ready,
+        policy_ready: runtime.policy_ready,
+        policy_malformed: runtime.policy_malformed,
+        tuple_aligned: runtime.tuple_aligned,
+        pin_capabilities_ready: runtime.pin_capabilities_ready,
+        owned_running_before: runtime.owned_running_before,
+        owned_running_after: runtime.owned_running_after,
+        owned_running: runtime.owned_running,
+    }
+}
+
+fn authority_of(route: &RouteFact) -> RoutingRouteAuthority {
+    RoutingRouteAuthority {
+        plane: match route.plane {
+            RoutePlane::Desired => RoutingRoutePlane::Desired,
+            RoutePlane::Applied => RoutingRoutePlane::Applied,
+        },
+        credential_id: route.credential_id.clone(),
+        credential_version: route.credential_version,
+        current_version: route.current_version,
+        provider_id: route.provider_id.clone(),
+        binding_id: route.binding_id.clone(),
+        auth_id: route.auth_id.clone(),
+        registration_epoch: route.registration_epoch,
+        routing_rank: route.routing_rank,
+        destination_id: route.destination_id.clone(),
+        legacy_account_id: route.legacy_account_id.clone(),
+        account_label: route.account_label.clone(),
+        destination_label: route.destination_label.clone(),
+        public_model: route.public_model.clone(),
+        upstream_model: route.upstream_model.clone(),
+        spelling: match route.spelling {
+            Spelling::Empty => RoutingSpelling::Empty,
+            Spelling::Same => RoutingSpelling::Same,
+            Spelling::DistinctUpstream => RoutingSpelling::DistinctUpstream,
+        },
+        protocol: route.protocol.clone(),
+        endpoint_id: route.endpoint_id.clone(),
+        origin: route.origin.clone(),
+        endpoint_fingerprint: route.endpoint_fingerprint.clone(),
+        validation_only: route.validation_only,
+        channel: channel_of(route.channel),
+        adapter_kind: route.adapter_kind.clone(),
+        material: match route.material {
+            MaterialFact::HttpNone => RoutingMaterialFact::HttpNone,
+            MaterialFact::KeyedUnchecked => RoutingMaterialFact::KeyedUnchecked,
+            MaterialFact::NativePresent => RoutingMaterialFact::NativePresent,
+            MaterialFact::Unproven => RoutingMaterialFact::Unproven,
+        },
+        posture: match route.posture {
+            RoutePosture::Client => RoutingRoutePosture::Client,
+            RoutePosture::ValidationOnly => RoutingRoutePosture::ValidationOnly,
+            RoutePosture::Excluded => RoutingRoutePosture::Excluded,
+        },
+        exclusions: route
+            .exclusions
+            .iter()
+            .copied()
+            .map(authority_code)
+            .collect(),
+        credential_enabled: route.credential_enabled,
+        binding_enabled: route.binding_enabled,
+        destination_enabled: route.destination_enabled,
+        destination_draft: route.destination_draft,
+        setup_step: route.setup_step.clone(),
+        native_provider: route.native_provider.clone(),
+        native_mode: route.native_mode.clone(),
+        capability_listed: route.capability_listed,
+        grants_cover: route.grants_cover,
+        native_operations: route
+            .native_operations
+            .iter()
+            .map(|fact| RoutingOperationFact {
+                generation_kind: fact.generation_kind.clone(),
+                disposition: grant_of(&fact.disposition),
+            })
+            .collect(),
+        caller_pending: route.caller_pending,
+        secret_recheck_pending: route.secret_recheck_pending,
+        send_pending: route.send_pending,
+        quota: quota_of(&route.quota),
+        known_restriction_blocks: route.known_restriction_blocks,
+        trial_pending: route.trial_pending,
+        client_configuration_eligible: route.client_configuration_eligible,
+        migration_required: route.migration_required,
+        historical_placement: match route.historical_placement {
+            HistoricalPlacement::NotApplicable => RoutingHistoricalPlacement::NotApplicable,
+            HistoricalPlacement::OwnedPool => RoutingHistoricalPlacement::OwnedPool,
+            HistoricalPlacement::Remote => RoutingHistoricalPlacement::Remote,
+        },
+    }
+}
+
+fn grant_of(grant: &GrantFact) -> RoutingGrantDisposition {
+    match grant {
+        GrantFact::Granted { pins } => RoutingGrantDisposition::Granted {
+            pins: pins
+                .iter()
+                .map(|pin| RoutingNativePin {
+                    protocol: pin.protocol.clone(),
+                    endpoint_id: pin.endpoint_id.clone(),
+                    origin: pin.origin.clone(),
+                    endpoint_fingerprint: pin.endpoint_fingerprint.clone(),
+                    http_method: pin.http_method.clone(),
+                })
+                .collect(),
+        },
+        GrantFact::NotGranted => RoutingGrantDisposition::NotGranted,
+        GrantFact::LocalOnly => RoutingGrantDisposition::LocalOnly,
+        GrantFact::Unavailable => RoutingGrantDisposition::Unavailable,
+    }
+}
+
+fn quota_of(quota: &ScopedQuotaView) -> RoutingQuotaFact {
+    match quota {
+        ScopedQuotaView::Unknown => RoutingQuotaFact {
+            state: RoutingQuotaState::Unknown,
+            evidence: Vec::new(),
+        },
+        ScopedQuotaView::Malformed => RoutingQuotaFact {
+            state: RoutingQuotaState::Malformed,
+            evidence: Vec::new(),
+        },
+        ScopedQuotaView::Evidence(rows) => RoutingQuotaFact {
+            state: RoutingQuotaState::Evidence,
+            evidence: rows
+                .iter()
+                .map(|row| {
+                    let (
+                        subject_kind,
+                        credential_id,
+                        credential_version,
+                        provider_id,
+                        binding_id,
+                        pool_id,
+                        pool_version,
+                    ) = match &row.scope.subject {
+                        Subject::Credential {
+                            credential_id,
+                            credential_version,
+                            provider_id,
+                            binding_id,
+                        } => (
+                            "credential".to_string(),
+                            Some(credential_id.clone()),
+                            Some(*credential_version),
+                            Some(provider_id.clone()),
+                            Some(binding_id.clone()),
+                            None,
+                            None,
+                        ),
+                        Subject::Pool {
+                            pool_id,
+                            pool_version,
+                        } => (
+                            "pool".to_string(),
+                            None,
+                            None,
+                            None,
+                            None,
+                            Some(pool_id.clone()),
+                            Some(*pool_version),
+                        ),
+                    };
+                    let (reset, reset_at) = match row.reset {
+                        ResetEvidence::Known { at } => ("known".to_string(), Some(at.to_rfc3339())),
+                        ResetEvidence::UnknownReset => ("unknown_reset".to_string(), None),
+                        ResetEvidence::Expired { at } => {
+                            ("expired".to_string(), Some(at.to_rfc3339()))
+                        }
+                    };
+                    RoutingQuotaEvidence {
+                        subject_kind,
+                        credential_id,
+                        credential_version,
+                        provider_id,
+                        binding_id,
+                        pool_id,
+                        pool_version,
+                        public_model: row.scope.public_model.clone(),
+                        window: enum_name(&row.window),
+                        source: enum_name(&row.source),
+                        observed_at: row.observed_at.to_rfc3339(),
+                        observation_id: row.observation_id.clone(),
+                        reset,
+                        reset_at,
+                        applicable: row.applicable,
+                    }
+                })
+                .collect(),
+        },
+    }
+}
+
+fn authority_code(exclusion: RouteExclusion) -> RoutingExclusionCode {
+    match exclusion {
+        RouteExclusion::Identity => RoutingExclusionCode::Identity,
+        RouteExclusion::Rebound => RoutingExclusionCode::Rebound,
+        RouteExclusion::Version => RoutingExclusionCode::Version,
+        RouteExclusion::Setup => RoutingExclusionCode::SetupBlocked,
+        RouteExclusion::Disabled => RoutingExclusionCode::Disabled,
+        RouteExclusion::Draft => RoutingExclusionCode::Draft,
+        RouteExclusion::Scope => RoutingExclusionCode::Scope,
+        RouteExclusion::Model => RoutingExclusionCode::Model,
+        RouteExclusion::Protocol => RoutingExclusionCode::Protocol,
+        RouteExclusion::Capability => RoutingExclusionCode::Capability,
+        RouteExclusion::NativePresence => RoutingExclusionCode::NativePresence,
+        RouteExclusion::NativeMode => RoutingExclusionCode::NativeMode,
+        RouteExclusion::NativeTargets => RoutingExclusionCode::NativeTargets,
+        RouteExclusion::NotGranted => RoutingExclusionCode::NotGranted,
+        RouteExclusion::Material => RoutingExclusionCode::Material,
+        RouteExclusion::Unavailable => RoutingExclusionCode::ConfigurationUnavailable,
+    }
+}
+
+fn channel_of(channel: RoutingProductChannel) -> RoutingChannel {
+    match channel {
+        RoutingProductChannel::Go => RoutingChannel::Go,
+        RoutingProductChannel::Free => RoutingChannel::Free,
+    }
+}
+
+fn push_code(codes: &mut Vec<RoutingExclusionCode>, code: RoutingExclusionCode) {
+    if !codes.contains(&code) {
+        codes.push(code);
+    }
+}
+
+fn code_label(code: RoutingExclusionCode) -> String {
+    enum_name(&code)
+}
+
+fn enum_name<T: serde::Serialize>(value: &T) -> String {
+    match serde_json::to_value(value) {
+        Ok(Value::String(name)) => name,
+        _ => String::new(),
+    }
+}
+
+fn subject_label(route: &RouteFact) -> String {
+    if !route.legacy_account_id.is_empty() {
+        route.legacy_account_id.clone()
+    } else {
+        route.credential_id.clone()
+    }
+}
+
+fn nonempty(value: &str) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
     }
 }
 

@@ -362,22 +362,38 @@ async fn unauthorized_and_expected_fallback_requests_are_not_persisted() {
         .json(&gemini_body)
         .send()
         .await
-        .expect("countTokens fallback should complete");
-    assert_eq!(count_tokens.status(), StatusCode::NOT_IMPLEMENTED);
+        .expect("authorized countTokens request should complete");
+    assert_eq!(count_tokens.status(), StatusCode::SERVICE_UNAVAILABLE);
     let count_tokens_request_id = count_tokens
         .headers()
         .get("x-ocg-request-id")
         .and_then(|value| value.to_str().ok())
-        .expect("countTokens fallback should keep correlation id");
-    assert!(
-        state
-            .db
-            .lock()
-            .query_gateway_logs(10, Some(count_tokens_request_id))
-            .expect("gateway logs should query")
-            .is_empty(),
-        "expected countTokens fallback must not be persisted as a failure"
-    );
+        .expect("countTokens response should keep correlation id")
+        .to_string();
+    let count_body: serde_json::Value = count_tokens
+        .json()
+        .await
+        .expect("countTokens error should be Google JSON");
+    assert_eq!(count_body["error"]["status"], "UNAVAILABLE");
+    {
+        let db = state.db.lock();
+        assert!(
+            db.query_gateway_logs(10, Some(count_tokens_request_id.as_str()))
+                .expect("gateway logs should query")
+                .is_empty(),
+            "authorized unready countTokens must not be persisted as a failure"
+        );
+        let attempts: Vec<_> = db
+            .list_forward_logs(100)
+            .expect("forward logs should query")
+            .into_iter()
+            .filter(|row| row.request_id.as_deref() == Some(count_tokens_request_id.as_str()))
+            .collect();
+        assert!(
+            attempts.is_empty(),
+            "authorized unready countTokens must not persist an attempt"
+        );
+    }
 
     let invalid_json = client
         .post(format!("{root}/v1/chat/completions"))
@@ -531,21 +547,74 @@ async fn gemini_and_messages_routes_stay_wired() {
             .as_str()
             .is_some_and(|message| message.contains("cannot be preserved"))
     );
-    for path in [
-        "/v1beta/models/minimax-m3:countTokens",
-        "/v1/models/minimax-m3:embedContent",
-    ] {
-        let response = client
-            .post(format!("{root}{path}"))
-            .header("x-goog-api-key", "gateway-test-key")
-            .json(&gemini_body)
-            .send()
-            .await
-            .expect("unsupported Gemini route should complete");
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-        let body: serde_json::Value = response.json().await.expect("Google error JSON");
-        assert_eq!(body["error"]["status"], "UNIMPLEMENTED");
+    let count_tokens = client
+        .post(format!("{root}/v1beta/models/minimax-m3:countTokens"))
+        .header("x-goog-api-key", "gateway-test-key")
+        .json(&gemini_body)
+        .send()
+        .await
+        .expect("authorized countTokens request should complete");
+    assert_eq!(count_tokens.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let count_tokens_request_id = count_tokens
+        .headers()
+        .get("x-ocg-request-id")
+        .and_then(|value| value.to_str().ok())
+        .expect("countTokens response should keep correlation id")
+        .to_string();
+    let count_body: serde_json::Value = count_tokens
+        .json()
+        .await
+        .expect("countTokens error should be Google JSON");
+    assert_eq!(count_body["error"]["status"], "UNAVAILABLE");
+    {
+        let db = state.db.lock();
+        assert!(
+            db.query_gateway_logs(10, Some(count_tokens_request_id.as_str()))
+                .expect("gateway logs should query")
+                .is_empty(),
+            "authorized unready countTokens must not be persisted"
+        );
+        let attempts: Vec<_> = db
+            .list_forward_logs(100)
+            .expect("forward logs should query")
+            .into_iter()
+            .filter(|row| row.request_id.as_deref() == Some(count_tokens_request_id.as_str()))
+            .collect();
+        assert!(
+            attempts.is_empty(),
+            "authorized unready countTokens must not persist an attempt"
+        );
     }
+    let embed = client
+        .post(format!("{root}/v1/models/minimax-m3:embedContent"))
+        .header("x-goog-api-key", "gateway-test-key")
+        .json(&gemini_body)
+        .send()
+        .await
+        .expect("Gemini embed route should complete");
+    assert_eq!(embed.status(), StatusCode::NOT_IMPLEMENTED);
+    let embed_body: serde_json::Value = embed.json().await.expect("Google error JSON");
+    assert_eq!(embed_body["error"]["status"], "UNIMPLEMENTED");
+    let unknown_model = client
+        .post(format!(
+            "{root}/v1beta/models/not-a-public-model:countTokens"
+        ))
+        .header("x-goog-api-key", "gateway-test-key")
+        .json(&gemini_body)
+        .send()
+        .await
+        .expect("unknown model count should complete");
+    assert_eq!(unknown_model.status(), StatusCode::BAD_REQUEST);
+    let unknown_body: serde_json::Value = unknown_model
+        .json()
+        .await
+        .expect("unknown model error should be Google JSON");
+    assert_eq!(unknown_body["error"]["status"], "INVALID_ARGUMENT");
+    assert!(
+        unknown_body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("unknown model"))
+    );
     let unknown_action = client
         .post(format!("{root}/v1beta/models/minimax-m3:unknownAction"))
         .header("x-goog-api-key", "gateway-test-key")
@@ -565,6 +634,46 @@ async fn gemini_and_messages_routes_stay_wired() {
 
     let _ = handle.shutdown.send(());
     handle.task.await.expect("test gateway should stop");
+    drop(state);
+    fs::remove_dir_all(dir).expect("test data directory should be removed");
+}
+
+#[tokio::test]
+async fn policy_callback_reads_the_listener_peer() {
+    let mut dir = std::env::temp_dir();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be valid")
+        .as_nanos();
+    dir.push(format!("ocg-policy-peer-{nanos}"));
+    fs::create_dir_all(&dir).expect("test data directory should be created");
+    let db = Database::open(dir.clone()).expect("test database should open");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+    let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).expect("state should load"));
+    let handle = start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .expect("test gateway should start");
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client should build");
+    let response = client
+        .post(format!(
+            "http://127.0.0.1:{}/_internal/ocg/cpa-policy",
+            handle.port
+        ))
+        .header("content-type", "application/json")
+        .header("origin", format!("http://127.0.0.1:{}", handle.port))
+        .body("{}")
+        .send()
+        .await
+        .expect("policy callback should answer");
+    let status = response.status();
+    let body = response.text().await.expect("policy body should be read");
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert!(body.contains("\"reason\":\"unauthorized\""), "{body}");
+    assert!(!body.contains("ConnectInfo"), "{body}");
+    super::stop_gateway_and_wait(handle).await;
     drop(state);
     fs::remove_dir_all(dir).expect("test data directory should be removed");
 }

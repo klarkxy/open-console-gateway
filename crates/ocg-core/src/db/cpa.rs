@@ -1,18 +1,19 @@
 //! CPA singleton on destinations + observer credential (schema v55+).
 //!
 //! After the leftover `cpa_integration` drop, the integration reconstructs
-//! from the CPA destination (`adapter=cpa` / legacy builtin `cpa`) and the
-//! observer credential (`destinations.observer_credential_id`). The
-//! management cipher stays on that observer row; the reserved inference
-//! credential stays keyless of the management secret. V4 GET stays
+//! from the reserved CPA destination (its id, or legacy builtin `cpa`) and
+//! the observer credential (`destinations.observer_credential_id`). An owned
+//! native destination also uses adapter `cpa` and is not this singleton.
+//! The management cipher stays on the remote observer row; the reserved
+//! inference credential stays keyless of the management secret. V4 GET stays
 //! secret-free. A fresh database without leftover CPA does not invent a
 //! destination.
 
 use super::*;
 use ocg_domain::credential::{identity_id_for_cpa, observer_credential_id_for_cpa};
 use ocg_domain::destination::{
-    AdapterKind, Destination, LegacyDestinationFacts, destination_from_legacy,
-    destination_id_for_builtin,
+    AdapterKind, Destination, LegacyDestinationFacts, LegacyDestinationRef,
+    destination_from_legacy, destination_id_for_builtin,
 };
 
 pub(crate) const CREDENTIAL_PURPOSE_CPA_OBSERVER: &str = "cpa_observer";
@@ -52,7 +53,6 @@ pub(crate) fn destination_present(conn: &Connection) -> Result<bool> {
         "SELECT EXISTS(
             SELECT 1 FROM destinations
              WHERE id = ?1
-                OR adapter = 'cpa'
                 OR (legacy_kind = 'builtin' AND legacy_id = ?2)
          )",
         params![destination_id(), CPA_PROVIDER_ID],
@@ -65,7 +65,11 @@ pub(crate) fn overlay_projected_destination(
     destinations: &mut [Destination],
 ) -> Result<()> {
     let Some(destination) = destinations.iter_mut().find(|destination| {
-        destination.adapter == AdapterKind::Cpa || destination.id == destination_id()
+        destination.id == destination_id()
+            || matches!(
+                &destination.legacy,
+                LegacyDestinationRef::Builtin(id) if id == CPA_PROVIDER_ID
+            )
     }) else {
         return Ok(());
     };
@@ -101,7 +105,6 @@ pub(crate) fn snapshot_destination_extras(conn: &Connection) -> Result<Vec<CpaDe
         "SELECT id, base_url, observer_credential_id
          FROM destinations
          WHERE id = ?1
-            OR adapter = 'cpa'
             OR (legacy_kind = 'builtin' AND legacy_id = ?2)",
     )?;
     let rows = stmt
@@ -289,7 +292,6 @@ fn load_destination_row(conn: &Connection) -> Result<Option<CpaDestinationExtras
         "SELECT id, base_url, observer_credential_id
            FROM destinations
           WHERE id = ?1
-             OR adapter = 'cpa'
              OR (legacy_kind = 'builtin' AND legacy_id = ?2)
           LIMIT 1",
         params![destination_id(), CPA_PROVIDER_ID],

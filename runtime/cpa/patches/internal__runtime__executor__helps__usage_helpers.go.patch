@@ -1,0 +1,35 @@
+diff --git a/diff-a/internal/runtime/executor/helps/usage_helpers.go b/diff-b/internal/runtime/executor/helps/usage_helpers.go
+index 1111111..2222222 100644
+--- a/diff-a/internal/runtime/executor/helps/usage_helpers.go
++++ b/diff-b/internal/runtime/executor/helps/usage_helpers.go
+@@ -1415,6 +1415,30 @@ func ParseAntigravityStreamUsage(line []byte) (usage.Detail, bool) {
+ 	return parseGeminiFamilyUsageDetail(node), true
+ }
+ 
++// AntigravityTerminal reports a native finishReason using the same paths as StripUsageMetadataFromJSON.
++func AntigravityTerminal(payload []byte) bool {
++	jsonBytes := jsonPayload(payload)
++	if len(jsonBytes) == 0 || !gjson.ValidBytes(jsonBytes) {
++		return false
++	}
++	finishReason := gjson.GetBytes(jsonBytes, "candidates.0.finishReason")
++	if !finishReason.Exists() {
++		finishReason = gjson.GetBytes(jsonBytes, "response.candidates.0.finishReason")
++	}
++	return finishReason.Exists() && strings.TrimSpace(finishReason.String()) != ""
++}
++
++// PublishOCGAntigravityUsage records parser input and output counts on the attempt facts.
++func PublishOCGAntigravityUsage(ctx context.Context, detail usage.Detail) {
++	if detail.InputTokens < 0 || detail.OutputTokens < 0 || detail.InputTokens > 50_000_000 || detail.OutputTokens > 50_000_000 {
++		return
++	}
++	if detail.InputTokens == 0 && detail.OutputTokens == 0 {
++		return
++	}
++	cliproxyauth.NoteGenerationUsage(ctx, []byte(fmt.Sprintf("{\"inputTokens\":%d,\"outputTokens\":%d}", detail.InputTokens, detail.OutputTokens)))
++}
++
+ var stopChunkWithoutUsage sync.Map
+ 
+ func rememberStopWithoutUsage(traceID string) {

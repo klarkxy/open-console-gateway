@@ -1,0 +1,163 @@
+diff --git a/diff-a/sdk/cliproxy/auth/conductor_execution.go b/diff-b/sdk/cliproxy/auth/conductor_execution.go
+index 0fc600c..9d94bbd 100644
+--- a/diff-a/sdk/cliproxy/auth/conductor_execution.go
++++ b/diff-b/sdk/cliproxy/auth/conductor_execution.go
+@@ -484,6 +484,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
+ 	if len(providers) == 0 {
+ 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
+ 	}
++	ctx = NoteOCGSourceFormat(ctx, opts.SourceFormat.String())
++	ctx = ensureRequestStop(ctx)
+ 	routeModel := authSelectionModelFromOptions(opts, req.Model)
+ 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
+ 	opts = ensureRequestedModelMetadata(opts, routeModel)
+@@ -591,6 +593,15 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
+ 			}
+ 			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
+ 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
++			var errGate error
++			execCtx, errGate = m.beforeGenerationSend(execCtx, auth, GenerationKindExecute, execReq.Model, routeModel)
++			if errGate != nil {
++				_, skip := generationGateError(errGate)
++				if skip {
++					break
++				}
++				return cliproxyexecutor.Response{}, errGate
++			}
+ 			startExec := time.Now()
+ 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
+ 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
+@@ -600,14 +611,27 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
+ 					upstreamErr = errExec
+ 				}
+ 				if errCtx := execCtx.Err(); errCtx != nil {
++					m.MarkResult(execCtx, generationFailureResult(auth, provider, resultModel, routeModel, execOpts, errExec))
+ 					return cliproxyexecutor.Response{}, errCtx
+ 				}
+ 				refreshCtx := newUpstreamAttemptContext(execCtx)
+ 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized); okRefresh {
++					m.MarkResult(execCtx, generationFailureResult(auth, provider, resultModel, routeModel, execOpts, errExec))
++					if requestStopped(execCtx) {
++						return cliproxyexecutor.Response{}, wrapRequestStopError(errExec)
++					}
+ 					auth = refreshed
+ 					didRefreshOnUnauthorized = true
+ 					execCtx = newUpstreamAttemptContext(execCtx)
+ 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
++					execCtx, errGate = m.beforeGenerationSend(execCtx, auth, GenerationKindRefreshResend, execReq.Model, routeModel)
++					if errGate != nil {
++						_, skip := generationGateError(errGate)
++						if skip {
++							break
++						}
++						return cliproxyexecutor.Response{}, errGate
++					}
+ 					startRetry := time.Now()
+ 					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
+ 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
+@@ -618,6 +642,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
+ 						}
+ 						warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationRetry, errExec)
+ 						if errCtx := execCtx.Err(); errCtx != nil {
++							m.MarkResult(execCtx, generationFailureResult(auth, provider, resultModel, routeModel, execOpts, errExec))
+ 							return cliproxyexecutor.Response{}, errCtx
+ 						}
+ 					}
+@@ -644,6 +669,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
+ 				} else {
+ 					m.MarkResult(execCtx, result)
+ 				}
++				if requestStopped(execCtx) {
++					return cliproxyexecutor.Response{}, wrapRequestStopError(errExec)
++				}
+ 				if okAction {
+ 					if isRequestScopedStop(action, okAction) {
+ 						return cliproxyexecutor.Response{}, wrapRequestStopError(errExec)
+@@ -696,4 +724,5 @@
+ 	if len(providers) == 0 {
+ 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
+ 	}
++	ctx = NoteOCGSourceFormat(ctx, opts.SourceFormat.String())
+ 	routeModel := authSelectionModelFromOptions(opts, req.Model)
+@@ -803,6 +832,15 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
+ 			}
+ 			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
+ 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
++			var errGate error
++			execCtx, errGate = m.beforeGenerationSend(execCtx, auth, GenerationKindCount, execReq.Model, routeModel)
++			if errGate != nil {
++				_, skip := generationGateError(errGate)
++				if skip {
++					continue
++				}
++				return cliproxyexecutor.Response{}, errGate
++			}
+ 			startExec := time.Now()
+ 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
+ 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
+@@ -812,14 +850,27 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
+ 					upstreamErr = errExec
+ 				}
+ 				if errCtx := execCtx.Err(); errCtx != nil {
++					m.MarkResult(execCtx, generationFailureResult(auth, provider, resultModel, routeModel, execOpts, errExec))
+ 					return cliproxyexecutor.Response{}, errCtx
+ 				}
+ 				refreshCtx := newUpstreamAttemptContext(execCtx)
+ 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized); okRefresh {
++					m.MarkResult(execCtx, generationFailureResult(auth, provider, resultModel, routeModel, execOpts, errExec))
++					if requestStopped(execCtx) {
++						return cliproxyexecutor.Response{}, wrapRequestStopError(errExec)
++					}
+ 					auth = refreshed
+ 					didRefreshOnUnauthorized = true
+ 					execCtx = newUpstreamAttemptContext(execCtx)
+ 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
++					execCtx, errGate = m.beforeGenerationSend(execCtx, auth, GenerationKindCount, execReq.Model, routeModel)
++					if errGate != nil {
++						_, skip := generationGateError(errGate)
++						if skip {
++							continue
++						}
++						return cliproxyexecutor.Response{}, errGate
++					}
+ 					startRetry := time.Now()
+ 					resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
+ 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
+@@ -830,6 +881,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
+ 						}
+ 						warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationRetry, errExec)
+ 						if errCtx := execCtx.Err(); errCtx != nil {
++							m.MarkResult(execCtx, generationFailureResult(auth, provider, resultModel, routeModel, execOpts, errExec))
+ 							return cliproxyexecutor.Response{}, errCtx
+ 						}
+ 					}
+@@ -853,6 +905,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
+ 				// the failure for hooks and metrics without suspending a model
+ 				// that remains usable through the messages endpoint.
+ 				if isCountTokensEndpointNotFoundError(errExec, execReq.Model) && (result.Error == nil || result.Error.Code != ErrorCodeForceCooldown) {
++					m.observeGenerationResult(execCtx, &result)
++					if result.AuthID == "" || result.HaltRotation || requestStopped(execCtx) {
++						return cliproxyexecutor.Response{}, wrapRequestStopError(errExec)
++					}
+ 					m.recordAvailabilityNeutralResult(execCtx, result)
+ 				} else {
+ 					if isCredentialScopedError(errExec) {
+@@ -909,6 +965,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
+ }
+ 
+ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, homeRetryLimit *int, retryRound int, defaultRequestRetry int) (*cliproxyexecutor.StreamResult, error) {
++	ctx = NoteOCGSourceFormat(ctx, opts.SourceFormat.String())
++	ctx = ensureRequestStop(ctx)
+ 	if len(providers) == 0 {
+ 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
+ 	}
+@@ -1173,6 +1231,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
+ 		}
+ 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil)
+ 		if errStream != nil {
++			if requestStopped(execCtx) || isRequestStopError(errStream) {
++				return nil, wrapRequestStopError(errStream)
++			}
+ 			if hasUpstreamExecutionAttempt(errStream) {
+ 				upstreamErr = errStream
+ 			}

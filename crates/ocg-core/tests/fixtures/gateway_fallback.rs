@@ -22,7 +22,10 @@ use ocg_core::models::{
 use ocg_core::provider::{
     COMMAND_CODE_PROVIDER_ID, CUSTOM_PROVIDER_ID, OPENCODE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
 };
-use ocg_core::state::{CoreStateInner, GatewayHandle};
+use ocg_core::state::CoreStateInner;
+
+#[path = "owned_cpa.rs"]
+mod owned_cpa;
 use ocg_domain::credential::ModelScope;
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -213,11 +216,12 @@ pub(crate) fn build_state_with_routing(
     (state, dir)
 }
 
-pub(crate) async fn start_gateway(state: Arc<CoreStateInner>) -> (u16, GatewayHandle) {
+pub(crate) async fn start_gateway(state: Arc<CoreStateInner>) -> u16 {
     let port = free_port();
-    let handle = gateway::start_gateway(state, port).await.unwrap();
+    let handle = gateway::start_gateway(state.clone(), port).await.unwrap();
+    let bound = owned_cpa::store_listener(&state, handle);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    (port, handle)
+    bound
 }
 
 pub(crate) struct PreparedFallback {
@@ -292,12 +296,11 @@ impl PreparedFallback {
     }
 
     pub async fn bind(self) -> FallbackHarness {
-        let (port, gateway_handle) = start_gateway(self.state.clone()).await;
+        let port = start_gateway(self.state.clone()).await;
         FallbackHarness {
             state: self.state,
             dir: Some(self.dir),
             port,
-            gateway_handle: Some(gateway_handle),
             calls: self.calls,
             delayed_calls: None,
             stop_mock: self.stop_mock,
@@ -311,7 +314,6 @@ pub(crate) struct FallbackHarness {
     pub state: Arc<CoreStateInner>,
     dir: Option<PathBuf>,
     pub port: u16,
-    gateway_handle: Option<GatewayHandle>,
     pub calls: FakeCalls,
     pub delayed_calls: Option<Arc<AtomicUsize>>,
     stop_mock: Option<tokio::sync::oneshot::Sender<()>>,
@@ -358,12 +360,11 @@ impl FallbackHarness {
         let (base_url, delayed_calls, stop_mock) =
             start_delayed_fake_upstream(status, content_type, responses).await;
         let (state, dir) = build_state(base_url, keys);
-        let (port, gateway_handle) = start_gateway(state.clone()).await;
+        let port = start_gateway(state.clone()).await;
         Self {
             state,
             dir: Some(dir),
             port,
-            gateway_handle: Some(gateway_handle),
             calls: Arc::new(Mutex::new(Vec::new())),
             delayed_calls: Some(delayed_calls),
             stop_mock: Some(stop_mock),
@@ -376,12 +377,11 @@ impl FallbackHarness {
         let (base_url, delayed_calls, stop_mock) =
             start_raw_disconnect_upstream(raw_response).await;
         let (state, dir) = build_state(base_url, keys);
-        let (port, gateway_handle) = start_gateway(state.clone()).await;
+        let port = start_gateway(state.clone()).await;
         Self {
             state,
             dir: Some(dir),
             port,
-            gateway_handle: Some(gateway_handle),
             calls: Arc::new(Mutex::new(Vec::new())),
             delayed_calls: Some(delayed_calls),
             stop_mock: Some(stop_mock),
@@ -401,12 +401,11 @@ impl FallbackHarness {
         stop_mock: Option<tokio::sync::oneshot::Sender<()>>,
         delayed_calls: Option<Arc<AtomicUsize>>,
     ) -> Self {
-        let (port, gateway_handle) = start_gateway(state.clone()).await;
+        let port = start_gateway(state.clone()).await;
         Self {
             state,
             dir: Some(dir),
             port,
-            gateway_handle: Some(gateway_handle),
             calls,
             delayed_calls,
             stop_mock,
@@ -493,7 +492,12 @@ impl FallbackHarness {
         self.extra_stops.push(stop);
     }
 
+    pub async fn ensure_owned_plane(&self) {
+        owned_cpa::ensure_owned_plane(&self.state).await;
+    }
+
     pub async fn chat(&self) -> (u16, String) {
+        self.ensure_owned_plane().await;
         chat(self.port).await
     }
 
@@ -502,6 +506,7 @@ impl FallbackHarness {
         conversation_id: Option<&str>,
         user: &str,
     ) -> (u16, String) {
+        self.ensure_owned_plane().await;
         chat_with_conversation(self.port, conversation_id, user).await
     }
 
@@ -510,10 +515,12 @@ impl FallbackHarness {
         path: &str,
         model: &str,
     ) -> (axum::http::StatusCode, serde_json::Value) {
+        self.ensure_owned_plane().await;
         protocol_call(self.port, path, model).await
     }
 
     pub async fn stream(&self, path: &str, model: &str) -> (axum::http::StatusCode, String) {
+        self.ensure_owned_plane().await;
         protocol_stream_call(self.port, path, model).await
     }
 
@@ -525,14 +532,16 @@ impl FallbackHarness {
         get_application_models(self.port).await
     }
 
+    pub async fn adopt_owned_plane(&self) {
+        owned_cpa::adopt_owned_plane(&self.state).await;
+    }
+
     pub fn stop(mut self) {
         self.shutdown();
     }
 
     fn shutdown(&mut self) {
-        if let Some(handle) = self.gateway_handle.take() {
-            gateway::stop_gateway(handle);
-        }
+        owned_cpa::shutdown_owned(&self.state);
         if let Some(stop) = self.stop_mock.take() {
             let _ = stop.send(());
         }

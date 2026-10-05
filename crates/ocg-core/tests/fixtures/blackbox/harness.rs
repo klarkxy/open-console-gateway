@@ -12,7 +12,10 @@ use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::Database;
 use ocg_core::gateway;
 use ocg_core::models::{AccountUpdate, ProxyMode};
-use ocg_core::state::{CoreStateInner, GatewayHandle};
+use ocg_core::state::CoreStateInner;
+
+#[path = "../owned_cpa.rs"]
+mod owned_cpa;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
@@ -61,13 +64,14 @@ pub(crate) fn loopback_client() -> reqwest::Client {
 pub(crate) struct BlackBoxHarness {
     pub state: Arc<CoreStateInner>,
     pub dir: PathBuf,
-    pub handle: GatewayHandle,
     pub client: reqwest::Client,
     pub port: u16,
     pub upstream_base_url: String,
     fake_calls: Option<FakeCalls>,
     disconnect_calls: Option<Arc<std::sync::atomic::AtomicUsize>>,
     stop_fake: Option<tokio::sync::oneshot::Sender<()>>,
+    processes_stopped: bool,
+    profile_deleted: bool,
 }
 
 impl BlackBoxHarness {
@@ -131,18 +135,20 @@ impl BlackBoxHarness {
             gateway::start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
                 .await
                 .unwrap();
+        let port = owned_cpa::store_listener(&state, handle);
         let client = loopback_client();
-        wait_ready(&client, handle.port).await;
+        wait_ready(&client, port).await;
         Self {
             state,
             dir,
-            port: handle.port,
-            handle,
+            port,
             client,
             upstream_base_url,
             fake_calls,
             disconnect_calls: None,
             stop_fake,
+            processes_stopped: false,
+            profile_deleted: false,
         }
     }
 
@@ -299,7 +305,17 @@ impl BlackBoxHarness {
         settings["revision"].as_u64().unwrap_or(0)
     }
 
+    pub(crate) async fn ensure_owned_plane(&self) {
+        owned_cpa::ensure_owned_plane(&self.state).await;
+    }
+
+    /// Replace the child so a new custom endpoint is in the applied snapshot.
+    pub(crate) async fn reapply_owned_plane(&self) {
+        owned_cpa::adopt_owned_plane(&self.state).await;
+    }
+
     pub(crate) async fn chat(&self, model: &str) -> (StatusCode, Value) {
+        self.ensure_owned_plane().await;
         let response = self
             .client
             .post(self.gateway("/v1/chat/completions"))
@@ -368,11 +384,33 @@ impl BlackBoxHarness {
     }
 
     pub(crate) fn shutdown(mut self) {
-        gateway::stop_gateway(self.handle);
+        self.delete_profile();
+    }
+
+    fn stop_owned_processes(&mut self) {
+        if self.processes_stopped {
+            return;
+        }
+        self.processes_stopped = true;
+        owned_cpa::shutdown_owned(&self.state);
         if let Some(stop) = self.stop_fake.take() {
             let _ = stop.send(());
         }
+    }
+
+    fn delete_profile(&mut self) {
+        self.stop_owned_processes();
+        if self.profile_deleted {
+            return;
+        }
+        self.profile_deleted = true;
         let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+impl Drop for BlackBoxHarness {
+    fn drop(&mut self) {
+        self.delete_profile();
     }
 }
 
@@ -406,18 +444,20 @@ pub(crate) async fn start_with_disconnect_upstream() -> BlackBoxHarness {
     let handle = gateway::start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .unwrap();
+    let port = owned_cpa::store_listener(&state, handle);
     let client = loopback_client();
-    wait_ready(&client, handle.port).await;
+    wait_ready(&client, port).await;
     BlackBoxHarness {
         state,
         dir,
-        port: handle.port,
-        handle,
+        port,
         client,
         upstream_base_url: format!("{}/zen/go", base.trim_end_matches('/')),
         fake_calls: None,
         disconnect_calls: Some(calls),
         stop_fake: Some(stop),
+        processes_stopped: false,
+        profile_deleted: false,
     }
 }
 
@@ -510,4 +550,41 @@ pub(crate) fn mutation_account(body: Value) -> Value {
         .filter(|account| !account.is_null())
         .cloned()
         .unwrap_or_else(|| panic!("V3 account mutation must wrap an account: {body}"))
+}
+
+#[tokio::test]
+async fn owned_cleanup_stops_child_and_listener_before_profile_delete() {
+    let mut harness = BlackBoxHarness::start().await;
+    ocg_core::cpa_runtime::host::register_owned_host(&harness.state);
+    harness.stop_owned_processes();
+    assert!(harness.state.gateway.lock().is_none());
+    assert!(harness.dir.exists());
+    let report = ocg_core::cpa_execution::execution_report(&harness.state);
+    assert!(!report.running);
+    assert!(!report.listener_bound);
+    assert!(!report.desired_running);
+    harness.delete_profile();
+    assert!(!harness.dir.exists());
+}
+
+#[tokio::test]
+async fn owned_cleanup_releases_listener_when_setup_unwinds() {
+    let harness = BlackBoxHarness::start().await;
+    ocg_core::cpa_runtime::host::register_owned_host(&harness.state);
+    let state = Arc::clone(&harness.state);
+    let dir = harness.dir.clone();
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _harness = harness;
+        owned_cpa::fail_setup(&_harness.state, "cleanup unwind sentinel");
+    }));
+    let message = caught
+        .expect_err("setup failure must unwind")
+        .downcast::<String>()
+        .expect("setup panic payload");
+    assert!(message.contains("cleanup unwind sentinel"), "{message}");
+    assert!(state.gateway.lock().is_none());
+    assert!(!dir.exists());
+    let report = ocg_core::cpa_execution::execution_report(&state);
+    assert!(!report.running);
+    assert!(!report.listener_bound);
 }

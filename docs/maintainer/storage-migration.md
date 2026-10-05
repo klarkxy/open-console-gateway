@@ -2,7 +2,9 @@
 
 # Storage And Migrations
 
-Operator contract for upgrades, backups, and rollback. Schema details are in [Persistence](state-and-lifecycle.md#persistence).
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
+Operator contract for upgrades, backups, and rollback. Schema details are authoritative in [migration source](../../crates/ocg-core/src/db/migrations.rs).
 
 ## Schema v64 — preset public model names
 

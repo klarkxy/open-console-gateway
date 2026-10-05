@@ -2,6 +2,8 @@
 
 # Troubleshooting
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
 Troubleshooting Open Console Gateway usually starts with discovering that something else
 is already squatting on `127.0.0.1:9042`. The entries below cover stale SPAs,
 conflicting writes, accounts that are cooling down, and Plans that look ready

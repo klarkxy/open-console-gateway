@@ -1,0 +1,21 @@
+{
+  "protocolVersion": 1,
+  "capabilities": [
+    "attempt-boundary",
+    "selective-no-replay",
+    "explicit-429-failover",
+    "policy-ipc-v1",
+    "readiness-v1",
+    "compat-protocol-routes",
+    "go-zen-identity",
+    "ollama-reasoning",
+    "oauth-redacted-references",
+    "routing-preserve",
+    "identity-fence-epoch-version-material",
+    "validated-protocol-pin-v1",
+    "validation-only-routes-v1",
+    "absolute-request-deadline-v1",
+    "native-refresh-registration-fence-v1",
+    "native-final-endpoint-pin-v1"
+  ]
+}

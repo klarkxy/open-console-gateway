@@ -2,6 +2,8 @@
 
 # Dashboard API
 
+> 适用范围：已发布的面板操作参考，加上[自有 CPA 控制](#自有-cpa-控制)与[自有 CPA 路由解释](#自有-cpa-路由解释)中的当前候选合约。这些合约已在检入的 schema 导出中。整份 CLI 验收与运行时验收仍待完成。原生桌面 GUI 继续延后。界面步骤不适用于这个无头 CLI 阶段。代际设计见[架构](../architecture.zh-CN.md)。
+
 ## 计费与本地积分估算（V4）
 
 `GET /dashboard/api/v4/accounts/{id}/billing` 统一返回周期额度、现金或积分，以及数据来源和可用操作。这里的 `id` 对应一个账号（一条 Key）；同一供应商容器内的多个账号仍独立计量。读取不请求上游。已有官方余额和额度刷新接口保留各供应商的观测适配器。
@@ -40,7 +42,7 @@ Step Plan 在官方用量 API 开放前使用上述本地估算与校准方式�
 
 ## Dashboard V4
 
-面板 JSON 位于 `/dashboard/api/v4`。这是唯一存活的面板 JSON 前缀：增量 V4 路由加上挂回的 V3 操作处理器。V3 的 `$defs` 不再增加新字段。
+面板 JSON 位于 `/dashboard/api/v4`。这是唯一存活的面板 JSON 前缀：增量 V4 路由加上挂回的 V3 操作处理器。已检入的 schema JSON 是 `export_dashboard_v3_schema` 与 `export_dashboard_v4_schema` 的标准输出。下面 CPA 小节中的字段，包括 `migrationRequired`，已在该 JSON 中。本页没有运行导出。
 
 V4 复用 V3 会话中间件。其列表返回与 V3 CAS 相同的 `ControlRevision`（`expectedRevision` / `processGeneration`）。V4 变更是 `POST /onboarding/commit`、`POST /credentials/{id}/rotate`、`POST /credentials/{id}/quota-retry`、`PATCH /bindings/{id}`、`POST /identities/{id}/credentials`、`POST|DELETE /applications/dsh`（同时绑定 GET 检查指纹；DELETE 不带 `keyId`）、`PUT /destinations/{id}/catalog`、`POST /destinations/{id}/catalog/refresh`、`POST /destinations/{id}/model-tests`、`POST /platform-accounts/{id}/import-keys`、`PUT /cpa/models`、`POST /provider-contracts/{scope_kind}/{scope_id}/catalog/remove` 与 `PATCH /alias-publication`，它们检查这两枚令牌；只读路由不检查。
 
@@ -48,7 +50,7 @@ V4 复用 V3 会话中间件。其列表返回与 V3 CAS 相同的 `ControlRevis
 
 只读路由为 `GET /contract`、`GET /templates`、`GET /connections`、`GET /accounts`（身份列表）、`GET /account-records`（挂回的 V3 账号列表垫片）、`GET /destinations`、`GET /credentials`、`GET /accounts/{id}/billing`、`GET /accounts/{id}/official-api`、`GET /providers/{id}/official-api/pricing`、`GET /routing/cards`、`GET /applications/dsh`（可选 `profilePath` 与 `runtimeUrl`）、`GET /cpa/models` 与 `GET /alias-publication`。这些读取不会发出出站请求。
 
-official-api 族——`GET /accounts/{id}/official-api`、`POST /accounts/{id}/official-api/balance` 与 `GET|POST /providers/{id}/official-api/pricing`——暴露官网 API 预设的账务依据。GET 是本地投影；带 CAS 的 POST 是唯一的联网路径。详见[官网 API 账务依据](runtime-invariants.zh-CN.md#官网-api-账务依据)。
+official-api 族——`GET /accounts/{id}/official-api`、`POST /accounts/{id}/official-api/balance` 与 `GET|POST /providers/{id}/official-api/pricing`——暴露官网 API 预设的账务依据。GET 是本地投影；带 CAS 的 POST 是唯一的联网路径。详见[官网 API 实现](../../crates/ocg-core/src/official_api.rs)。
 
 `GET /templates` 是只读的添加目录：密封内置项（不含 CPA）加上 `custom-http` 手动模板。预设不属于该模板目录。模板没有用户实例或密钥。
 
@@ -58,11 +60,11 @@ official-api 族——`GET /accounts/{id}/official-api`、`POST /accounts/{id}/o
 
 `GET /destinations` 与 `GET /credentials` 是不含密钥、带 revision、只读本机的投影。`DestinationCredentialDto` 可带可选可空的 `quotaRecovery`（camelCase）。缺省表示没有已确认耗尽，不是已验证的上游健康。该对象上的 `status` 只用于展示（`waiting` | `ready` | `probing`）。`IdentitySummary` 的凭据不带该字段。带 CAS 的 `PATCH /destinations/{id}` 完整替换可编辑 HTTP 目的地的名称、地址、鉴权、协议、映射与按模型路由覆盖；它不接收 Key，只给 `authorizeCredentialIds` 明确列出的凭据并入安全授权。`DELETE /destinations/{id}` 要求没有凭据引用。密封与平台管理目的地拒绝两种变更。空库或遗留表升级窗口回落到 `project()`；拒绝时返回结构化 `409`。
 
-节点转移（`POST /accounts/transfer/export|preview|import`）挂在 V4。最新导出使用当前迁移 payload，以 `destinations` 与 `credentials` 为权威，并携带按模型路由覆盖、模型解析策略、`quotaPools` 与 `node`，以及显式 HTTP 协议路由。支持的导入范围、逐版本默认值与显式路由拒绝规则见[运行时不变量](runtime-invariants.zh-CN.md)的节点迁移 payload 策略。本机额度恢复不是可迁移字段：导出省略；目标 Key 未改则保留；替换 Key 则清除。
+节点转移（`POST /accounts/transfer/export|preview|import`）挂在 V4。最新导出使用当前迁移 payload，以 `destinations` 与 `credentials` 为权威，并携带按模型路由覆盖、模型解析策略、`quotaPools` 与 `node`，以及显式 HTTP 协议路由。支持的导入范围、逐版本默认值与显式路由拒绝规则见当前[账号转移实现](../../crates/ocg-core/src/dashboard_v3/account_transfer.rs)。本机额度恢复不是可迁移字段：导出省略；目标 Key 未改则保留；替换 Key 则清除。
 
 `GET /routing/cards` 返回带同一 revision 的 `cards`、`destinations` 与 `credentials` 快照。`PUT /routing/cards` 接收 CAS 令牌和完整有序卡片列表。每张卡包含 `id`、`destinationId` 与有序 `credentialIds`；包括禁用行在内，每份推理凭据必须在原目的地下恰好出现一次，观察者凭据不参与。布局和展开后的路由顺序一起提交，响应返回完整快照。多张卡共用同一目的地；新增或移除额外空卡不会新建或删除供应商。
 
-`GET /routing/explain?model=...&clientProtocol=...` 是受保护的只读解释。它复用真实别名解析、路由物化、资格门和基础策略克隆预览，不发送、不解密 Key、不探测 DNS、不写日志/冷却/额度恢复，也不推进粘性、轮询或额度试探。响应给出合格 Key、类型化排除原因、有效上游协议/全局顺序及明确的运行时不确定项。
+`GET /routing/explain?model=...&clientProtocol=...` 是现有的已鉴权读取。当前候选合约是[自有 CPA 路由解释](#自有-cpa-路由解释)。已检入的 schema JSON 包含这次读取，包括 `migrationRequired`。
 
 V4 不把授权 `unknown` 当作 `valid`。资格是本地投影，不是上游健康。
 
@@ -94,13 +96,13 @@ V4 不把授权 `unknown` 当作 `valid`。资格是本地投影，不是上游�
 
 ## Settings 变更流程
 
-[![Dashboard V3 Settings 变更流程](../diagrams/dashboard-v3-mutation.visual-check.1440x900.light.png)](https://klarkxy.github.io/open-console-gateway/diagrams/dashboard-v3-mutation/)
 
-[在 GitHub Pages 打开交互式流程图](https://klarkxy.github.io/open-console-gateway/diagrams/dashboard-v3-mutation/)。
 
 这条流程只描述受 CAS 保护的 Settings 写入；发现、诊断和读取操作可能按上文所述跳过 CAS。客户端提交 `expectedRevision` 与 `processGeneration`。令牌不匹配时返回 `409`；客户端刷新令牌与受影响资源，但不会自动重放写入。
 
 CAS 成功后，Host 先持久化新设置并释放设置锁。只有端口发生变化且监听器正在运行时才会重绑。若重绑失败，请求以 `internal` 代码返回 `500`。补偿逻辑仅在实时配置仍等于本次失败写入的端口时恢复旧端口，避免覆盖随后成功的写入。
+
+成功的 V4 投影保存会在拿到已保存回执之后调用既有的 `note_product_apply`。目的地 PATCH 在外层提交结果之后等待这一次调用。绑定 PATCH、凭据轮换、目的地删除、刷新和内置项移除只在同步保存成功并且设置锁已释放之后调用它。身份创建和引导重放仅在该操作不是重放时调用它。对绑定而言，`patch_locked` 保存该行并推进设置 revision；处理函数随后调用 `note_product_apply`，并且不调用 `schedule_owned_apply`。模型测试保留一次探测前的 `schedule_owned_apply`，没有产品保存钩子。额度重试和读取路由没有投影钩子。`commit_configuration_update` 在数据库事务打开期间执行变更、路由调和、导入运行时准备和临时策略编译，然后提交，再安装导入的运行时和同一份已编译快照。编译不替换实时快照。编译失败时事务保持未提交。`publish_temporary_policy` 仍在该事务之外编译并安装，且这次提交之后不会使用它。应用失败时，`note_product_apply` 保留成功的保存回执。一次性的回执失败分支只存在于测试中。这一边界的源码已经存在。同级测试已检视，本页没有执行它们。已检入的 schema JSON 就是该导出。Cargo 断言和普通 CLI 验收仍待完成。
 
 ## V2 REST 墓碑
 
@@ -116,6 +118,84 @@ CAS 成功后，Host 先持久化新设置并释放设置锁。只有端口发�
 - `browser/sessions/{token}/ws`（token 非空）
 
 `/dashboard/api/v3` 前缀是单独的 410 家族（`dashboardV3Removed`）。Vue 外壳与产品页面只调用 `/dashboard/api/v4`（`requestV3` 与 `requestV4` 共用该前缀；`dashboardV3.listAccounts` 使用 `GET /account-records`）。推理路由、面板 HTML 与 `/dashboard/assets/...` 不在墓碑范围内。
+
+## 自有 CPA 控制
+
+`GET /dashboard/api/v4/external-integrations/cpa` 以及不写入的、只带 enabled 的 `PUT` 返回 `CpaIntegration`。V4 挂回这些 V3 DTO。V3 REST 仍是上文的 410 墓碑。已检入的 `schema/dashboard-api-v3.schema.json` 与 `schema/dashboard-api-v4.schema.json` 是 Rust 示例导出。源码用 schemars skip 标记退役的请求字段。本页不编辑 schema JSON。整份 CLI 验收与运行时验收仍待完成。
+
+没有外部 CPA 产品模式，也没有远程选择器。共享前缀仍是 `/dashboard/api/v4/external-integrations/cpa`。旧路由和旧字段是保留的拒绝与迁移表面。省略 `target` 时，请求指向自有子进程。已保存的历史行不会选中 `integration`。已保存的历史字节继续保留。显式迁移是必需的，尚未实现。本视图不解析 `OCG_CPA_BASE_URL`，它也不是产品开关。
+
+`legacyMigrationRequired`（`legacy_migration_required`）是必需布尔值。仅当 `cpa_integration()` 为 `Some`，即存在已保存的历史远程 CPA 行时，它为 true。该值已脱敏。它不复制 URL、密钥、账号 id 或目录，也不从 `OCG_CPA_BASE_URL` 推导。
+
+`runtimeUnavailableReason` 只表示自有运行时健康：既有的平台不支持文本、执行记录错误或 `cpa execution is unavailable`，否则为 JSON `null`。迁移语句和 `OCG_CPA_BASE_URL` 语句都不是该字段的取值。已保存的行可以在 `runtimeUnavailableReason` 为 null 时把 `legacyMigrationRequired` 设为 true，反过来也成立。这两个字段互不蕴含。`CpaRuntime` 不增加 `legacyMigrationRequired`。它的 `unavailableReason` 使用同一健康规则。`installed`、`running` 和 `owned` 仍是执行报告的值。历史数据不会把已安装或正在运行的子进程变成不可用，也不会把缺失的子进程变成已安装或正在运行。
+
+`CpaIntegration` 上的自有生命周期：
+
+| 字段 | 取值 |
+| --- | --- |
+| `configured` | 仅当存在自有托管记录，或执行报告表明自有可执行文件已安装时为 true。仅有历史行时为 false。 |
+| `runtimeOwned` | 与 `configured` 同一谓词。 |
+| `runtimeRunning` | `ExecutionReport.running`。 |
+| `runtimeSupported` | `cpa_runtime_supported()`。 |
+| `installedVersion` | 该制品已安装时取执行报告的 `current_version`，否则取自有托管记录的 `current_version`，再否则为 null。 |
+| `latestVersion` | 执行报告的 `latest_version`（当前报告为 `v8.0.10`）。 |
+| `updateAvailable` | 执行报告的标志。 |
+| `currentOperation` | 执行报告的 `current_operation`。 |
+| `baseUrl` | 执行报告给出端口时，取该自有环回地址；否则在存在托管记录时为 `http://127.0.0.1:{managed.port}`，再否则为 `""`。已保存的远程 URL、`OCG_CPA_BASE_URL` 和 `DEFAULT_CPA_BASE_URL` 都不出现在这个值里。 |
+| `baseUrlReadOnly` | 恒为 true。 |
+
+退役的单例输出仍可解析，并保持空或 false。它们不宣告外部账号或目录：
+
+| 字段 | 固定值 | 原因 |
+| --- | --- | --- |
+| `managementKeyConfigured` | `false` | 历史管理密文不是自有执行来源。 |
+| `inferenceKeyConfigured` | `false` | 历史推理密文不是自有执行来源。 |
+| `enabled` | `false` | 自有启用按原生凭据计算，不是这个单例。 |
+| `accountId` | `null` | 历史 `CPA_ACCOUNT_ID` 不是自有账号。 |
+| `modelCount` | `0` | 自有目录按 `destination_models` 中的目的地分开。这个整数不能代表一份规范的自有原生目录。全局 `provider_model_catalogs` 的 CPA 行不复制到这里。 |
+| `modelsRefreshedAt` | `null` | `destination_models` 没有刷新时间列，一个时间戳也不能覆盖按目的地分开的目录。 |
+
+`revision` 与 `processGeneration` 不变。GET 不推进 revision，也不写入历史行、账号、目录或目的地字节。
+
+请求仍可解析，并在任何 I/O 和任何写入之前被拒绝。候选 schema 不再宣告这些退役输入。
+
+| 类型 | 从 schema 排除 | Serde 仍接受 |
+| --- | --- | --- |
+| `CpaControlTarget` | 变体 `integration` | `"integration"` |
+| `CpaIntegrationUpdate` | `baseUrl`、`managementKey`、`inferenceKey` | 这三项 |
+| `CpaTestRequest` | `baseUrl`、`managementKey`、`inferenceKey` | 这三项 |
+
+候选的 `CpaControlTarget` schema 枚举是 `["owned"]`。`CpaIntegrationUpdate`、`CpaTestRequest` 和 `CpaRuntimeInstall` 上的 `target` 仍引用该枚举。拒绝语句仍在任何 I/O 之前：
+
+- 显式 `target: "owned"` 加上 `baseUrl`、`managementKey` 或 `inferenceKey` 中的任一项：`owned CPA control does not accept a remote base URL or key`。
+- 显式 `target: "integration"`，或省略 `target` 却带上这三项中的任一项：存在历史行时为 `Stored remote CPA configuration requires explicit migration and was left unchanged`，否则为 `Remote CPA is not a target in this product`。
+- 对集成的 `DELETE` 使用同样的语句。已保存的字节保持原样。
+
+`CpaIntegrationUpdate.enabled` 仍留在 schema 中。只带 enabled 的 PUT 返回自有视图，不改写历史行或账号。响应里的 `enabled` 为 false。
+
+`OAuthStatusQuery` 与 `CpaTargetQuery` 是 serde 查询类型。它们不是 `JsonSchema` 类型，因此不在生成的 schema 里。这些查询上的 `target=integration` 仍能反序列化，并在任何 I/O 之前被拒绝。仍会构建客户端的路径，其 URL 与脱敏检查保持不变。遗留持久化不被删除。`CpaIntegration`、`CpaControlTarget`、`CpaIntegrationUpdate` 和 `CpaTestRequest` 上的面向读者的注释把这些字段称为退役的兼容字段。
+
+## 自有 CPA 路由解释
+
+只有现有的 `GET /dashboard/api/v4/routing/explain`。处理函数只调用一次 `explain_owned_routes(state, public_model, callable_protocol, now)`。`cpa_execution.rs` 含有 `pub(crate) mod explain`。该门面是稳定读取。本页不把遗留选择器或物化器写成当前执行事实。`contract_schema()` 包含 `RoutingExplanation`，已检入的 schema JSON 是该合约的示例导出。`dashboard_v4/types/tests.rs` 构造带有映射 `destinationId`、`adapterKind` 和 `migration_required` 的 `RoutingExplanation` 与 `RoutingResolvedMapping`。它断言线路上的 `migrationRequired` 为 false，并把省略该键的旧载荷反序列化为 false。它也覆盖排除项的 `authority: null`、`desiredRoutes: []`，以及下面的 `ownedProjection` 字段。本页没有执行该测试，也没有运行导出。播种数据库再调用 `explain` 的处理函数测试不是在线 Ready 证明。`verified_ready` 不能由单元测试设置。这次读取不解密、不放行、不写入，也不调用选择器、粘性变更、`OCG_CPA_BASE_URL`、物化器或出站客户端。
+
+请求不变。`model` 在去除空白后必填。`clientProtocol` 默认 `chat_completions`。接受的值仍是 `chat_completions`、`responses`、`messages` 和 `gemini`。其他值是既有的非法请求。公开 Gemini 不是第四种可调用协议：门面收到的是 `chat_completions`，响应里的 `clientProtocol` 仍是 `gemini`。已鉴权的 V4、`ControlRevision` 和进程代仍在响应上。适配器不接收 `settings_update`。门面在既有的 `settings_update` 保护下捕获设置 revision、进程代、定价 revision、路由模式和 `conversationSticky`，适配器只格式化这些已捕获的值。`routingMode` 与 `conversationSticky` 是这份已捕获的配置，只用于展示。`conversationBinding` 为 `not_evaluated`。任何路由模式下 `expectedBasePolicyFirstPick` 都是 null。公开合格还要求一条已选中的可路由映射，其目的地、供应商和实际上游相同。公开模型不是这个键。漂移并入既有的 `state_changed` 路径。这次捕获不增加公开线路字段。该捕获的源码已经存在。Cargo 验收和普通 CLI 验收仍待完成。
+
+门面 `QueryResolution` 是唯一的别名事实。`known == false`、`ambiguous == true` 或 `kind == None` 是既有非法请求 `model is unknown or ambiguous`。已知行即使 `routeable == false` 也是一次成功的解释。禁用、草稿和仅验证的映射仍留在 `resolved.mappings`。`resolved.kind` 与 `resolved.alias` 复制 `QueryResolutionKind` 和 `alias`。每条映射复制 `destinationId`、`providerId`、`upstreamModel`、`routeable`、`adapterKind` 和 `migrationRequired`。`RoutingResolvedMapping` 含有 `destinationId`、`adapterKind` 和 `migration_required`。最后一个字段的线路名是 `migrationRequired`。`#[serde(default)]` 使省略该字段的旧载荷为 false，新响应会发出该字段。
+
+规范类别是 `Alias` 或 `PinnedRaw`。原始形态的请求必须与已保存的上游拼写完全一致。大小写变体是未知。精确的原始拼写在身份折叠之前，优先于拼写不同的规范别名或公开别名。请求本身就是规范别名时，它仍是别名。两个不同的原始供应商身份保持歧义。已知目录行如果没有匹配的已应用路由，保持已知且 `routeable == false`。仅期望平面的行保持已知且不可路由。已应用的仅验证行保持不可路由，即使期望平面不是仅验证。远程放置设置 `migration_required` 并强制 `routeable == false`。`routeable` 是额度与放置之后、当前已应用配置的资格。它不是目的地启用、目录启用、引导草稿，也不是期望平面与已应用平面 `validation_only` 标志的并集。
+
+`QueryMapping.migration_required` 被复制到已脱敏的公开 `RoutingResolvedMapping`，包括没有 `RouteFact`、只有目录的历史远程行。该行的源码测试期望 `migrationRequired` 为 true、`routeable` 为 false，合格、排除和期望列表为空，并且远程 URL 已脱敏。本页没有执行该测试。Cargo 验收和普通 CLI 验收仍待完成。自有原生目的地标记 `cpa-owned-native` 不是供应商 id。供应商 id 来自原生凭据存储（`provider_id` 为 `cpa`）。第二个能解析同一名称的真实供应商保持歧义。`ValidationUse` 已不存在。
+
+一条路由要成为公开合格，必须同时满足：平面为已应用；`client_configuration_eligible`；姿态是客户端且 `validation_only` 为 false；`runtime.owned_running`；`origin_verified`、`verified_ready`、`policy_ready`、`pin_capabilities_ready` 和 `tuple_aligned`；不是 `state_changed`、`stopped`、`poisoned`、`policy_malformed` 或 `unavailable`；不是 `known_restriction_blocks`，也不是 `trial_pending`；额度不是 `malformed`；不是 `migration_required`，且历史放置不是 `remote`。仅有静态标志不是发送承诺。合格行仍携带 `callerPending`、`secretRecheckPending` 和 `sendPending`。名次是一个字段。列表顺序是门面顺序。没有 SDK 的下一凭据。缺失的额度证据是 `unknown`。它不是无限额度，单独也不构成公开合格的阻断。已知且适用的重置会阻断。未知重置是 `trialPending`，不是已消耗的试探。过期证据仍可见，且 `applicable` 为 false。畸形文档是不可用，不是一份空的开放列表。仅期望、仅验证、当前已吊销、已停止、不受信任、状态已变和历史迁移的行留在 `eligible` 之外。
+
+`desiredRoutes` 只是期望平面。它不并入 `eligible` 或 `exclusions`。`exclusions` 是未达到公开合格的已应用路由，顺序为门面顺序。每个线路代码是一条记录。每条记录携带同一个 `authority` 对象，包括精确额度，即使该路由不在期望平面中。`RoutingExclusion` 增加 `authority: RoutingRouteAuthority | null`。这个处理函数发出对象。对于没有结构化证明的旧载荷，null 仍然有效。
+
+`RoutingRouteAuthority` 携带平面、凭据 id、路由凭据版本、当前数据库版本、供应商、绑定、auth id、注册 epoch、路由名次、目的地 id、遗留账号 id、账号标签、目的地标签、公开模型、上游模型、拼写（`empty`、`same` 或 `distinct_upstream`）、协议、端点 id、源、端点指纹、仅验证、通道、适配器种类、材料、姿态、配置排除代码、启用与草稿标志、设置步骤、原生供应商、原生模式、已列出的能力、授权覆盖、原生操作、`callerPending`、`secretRecheckPending`、`sendPending`、额度、`knownRestrictionBlocks`、`trialPending`、`clientConfigurationEligible`、`migrationRequired` 和历史放置。该对象不含材料指纹、密文、跳转令牌、策略令牌、认证文件路径或私有相对路径。公开路由的端点指纹包含在内。`RoutingNativePin` 是协议、端点 id、源、端点指纹和 HTTP 方法。`RoutingGrantDisposition` 是带 pin 的 `granted`、`not_granted`、`local_only` 或 `unavailable`。`RoutingOperationFact` 是一种生成种类加上该处置。`RoutingQuotaFact.state` 是 `unknown`、`evidence` 或 `malformed`。证据复制主体身份、可选的公开模型、窗口、来源、观测时间、观测 id、重置（`known`、`unknown_reset` 或 `expired`）、重置时间和 `applicable`。恢复租约和尝试 id 不复制。通道只有 `go` 或 `free`。适配器种类保持目的地的 `AdapterKind` 字符串，不从通道推导。
+
+`ownedProjection` 复制 `desired` 与 `applied` 的 generation、revision 和 digest；`applyStatus`、`desiredRunning`、`runtimeChildGeneration`；`unavailable`、`stateChanged`、`stopped`、`poisoned`；`originVerified`、`verifiedReady`、`policyReady`、`policyMalformed`、`tupleAligned`、`pinCapabilitiesReady`；`ownedRunningBefore`、`ownedRunningAfter` 和 `ownedRunning`。只有两次本地观测都看到子进程时，`ownedRunning` 才为 true。`verifiedReady` 是捕获到的平面位。`applyStatus: applied` 并不蕴含这两者中的任何一个。两次运行观测不一致时，不因此设置 `stateChanged`。
+
+既有的 `RoutingExclusionCode` 与 `RuntimeOnlyUncertainty` 变体保留当前线路拼写，以便旧载荷仍能解析。这个处理函数不发出 `mapping_protocol_incompatible`、`credential_disabled`、`binding_disabled`、`model_scope_denied`、`goat_not_eligible`、`goat_unverified`、`candidate_materialization_failed`、`production_route_unsupported`、`account_disabled`、`setup_not_ready`、`channel_mismatch`、`credential_missing`、`auth_error`、`cooling_down`、`free_channel_unavailable`、`quota_waiting`、`quota_due` 或 `quota_probing`。追加的排除代码是 `identity`、`rebound`、`version`、`setup_blocked`、`disabled`、`draft`、`scope`、`model`、`protocol`、`capability`、`native_presence`、`native_mode`、`native_targets`、`not_granted`、`material`、`configuration_unavailable`、`validation_only`、`quota_known_reset`、`quota_unknown_reset`、`quota_malformed`、`migration_required`、`state_changed`、`stopped`、`untrusted`、`owned_not_running`、`origin_unverified`、`not_ready`、`policy_not_ready`、`pin_capabilities`、`tuple_unaligned` 和 `policy_malformed`。从门面或真实运行时位发出的追加不确定项是 `cpa_selection_not_evaluated` 和 `quota_trial_not_evaluated`。事实为真时还会发出：`conversation_binding_not_evaluated`；返回的路由带有 `secretRecheckPending` 时的 `credential_recheck_pending`；`runtime.state_changed` 时的 `state_changed_after_snapshot`。`retry_exclusions_not_applied` 与 `upstream_result_unknown` 留在枚举上，且不被发出。
 
 ---
 

@@ -1,6 +1,7 @@
 pub mod attempt;
 pub(crate) mod attempt_pricing;
 pub mod classify;
+pub(crate) mod cpa_ingress;
 pub(crate) mod debug_capture;
 pub mod diagnostics;
 pub mod executor;
@@ -71,10 +72,14 @@ fn inference_router_with_body_limit(state: CoreState, body_limit: usize) -> Rout
         .allow_headers(Any)
         .expose_headers([HeaderName::from_static(diagnostics::REQUEST_ID_HEADER)]);
 
-    Router::new()
+    let public = Router::new()
         .route("/v1/chat/completions", post(handler::chat_completions))
         .route("/v1/responses", post(handler::responses))
         .route("/v1/messages", post(handler::messages))
+        .route(
+            "/v1/messages/count_tokens",
+            post(handler::messages_count_tokens),
+        )
         .route("/v1/models", get(handler::models))
         .route(
             "/v1beta/models/{*model_action}",
@@ -89,7 +94,16 @@ fn inference_router_with_body_limit(state: CoreState, body_limit: usize) -> Rout
         .layer(middleware::from_fn_with_state(
             state,
             handler::request_trace_middleware,
-        ))
+        ));
+    // The child posts here during start. This router keeps its own 128 KiB
+    // limit and does not inherit public CORS or request tracing.
+    let policy = Router::new()
+        .route(
+            "/_internal/ocg/cpa-policy",
+            post(crate::cpa_execution::policy_callback),
+        )
+        .layer(DefaultBodyLimit::max(128 * 1024));
+    public.merge(policy)
 }
 
 pub async fn start_gateway(state: CoreState, port: u16) -> Result<GatewayHandle> {

@@ -193,11 +193,48 @@ struct Receipt {
     finished_at: Option<DateTime<Utc>>,
 }
 
+/// The log keeps its own account attribution. A personal meter is addressed by
+/// the legacy account id, while a CPA observation log stores the credential id.
+/// Both refer to one credential row; a third id does not.
+fn receipt_identity_matches(
+    conn: &Connection,
+    log_account_id: &str,
+    attempt: &CreditAttempt,
+) -> Result<bool> {
+    if log_account_id == attempt.account_id {
+        return Ok(true);
+    }
+    if attempt.credential_id.is_empty() || log_account_id != attempt.credential_id {
+        return Ok(false);
+    }
+    let legacy: Option<String> = conn
+        .query_row(
+            "SELECT legacy_account_id FROM credentials WHERE id=?1",
+            [&attempt.credential_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(legacy.as_deref() == Some(attempt.account_id.as_str()))
+}
+
 pub(crate) fn attach_attempt_on(
     conn: &Connection,
     log_id: i64,
     attempt: &CreditAttempt,
 ) -> Result<()> {
+    let log_account: Option<String> = conn
+        .query_row(
+            "SELECT account_id FROM forward_logs WHERE id=?1 AND credit_receipt_json IS NULL",
+            [log_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(log_account) = log_account else {
+        return Ok(());
+    };
+    if !receipt_identity_matches(conn, &log_account, attempt)? {
+        return Ok(());
+    }
     let receipt = Receipt {
         attempt: attempt.clone(),
         phase: "pending".into(),
@@ -205,9 +242,24 @@ pub(crate) fn attach_attempt_on(
         uncertain: false,
         finished_at: None,
     };
-    conn.execute("UPDATE forward_logs SET credit_receipt_json=?1 WHERE id=?2 AND account_id=?3 AND credit_receipt_json IS NULL",
-        params![serde_json::to_string(&receipt)?, log_id, attempt.account_id])?;
+    conn.execute(
+        "UPDATE forward_logs SET credit_receipt_json=?1 WHERE id=?2 AND credit_receipt_json IS NULL",
+        params![serde_json::to_string(&receipt)?, log_id],
+    )?;
     Ok(())
+}
+
+pub(crate) fn attached_pending_on(
+    conn: &Connection,
+    log_id: i64,
+    attempt: &CreditAttempt,
+) -> Result<bool> {
+    let Some((log_account, receipt)) = receipt_on(conn, log_id)? else {
+        return Ok(false);
+    };
+    Ok(receipt.phase == "pending"
+        && receipt.attempt == *attempt
+        && receipt_identity_matches(conn, &log_account, attempt)?)
 }
 
 fn receipt_on(conn: &Connection, log_id: i64) -> Result<Option<(String, Receipt)>> {
@@ -249,14 +301,16 @@ pub(crate) fn settle_on(
     if status == "streaming" {
         return Ok(());
     }
-    let Some((account_id, mut receipt)) = receipt_on(conn, log_id)? else {
+    let Some((log_account_id, mut receipt)) = receipt_on(conn, log_id)? else {
         return Ok(());
     };
-    if receipt.phase != "pending" || receipt.attempt != *attempt || account_id != attempt.account_id
+    if receipt.phase != "pending"
+        || receipt.attempt != *attempt
+        || !receipt_identity_matches(conn, &log_account_id, attempt)?
     {
         return Ok(());
     }
-    let mut state = load_on(conn, &account_id)?;
+    let mut state = load_on(conn, &attempt.account_id)?;
     let matching = state.as_ref().is_some_and(|state| {
         state.meter_id == attempt.meter_id
             && state.credential_id == attempt.credential_id

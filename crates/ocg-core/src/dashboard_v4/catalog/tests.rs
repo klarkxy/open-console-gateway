@@ -512,3 +512,190 @@ async fn builtin_alias_cannot_shadow_an_existing_generated_alias() {
     );
     assert_eq!(state.settings_revision(), rev);
 }
+
+/// Skip-spawn owned plane. The empty task fills `GatewayHandle`; it is not a child process.
+struct OwnedApplyGuard {
+    _shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+}
+
+impl OwnedApplyGuard {
+    fn arm(state: &CoreState) -> Self {
+        crate::cpa_execution::set_skip_spawn(true);
+        crate::cpa_execution::set_fail_ready(false);
+        crate::cpa_execution::set_test_password(Some("synthetic-management".to_string()));
+        crate::cpa_execution::set_before_apply_commit(None);
+        crate::cpa_execution::set_artifact_dir(
+            state,
+            crate::cpa_execution::documented_runtime_dir(),
+        );
+        let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async {});
+        *state.gateway.lock() = Some(crate::gateway_runtime::GatewayHandle {
+            port: 9,
+            listen_addr: "127.0.0.1:9".parse().unwrap(),
+            dashboard_is_local: true,
+            shutdown,
+            task,
+        });
+        Self {
+            _shutdown_rx: shutdown_rx,
+        }
+    }
+}
+
+impl Drop for OwnedApplyGuard {
+    fn drop(&mut self) {
+        crate::cpa_execution::set_skip_spawn(false);
+        crate::cpa_execution::set_fail_ready(false);
+        crate::cpa_execution::set_test_password(None);
+        crate::cpa_execution::set_before_apply_commit(None);
+        clear_contracts_receipt_failure();
+    }
+}
+
+fn minimax_models(state: &CoreState) -> Vec<String> {
+    let scope = ContractScope::provider("minimax");
+    state
+        .db
+        .lock()
+        .load_persisted_scope(&scope)
+        .unwrap()
+        .map(|row| row.catalog_models)
+        .unwrap_or_default()
+}
+
+async fn started_plane(state: &CoreState) -> crate::cpa_execution::ExecutionReport {
+    let started =
+        crate::cpa_execution::start(state, state.settings_revision(), state.process_generation())
+            .await
+            .expect("owned plane start");
+    assert_eq!(started.apply_status, "applied");
+    assert!(started.desired_running);
+    started
+}
+
+fn assert_plane_unchanged(state: &CoreState, started: &crate::cpa_execution::ExecutionReport) {
+    let after = crate::cpa_execution::execution_report(state);
+    assert_eq!(after.desired_revision, started.desired_revision);
+    assert_eq!(after.applied_revision, started.applied_revision);
+    assert_eq!(after.apply_status, started.apply_status);
+    assert!(state.settings_update.try_lock().is_some());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn add_models_stale_cas_does_not_apply() {
+    let f = Fixture::new();
+    let state = f.state();
+    let _plane = OwnedApplyGuard::arm(&state);
+    let started = started_plane(&state).await;
+    let revision = state.settings_revision();
+    let before = minimax_models(&state);
+    let error = add_models(
+        State(state.clone()),
+        path("minimax"),
+        Bytes::from(
+            serde_json::to_vec(&json!({
+                "expectedRevision": revision + 1,
+                "processGeneration": state.process_generation(),
+                "modelIds": ["Boundary-Stale"],
+            }))
+            .unwrap(),
+        ),
+    )
+    .await
+    .expect_err("stale catalog add");
+    assert!(format!("{error:?}").contains("revisionConflict"));
+    assert_eq!(minimax_models(&state), before);
+    assert_eq!(state.settings_revision(), revision);
+    assert_plane_unchanged(&state, &started);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn add_models_unknown_scope_does_not_apply() {
+    let f = Fixture::new();
+    let state = f.state();
+    let _plane = OwnedApplyGuard::arm(&state);
+    let started = started_plane(&state).await;
+    let revision = state.settings_revision();
+    let error = add_models(
+        State(state.clone()),
+        Path(("provider".into(), "not-a-builtin".into())),
+        f.body(&["Boundary-Model"]),
+    )
+    .await
+    .expect_err("unknown builtin scope");
+    assert!(format!("{error:?}").contains("only built-in provider catalogs can be added here"));
+    assert_eq!(state.settings_revision(), revision);
+    assert_plane_unchanged(&state, &started);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn add_models_receipt_failure_after_commit_still_applies() {
+    let f = Fixture::new();
+    let state = f.state();
+    let _plane = OwnedApplyGuard::arm(&state);
+    let started = started_plane(&state).await;
+    let revision = state.settings_revision();
+    assert!(
+        !minimax_models(&state)
+            .iter()
+            .any(|id| id == "Boundary-Model")
+    );
+    fail_next_contracts_receipt();
+    let error = add_models(
+        State(state.clone()),
+        path("minimax"),
+        f.body(&["Boundary-Model"]),
+    )
+    .await
+    .expect_err("contracts receipt");
+    assert!(format!("{error:?}").contains("provider contracts could not be read"));
+    assert!(
+        minimax_models(&state)
+            .iter()
+            .any(|id| id == "Boundary-Model")
+    );
+    assert!(state.settings_revision() > revision);
+    let applied = crate::cpa_execution::execution_report(&state);
+    assert_eq!(applied.desired_revision, started.desired_revision + 1);
+    assert_eq!(applied.applied_revision, applied.desired_revision);
+    assert_eq!(applied.apply_status, "applied");
+    assert!(state.settings_update.try_lock().is_some());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn edit_model_receipt_failure_after_commit_still_applies() {
+    let f = Fixture::new();
+    let state = f.state();
+    let _plane = OwnedApplyGuard::arm(&state);
+    let started = started_plane(&state).await;
+    let revision = state.settings_revision();
+    fail_next_contracts_receipt();
+    let error = edit_model(
+        State(state.clone()),
+        Path("minimax".into()),
+        edit_body(
+            &f,
+            None,
+            "boundary-alias",
+            "MiniMax-M2",
+            &["messages"],
+            Some("messages"),
+            true,
+        ),
+    )
+    .await
+    .expect_err("contracts receipt");
+    assert!(format!("{error:?}").contains("provider contracts could not be read"));
+    let dest_id = ocg_domain::destination::destination_id_for_builtin("minimax");
+    let catalog =
+        crate::db::destination_store::load_destination_catalog(&state.db.lock().conn, &dest_id)
+            .unwrap();
+    assert_eq!(catalog[0].public_model, "boundary-alias");
+    assert!(state.settings_revision() > revision);
+    let applied = crate::cpa_execution::execution_report(&state);
+    assert_eq!(applied.desired_revision, started.desired_revision + 1);
+    assert_eq!(applied.applied_revision, applied.desired_revision);
+    assert_eq!(applied.apply_status, "applied");
+    assert!(state.settings_update.try_lock().is_some());
+}

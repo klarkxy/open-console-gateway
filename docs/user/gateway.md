@@ -2,6 +2,8 @@
 
 # Gateway Behavior
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
 Open Console Gateway exposes one HTTP surface on `127.0.0.1:9042` that speaks four client protocols and routes requests to whichever eligible OpenCode Go, Zen Free, Command Code GOAT, MiniMax CN, Kimi Code CN, Ollama Cloud, or Custom API account wins selection.
 
 Ollama Cloud is a routable sealed fixed-origin Plan (`https://ollama.com`): Chat Completions only, Bearer. Its saved and raw catalog IDs do not join `GET /v1/models` or the Go Alias registry. An actual upstream 429 uses the generic cooldown and fallback path.

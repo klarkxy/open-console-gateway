@@ -2,8 +2,11 @@
 
 # Install And First Run
 
-Install the local gateway, launch it, and close the browser tab when you're
-done. The rest is mostly convincing your OS that small developers exist.
+> Historical scope: published desktop installers of the `open-console-gateway` generation. Not the current `ocg` package. This page does not define an installer for this generation, and it does not record a test or a completed migration.
+
+This generation is the headless `ocg` CLI (`ocg.exe` on Windows, `ocg` on Linux and macOS). `ocg3` and `open-console-gateway` are two generation branches of one project; the product name stays Open Console Gateway. Execution is one local CPA owned by that process. Custom HTTP providers remain provider routes on that local CPA. The default data root is `~/.ocg3`. A launch does not open, copy, move, delete, or adopt `~/.ocg-mgr` or `~/.ocg-mgr-cli`. The GPUI/Ely GUI is postponed. Whole CLI acceptance is pending. Commands are in the [CLI guide](cli.md). Design is in the [architecture](../architecture.md).
+
+The NSIS, DMG, deb, and AppImage steps below install that generation's desktop app and its browser dashboard. Its data directory is `~/.ocg-mgr` (Windows: `%USERPROFILE%\.ocg-mgr`). That directory is not `~/.ocg3`. The steps do not move or delete an existing data directory unless the uninstall confirm page's **Delete application data** is chosen. Silent uninstalls and in-app updates of that app never deleted it.
 
 ## Windows 10/11 x64
 

@@ -729,6 +729,7 @@ async fn delayed_400_records_surviving_rule_after_http_delete() {
     .await;
     assert_eq!(status, StatusCode::OK, "{committed}");
 
+    h.ensure_owned_plane().await;
     let pending = spawn_held_protocol(h.port, MODEL_A, &arrived).await;
     assert_eq!(upstream.calls.load(Ordering::SeqCst), 1);
 
@@ -822,6 +823,7 @@ async fn delayed_400_does_not_record_rebuilt_same_id_generation() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
+    h.ensure_owned_plane().await;
     let pending = spawn_held_protocol(h.port, MODEL_A, &arrived).await;
 
     let (status, cleared) = put_rules(&h, json!([])).await;
@@ -1027,6 +1029,7 @@ async fn probe_success_does_not_clear_later_rule_b_over_http() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
+    h.ensure_owned_plane().await;
     let pending_x = spawn_held_protocol(h.port, MODEL_A, &x_arrived).await;
 
     let (status, body) = h.protocol("/v1/chat/completions", MODEL_A).await;
@@ -1042,6 +1045,7 @@ async fn probe_success_does_not_clear_later_rule_b_over_http() {
     );
 
     clock.store(40, Ordering::SeqCst);
+    h.ensure_owned_plane().await;
     let pending_p = spawn_held_protocol(h.port, MODEL_A, &p_arrived).await;
 
     x_release.notify_one();

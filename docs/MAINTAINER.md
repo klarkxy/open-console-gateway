@@ -1,38 +1,26 @@
 [简体中文](MAINTAINER.zh-CN.md)
 
-# Maintainer Guide
+# Maintainer guide
 
-This guide is for people changing code, cutting releases, debugging the gateway, and validating desktop bundles. It documents the architecture and operating contracts as implemented at HEAD.
+Start with the [CPA architecture](architecture.md), [migration boundaries](maintainer/cpa-migration.md), and [completed findings](maintainer/cpa-validation.md). These define the new version; the former kernel remains in source pending migration.
 
-## Chapters
+The [native GUI section](architecture.md#9-native-desktop-gui) owns the adopted GPUI/Ely layouts, shared control/lifecycle boundaries, and Windows/Linux/macOS validation target. Concept images and platform targets are not runtime acceptance evidence; the current checkout has no GPUI GUI.
 
-- [Layout](maintainer/layout.md) — Crate and directory layout.
-- [Development](maintainer/development.md) — Dev loop and checks.
-- [Architecture](maintainer/architecture.md) — Dependency boundaries, adapter identity, request flow, and text diagrams.
-- [Dashboard API](maintainer/dashboard-api.md) — V4 surface, remounted compatibility handlers, CAS tokens, and mutation rules.
-- [State, Credentials, And Lifecycle](maintainer/state-and-lifecycle.md) — `CoreState`, locks, credentials, and persistence.
-- [HTTP Routes](maintainer/http-routes.md) — Inference routes, V3/V4 paths, the V2 tombstone, and auth/session routes.
-- [Runtime Invariants](maintainer/runtime-invariants.md) — Detailed gateway, alias, Zen Free, plan catalog, access key, proxy, and usage-sync semantics.
-- [Storage And Migrations](maintainer/storage-migration.md) — SQLite schema and migrations, backup, and the operator runbook.
-- [Extending Open Console Gateway](maintainer/extending.md) — Sealed provider extension procedure.
-- [Local BYOK Applications](maintainer/byok-applications.md) — Client format baselines, ownership, recovery, and isolated validation.
-- [Release Artifacts](maintainer/release-artifacts.md) — Supported platform matrix and package names.
-- [CI Workflows](maintainer/ci.md) — Quality, release, and container workflows.
-- [Release Procedure](maintainer/releasing.md) — Version bump, tag, build, and publish checklist.
-- [Known Debt And Non-Goals](maintainer/known-debt.md) — Documented gaps and deliberate non-goals.
-- [RFC: Account And Provider Model Redesign](maintainer/account-model-unification.md) — Landed Destination / Credential model, leftover table drops, V3 tombstone, and the migration that produced HEAD.
-- [Coding Conventions](maintainer/conventions.md) — crate DAG, security boundaries, and documentation ownership.
+## Current implementation references
 
-## Proposals
+- [Development](maintainer/development.md) — Current Rust CLI builds and checks.
+- [CLI](user/cli.md) — Implemented commands and operations.
+- [HTTP contracts](maintainer/dashboard-api.md) and [routes](maintainer/http-routes.md) — Existing V4/CAS behavior, not completed CPA integration.
+- [Storage migration](maintainer/storage-migration.md) — Existing encryption, backups, and rollback.
+- [Application integration](maintainer/byok-applications.md) — Client-specific behavior, not another execution architecture.
+- [Conventions](maintainer/conventions.md) — Design/source separation and documentation rules.
+- [CI](maintainer/ci.md) — Current checks and historical publisher limitations.
+- [Work checkpoint — 2026-10-05](maintainer/work-checkpoint-2026-10-05.md) — Paused CLI work, evidence and reinstall/resume steps.
 
-- [Codex integration](maintainer/codex-integration-proposal.md) — OpenCodex research and a proposed login-preserving integration; not implemented.
+## Historical release references
 
-## Reading paths
+[Artifacts](maintainer/release-artifacts.md) and [release procedure](maintainer/releasing.md) describe earlier desktop distribution. They are not a usable CPA-based OCG3 publisher. Release notes remain under releases/.
 
-- **Contributor** — `layout` → `development` → `architecture` → `state-and-lifecycle` → `http-routes` → `conventions`.
-- **Release owner** — `release-artifacts` → `ci` → `releasing` → `known-debt`.
-- **UI / theme work** — Read `DESIGN.md` first, then `src/theme.ts` and the Vue surface you are changing.
+This documentation update records the native GUI direction without implementing a GUI, migrating the runtime/database, or publishing anything. During implementation, preserve complete CLI operation and shared V4/CAS controls. Keep compatibility/security guarantees while replacing execution; do not develop an outer retry scheduler.
 
----
-
-[Docs index](README.md) · [简体中文](MAINTAINER.zh-CN.md)
+[Docs index](README.md) · [Agent guidance](../AGENTS.md)

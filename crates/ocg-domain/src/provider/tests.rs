@@ -323,7 +323,11 @@ fn provider_registry_is_exhaustive_for_plans_and_adapter_kinds() {
             .expect("every catalog plan has a composed descriptor");
         assert_eq!(descriptor.kind, kind);
         assert_eq!(descriptor.provider_id, plan.provider_id);
-        assert_eq!(descriptor.inference.catalog_routable, plan.routable);
+        if kind == ProviderAdapterKind::Cpa {
+            assert!(!descriptor.inference.catalog_routable);
+        } else {
+            assert_eq!(descriptor.inference.catalog_routable, plan.routable);
+        }
         assert_eq!(descriptor.inference.credential_kind, plan.credential_kind);
         assert_eq!(descriptor.inference.quota_scope, plan.quota_scope);
         assert_eq!(descriptor.verification.policy, plan.verification_policy);
@@ -365,7 +369,6 @@ fn provider_registry_is_exhaustive_for_plans_and_adapter_kinds() {
                     | ProviderAdapterKind::MiniMaxCn
                     | ProviderAdapterKind::KimiCn
                     | ProviderAdapterKind::OllamaCloud
-                    | ProviderAdapterKind::Cpa
             )
         );
         assert_eq!(
@@ -379,23 +382,27 @@ fn provider_registry_is_exhaustive_for_plans_and_adapter_kinds() {
                     | ProviderAdapterKind::KimiCn
             )
         );
-        assert_eq!(
-            descriptor.verification.uses_get_models,
-            kind == ProviderAdapterKind::Cpa
-        );
+        assert!(!descriptor.verification.uses_get_models);
         assert_eq!(
             descriptor.usage.egress_ip_shared_cooldown_window,
             kind == ProviderAdapterKind::ZenFree
         );
         match kind {
+            ProviderAdapterKind::Cpa => {
+                assert!(!descriptor.inference.production_inference);
+                assert!(!descriptor.inference.catalog_routable);
+                assert_eq!(descriptor.inference.origin, InferenceOriginKind::None);
+                assert!(!descriptor.model_catalog.publishes_client_aliases);
+                assert!(!descriptor.model_catalog.admin_explicit_refresh);
+                assert!(!descriptor.card_actions.catalog_refresh);
+            }
             ProviderAdapterKind::OpenCodeGo
             | ProviderAdapterKind::ZenFree
             | ProviderAdapterKind::CommandCodeGoat
             | ProviderAdapterKind::MiniMaxCn
             | ProviderAdapterKind::KimiCn
             | ProviderAdapterKind::OllamaCloud
-            | ProviderAdapterKind::ConfigurableHttp
-            | ProviderAdapterKind::Cpa => {
+            | ProviderAdapterKind::ConfigurableHttp => {
                 assert!(descriptor.inference.production_inference);
                 assert!(descriptor.inference.catalog_routable);
             }
@@ -614,12 +621,12 @@ fn adapter_descriptors_preserve_current_capability_decisions() {
         cpa.product_surface,
         ProviderProductSurface::ExternalIntegration
     );
-    assert_eq!(cpa.inference.auth, InferenceAuthDescriptor::Bearer);
+    assert_eq!(cpa.inference.auth, InferenceAuthDescriptor::None);
     assert!(!cpa.inference.follow_redirects);
-    assert_eq!(
-        cpa.inference.origin,
-        InferenceOriginKind::LocalExternalIntegration
-    );
+    assert_eq!(cpa.inference.origin, InferenceOriginKind::None);
+    assert!(!cpa.inference.catalog_routable);
+    assert!(!cpa.inference.production_inference);
+    assert!(cpa.inference.channel.is_none());
     assert_eq!(
         cpa.model_catalog.kind,
         ModelCatalogKind::ProviderPersistedSnapshot
@@ -634,11 +641,13 @@ fn adapter_descriptors_preserve_current_capability_decisions() {
         StructuralProbeCeiling::Unavailable
     );
     assert!(cpa.verification.never_auto_enable);
-    assert!(cpa.verification.uses_get_models);
+    assert!(!cpa.verification.uses_get_models);
     assert_eq!(cpa.usage.contract, UsageContractKind::Unavailable);
     assert!(!cpa.usage.publishes_capability);
-    assert!(cpa.card_actions.catalog_refresh);
+    assert!(!cpa.card_actions.catalog_refresh);
     assert!(!cpa.card_actions.protocol_probe);
+    assert!(!cpa.model_catalog.publishes_client_aliases);
+    assert!(!cpa.model_catalog.admin_explicit_refresh);
 }
 
 #[test]
@@ -830,4 +839,52 @@ fn builtin_offering_maps_paid_families_to_plan_and_the_rest_to_api() {
     }
     assert_eq!(builtin_offering("not-a-builtin"), "api");
     assert_eq!(builtin_offering(""), "api");
+}
+
+#[test]
+fn dedicated_cpa_identity_stays_historical_and_does_not_grant_native_routes() {
+    assert_eq!(ProviderAdapterKind::ALL.len(), 8);
+    assert_eq!(
+        ProviderAdapterKind::from_provider_id(CPA_PROVIDER_ID),
+        Some(ProviderAdapterKind::Cpa)
+    );
+    let plan = builtin_provider(CPA_PROVIDER_ID).unwrap();
+    assert!(plan.routable);
+    assert_eq!(plan.credential_kind, CredentialKind::ApiKey);
+    assert_eq!(plan.singleton_account_id, Some(CPA_ACCOUNT_ID));
+    assert_eq!(
+        plan.creation_availability,
+        CreationAvailability::Unavailable
+    );
+    assert_eq!(
+        plan.creation_unavailable_reason,
+        Some(
+            "CPA is a local external integration and cannot be created through the generic account API"
+        )
+    );
+    assert_eq!(
+        plan.product_surface,
+        ProviderProductSurface::ExternalIntegration
+    );
+    assert!(is_cpa_external_integration(CPA_PROVIDER_ID));
+    assert!(!is_cpa_external_integration("cpa-owned-native"));
+    assert!(provider_allows_enablement(CPA_PROVIDER_ID));
+    assert!(
+        validate_account_binding(
+            "not-the-singleton",
+            CPA_PROVIDER_ID,
+            CredentialKind::ApiKey,
+            QuotaScope::Key,
+        )
+        .is_err()
+    );
+    let descriptor = ProviderRegistry::get(CPA_PROVIDER_ID).unwrap();
+    assert!(!descriptor.inference.catalog_routable);
+    assert!(!descriptor.inference.production_inference);
+    assert_eq!(descriptor.inference.origin, InferenceOriginKind::None);
+    assert_ne!(
+        descriptor.inference.origin,
+        InferenceOriginKind::LocalExternalIntegration
+    );
+    assert!(descriptor.contract_scope_id.is_none());
 }

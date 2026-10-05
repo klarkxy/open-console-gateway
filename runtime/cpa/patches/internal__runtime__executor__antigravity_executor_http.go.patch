@@ -1,0 +1,67 @@
+diff --git a/diff-a/internal/runtime/executor/antigravity_executor_execute.go b/diff-b/internal/runtime/executor/antigravity_executor_execute.go
+index 1111111..2222222 100644
+--- a/diff-a/internal/runtime/executor/antigravity_executor_execute.go
++++ b/diff-b/internal/runtime/executor/antigravity_executor_execute.go
+@@ -127,10 +127,14 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+ 	httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, false, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
+ 	if errReq != nil {
+ 		err = errReq
+ 		return resp, err
+ 	}
+ 
++	if errDispatch := cliproxyauth.BeforeOCGHTTPDispatch(ctx, httpReq); errDispatch != nil {
++		return resp, errDispatch
++	}
+ 	httpResp, errDo := httpClient.Do(httpReq)
++	cliproxyauth.NoteOCGHTTPDispatch(ctx, errDo, httpResp)
+ 	if errDo != nil {
+ 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+ 		if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
+@@ -337,10 +341,14 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+ 	httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
+ 	if errReq != nil {
+ 		err = errReq
+ 		return resp, err
+ 	}
+ 
++	if errDispatch := cliproxyauth.BeforeOCGHTTPDispatch(ctx, httpReq); errDispatch != nil {
++		return resp, errDispatch
++	}
+ 	httpResp, errDo := httpClient.Do(httpReq)
++	cliproxyauth.NoteOCGHTTPDispatch(ctx, errDo, httpResp)
+ 	if errDo != nil {
+ 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+ 		if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
+diff --git a/diff-a/internal/runtime/executor/antigravity_executor_stream.go b/diff-b/internal/runtime/executor/antigravity_executor_stream.go
+index 1111111..2222222 100644
+--- a/diff-a/internal/runtime/executor/antigravity_executor_stream.go
++++ b/diff-b/internal/runtime/executor/antigravity_executor_stream.go
+@@ -127,8 +127,12 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+ 	httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
+ 	if errReq != nil {
+ 		err = errReq
+ 		return nil, err
+ 	}
++	if errDispatch := cliproxyauth.BeforeOCGHTTPDispatch(ctx, httpReq); errDispatch != nil {
++		return nil, errDispatch
++	}
+ 	httpResp, errDo := httpClient.Do(httpReq)
++	cliproxyauth.NoteOCGHTTPDispatch(ctx, errDo, httpResp)
+ 	if errDo != nil {
+ 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+diff --git a/diff-a/internal/runtime/executor/claude_executor_request.go b/diff-b/internal/runtime/executor/claude_executor_request.go
+index 1111111..2222222 100644
+--- a/diff-a/internal/runtime/executor/claude_executor_request.go
++++ b/diff-b/internal/runtime/executor/claude_executor_request.go
+@@ -1477,5 +1477,10 @@ func doClaudeUpstreamRequest(client *http.Client, req *http.Request) (*http.Response, error) {
+ func doClaudeUpstreamRequest(client *http.Client, req *http.Request) (*http.Response, error) {
+ 	applyClaudeWireHeaderCasing(req)
++	if errDispatch := cliproxyauth.BeforeOCGHTTPDispatch(req.Context(), req); errDispatch != nil {
++		return nil, errDispatch
++	}
+ 	cliproxyexecutor.MarkUpstreamAttempt(req.Context())
+-	return client.Do(req)
++	resp, err := client.Do(req)
++	cliproxyauth.NoteOCGHTTPDispatch(req.Context(), err, resp)
++	return resp, err
+ }

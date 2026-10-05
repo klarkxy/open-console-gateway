@@ -2,28 +2,53 @@
 
 # CLI
 
-`ocg-manager-cli serve` 是提交控制面变更的常驻服务。`api` 是它的 HTTP 客户端。即便同时带了 `--data-dir`，它也不创建、不打开数据库。`schema` 是离线 JSON 帮助：它不连接 `serve`，也不打开数据目录。
+本页是 Open Console Gateway 的 OCG3 代操作指南。`ocg3` 与 `open-console-gateway` 是同一项目的两代，关系如同 Python 3 与 Python 2。产品名仍是 Open Console Gateway。这一代的命令是 `ocg`（Windows 上为 `ocg.exe`）。Rust 包名是 `ocg-cli`。上一代的命令名不是别名。
 
-旧的 `status`、`key list`、`key ping` 辅助命令只在服务停止时打开本地数据目录，并在初始化前取得同一目录锁。`serve` 运行期间，通过 `api` 读取设置、账户记录、网关状态，或运行模型测试。
+`ocg serve` 是提交控制面变更的常驻服务。`api` 是它的 HTTP 客户端。即便同时带了 `--data-dir`，它也不创建、不打开数据库。`schema` 是离线 JSON 帮助：它不连接 `serve`，也不打开数据目录。
 
-本页是 `serve`、`api`、`schema` 的操作约定。若 `ocg-manager-cli api --help` 里没有下面这些参数，那份可执行文件比本页旧。React 面板和桌面外壳是后续界面。监听器仍可提供与可执行文件放在一起的既有 `dist/`。
+`status` 和 `key list` 只在宿主停止时打开所选数据目录，并在初始化前取得同一目录锁。`serve` 运行期间，用 `api` 读取设置、账户记录和网关状态。
 
-Windows 上的可执行文件是 `ocg-manager-cli.exe`。Linux 解压后执行 `chmod +x ocg-manager-cli`。各平台默认数据目录都是 `~/.ocg-mgr-cli`。`serve` 用 `--data-dir <path>` 改它。混淆密钥依次为 `--encryption-key`、环境变量 `OCG_MANAGER_ENCRYPTION_KEY`、`<data-dir>/.encryption-key`。Windows 上该文件不存在时，`serve` 退回机器绑定的密钥。优先用密钥文件。写在命令行上的密钥会进 shell 历史。
+`key ping ACCOUNT_ID` 必须使用该数据目录所记录的正在运行的 `serve`。它读取 `cli-listener.json`；该进程仍在时，向记录的监听地址发送 `POST /dashboard/api/v4/accounts/{id}/model-tests`。它不打开数据库，不改选账户，也不自己调用供应商。标记缺失、进程已退出或标记不可读时，命令在解析混淆密钥、打开 SQLite 或发起供应商 I/O 之前拒绝。`--endpoint` 不能把这条命令发到另一个宿主，也不能让已停止的 `serve` 变得可接受。`--model` 默认是 `mimo-v2.5`，并总会作为 `modelId` 发送。省略 `--message` 和 `--max-tokens` 时，保留服务端的最小验证正文。传入 `--message` 或正数 `--max-tokens` 会加上 `message` 或 `maxTokens`。`--max-tokens 0` 会在这次 POST 之前被拒绝。这里说明的是命令要求，不是已完成的在线模型测试验证。
+
+```bash
+ocg --data-dir ./ocg-data key ping ACCOUNT_ID
+ocg --data-dir ./ocg-data key ping ACCOUNT_ID --message "synthetic check" --max-tokens 16
+```
+
+本页是 `serve`、`api`、`schema`、`backup` 的操作约定。若可执行文件的 `--help` 里没有这些命令和参数，那份程序比本页旧。原生桌面 GUI 延后，直到这份 CLI 完成。监听器仍可提供与可执行文件放在一起的既有 `dist/`；该兼容行为不定义新 GUI。
+
+Windows 上的可执行文件是 `ocg.exe`。Linux 与 macOS 解压后执行 `chmod +x ocg`。各平台默认数据目录都是 `~/.ocg3`。`ocg` 不打开、不移动、不删除上一代的 `~/.ocg-mgr-cli`。用 `--data-dir <path>` 指定目录。开发和测试使用合成目录，不用已安装的配置目录。混淆密钥依次为 `--encryption-key`、环境变量 `OCG_MANAGER_ENCRYPTION_KEY`、`<data-dir>/.encryption-key`。该环境变量名不变。Windows 上该文件不存在时，`serve` 退回机器绑定的密钥。优先用密钥文件。写在命令行上的密钥会进 shell 历史。
+
+这一代的 CPA 是 `ocg serve` 拥有的那一个本地运行时。`external-integrations/cpa` 路由保留为拒绝与迁移表面。含义见[自有本地 CPA](#自有本地-cpa)。整目录备份仍使用快照格式标记 `ocg-directory-snapshot`。
+
+## 自有本地 CPA
+
+产品模式是一个由 OCG 拥有的本地 CPA。自定义 HTTP 仍是由该本地 CPA 执行的供应商能力。省略 `target` 时，请求指向自有子进程。已保存的历史远程行不会因此选中 `integration`。该行继续保存。这些路由不会激活它，不会把它转换成本地凭据，也不会删除它。显式迁移是单独的操作，尚未实现。这些路由不打开、不复制、不移动、不删除 `~/.ocg-mgr-cli`。`OCG_CPA_BASE_URL` 不是产品开关：本视图不解析它，安装、回滚和 apply 也不读取它。整份 CLI 验收和这份运行时仍待完成。原生桌面 GUI 继续延后。
+
+`GET /dashboard/api/v4/external-integrations/cpa` 返回 `CpaIntegration`。仅当存在已保存的历史远程 CPA 行时，`legacyMigrationRequired` 为 true。该值已脱敏：响应不复制 URL、密钥、账号 id 或目录。自有健康状态是另一个字段。`runtimeUnavailableReason` 是既有的平台不支持文本、执行记录错误或 `cpa execution is unavailable`，否则为 JSON `null`。迁移语句和任何 `OCG_CPA_BASE_URL` 语句都不是该字段的取值。已保存的行可以在 `runtimeUnavailableReason` 为 null 时把 `legacyMigrationRequired` 设为 true；健康原因也可以在 `legacyMigrationRequired` 为 false 时出现。`CpaRuntime.unavailableReason` 使用同一健康规则。`CpaRuntime` 不携带 `legacyMigrationRequired`。历史数据不会把已安装或正在运行的子进程变成不可用，也不会把缺失的子进程变成已安装或正在运行。
+
+仅当存在自有托管记录，或执行报告表明自有可执行文件已安装时，`configured` 与 `runtimeOwned` 为 true。仅有历史行时两者都为 false。`runtimeRunning` 是 `ExecutionReport.running`。`runtimeSupported` 跟随 `cpa_runtime_supported()`。已安装该制品时，`installedVersion` 取执行报告的 `current_version`，否则取自有托管记录的 `current_version`，再否则为 null。`latestVersion` 是执行报告的 `latest_version`（当前报告为 `v8.0.10`）。`updateAvailable` 与 `currentOperation` 来自该报告。执行报告给出端口时，`baseUrl` 是该自有环回地址；否则在存在托管记录时为 `http://127.0.0.1:{managed.port}`，再否则为空字符串。已保存的远程 URL 不出现在 `baseUrl` 中。`baseUrlReadOnly` 恒为 true。`revision` 与 `processGeneration` 仍是控制令牌。GET 不推进 revision，也不写入历史行、账号、目录或目的地字节。
+
+退役的单例输出仍可解析，并保持空或 false：`managementKeyConfigured` 为 false，`inferenceKeyConfigured` 为 false，`enabled` 为 false，`accountId` 为 null，`modelCount` 为 0，`modelsRefreshedAt` 为 null。历史密文不是自有执行来源。自有启用按原生凭据计算。历史 `CPA_ACCOUNT_ID` 不是自有账号。自有目录按 `destination_models` 中的目的地分开。这个整数不能代表一份规范的自有原生目录，全局 `provider_model_catalogs` 的 CPA 行也不会复制到这里。`destination_models` 没有刷新时间列。
+
+候选的 `CpaControlTarget` schema 枚举是 `owned`。Serde 仍接受 `integration`，处理函数在任何 I/O 之前拒绝它。`CpaIntegrationUpdate` 与 `CpaTestRequest` 在线路上仍接受 `baseUrl`、`managementKey` 和 `inferenceKey`；生成的 schema 预期省略这三项。`CpaIntegrationUpdate.enabled` 仍留在 schema 中。已检入的 schema JSON 是 Rust 示例导出。两份已构建二进制的 `schema v3` 和 `schema v4` 与这些文件一致。本页没有执行导出。`schema v3` 与 `schema v4` 描述的是你运行的那份二进制。字段合约见[自有 CPA 控制](../maintainer/dashboard-api.zh-CN.md#自有-cpa-控制)。
+
+`GET /dashboard/api/v4/routing/explain` 是对自有 CPA 已应用、静态、运行时和额度事实的一次读取。`model` 在去除空白后必填。`clientProtocol` 默认 `chat_completions`。接受的值是 `chat_completions`、`responses`、`messages` 和 `gemini`。公开的 `gemini` 通过 `chat_completions` 解释，响应里的 `clientProtocol` 仍是 `gemini`。`routingMode` 与 `conversationSticky` 只展示已保存的设置。`conversationBinding` 为 `not_evaluated`。任何路由模式下 `expectedBasePolicyFirstPick` 都是 null。已知目录行即使 `routeable` 为 false，也是一次成功的解释。期望路由不进入合格列表。合格行仍可带 `callerPending`、`secretRecheckPending` 和 `sendPending`。`RoutingResolvedMapping` 上的线路字段 `migrationRequired` 已经实现，包括只有目录的历史远程行。省略该字段的旧载荷为 false，新响应会发出该字段。该字段已在检入的 schema 导出中。这次读取的 Cargo 断言运行和普通 CLI 验收仍待完成。合格判断使用同一目的地、同一供应商和实际上游上已选中的可路由映射，以及该次读取捕获的设置。该捕获的源码已经存在，其验收仍待完成。这次读取不解密、不放行、不写入。线路合约见[自有 CPA 路由解释](../maintainer/dashboard-api.zh-CN.md#自有-cpa-路由解释)。
 
 ## 命令
 
 启动宿主并让它一直运行。`--port` 写入 SQLite；之后不带该参数的 `serve` 会沿用这个端口。默认绑定 `127.0.0.1`。该绑定上没有 `Origin`、也没有转发头时，环回调用者已经是本地管理员。注册之前 `initialized` 为 false。
 
 ```bash
-ocg-manager-cli --data-dir ./ocg-data serve --port 9042
+ocg --data-dir ./ocg-data serve --port 9042
 ```
 
-用 Ctrl+C 停止。该进程启动时恢复自己托管的 CPA 运行时，退出时关掉这个托管进程。OAuth 会话、浏览器会话、更新阶段和 settings epoch 都在这个进程里。另一个进程打开同一目录并不能代替它。
+用 Ctrl+C 停止。该进程拥有本地 CPA 子进程：启动是恢复路径，退出是关闭路径。已审阅的制品锁已经存在。本页不记录一个正在运行的子进程，整份 CLI 验收仍待完成。OAuth 会话、浏览器会话、更新阶段和 settings epoch 都在这个进程里。另一个进程打开同一目录并不能代替它。
 
 在另一个终端指定监听地址：
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api METHOD PATH \
+ocg --endpoint http://127.0.0.1:9042 api METHOD PATH \
   --input request.json \
   --output response.json \
   --cas-current \
@@ -35,7 +60,7 @@ ocg-manager-cli --endpoint http://127.0.0.1:9042 api METHOD PATH \
 推理走同一个 `api`，外加一份 bearer 文件。文件里是网关 Key，一行，不放进进程参数。
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /v1/chat/completions \
+ocg --endpoint http://127.0.0.1:9042 api POST /v1/chat/completions \
   --input chat.json \
   --key-file gateway-key.txt \
   --output chat-out.json
@@ -44,8 +69,8 @@ ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /v1/chat/completions \
 `schema` 不连接 `serve`，也不打开数据目录。它把离线 JSON schema 写到 stdout。
 
 ```bash
-ocg-manager-cli schema v4
-ocg-manager-cli schema v3
+ocg schema v4
+ocg schema v3
 ```
 
 能力表里的名字是该输出中的 `$defs`。只属于 V4 的请求体在 `schema v4`。由重新挂载的 V3 处理函数拥有的请求体在 `schema v3`。
@@ -61,8 +86,8 @@ ocg-manager-cli schema v3
 新建的环回宿主上，`status.json` 里 `local` 为 true，`authenticated` 为 true，`initialized` 为 false，并带有 `revision` 与 `processGeneration`。`--cas-current` 读的就是这份公开响应。其中没有密码、cookie 或 Key。`GET /dashboard/api/v4/contract` 需要会话；在非本地绑定上，用它为尚未注册的宿主取期望值是错误的。
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/auth/status --output status.json
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/templates --output templates.json
+ocg --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/auth/status --output status.json
+ocg --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/templates --output templates.json
 ```
 
 `register.json` 是省略两个期望字段的 `AuthRegister`，由 `--cas-current` 填入：
@@ -72,7 +97,7 @@ ocg-manager-cli --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/templ
 ```
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/auth/register \
+ocg --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/auth/register \
   --input register.json --cas-current --session-file session.json --output register-out.json
 ```
 
@@ -99,7 +124,7 @@ ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/auth
 ```
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/onboarding/commit \
+ocg --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/onboarding/commit \
   --input onboarding.json --cas-current --output onboard.json
 ```
 
@@ -110,15 +135,15 @@ ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/onbo
 ```
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api PATCH /dashboard/api/v4/alias-publication \
+ocg --endpoint http://127.0.0.1:9042 api PATCH /dashboard/api/v4/alias-publication \
   --input publish.json --cas-current --output publish-out.json
 ```
 
 `GET /dashboard/api/v4/connection` 返回 `ConnectionInfo`，其中含 `primaryKey`。用 `--output connection.json` 写入，再自行把 `primaryKey` 抄进 `gateway-key.txt`。不带 `--output` 时，stdout 会略去这把 Key。
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/connection --output connection.json
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api GET /v1/models --key-file gateway-key.txt --output models.json
+ocg --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/connection --output connection.json
+ocg --endpoint http://127.0.0.1:9042 api GET /v1/models --key-file gateway-key.txt --output models.json
 ```
 
 `chat.json`：
@@ -128,7 +153,7 @@ ocg-manager-cli --endpoint http://127.0.0.1:9042 api GET /v1/models --key-file g
 ```
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /v1/chat/completions \
+ocg --endpoint http://127.0.0.1:9042 api POST /v1/chat/completions \
   --input chat.json --key-file gateway-key.txt --output chat-out.json
 ```
 
@@ -143,7 +168,7 @@ ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /v1/chat/completions \
 读取、修改、再写入：
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/accounts/ACCOUNT_ID --output account.json
+ocg --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/accounts/ACCOUNT_ID --output account.json
 ```
 
 `rename.json` 是 `AccountUpdate`。省略期望字段时，`--cas-current` 填入当前这一对：
@@ -153,7 +178,7 @@ ocg-manager-cli --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/accou
 ```
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api PATCH /dashboard/api/v4/accounts/ACCOUNT_ID \
+ocg --endpoint http://127.0.0.1:9042 api PATCH /dashboard/api/v4/accounts/ACCOUNT_ID \
   --input rename.json --cas-current --output rename-out.json
 ```
 
@@ -176,13 +201,13 @@ ocg-manager-cli --endpoint http://127.0.0.1:9042 api PATCH /dashboard/api/v4/acc
 异步工作留在 `serve` 里。轮询对应的 GET。启动工作的那次 POST 不会因为 GET 慢、返回 409 或端口改变而重发。
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/external-integrations/cpa/oauth/start \
+ocg --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/external-integrations/cpa/oauth/start \
   --input oauth.json --cas-current --output oauth-start.json
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/external-integrations/cpa/oauth/status \
+ocg --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/external-integrations/cpa/oauth/status \
   --output oauth-status.json
 ```
 
-同一模式还有：`POST /accounts/{id}/usage/refresh`（`UsageRefreshUpdate`）之后 `GET /accounts/{id}/usage`；运行时安装、启动、停止或回滚之后读 `GET /external-integrations/cpa/runtime` 和 `GET /external-integrations/cpa/runtime/logs`。`GET /settings/update-status` 是更新阶段的读取。在这个无头宿主上，安装用的 POST 不会启动安装器；见更新器各行。
+上面的 OAuth 一对请求省略了 `target`，因此指向自有子进程。历史远程行不会选中远程 OAuth 目标。本页不记录一次已完成的供应商 OAuth。同一模式还有：`POST /accounts/{id}/usage/refresh`（`UsageRefreshUpdate`）之后 `GET /accounts/{id}/usage`；运行时安装、启动、停止或回滚之后读 `GET /external-integrations/cpa/runtime` 和 `GET /external-integrations/cpa/runtime/logs`。`GET /settings/update-status` 是更新阶段的读取。在这个无头宿主上，安装用的 POST 不会启动安装器；见更新器各行。
 
 改端口是一次设置写入，然后换一个 endpoint。`SettingsUpdate` 可以只包含你要改的字段：
 
@@ -191,9 +216,9 @@ ocg-manager-cli --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/exter
 ```
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api PUT /dashboard/api/v4/settings \
+ocg --endpoint http://127.0.0.1:9042 api PUT /dashboard/api/v4/settings \
   --input port.json --cas-current --output port-out.json
-ocg-manager-cli --endpoint http://127.0.0.1:9043 api GET /dashboard/api/v4/settings --output settings.json
+ocg --endpoint http://127.0.0.1:9043 api GET /dashboard/api/v4/settings --output settings.json
 ```
 
 第二条命令连的是刚刚绑定 `9043` 的监听器。PUT 不会再发。若重新绑定失败，宿主会补偿，仍在应答的是旧 endpoint。先读那里的 `gatewayPort`，再改 `--endpoint`。
@@ -245,7 +270,7 @@ ocg-manager-cli --endpoint http://127.0.0.1:9043 api GET /dashboard/api/v4/setti
 | 定价 | `POST /dashboard/api/v4/providers/{id}/pricing/refresh` | v3 `ProviderPricingRefreshUpdate` |
 | 定价 | `PUT /dashboard/api/v4/providers/{id}/pricing/multipliers` | v3 `PricingMultipliersUpdate` |
 | 别名发布 | `GET` 或 `PATCH /dashboard/api/v4/alias-publication` | v4 `AliasPublicationUpdate` |
-| 路由 | `GET /dashboard/api/v4/routing/explain` | v4 `RoutingExplanation` |
+| 路由 | `GET /dashboard/api/v4/routing/explain` | v4 `RoutingExplanation`；自有 CPA 已应用事实 |
 | 路由 | `GET` 或 `PUT /dashboard/api/v4/routing/cards` | v4 `RoutingCardUpdate` |
 | 策略 | `GET` 或 `PUT /dashboard/api/v4/routing/temporary-unavailability` | v4 `TemporaryPolicyUpdate` |
 | 策略 | `POST /dashboard/api/v4/routing/temporary-unavailability/restrictions/{id}/clear` | v4 `TemporaryPolicyClearRequest` |
@@ -261,14 +286,14 @@ ocg-manager-cli --endpoint http://127.0.0.1:9043 api GET /dashboard/api/v4/setti
 | 代理 | `POST /dashboard/api/v4/settings/test-proxy` | v3 `ProxyTestRequest` |
 | 便携备份 | `POST /dashboard/api/v4/accounts/transfer/export` 与 `.../preview` | v3 `AccountExportRequest`、`AccountImportPreviewRequest` |
 | 便携备份 | `POST /dashboard/api/v4/accounts/transfer/import` | v3 `AccountImportRequest` |
-| 全量数据备份 | 停止 `serve`，复制目录，再复制回去，然后启动 | 没有 CLI 子命令。见[升级、备份、恢复](upgrade-backup.zh-CN.md)。 |
+| 全量数据备份 | `backup create --output FILE`、`backup restore --input FILE` | 离线整目录快照；恢复到新目录或空目录。 |
 | 日志 | `GET /dashboard/api/v4/logs/gateway`、`/logs/forward`、`/logs/forward/models`、`/logs/forward/keys` | 已脱敏的处理函数响应 |
 | 日志 | `GET /dashboard/api/v4/gateway/status`、`/dashboard/summary`、`/dashboard/daily-tokens-by-model` | 需要会话的读取 |
 | 浏览器 | `GET /dashboard/api/v4/browser/capabilities` | `mode` 为 `native`、`remote` 或 `unsupported` |
 | 浏览器 | `POST /dashboard/api/v4/accounts/{id}/browser` | v3 `BrowserOpenRequest` |
 | 浏览器 | `DELETE /dashboard/api/v4/accounts/{id}/browser-profile` | v3 `MutationExpectation` |
 | 浏览器套接字 | 不是 `api` 调用 | 服务器仍挂载。保留路径不在 CLI 允许列表中。 |
-| CPA | `GET`、`PUT` 或 `DELETE /dashboard/api/v4/external-integrations/cpa` | `PUT` 与 `DELETE` 需要 CAS |
+| CPA | `GET`、`PUT` 或 `DELETE /dashboard/api/v4/external-integrations/cpa` | v3 `CpaIntegration`；`PUT` 与 `DELETE` 需要 CAS；远程 URL 与密钥字段会被拒绝 |
 | CPA | `POST .../cpa/oauth/start`，然后 `GET .../cpa/oauth/status` | v3 `CpaOAuthStartRequest` |
 | CPA 进程 | `POST .../cpa/runtime/start`、`.../stop`、`.../rollback`；`GET .../runtime` 与 `.../runtime/logs` | POST 与 `DELETE .../runtime` 需要 CAS |
 | CPA Key | `POST /dashboard/api/v4/external-integrations/cpa/client-keys` | 响应 `CpaRuntimeKeyCreated` 只在 `--output` |
@@ -301,7 +326,7 @@ ocg-manager-cli --endpoint http://127.0.0.1:9043 api GET /dashboard/api/v4/setti
 
 默认 CLI 构建启用 `dsh-local-host`，`serve` 会注册 BYOK 宿主和 DSH 宿主。找到受支持的 Chromium 可执行文件时，还会注册原生浏览器启动器与停止器，此时 `GET /browser/capabilities` 报告 `mode: native`。用 `POST /accounts/{id}/browser`（`BrowserOpenRequest`）打开原生会话。远程模式是 `OCG_BROWSER_WORKER_URL` 指向的 worker，配合 `OCG_BROWSER_CONTROL_TOKEN_FILE`（默认文件 `/run/ocg-browser/control-token`），且仅在没有注册原生启动器时使用。两种运行时都没有时，浏览器能力报告 `unsupported`。远程会话空闲 30 分钟后断开，最长 4 小时。查看该会话属于后续远程查看器，或使用外部 WebSocket 客户端。`api` 不附着到这个套接字。重置配置文件和打开账号会在浏览器操作锁之后再次检查 CAS。
 
-`GET /cpa/models` 是本地 CPA 目录。`GET /external-integrations/cpa/models` 是集成快照。运行时的启动、停止、回滚、安装和更新作用于这个 `serve` 内部的监督器。OAuth 启动也把会话存在这里。
+`GET /cpa/models` 读取共享的供应商目录槽（`provider_id` 为 `cpa`）。`GET /external-integrations/cpa/models` 是保留的集成快照。自有原生目录按目的地分开。单例 `modelCount` 保持为 0，并且不复制这两份目录。运行时的启动、停止、回滚、安装和更新作用于这个 `serve` 内部、面向自有子进程的监督器。已审阅的制品锁已经存在。本页不记录一个正在运行的子进程，整份 CLI 验收仍待完成。OAuth 启动把会话存在这个进程里。本页不记录一次已完成的供应商 OAuth。仍携带 `baseUrl`、`managementKey` 或 `inferenceKey` 的请求在任何 I/O 之前被拒绝。显式 `target` 为 `owned` 且带上其中任一字段时，返回 `owned CPA control does not accept a remote base URL or key`。显式 `target` 为 `integration`，或省略 `target` 却带上其中任一字段时，若存在历史行则返回 `Stored remote CPA configuration requires explicit migration and was left unchanged`，若不存在则返回 `Remote CPA is not a target in this product`。`DELETE` 使用同样的语句，并让已保存的字节保持原样。只带 `enabled` 的 `PUT` 返回自有视图，不改写历史行和账号，响应里的 `enabled` 为 false。OAuth 状态查询和 CPA target 查询上的 `target=integration` 仍能反序列化，并在任何 I/O 之前以同样方式拒绝。
 
 BYOK 的配置与移除、DSH 的安装与卸载都是 CAS 写入。`codex` 和 `kimi` 要求 `clientClosed: true`。配置还要求先前 GET 得到的 `expectedFingerprint`。已发布目录为空时返回 412 `No models are published by this Key yet; configure a model source first`。未知 `{client}` 返回 `Unknown BYOK application`。宿主会创建或复用名为 `codex`、`kimi-code`、`minimax-code` 或 `zcode` 的普通 Key。
 
@@ -313,16 +338,27 @@ BYOK 的配置与移除、DSH 的安装与卸载都是 CAS 写入。`codex` 和 
 
 ## 备份
 
-完整备份按[升级、备份、恢复](upgrade-backup.zh-CN.md)操作：停止 `serve`，复制整个数据目录（含 `data.sqlite` 和 `.encryption-key`），恢复时先停止，换上该目录，再用相同或更新的构建启动。没有 `backup` 子命令。
+停止 `serve` 后创建整目录快照。输出必须是源目录之外的新文件。恢复时使用另一个新目录或空目录：
+
+```bash
+ocg --data-dir ./ocg-data backup create --output ./ocg-snapshot.tar.gz
+ocg --data-dir ./restored-ocg-data backup restore --input ./ocg-snapshot.tar.gz
+```
+
+快照包含 SQLite、加密身份、CPA 托管的认证与运行时配置文件，以及其他持久数据。宿主或数据库锁被占用时立即拒绝。恢复先验证格式、schema、文件哈希和加密身份，再发布目录；它会重定位托管 CPA 的认证目录，排除活动监听器与锁标记，并且不启动进程。已有输出文件和非空目标目录都会保留，没有替换模式。
+
+加密选择依次为显式密钥、环境变量密钥、密钥文件、Windows 机器密钥。即便存在旧 `.encryption-key`，显式或环境变量覆盖仍优先。恢复需要相同的有效外部密钥或 Windows 机器身份；使用文件密钥的快照会携带该文件。旧的未认证密文会保留，并标为尚未验证的历史材料：仅能读出文本，不能证明其原始密钥正确。
+
+限制为展开后总计 4 GiB、单文件 2 GiB、每份托管 CPA 配置 1 MiB。成功输出一条包含路径、格式、版本、数量和状态的 JSON 回执；失败返回非零退出码。快照应与兼容程序一起保留。历史安装及目录复制流程见[升级、备份、恢复](upgrade-backup.zh-CN.md)。
 
 便携加密转移是通过 `api` 的三个文件。导出和预览不加 `--cas-current`。导入要加。密码错误时导入失败，revision 不变。
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/accounts/transfer/export \
+ocg --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/accounts/transfer/export \
   --input export.json --output export-out.json
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/accounts/transfer/preview \
+ocg --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/accounts/transfer/preview \
   --input preview.json --output preview-out.json
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/accounts/transfer/import \
+ocg --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/accounts/transfer/import \
   --input import.json --cas-current --output import-out.json
 ```
 
@@ -333,8 +369,8 @@ ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/acco
 用 Cargo 从工作区构建此二进制。默认特性是 `dsh-local-host`。
 
 ```bash
-cargo build -p ocg-manager-cli --locked
-cargo build -p ocg-manager-cli --locked --no-default-features
+cargo build -p ocg-cli --locked
+cargo build -p ocg-cli --locked --no-default-features
 ```
 
 工作区质量门是带 core 环回特性的锁定测试和 Clippy：
@@ -349,6 +385,8 @@ cargo clippy --workspace --all-targets --locked --features ocg-core/ollama-cloud
 ```bash
 node scripts/cli-acceptance.mjs
 ```
+
+可选的 CPA 验收程序、宿主变体对齐和证据等级见[开发说明](../maintainer/development.zh-CN.md#cpa-验收程序)。本页不记录该程序的运行结果。整份 CLI 验收仍待完成。
 
 标签工作流仍是历史上的桌面发布路径。它不是这套全功能 CLI 的发布。请使用刚刚构建的二进制。
 

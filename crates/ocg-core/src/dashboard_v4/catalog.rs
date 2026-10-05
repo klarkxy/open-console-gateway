@@ -64,6 +64,7 @@ pub(super) async fn remove_models(
             Utc::now(),
         )
         .map_err(|error| map_catalog_removal_error(&state, error))?;
+    crate::cpa_execution::note_product_apply(&state).await;
     Ok(Json(CatalogModelsRemoveResult {
         revision: ControlRevision {
             revision: removed.revision,
@@ -105,25 +106,29 @@ pub(super) async fn add_models(
         ));
     }
     let scope = ContractScope::provider(&scope_id);
-    let _settings = state.settings_update.lock();
-    check_expectation(&state, &input.expectation)?;
-    let contracts = state.provider_contracts();
-    let current = contracts
-        .scope(&scope)
-        .ok_or_else(|| V3ApiError::not_found_at(&state, "provider scope not found"))?;
-    let model_ids = validate_additions(&current.catalog.models, &input.model_ids)
-        .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
-    crate::account_control::add_builtin_catalog_models_locked(&state, &scope_id, &model_ids)
-        .map_err(|error| match error {
-            crate::account_control::AccountControlError::RevisionConflict => {
-                V3ApiError::revision_conflict(&state)
-            }
-            crate::account_control::AccountControlError::Internal(error) => {
-                V3ApiError::internal(error)
-            }
-            other => V3ApiError::invalid_request_at(&state, other.to_string()),
-        })?;
-    crate::dashboard_v3::provider_contracts_response(&state)
+    let receipt = {
+        let _settings = state.settings_update.lock();
+        check_expectation(&state, &input.expectation)?;
+        let contracts = state.provider_contracts();
+        let current = contracts
+            .scope(&scope)
+            .ok_or_else(|| V3ApiError::not_found_at(&state, "provider scope not found"))?;
+        let model_ids = validate_additions(&current.catalog.models, &input.model_ids)
+            .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
+        crate::account_control::add_builtin_catalog_models_locked(&state, &scope_id, &model_ids)
+            .map_err(|error| match error {
+                crate::account_control::AccountControlError::RevisionConflict => {
+                    V3ApiError::revision_conflict(&state)
+                }
+                crate::account_control::AccountControlError::Internal(error) => {
+                    V3ApiError::internal(error)
+                }
+                other => V3ApiError::invalid_request_at(&state, other.to_string()),
+            })?;
+        contracts_receipt(&state)
+    };
+    crate::cpa_execution::note_product_apply(&state).await;
+    receipt
 }
 
 fn validate_additions(existing: &[String], input: &[String]) -> Result<Vec<String>, &'static str> {
@@ -171,21 +176,51 @@ pub(super) async fn edit_model(
         enabled: input.enabled,
         upstream_override: None,
     };
-    let _settings = state.settings_update.lock();
-    check_expectation(&state, &input.expectation)?;
-    crate::account_control::edit_builtin_catalog_model_locked(
-        &state,
-        &scope_id,
-        input.original_model_id.as_deref(),
-        model,
-    )
-    .map_err(|error| match error {
-        crate::account_control::AccountControlError::RevisionConflict => {
-            V3ApiError::revision_conflict(&state)
-        }
-        other => V3ApiError::invalid_request_at(&state, other.to_string()),
-    })?;
-    crate::dashboard_v3::provider_contracts_response(&state)
+    let receipt = {
+        let _settings = state.settings_update.lock();
+        check_expectation(&state, &input.expectation)?;
+        crate::account_control::edit_builtin_catalog_model_locked(
+            &state,
+            &scope_id,
+            input.original_model_id.as_deref(),
+            model,
+        )
+        .map_err(|error| match error {
+            crate::account_control::AccountControlError::RevisionConflict => {
+                V3ApiError::revision_conflict(&state)
+            }
+            other => V3ApiError::invalid_request_at(&state, other.to_string()),
+        })?;
+        contracts_receipt(&state)
+    };
+    crate::cpa_execution::note_product_apply(&state).await;
+    receipt
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_CONTRACTS_RECEIPT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Next post-commit contracts read returns an error after the catalog write.
+#[cfg(test)]
+pub(super) fn fail_next_contracts_receipt() {
+    FAIL_NEXT_CONTRACTS_RECEIPT.with(|flag| flag.set(true));
+}
+
+#[cfg(test)]
+pub(super) fn clear_contracts_receipt_failure() {
+    FAIL_NEXT_CONTRACTS_RECEIPT.with(|flag| flag.set(false));
+}
+
+fn contracts_receipt(
+    state: &CoreState,
+) -> Result<Json<crate::dashboard_v3::ProviderContracts>, V3ApiError> {
+    #[cfg(test)]
+    if FAIL_NEXT_CONTRACTS_RECEIPT.with(|flag| flag.replace(false)) {
+        return Err(V3ApiError::internal("provider contracts could not be read"));
+    }
+    crate::dashboard_v3::provider_contracts_response(state)
 }
 
 #[cfg(test)]

@@ -2,6 +2,8 @@
 
 # Model catalog refresh
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
 **Refresh model catalog** on **Providers → Models** updates the saved local directory. It is available for each refreshable sealed Provider and every saved configurable HTTP connection. Refresh is a directory operation, not an inference test: it keeps routing state and quota/cooldown state unchanged.
 
 Newly discovered models are saved enabled with the protocols supported by official documentation or the connection's configured routes. On GOAT's first successful refresh, only plan-included models start enabled; other models in that first snapshot stay off until enabled manually. Models first discovered by later GOAT refreshes use the normal enabled default. Existing saved switches stay in effect. A model with no protocol evidence waits for official documentation; when that evidence later arrives, refresh may add and enable the protocol. Existing mappings, preferred protocol, route overrides, Key grants, and probe observations remain unchanged; refresh may add newly documented protocol declarations. Failed, empty, or stale refreshes preserve the previous directory; a partial response is reported as partial.

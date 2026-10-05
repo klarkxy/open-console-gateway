@@ -13,7 +13,12 @@ use ocg_core::host_router::{
     DASHBOARD_V3_REMOVED_MESSAGE,
 };
 use ocg_core::models::AccountUpdate;
-use ocg_core::state::{CoreStateInner, GatewayHandle};
+use ocg_core::state::CoreStateInner;
+
+#[path = "../owned_cpa.rs"]
+mod owned_cpa;
+
+pub(crate) use owned_cpa::{adopt_owned_plane, refuse_stale_revision};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use std::fs;
@@ -21,15 +26,20 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub(crate) struct ListenerPort {
+    pub port: u16,
+}
+
 pub(crate) struct V3Harness {
     pub state: Arc<CoreStateInner>,
     pub dir: PathBuf,
-    pub handle: GatewayHandle,
+    pub handle: ListenerPort,
     pub client: reqwest::Client,
     pub v2_base: String,
     pub v3_base: String,
     pub v3_tombstone_base: String,
     pub v4_base: String,
+    keep_dir: bool,
     #[allow(dead_code)]
     official_protocol_guard: OfficialProtocolFetchGuard,
 }
@@ -102,23 +112,35 @@ async fn start_state_on(state: Arc<CoreStateInner>, addr: SocketAddr) -> V3Harne
     let handle = gateway::start_gateway_on(state.clone(), addr)
         .await
         .unwrap();
-    let host = format!("http://127.0.0.1:{}", handle.port);
+    let port = owned_cpa::store_listener(&state, handle);
+    let host = format!("http://127.0.0.1:{port}");
     let official_protocol_guard =
         install_official_protocol_fetch_unavailable_for_tests(state.process_generation());
     V3Harness {
         state,
         dir,
-        handle,
+        handle: ListenerPort { port },
         client: loopback_client(),
         v2_base: format!("{host}/dashboard/api"),
         v3_base: format!("{host}/dashboard/api/v4"),
         v3_tombstone_base: format!("{host}/dashboard/api/v3"),
         v4_base: format!("{host}/dashboard/api/v4"),
+        keep_dir: false,
         official_protocol_guard,
     }
 }
 
 impl V3Harness {
+    /// Adopt the compile-selected plane when it is not already accepted.
+    pub(crate) async fn ensure_owned_plane(&self) {
+        owned_cpa::ensure_owned_plane(&self.state).await;
+    }
+
+    /// Start again so a changed upstream URL, proxy list, or route snapshot is applied.
+    pub(crate) async fn reapply_owned_plane(&self) {
+        owned_cpa::adopt_owned_plane(&self.state).await;
+    }
+
     pub(crate) async fn get_json(&self, url: &str) -> (StatusCode, Value) {
         let response = self.client.get(url).send().await.unwrap();
         let status = response.status();
@@ -181,14 +203,24 @@ impl V3Harness {
         self.state.reload_provider_contracts().unwrap();
     }
 
-    pub(crate) fn stop(self) {
-        gateway::stop_gateway(self.handle);
-        let _ = fs::remove_dir_all(self.dir);
-    }
+    /// Destructive cleanup. Drop uses operator Stop and deletes this profile.
+    pub(crate) fn stop(self) {}
 
-    pub(crate) fn close_keep_dir(self) -> PathBuf {
-        let dir = self.dir.clone();
-        gateway::stop_gateway(self.handle);
-        dir
+    /// Host exit. Drop stops the child and listener and keeps the directory.
+    /// Persisted run intent is left for a later reopen.
+    pub(crate) fn close_keep_dir(mut self) -> PathBuf {
+        self.keep_dir = true;
+        self.dir.clone()
+    }
+}
+
+impl Drop for V3Harness {
+    fn drop(&mut self) {
+        if self.keep_dir {
+            owned_cpa::exit_host_preserve_intent(&self.state);
+        } else {
+            owned_cpa::shutdown_owned(&self.state);
+            let _ = fs::remove_dir_all(&self.dir);
+        }
     }
 }

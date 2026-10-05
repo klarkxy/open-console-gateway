@@ -2,6 +2,8 @@
 
 # Dashboard API
 
+> Scope: published dashboard operation reference, plus the current candidate contracts in [Owned CPA control](#owned-cpa-control) and [Owned CPA routing explain](#owned-cpa-routing-explain). Those contracts are in the checked-in schema export. Whole CLI acceptance and runtime acceptance are pending. The native desktop GUI stays postponed. UI steps do not apply to this headless CLI phase. Generation design is in [architecture](../architecture.md).
+
 ## Billing and local credit estimates (V4)
 
 `GET /dashboard/api/v4/accounts/{id}/billing` presents timed quota, cash, or credits together with its observation source and available actions. Here `id` identifies one account (one Key); several accounts in a supplier container remain independent. The read makes no upstream request. Existing official balance and quota refresh endpoints retain their provider-specific observation adapters.
@@ -82,7 +84,7 @@ handlers. Other `/dashboard/api/...` REST paths are tombstoned in
 
 Dashboard V4 JSON is `/dashboard/api/v4`. This is the only live dashboard
 JSON prefix: additive V4 routes plus remounted V3 operational handlers.
-V3 `$defs` do not gain new fields.
+The checked-in schema JSON is the stdout of `export_dashboard_v3_schema` and `export_dashboard_v4_schema`. The CPA fields below, including `migrationRequired`, are in that JSON. This page did not run the export.
 
 V4 reuses V3 session middleware. Its listings return the same `ControlRevision`
 (`expectedRevision` / `processGeneration`) that V3 uses for CAS. V4 mutations are `POST /onboarding/commit`,
@@ -117,7 +119,7 @@ The official-api family — `GET /accounts/{id}/official-api`,
 `GET|POST /providers/{id}/official-api/pricing` — exposes official-API preset
 financial evidence. The GETs are local projections; the CAS-protected POSTs are
 the only network paths. See
-[Official API Financial Evidence](runtime-invariants.md#official-api-financial-evidence).
+[official API implementation](../../crates/ocg-core/src/official_api.rs).
 
 `GET /templates` is the read-only add catalog: the sealed built-ins (CPA
 excluded) plus the `custom-http` manual template. Presets are not part of the
@@ -174,11 +176,11 @@ Merging a package that has no CPA observer key preserves the destination's
 existing management key. It does not emit
 `accounts`, `platformAccounts`, `platformLinks`, `dynamicProviders`, or
 `identities`. Those portable types are transfer-only and are not V4 listing
-DTOs. The supported import range, per-version defaults, and the explicit-routes rejection are the node-transfer payload policy in [runtime invariants](runtime-invariants.md). Local quota recovery is not a portable field: it is omitted from export, retained on an unchanged target Key, and cleared when the Key is replaced.
+DTOs. The supported import range, per-version defaults, and the explicit-routes rejection are the current [account-transfer implementation](../../crates/ocg-core/src/dashboard_v3/account_transfer.rs). Local quota recovery is not a portable field: it is omitted from export, retained on an unchanged target Key, and cleared when the Key is replaced.
 
 `GET /routing/cards` returns one revision-tagged snapshot of `cards`, `destinations` and `credentials`. `PUT /routing/cards` accepts CAS tokens and the complete ordered card list. A card has `id`, `destinationId` and ordered `credentialIds`; every inference credential, including disabled rows, must appear exactly once under its existing destination. Observer credentials are excluded. Layout and flattened routing ranks commit together, and the response returns the complete committed snapshot. Multiple cards share one destination; creating or removing an empty extra card does not create or delete a supplier.
 
-`GET /routing/explain?model=...&clientProtocol=...` is read-only and authenticated. It reuses live alias resolution, route materialization, availability gates, and a clone-based base-policy preview. It never sends, decrypts a Key, probes DNS, writes logs/cooldowns/quota recovery, or advances sticky, round-robin or quota-trial state. The response includes eligible Keys, typed exclusions, effective upstream protocol/global rank, and explicit runtime-only uncertainties.
+`GET /routing/explain?model=...&clientProtocol=...` is the existing authenticated read. Its current candidate contract is [Owned CPA routing explain](#owned-cpa-routing-explain). The checked-in schema JSON includes this read, including `migrationRequired`.
 
 V4 does not treat authorization `unknown` as `valid`. Eligibility is a local
 projection, never upstream health.
@@ -291,9 +293,7 @@ binding edits, and adding a Key to an existing identity use V4.
 
 ## Settings mutation workflow
 
-[![Dashboard V3 settings mutation workflow](../diagrams/dashboard-v3-mutation.visual-check.1440x900.light.png)](https://klarkxy.github.io/open-console-gateway/diagrams/dashboard-v3-mutation/)
 
-[Open the interactive diagram on GitHub Pages](https://klarkxy.github.io/open-console-gateway/diagrams/dashboard-v3-mutation/).
 
 This sequence is specific to CAS-protected Settings writes; discovery,
 diagnostic, and read operations may skip CAS as described above. The client
@@ -307,6 +307,8 @@ listener is running. If rebind fails, the request returns `500` with code
 `internal`. Compensation restores the previous port only when the live config
 still contains the failed committed port, so a later successful write is not
 overwritten.
+
+Successful V4 projection saves call the existing `note_product_apply` after the saved receipt is in hand. Destination PATCH awaits that call once after the outer commit result. Binding PATCH, credential rotation, destination delete, refresh, and builtin removal call it only after the synchronous save succeeds and the settings lock is released. Identity creation and onboarding replay call it when the operation is not a replay. On a binding, `patch_locked` stores the row and bumps the settings revision; the handler then calls `note_product_apply` and does not call `schedule_owned_apply`. Model test keeps one pre-probe `schedule_owned_apply` and has no product-save hook. Quota retry and read routes have no projection hook. `commit_configuration_update` runs the mutation, routing reconciliation, imported-runtime preparation, and temporary-policy compilation while the database transaction is open, commits, then installs the imported runtime and that same compiled snapshot. Compilation does not replace the live snapshot. A compile failure leaves the transaction uncommitted. `publish_temporary_policy` still compiles and installs outside this transaction and is unused after this commit. `note_product_apply` keeps the successful save receipt when apply fails. The one-shot receipt-failure branches are test-only. Source for this boundary is present. The sibling tests were inspected and were not executed for this page. The checked-in schema JSON is that export. Cargo assertions and normal CLI acceptance remain pending.
 
 ## V2 REST tombstone
 
@@ -331,6 +333,84 @@ The `/dashboard/api/v3` prefix is a separate 410 family
 `/dashboard/api/v4` only (`requestV3` and `requestV4` share that base;
 `dashboardV3.listAccounts` uses `GET /account-records`). Inference routes,
 dashboard HTML, and `/dashboard/assets/...` are outside the tombstone.
+
+## Owned CPA control
+
+`GET /dashboard/api/v4/external-integrations/cpa` and an enabled-only `PUT` that does not write return `CpaIntegration`. V4 remounts these V3 DTOs. V3 REST remains the 410 tombstone above. Checked-in `schema/dashboard-api-v3.schema.json` and `schema/dashboard-api-v4.schema.json` are the Rust example export. Source marks the retired request fields with schemars skip. This page does not edit the schema JSON. Whole CLI acceptance and runtime acceptance remain pending.
+
+There is no external CPA product mode and no remote selector. The shared prefix stays `/dashboard/api/v4/external-integrations/cpa`. Old routes and fields are the retained refusal and migration surface. Omitting `target` addresses the owned child. A saved historical row does not select `integration`. Stored historical bytes stay. Explicit migration is required and is not implemented. `OCG_CPA_BASE_URL` is not parsed by this view and is not a product switch.
+
+`legacyMigrationRequired` (`legacy_migration_required`) is a required boolean. It is true only when `cpa_integration()` is `Some`: a stored historical remote CPA row is present. It is redacted. It does not copy the URL, keys, account id, or catalog, and it is not derived from `OCG_CPA_BASE_URL`.
+
+`runtimeUnavailableReason` is owned runtime health only: the existing platform-unsupported text, the execution-record error or `cpa execution is unavailable`, or JSON `null`. The migration sentence and the `OCG_CPA_BASE_URL` sentence are not values of this field. A stored row can set `legacyMigrationRequired` while `runtimeUnavailableReason` is null, and the reverse is possible. The two fields do not imply each other. `CpaRuntime` does not gain `legacyMigrationRequired`. Its `unavailableReason` uses the same health rule. `installed`, `running`, and `owned` stay the execution-report values. Historical data does not turn an installed or running child into unavailable, and it does not turn an absent child into installed or running.
+
+Owned lifecycle on `CpaIntegration`:
+
+| Field | Value |
+| --- | --- |
+| `configured` | True only when an owned managed record exists or the execution report says the owned executable is installed. A historical row alone leaves it false. |
+| `runtimeOwned` | Same predicate as `configured`. |
+| `runtimeRunning` | `ExecutionReport.running`. |
+| `runtimeSupported` | `cpa_runtime_supported()`. |
+| `installedVersion` | Execution report `current_version` when that artifact is installed, otherwise the owned managed record's `current_version`, otherwise null. |
+| `latestVersion` | Execution report `latest_version` (`v8.0.10` from the current report). |
+| `updateAvailable` | Execution report flag. |
+| `currentOperation` | Execution report `current_operation`. |
+| `baseUrl` | Owned loopback from the execution report port when that port is set, otherwise `http://127.0.0.1:{managed.port}` when a managed record exists, otherwise `""`. The saved remote URL, `OCG_CPA_BASE_URL`, and `DEFAULT_CPA_BASE_URL` are absent from this value. |
+| `baseUrlReadOnly` | Always true. |
+
+Retired singleton outputs stay parseable and stay empty or false. They do not advertise an external account or catalog:
+
+| Field | Fixed value | Reason |
+| --- | --- | --- |
+| `managementKeyConfigured` | `false` | The historical management cipher is not an owned execution source. |
+| `inferenceKeyConfigured` | `false` | The historical inference cipher is not an owned execution source. |
+| `enabled` | `false` | Owned enablement is per native credential, not this singleton. |
+| `accountId` | `null` | The historical `CPA_ACCOUNT_ID` is not the owned account. |
+| `modelCount` | `0` | Owned catalogs are per destination in `destination_models`. This integer cannot name one canonical owned-native catalog. The global `provider_model_catalogs` CPA row is not copied here. |
+| `modelsRefreshedAt` | `null` | `destination_models` has no refreshed-at column, and one timestamp cannot cover destination-scoped catalogs. |
+
+`revision` and `processGeneration` are unchanged. A GET does not bump revision and does not write the historical row, account, catalog, or destination bytes.
+
+Requests stay parseable and are refused before I/O and before any write. The candidate schema stops advertising the retired inputs.
+
+| Type | Excluded from schema | Still accepted by serde |
+| --- | --- | --- |
+| `CpaControlTarget` | variant `integration` | `"integration"` |
+| `CpaIntegrationUpdate` | `baseUrl`, `managementKey`, `inferenceKey` | those three properties |
+| `CpaTestRequest` | `baseUrl`, `managementKey`, `inferenceKey` | those three properties |
+
+The candidate `CpaControlTarget` schema enum is `["owned"]`. `target` on `CpaIntegrationUpdate`, `CpaTestRequest`, and `CpaRuntimeInstall` still references that enum. Refusal strings, still before I/O:
+
+- Explicit `target: "owned"` plus any of `baseUrl`, `managementKey`, or `inferenceKey`: `owned CPA control does not accept a remote base URL or key`.
+- Explicit `target: "integration"`, or any of those three fields with `target` omitted: `Stored remote CPA configuration requires explicit migration and was left unchanged` when a historical row exists, otherwise `Remote CPA is not a target in this product`.
+- `DELETE` of the integration uses the same sentences. The stored bytes stay.
+
+`CpaIntegrationUpdate.enabled` stays in the schema. An enabled-only PUT returns the owned view and does not rewrite the historical row or account. The response `enabled` is false.
+
+`OAuthStatusQuery` and `CpaTargetQuery` are serde query types. They are not `JsonSchema` types, so they are absent from the generated schema. `target=integration` on those queries still deserializes and is refused before I/O. URL and redaction checks on any path that still builds a client are unchanged. Legacy persistence is not deleted. User-readable comments on `CpaIntegration`, `CpaControlTarget`, `CpaIntegrationUpdate`, and `CpaTestRequest` call these retired compatibility fields.
+
+## Owned CPA routing explain
+
+Existing `GET /dashboard/api/v4/routing/explain` only. The handler makes one call to `explain_owned_routes(state, public_model, callable_protocol, now)`. `cpa_execution.rs` contains `pub(crate) mod explain`. That facade is the stable read. This page does not describe the legacy selector or materializer as current execution truth. `contract_schema()` includes `RoutingExplanation`, and the checked-in schema JSON is the example export of that contract. `dashboard_v4/types/tests.rs` builds `RoutingExplanation` and `RoutingResolvedMapping` with mapping `destinationId`, `adapterKind`, and `migration_required`. It asserts wire `migrationRequired` false, and it deserializes an older payload that omits that key to false. It also covers exclusion `authority: null`, `desiredRoutes: []`, and the `ownedProjection` fields below. This page did not execute that test and did not run the export. Handler tests that seed a database and call `explain` are not live Ready proof. `verified_ready` cannot be set from a unit test. The read does not decrypt, admit, or write, and it does not call a selector, sticky mutation, `OCG_CPA_BASE_URL`, a materializer, or an outbound client.
+
+The request is unchanged. `model` is required after trim. `clientProtocol` defaults to `chat_completions`. Accepted values remain `chat_completions`, `responses`, `messages`, and `gemini`. Any other value is the existing invalid request. Public Gemini is not a fourth callable protocol: the facade receives `chat_completions`, and the response `clientProtocol` stays `gemini`. Authenticated V4, `ControlRevision`, and process generation stay on the response. The adapter does not take `settings_update`. The facade captures settings revision, process generation, pricing revision, routing mode, and `conversationSticky` under the existing `settings_update` guard, and the adapter formats those captured values. `routingMode` and `conversationSticky` are that captured config, displayed only. `conversationBinding` is `not_evaluated`. `expectedBasePolicyFirstPick` is null in every routing mode. Public eligibility also requires a selected routeable mapping with the same destination, provider, and actual upstream. The public model is not that key. Drift joins the existing `state_changed` path. This capture adds no public wire field. Source for the capture is present. Cargo and normal CLI acceptance remain pending.
+
+Facade `QueryResolution` is the only alias fact. `known == false`, `ambiguous == true`, or `kind == None` is the existing invalid request `model is unknown or ambiguous`. A known row with `routeable == false` is a successful explanation. Disabled, draft, and validation-only mappings stay in `resolved.mappings`. `resolved.kind` and `resolved.alias` copy `QueryResolutionKind` and `alias`. Each mapping copies `destinationId`, `providerId`, `upstreamModel`, `routeable`, `adapterKind`, and `migrationRequired`. `RoutingResolvedMapping` has `destinationId`, `adapterKind`, and `migration_required`. The wire name of the last field is `migrationRequired`. `#[serde(default)]` makes an omitted older payload false, and new responses emit the field.
+
+Canonical class is `Alias` or `PinnedRaw`. A raw-shaped request matches the stored upstream spelling exactly. A case variant is unknown. An exact raw spelling wins over a differently spelled canonical or public alias before identities collapse. The request that is itself the canonical alias stays an alias. Two distinct raw provider identities stay ambiguous. A known catalog row with no matching applied route stays known and `routeable == false`. A desired-only row stays known and nonrouteable. An applied validation-only row stays nonrouteable even when the desired plane is not validation-only. Remote placement sets `migration_required` and forces `routeable == false`. `routeable` is current applied configuration eligibility after quota and placement. It is not destination enablement, catalog enablement, onboarding draft, or the union of the desired and applied `validation_only` flags.
+
+`QueryMapping.migration_required` is copied onto the redacted public `RoutingResolvedMapping`, including a catalog-only historical remote row that has no `RouteFact`. The source test for that row expects `migrationRequired` true, `routeable` false, empty eligible, exclusion, and desired lists, and a redacted remote URL. This page did not execute that test. Cargo and normal CLI acceptance remain pending. The owned-native destination marker `cpa-owned-native` is not a provider id. Provider ids come from native credential storage (`provider_id` `cpa`). A second real provider that resolves the same name stays ambiguous. `ValidationUse` is gone.
+
+A route is public-eligible only when all of these hold: plane is applied; `client_configuration_eligible`; posture is client and `validation_only` is false; `runtime.owned_running`; `origin_verified`, `verified_ready`, `policy_ready`, `pin_capabilities_ready`, and `tuple_aligned`; not `state_changed`, `stopped`, `poisoned`, `policy_malformed`, or `unavailable`; not `known_restriction_blocks` and not `trial_pending`; quota is not `malformed`; not `migration_required` and historical placement is not `remote`. The static flag alone is not a send promise. Eligible rows still carry `callerPending`, `secretRecheckPending`, and `sendPending`. Rank is a field. List order is facade order. There is no SDK next credential. Missing quota evidence is `unknown`. It is not an unlimited quota and it is not, by itself, a public-eligible block. A known applicable reset blocks. An unknown reset is `trialPending` and is not a consumed trial. Expired evidence stays visible with `applicable: false`. A malformed document is unavailable, not an empty open list. Desired-only, validation-only, current revoked, stopped, untrusted, state-changed, and historical-migration rows stay out of `eligible`.
+
+`desiredRoutes` is the desired plane only. It is not merged into `eligible` or `exclusions`. `exclusions` are applied routes that are not public-eligible, in facade order. Each wire code is one entry. Every entry carries the same `authority` object, including precise quota, even when the route is absent from desired. `RoutingExclusion` gains `authority: RoutingRouteAuthority | null`. This handler emits an object. Null remains valid for an older payload that has no structured proof.
+
+`RoutingRouteAuthority` carries plane, credential id, route credential version, current database version, provider, binding, auth id, registration epoch, routing rank, destination id, legacy account id, account label, destination label, public model, upstream model, spelling (`empty`, `same`, or `distinct_upstream`), protocol, endpoint id, origin, endpoint fingerprint, validation only, channel, adapter kind, material, posture, configuration exclusion codes, enabled and draft flags, setup step, native provider, native mode, capability listed, grants cover, native operations, `callerPending`, `secretRecheckPending`, `sendPending`, quota, `knownRestrictionBlocks`, `trialPending`, `clientConfigurationEligible`, `migrationRequired`, and historical placement. The object omits material fingerprint, cipher, hop token, policy token, auth file path, and private relative path. A public route endpoint fingerprint is included. `RoutingNativePin` is protocol, endpoint id, origin, endpoint fingerprint, and HTTP method. `RoutingGrantDisposition` is `granted` with pins, `not_granted`, `local_only`, or `unavailable`. `RoutingOperationFact` is one generation kind plus that disposition. `RoutingQuotaFact.state` is `unknown`, `evidence`, or `malformed`. Evidence copies subject identity, optional public model, window, source, observed time, observation id, reset (`known`, `unknown_reset`, or `expired`), reset time, and `applicable`. Recovery leases and attempt ids are not copied. Channel is `go` or `free` only. Adapter kind stays the destination `AdapterKind` string and is not derived from the channel.
+
+`ownedProjection` copies `desired` and `applied` generation, revision, and digest; `applyStatus`, `desiredRunning`, `runtimeChildGeneration`; `unavailable`, `stateChanged`, `stopped`, `poisoned`; `originVerified`, `verifiedReady`, `policyReady`, `policyMalformed`, `tupleAligned`, `pinCapabilitiesReady`; `ownedRunningBefore`, `ownedRunningAfter`, and `ownedRunning`. `ownedRunning` is true only when both local observations saw the child. `verifiedReady` is the captured plane bit. `applyStatus: applied` does not imply either one. A disagreement between the two running observations does not set `stateChanged`.
+
+Existing `RoutingExclusionCode` and `RuntimeOnlyUncertainty` variants stay, with their current wire spellings, so older payloads still parse. This handler does not emit `mapping_protocol_incompatible`, `credential_disabled`, `binding_disabled`, `model_scope_denied`, `goat_not_eligible`, `goat_unverified`, `candidate_materialization_failed`, `production_route_unsupported`, `account_disabled`, `setup_not_ready`, `channel_mismatch`, `credential_missing`, `auth_error`, `cooling_down`, `free_channel_unavailable`, `quota_waiting`, `quota_due`, or `quota_probing`. Appended exclusion codes are `identity`, `rebound`, `version`, `setup_blocked`, `disabled`, `draft`, `scope`, `model`, `protocol`, `capability`, `native_presence`, `native_mode`, `native_targets`, `not_granted`, `material`, `configuration_unavailable`, `validation_only`, `quota_known_reset`, `quota_unknown_reset`, `quota_malformed`, `migration_required`, `state_changed`, `stopped`, `untrusted`, `owned_not_running`, `origin_unverified`, `not_ready`, `policy_not_ready`, `pin_capabilities`, `tuple_unaligned`, and `policy_malformed`. Appended uncertainties emitted from the facade or a real runtime bit are `cpa_selection_not_evaluated` and `quota_trial_not_evaluated`. Also emitted when the fact is true: `conversation_binding_not_evaluated`; `credential_recheck_pending` when a returned route has `secretRecheckPending`; `state_changed_after_snapshot` when `runtime.state_changed`. `retry_exclusions_not_applied` and `upstream_result_unknown` stay on the enum and are not emitted.
 
 ---
 

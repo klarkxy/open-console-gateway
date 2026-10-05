@@ -2,6 +2,8 @@
 
 # Release Artifacts
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
 Open Console Gateway ships desktop installers for three platforms, a CLI archive for each,
 and a multi-arch container image.
 

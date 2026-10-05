@@ -1,0 +1,78 @@
+diff --git a/diff-a/internal/runtime/executor/helps/utls_client.go b/diff-b/internal/runtime/executor/helps/utls_client.go
+index 1111111..2222222 100644
+--- a/diff-a/internal/runtime/executor/helps/utls_client.go
++++ b/diff-b/internal/runtime/executor/helps/utls_client.go
+@@ -7,6 +7,7 @@ import (
+ 	"io"
+ 	"net"
+ 	"net/http"
++	"net/url"
+ 	"strings"
+ 	"sync"
+ 	"time"
+@@ -416,15 +417,59 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+ 		standardTransport = ctxRoundTripper
+ 	}
+ 
+-	client := &http.Client{
+-		Transport: &fallbackRoundTripper{
+-			anthropic: anthropicRT,
+-			chrome:    chromeRT,
+-			fallback:  standardTransport,
+-		},
++	transport := http.RoundTripper(&fallbackRoundTripper{
++		anthropic: anthropicRT,
++		chrome:    chromeRT,
++		fallback:  standardTransport,
++	})
++	if host := loopbackEndpointHost(auth); host != "" {
++		transport = &loopbackEndpointGuard{host: host, next: transport}
+ 	}
++	client := &http.Client{Transport: transport, CheckRedirect: RefuseUnmanagedRedirect}
+ 	if timeout > 0 {
+ 		client.Timeout = timeout
+ 	}
+ 	return client
+ }
++
++// loopbackEndpointGuard refuses a dial when a loopback base URL was configured
++// and the request host is something else. Official hosts stay reachable when
++// the auth has no loopback endpoint.
++type loopbackEndpointGuard struct {
++	host string
++	next http.RoundTripper
++}
++
++func (g *loopbackEndpointGuard) RoundTrip(req *http.Request) (*http.Response, error) {
++	if g == nil || g.next == nil || req == nil || req.URL == nil {
++		return nil, fmt.Errorf("blocked unknown host")
++	}
++	if g.host != "" && !strings.EqualFold(req.URL.Hostname(), g.host) {
++		return nil, fmt.Errorf("blocked unknown host %s", req.URL.Hostname())
++	}
++	return g.next.RoundTrip(req)
++}
++
++func loopbackEndpointHost(auth *cliproxyauth.Auth) string {
++	if auth == nil {
++		return ""
++	}
++	raw := ""
++	if auth.Attributes != nil {
++		raw = strings.TrimSpace(auth.Attributes["base_url"])
++	}
++	if raw == "" && auth.Metadata != nil {
++		if value, ok := auth.Metadata["base_url"].(string); ok {
++			raw = strings.TrimSpace(value)
++		}
++	}
++	parsed, err := url.Parse(raw)
++	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
++		return ""
++	}
++	host := parsed.Hostname()
++	if host == "127.0.0.1" || host == "localhost" || host == "::1" {
++		return host
++	}
++	return ""
++}

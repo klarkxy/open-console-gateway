@@ -2,7 +2,9 @@
 
 # 本机 BYOK 应用
 
-应用页包含 Codex、Kimi Code、MiniMax Code 和 ZCode 四个固定的原生适配。这是独立自定义供应商配置，与旧版 [Codex 方案](codex-integration-proposal.zh-CN.md) 中的原生登录代理不同。DSH 保留插件接入流程。
+> 适用范围：本页保留当前实现或 OCG2 已发布版本的操作参考，不定义 OCG3 新架构。CPA 底层迁移目标见[架构](../architecture.zh-CN.md)；其中界面步骤不适用于当前 CLI 阶段。
+
+应用页包含 Codex、Kimi Code、MiniMax Code 和 ZCode 四个固定的原生适配。这是独立自定义供应商配置，与代理客户端原生登录的方式不同。DSH 保留插件接入流程。
 
 已鉴权的 V4 接口是 `GET|POST|DELETE /dashboard/api/v4/applications/byok/{client}` 与 `POST .../{client}/recover`。写入需要当前 revision、process generation 和检查得到的文件指纹。配置接口不再接受 Key、模型选择、元数据覆盖或默认模型选择。控制层持有设置锁，从带鉴权 `/v1/models` 使用的同一发布器导出全部精确公开名称，拒绝空目录，然后创建或复用名称为 `codex`、`kimi-code`、`minimax-code` 或 `zcode` 的已启用普通 Key。DSH 默认使用 `dsh`；可选 `keyId` 保留旧 API 调用兼容性。创建 Key 后立即推进 revision，即使后续原生写入失败也如此。GET 不创建 Key，也不构建模型选择目录。移除和恢复不依赖原 Key 或模型仍然存在。原生 CLI 与 Tauri 注册共享 Host；不含 `dsh-local-host` 的构建返回 `unsupported_runtime`。
 

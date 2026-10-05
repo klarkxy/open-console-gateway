@@ -10,7 +10,7 @@ use crate::kernel::pricing::PricingLimits;
 use crate::models::AppConfig;
 use crate::provider::{
     COMMAND_CODE_GOAT_QUOTA_5H, COMMAND_CODE_GOAT_QUOTA_MONTH, COMMAND_CODE_GOAT_QUOTA_WEEK,
-    COMMAND_CODE_GOAT_USAGE_URL,
+    COMMAND_CODE_GOAT_USAGE_URL, COMMAND_CODE_PROVIDER_ID,
 };
 use crate::usage_http::{
     UsageHttpError, WindowOutOfRange, bounded_resets_in_minutes, classify_transport, read_ok_body,
@@ -140,6 +140,30 @@ impl From<WindowOutOfRange> for CommandCodeUsageError {
     }
 }
 
+/// Keep a debug override URL. Rewrite only [`COMMAND_CODE_GOAT_USAGE_URL`].
+/// A rewrite error does not send.
+pub(crate) fn resolve_command_code_usage_endpoint(
+    selected: &str,
+) -> Result<String, CommandCodeUsageError> {
+    resolve_command_code_usage_endpoint_with(selected, |canonical| {
+        crate::cpa_test_endpoints::rewrite_url(COMMAND_CODE_PROVIDER_ID, canonical)
+    })
+}
+
+pub(crate) fn resolve_command_code_usage_endpoint_with(
+    selected: &str,
+    rewrite: impl FnOnce(&str) -> Result<Option<String>, String>,
+) -> Result<String, CommandCodeUsageError> {
+    if selected != COMMAND_CODE_GOAT_USAGE_URL {
+        return Ok(selected.to_string());
+    }
+    match rewrite(selected) {
+        Ok(Some(url)) => Ok(url),
+        Ok(None) => Ok(COMMAND_CODE_GOAT_USAGE_URL.to_string()),
+        Err(_) => Err(CommandCodeUsageError::Network),
+    }
+}
+
 pub async fn fetch_command_code_usage(
     config: &AppConfig,
     api_key: &str,
@@ -158,7 +182,8 @@ pub async fn fetch_command_code_usage(
         let _ = process_generation;
         COMMAND_CODE_GOAT_USAGE_URL
     };
-    fetch_command_code_usage_from(config, api_key, endpoint, now).await
+    let endpoint = resolve_command_code_usage_endpoint(endpoint)?;
+    fetch_command_code_usage_from(config, api_key, &endpoint, now).await
 }
 
 pub(crate) async fn fetch_command_code_usage_from(

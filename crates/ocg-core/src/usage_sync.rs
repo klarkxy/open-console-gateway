@@ -12,6 +12,7 @@ pub(crate) use provider_refresh::{
     CalibrationOutcome, ControlRevision, PROVIDER_REFRESH_CONCURRENCY, ProviderUsageRefreshGate,
 };
 
+pub use crate::cpa_quota::{OfficialPlanCommit, OfficialPlanHook, QuotaFence};
 use crate::go_usage::{GoUsageError, GoUsageSnapshot};
 use crate::kernel::pricing::PricingLimits;
 use crate::models::{Account, AppConfig, ProviderUsageSyncState, UsageWindow};
@@ -251,6 +252,20 @@ pub trait UsageSyncStore {
     ) -> anyhow::Result<()> {
         Ok(())
     }
+    /// Pool ids captured with the pre-HTTP fence. The default is empty so a
+    /// host that has not implemented the hook does not pretend to know pools.
+    fn quota_pool_ids(
+        &self,
+        _credential_id: &str,
+        _legacy_account_id: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+    /// `Unhooked` keeps the legacy quota-recovery reconcile. A host that
+    /// implements this must not reconcile after `Applied`.
+    fn apply_official_plan_observation(&self, _commit: &OfficialPlanCommit) -> OfficialPlanHook {
+        OfficialPlanHook::Unhooked
+    }
     fn list_accounts(&self) -> anyhow::Result<Vec<Account>>;
     fn get_account(&self, account_id: &str) -> anyhow::Result<Option<Account>>;
     fn account_usage_sync_state(
@@ -338,7 +353,7 @@ struct InflightEntry {
 
 /// Process-wide gates for concurrency-1, in-flight dedupe, and wakeups.
 pub struct UsageSyncRuntime {
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "ollama-cloud-loopback-test"))]
     reactive_enabled_for_test: AtomicBool,
     global: AsyncMutex<()>,
     inflight: AsyncMutex<HashMap<String, InflightEntry>>,
@@ -350,8 +365,11 @@ pub struct UsageSyncRuntime {
     clock: ParkingMutex<Option<ClockFn>>,
     /// Optional injectable jitter (0.0..1.0) for tests.
     jitter: ParkingMutex<Option<JitterFn>>,
-    /// Optional fetch seam for tests. Production uses `go_usage::fetch_go_usage`.
+    /// Optional fetch seam for tests. Production uses `go_usage::fetch_accepted`.
     fetch: ParkingMutex<Option<FetchFn>>,
+    /// Official response bytes paired with a test fetch. Production retains
+    /// the body from [`crate::go_usage::fetch_accepted`] instead.
+    official_body: ParkingMutex<Option<Vec<u8>>>,
     /// Optional hook run after an in-flight future resolves and before
     /// generation-scoped cleanup (tests only).
     before_inflight_cleanup: ParkingMutex<Option<CleanupHook>>,
@@ -366,7 +384,7 @@ impl Default for UsageSyncRuntime {
 impl UsageSyncRuntime {
     pub fn new() -> Self {
         Self {
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, feature = "ollama-cloud-loopback-test"))]
             reactive_enabled_for_test: AtomicBool::new(true),
             global: AsyncMutex::new(()),
             inflight: AsyncMutex::new(HashMap::new()),
@@ -376,23 +394,24 @@ impl UsageSyncRuntime {
             clock: ParkingMutex::new(None),
             jitter: ParkingMutex::new(None),
             fetch: ParkingMutex::new(None),
+            official_body: ParkingMutex::new(None),
             before_inflight_cleanup: ParkingMutex::new(None),
         }
     }
 
     /// Keep inference-only loopback tests from calling optional official APIs.
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "ollama-cloud-loopback-test"))]
     pub fn set_reactive_refresh_enabled_for_test(&self, enabled: bool) {
         self.reactive_enabled_for_test
             .store(enabled, Ordering::Relaxed);
     }
 
     pub(crate) fn reactive_refresh_enabled(&self) -> bool {
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "ollama-cloud-loopback-test"))]
         {
             self.reactive_enabled_for_test.load(Ordering::Relaxed)
         }
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(any(debug_assertions, feature = "ollama-cloud-loopback-test")))]
         {
             true
         }
@@ -413,6 +432,11 @@ impl UsageSyncRuntime {
         *self.fetch.lock() = Some(Arc::new(fetch));
     }
 
+    /// Bytes the test fetch stands in for. Cleared with the other seams.
+    pub fn set_official_body_for_test(&self, body: Vec<u8>) {
+        *self.official_body.lock() = Some(body);
+    }
+
     pub fn set_before_inflight_cleanup_for_test(
         &self,
         hook: impl Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
@@ -421,12 +445,13 @@ impl UsageSyncRuntime {
     }
 
     pub fn clear_test_seams(&self) {
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "ollama-cloud-loopback-test"))]
         self.reactive_enabled_for_test
             .store(true, Ordering::Relaxed);
         *self.clock.lock() = None;
         *self.jitter.lock() = None;
         *self.fetch.lock() = None;
+        *self.official_body.lock() = None;
         *self.before_inflight_cleanup.lock() = None;
     }
 
@@ -1049,6 +1074,28 @@ async fn execute_official_usage_refresh(
             "disabled accounts are not auto-synced",
         ));
     }
+    let fence = if let Some(identity) = identity.as_ref() {
+        match state.with_sync_store(|store| {
+            store.quota_pool_ids(&identity.credential.credential_id, &identity.credential.id)
+        }) {
+            Ok(pools) => Some(crate::cpa_quota::fence_with_pools(
+                &identity.credential,
+                &pools,
+            )),
+            Err(error) => {
+                record_current_attempt_failure(
+                    state,
+                    account_id,
+                    now,
+                    authorization,
+                    Some(identity),
+                )?;
+                return Err(OfficialUsageRefreshError::Internal(error.to_string()));
+            }
+        }
+    } else {
+        None
+    };
     let key_cipher = account.key_cipher.clone();
     let plaintext = match state.decrypt_account_key(&key_cipher) {
         Ok(key) => key,
@@ -1064,28 +1111,44 @@ async fn execute_official_usage_refresh(
         }
     };
 
-    let snapshot = {
+    let (snapshot, body, fetched_at) = {
         let fetch = state.usage_runtime().fetch.lock().clone();
-        let result = if let Some(fetch) = fetch {
-            fetch(config.clone(), plaintext.clone()).await
+        if let Some(fetch) = fetch {
+            let result = fetch(config.clone(), plaintext.clone()).await;
+            drop(plaintext);
+            match result {
+                Ok(snapshot) => {
+                    let body = state.usage_runtime().official_body.lock().clone();
+                    let fetched_at = state.usage_runtime().now();
+                    (snapshot, body, fetched_at)
+                }
+                Err(error) => {
+                    record_current_attempt_failure(
+                        state,
+                        account_id,
+                        now,
+                        authorization,
+                        identity.as_ref(),
+                    )?;
+                    return Err(OfficialUsageRefreshError::Upstream(error));
+                }
+            }
         } else {
-            crate::go_usage::fetch_go_usage(&config, &plaintext).await
-        };
-        drop(plaintext);
-        result
-    };
-
-    let snapshot = match snapshot {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            record_current_attempt_failure(
-                state,
-                account_id,
-                now,
-                authorization,
-                identity.as_ref(),
-            )?;
-            return Err(OfficialUsageRefreshError::Upstream(error));
+            let result = crate::go_usage::fetch_accepted(&config, &plaintext).await;
+            drop(plaintext);
+            match result {
+                Ok(accepted) => (accepted.snapshot, Some(accepted.body), accepted.fetched_at),
+                Err(error) => {
+                    record_current_attempt_failure(
+                        state,
+                        account_id,
+                        now,
+                        authorization,
+                        identity.as_ref(),
+                    )?;
+                    return Err(OfficialUsageRefreshError::Upstream(error));
+                }
+            }
         }
     };
 
@@ -1112,12 +1175,16 @@ async fn execute_official_usage_refresh(
         compute_next_after_success(now, active, snapshot.earliest_resets_in_minutes, jitter);
     let next_allowed = now + MANUAL_THROTTLE;
     let usage = {
-        let committed: anyhow::Result<Option<UsageWindow>> = state
-            .with_authorized_sync_store(authorization, |store| {
+        enum PlanSave {
+            Saved(UsageWindow),
+            Conflict,
+        }
+        let committed = state
+            .with_authorized_sync_store(authorization, |store| -> anyhow::Result<PlanSave> {
                 if let Some(identity) = &identity
                     && !store.usage_identity_is_current(identity)?
                 {
-                    return Ok(None);
+                    return Ok(PlanSave::Conflict);
                 }
                 let usage = store.commit_official_usage_sync_success(
                     account_id,
@@ -1130,19 +1197,46 @@ async fn execute_official_usage_refresh(
                         mark_expedited: trigger == UsageSyncTrigger::Expedited,
                     },
                 )?;
-                if usage.is_some() {
+                let Some(usage) = usage else {
+                    return Ok(PlanSave::Conflict);
+                };
+                if let (Some(fence), Some(body)) = (fence.as_ref(), body.as_ref()) {
+                    let plan = crate::cpa_quota::OfficialPlanCommit {
+                        fence: fence.clone(),
+                        observation_id: uuid::Uuid::new_v4().to_string(),
+                        fetched_at,
+                        body: body.clone(),
+                        provider_id: fence.provider_id.clone(),
+                    };
+                    match store.apply_official_plan_observation(&plan) {
+                        crate::cpa_quota::OfficialPlanHook::Unhooked => {
+                            store.reconcile_authoritative_usage(
+                                account_id,
+                                &snapshot,
+                                quota_observed_at,
+                            )?;
+                        }
+                        crate::cpa_quota::OfficialPlanHook::Applied => {}
+                        crate::cpa_quota::OfficialPlanHook::Stale => {
+                            return Ok(PlanSave::Conflict);
+                        }
+                        crate::cpa_quota::OfficialPlanHook::Rejected => {
+                            anyhow::bail!("official quota evidence was not accepted");
+                        }
+                    }
+                } else {
                     store.reconcile_authoritative_usage(
                         account_id,
                         &snapshot,
                         quota_observed_at,
                     )?;
                 }
-                Ok(usage)
+                Ok(PlanSave::Saved(usage))
             })
             .map_err(|_| commit_authorization_conflict())?;
         match committed {
-            Ok(Some(usage)) => usage,
-            Ok(None) => {
+            Ok(PlanSave::Saved(usage)) => usage,
+            Ok(PlanSave::Conflict) => {
                 record_current_attempt_failure(
                     state,
                     account_id,

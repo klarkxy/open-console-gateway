@@ -2680,6 +2680,7 @@ async fn listed_gateway_model_ids(harness: &V3Harness) -> Vec<String> {
 }
 
 async fn chat_completion(harness: &V3Harness, model: &str) -> (StatusCode, String) {
+    harness.ensure_owned_plane().await;
     let response = harness
         .client
         .post(format!(
@@ -2910,6 +2911,7 @@ async fn explicit_draft_with_key_and_models_stays_nonsend() {
     assert_eq!(dynamic_provider_count(&harness), 1);
     let account_id = result["accountId"].as_str().expect("draft account id");
     harness.enable_account(account_id);
+    harness.reapply_owned_plane().await;
     let listed_live = listed_gateway_model_ids(&harness).await;
     assert!(
         listed_live.iter().any(|id| id == public_model),
@@ -3387,34 +3389,65 @@ async fn cpa_catalog_selection_is_local_and_cas_protected() {
     )
     .await;
     assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{rejected}");
+    assert!(
+        rejected
+            .to_string()
+            .contains("dedicated CPA catalog is retired and cannot be changed"),
+        "{rejected}"
+    );
 
+    let refreshed_at = Utc::now();
+    let seeded = vec![
+        ocg_core::db::CpaCatalogModel {
+            id: "gpt-5".into(),
+            owned_by: Some("openai".into()),
+            enabled: true,
+        },
+        ocg_core::db::CpaCatalogModel {
+            id: "claude".into(),
+            owned_by: Some("anthropic".into()),
+            enabled: false,
+        },
+    ];
     harness
         .state
-        .activate_cpa_model_catalog(
-            vec![
-                ocg_core::db::CpaCatalogModel {
-                    id: "gpt-5".into(),
-                    owned_by: Some("openai".into()),
-                    enabled: true,
-                },
-                ocg_core::db::CpaCatalogModel {
-                    id: "claude".into(),
-                    owned_by: Some("anthropic".into()),
-                    enabled: false,
-                },
-            ],
-            "http://127.0.0.1:8317",
-            chrono::Utc::now(),
-        )
+        .db
+        .lock()
+        .replace_cpa_model_catalog(&seeded, "http://127.0.0.1:8317", refreshed_at)
         .unwrap();
+    let stored = harness.state.db.lock().cpa_model_catalog().unwrap();
+    let revision = harness.state.settings_revision();
+    let generation = harness.state.process_generation();
+    let refused = harness
+        .state
+        .activate_cpa_model_catalog(seeded, "http://127.0.0.1:8317", refreshed_at)
+        .expect_err("retired catalog activation must fail before any remote call");
+    assert!(
+        refused
+            .to_string()
+            .contains("dedicated CPA catalog is retired and cannot be changed"),
+        "{refused}"
+    );
+    assert_eq!(harness.state.db.lock().cpa_model_catalog().unwrap(), stored);
+    assert!(harness.state.cpa_model_catalog().is_empty());
+    assert_eq!(harness.state.settings_revision(), revision);
+    assert_eq!(harness.state.process_generation(), generation);
 
     let (status, listed) = send_v4(&harness, Method::GET, "/cpa/models", &Value::Null).await;
     assert_eq!(status, StatusCode::OK, "{listed}");
     assert_eq!(listed["models"][0]["id"], "gpt-5");
-    assert_eq!(listed["models"][0]["enabled"], true);
+    assert_eq!(listed["models"][0]["ownedBy"], "openai");
+    assert_eq!(listed["models"][0]["enabled"], false);
     assert_eq!(listed["models"][1]["id"], "claude");
+    assert_eq!(listed["models"][1]["ownedBy"], "anthropic");
     assert_eq!(listed["models"][1]["enabled"], false);
-    assert_eq!(harness.state.cpa_model_catalog().as_ref(), &["gpt-5"]);
+    assert_eq!(
+        listed["sourceUrl"],
+        json!("http://127.0.0.1:8317"),
+        "the stored historical URL stays on the nonroutable read"
+    );
+    assert!(harness.state.cpa_model_catalog().is_empty());
+    assert_eq!(harness.state.db.lock().cpa_model_catalog().unwrap(), stored);
 
     let (status, unknown) = send_v4(
         &harness,
@@ -3423,7 +3456,13 @@ async fn cpa_catalog_selection_is_local_and_cas_protected() {
         &cas(&harness, json!({ "enabledIds": ["missing"] })),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{unknown}");
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{unknown}");
+    assert!(
+        unknown
+            .to_string()
+            .contains("dedicated CPA catalog is retired and cannot be changed"),
+        "{unknown}"
+    );
 
     let (status, updated) = send_v4(
         &harness,
@@ -3432,10 +3471,17 @@ async fn cpa_catalog_selection_is_local_and_cas_protected() {
         &cas(&harness, json!({ "enabledIds": ["claude"] })),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{updated}");
-    assert_eq!(updated["models"][0]["enabled"], false);
-    assert_eq!(updated["models"][1]["enabled"], true);
-    assert_eq!(harness.state.cpa_model_catalog().as_ref(), &["claude"]);
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{updated}");
+    assert!(
+        updated
+            .to_string()
+            .contains("dedicated CPA catalog is retired and cannot be changed"),
+        "{updated}"
+    );
+    assert_eq!(harness.state.db.lock().cpa_model_catalog().unwrap(), stored);
+    assert!(harness.state.cpa_model_catalog().is_empty());
+    assert_eq!(harness.state.settings_revision(), revision);
+    assert_eq!(harness.state.process_generation(), generation);
     harness.stop();
 }
 

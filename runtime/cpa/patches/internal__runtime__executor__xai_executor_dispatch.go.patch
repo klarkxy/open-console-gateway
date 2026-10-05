@@ -1,0 +1,95 @@
+diff --git a/diff-a/internal/runtime/executor/xai_executor.go b/diff-b/internal/runtime/executor/xai_executor.go
+index 1111111..2222222 100644
+--- a/diff-a/internal/runtime/executor/xai_executor.go
++++ b/diff-b/internal/runtime/executor/xai_executor.go
+@@ -109,7 +109,12 @@
+ 	httpReq := req.WithContext(ctx)
+ 	if errPrepare := e.PrepareRequest(httpReq, auth); errPrepare != nil {
+ 		return nil, errPrepare
+ 	}
+ 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
++	if errDispatch := cliproxyauth.BeforeOCGHTTPDispatch(ctx, httpReq); errDispatch != nil {
++		return nil, errDispatch
++	}
+-	return httpClient.Do(httpReq)
++	resp, err := httpClient.Do(httpReq)
++	cliproxyauth.NoteOCGHTTPDispatch(ctx, err, resp)
++	return resp, err
+ }
+diff --git a/diff-a/internal/runtime/executor/xai_executor_execute.go b/diff-b/internal/runtime/executor/xai_executor_execute.go
+index 1111111..2222222 100644
+--- a/diff-a/internal/runtime/executor/xai_executor_execute.go
++++ b/diff-b/internal/runtime/executor/xai_executor_execute.go
+@@ -52,8 +52,12 @@
+ 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
+ 
+ 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+ 	httpClient = reporter.TrackHTTPClient(httpClient)
++	if errDispatch := cliproxyauth.BeforeOCGHTTPDispatch(ctx, httpReq); errDispatch != nil {
++		return resp, errDispatch
++	}
+ 	httpResp, err := httpClient.Do(httpReq)
++	cliproxyauth.NoteOCGHTTPDispatch(ctx, err, httpResp)
+ 	if err != nil {
+ 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+ 		return resp, err
+@@ -205,8 +205,12 @@
+ 	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), prepared.body)
+ 
+ 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+ 	httpClient = reporter.TrackHTTPClient(httpClient)
++	if errDispatch := cliproxyauth.BeforeOCGHTTPDispatch(ctx, httpReq); errDispatch != nil {
++		return nil, nil, nil, nil, errDispatch
++	}
+ 	httpResp, err := httpClient.Do(httpReq)
++	cliproxyauth.NoteOCGHTTPDispatch(ctx, err, httpResp)
+ 	if err != nil {
+ 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+ 		return nil, nil, nil, nil, err
+diff --git a/diff-a/internal/runtime/executor/xai_executor_stream.go b/diff-b/internal/runtime/executor/xai_executor_stream.go
+index 1111111..2222222 100644
+--- a/diff-a/internal/runtime/executor/xai_executor_stream.go
++++ b/diff-b/internal/runtime/executor/xai_executor_stream.go
+@@ -46,8 +46,12 @@
+ 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
+ 
+ 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+ 	httpClient = reporter.TrackHTTPClient(httpClient)
++	if errDispatch := cliproxyauth.BeforeOCGHTTPDispatch(ctx, httpReq); errDispatch != nil {
++		return nil, errDispatch
++	}
+ 	httpResp, err := httpClient.Do(httpReq)
++	cliproxyauth.NoteOCGHTTPDispatch(ctx, err, httpResp)
+ 	if err != nil {
+ 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+ 		return nil, err
+diff --git a/diff-a/internal/runtime/executor/xai_executor_media.go b/diff-b/internal/runtime/executor/xai_executor_media.go
+index 1111111..2222222 100644
+--- a/diff-a/internal/runtime/executor/xai_executor_media.go
++++ b/diff-b/internal/runtime/executor/xai_executor_media.go
+@@ -40,8 +40,12 @@
+ 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), payload)
+ 
+ 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+ 	httpClient = reporter.TrackHTTPClient(httpClient)
++	if errDispatch := cliproxyauth.BeforeOCGHTTPDispatch(ctx, httpReq); errDispatch != nil {
++		return resp, errDispatch
++	}
+ 	httpResp, err := httpClient.Do(httpReq)
++	cliproxyauth.NoteOCGHTTPDispatch(ctx, err, httpResp)
+ 	if err != nil {
+ 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+ 		return resp, err
+@@ -116,8 +116,12 @@
+ 	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), payload)
+ 
+ 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+ 	httpClient = reporter.TrackHTTPClient(httpClient)
++	if errDispatch := cliproxyauth.BeforeOCGHTTPDispatch(ctx, httpReq); errDispatch != nil {
++		return resp, errDispatch
++	}
+ 	httpResp, err := httpClient.Do(httpReq)
++	cliproxyauth.NoteOCGHTTPDispatch(ctx, err, httpResp)
+ 	if err != nil {
+ 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+ 		return resp, err

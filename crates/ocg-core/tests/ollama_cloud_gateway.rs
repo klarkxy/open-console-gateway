@@ -21,7 +21,10 @@ use ocg_core::gateway::provider_adapter::install_ollama_cloud_loopback_route_for
 use ocg_core::models::{Account, ForwardLog, ProxyMode, RoutingMode};
 use ocg_core::provider::{OLLAMA_PROVIDER_ID, OllamaBillingTier};
 use ocg_core::provider_contracts::ContractScope;
-use ocg_core::state::{CoreStateInner, GatewayHandle};
+use ocg_core::state::CoreStateInner;
+
+#[path = "fixtures/owned_cpa.rs"]
+mod owned_cpa;
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -130,22 +133,17 @@ fn persist_ollama_catalog(state: &Arc<CoreStateInner>, models: &[&str]) {
     state.reload_provider_contracts().unwrap();
 }
 
-async fn start_gateway(state: Arc<CoreStateInner>) -> (u16, GatewayHandle) {
+async fn start_gateway(state: Arc<CoreStateInner>) -> u16 {
     let listener = StdTcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
-    let handle = gateway::start_gateway(state, port).await.unwrap();
+    let handle = gateway::start_gateway(state.clone(), port).await.unwrap();
     tokio::time::sleep(StdDuration::from_millis(50)).await;
-    (port, handle)
+    owned_cpa::store_listener(&state, handle)
 }
 
-fn stop(
-    state: Arc<CoreStateInner>,
-    dir: PathBuf,
-    gateway: GatewayHandle,
-    mock: tokio::sync::oneshot::Sender<()>,
-) {
-    gateway::stop_gateway(gateway);
+fn stop(state: Arc<CoreStateInner>, dir: PathBuf, mock: tokio::sync::oneshot::Sender<()>) {
+    owned_cpa::shutdown_owned(&state);
     let _ = mock.send(());
     drop(state);
     let _ = fs::remove_dir_all(dir);
@@ -164,6 +162,17 @@ fn quirk_request(model: &str) -> Value {
 }
 
 async fn chat_call(
+    state: &Arc<CoreStateInner>,
+    port: u16,
+    body: &Value,
+    stream: bool,
+    cookie: bool,
+) -> (StatusCode, Value, String) {
+    owned_cpa::ensure_owned_plane(state).await;
+    chat_call_unprepared(port, body, stream, cookie).await
+}
+
+async fn chat_call_unprepared(
     port: u16,
     body: &Value,
     stream: bool,
@@ -201,9 +210,10 @@ async fn ollama_cloud_attempt_normalizes_wire_and_never_sends_cookies() {
     state.db.lock().create_account(&account).unwrap();
     let _route =
         install_ollama_cloud_loopback_route_for_test("ollama-normalize", base_url).unwrap();
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
 
-    let (status, body, _text) = chat_call(port, &quirk_request("gpt-oss:120b"), false, true).await;
+    let (status, body, _text) =
+        chat_call(&state, port, &quirk_request("gpt-oss:120b"), false, true).await;
     assert_eq!(status, StatusCode::OK);
     // Response direction: the client sees reasoning_content backfilled from
     // the upstream `reasoning` field, and the original field is preserved.
@@ -238,7 +248,7 @@ async fn ollama_cloud_attempt_normalizes_wire_and_never_sends_cookies() {
     assert!(log.pricing_revision_id.is_none());
     assert_eq!(log.route, "direct", "the attempt's route leg is recorded");
 
-    stop(state, dir, gateway_handle, stop_mock);
+    stop(state, dir, stop_mock);
 }
 
 #[tokio::test]
@@ -256,9 +266,10 @@ async fn ollama_cloud_stream_backfills_reasoning_content_per_delta() {
     let account = base_account(&state, "ollama-stream", OLLAMA_KEY);
     state.db.lock().create_account(&account).unwrap();
     let _route = install_ollama_cloud_loopback_route_for_test("ollama-stream", base_url).unwrap();
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
 
-    let (status, _body, text) = chat_call(port, &quirk_request("gpt-oss:120b"), true, false).await;
+    let (status, _body, text) =
+        chat_call(&state, port, &quirk_request("gpt-oss:120b"), true, false).await;
     assert_eq!(status, StatusCode::OK);
     let first_delta = text
         .lines()
@@ -278,7 +289,7 @@ async fn ollama_cloud_stream_backfills_reasoning_content_per_delta() {
         "the [DONE] sentinel passes through untouched"
     );
 
-    stop(state, dir, gateway_handle, stop_mock);
+    stop(state, dir, stop_mock);
 }
 
 #[tokio::test]
@@ -296,10 +307,10 @@ async fn ollama_cloud_failure_diagnostic_records_normalized_body_bytes() {
     let account = base_account(&state, "ollama-diag", OLLAMA_KEY);
     state.db.lock().create_account(&account).unwrap();
     let _route = install_ollama_cloud_loopback_route_for_test("ollama-diag", base_url).unwrap();
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
 
     let (status, _body, _text) =
-        chat_call(port, &quirk_request("gpt-oss:120b"), false, false).await;
+        chat_call(&state, port, &quirk_request("gpt-oss:120b"), false, false).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 
     let sent_body = calls.lock().unwrap()[0].body.clone();
@@ -314,7 +325,7 @@ async fn ollama_cloud_failure_diagnostic_records_normalized_body_bytes() {
     let sent: Value = serde_json::from_str(&sent_body).unwrap();
     assert_eq!(sent["max_tokens"], 65_535);
 
-    stop(state, dir, gateway_handle, stop_mock);
+    stop(state, dir, stop_mock);
 }
 
 #[tokio::test]
@@ -348,10 +359,16 @@ async fn mixed_candidate_chain_keeps_go_attempt_bytes_identical() {
     let ollama = base_account(&state, "ollama-mixed", OLLAMA_KEY);
     state.db.lock().create_account(&ollama).unwrap();
     let _route = install_ollama_cloud_loopback_route_for_test("ollama-mixed", base_url).unwrap();
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
 
-    let (status, body, _text) =
-        chat_call(port, &quirk_request("deepseek-v4-flash"), false, false).await;
+    let (status, body, _text) = chat_call(
+        &state,
+        port,
+        &quirk_request("deepseek-v4-flash"),
+        false,
+        false,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["choices"][0]["message"]["content"], "ok");
 
@@ -381,7 +398,7 @@ async fn mixed_candidate_chain_keeps_go_attempt_bytes_identical() {
         "client-facing name is preserved"
     );
 
-    stop(state, dir, gateway_handle, stop_mock);
+    stop(state, dir, stop_mock);
 }
 
 #[tokio::test]
@@ -399,10 +416,16 @@ async fn shared_alias_served_by_ollama_is_unpriced_and_uses_the_snapshot_id_upst
     let account = base_account(&state, "ollama-shared", OLLAMA_KEY);
     state.db.lock().create_account(&account).unwrap();
     let _route = install_ollama_cloud_loopback_route_for_test("ollama-shared", base_url).unwrap();
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
 
-    let (status, _body, _text) =
-        chat_call(port, &quirk_request("deepseek-v4-flash"), false, false).await;
+    let (status, _body, _text) = chat_call(
+        &state,
+        port,
+        &quirk_request("deepseek-v4-flash"),
+        false,
+        false,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let calls = calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
@@ -419,7 +442,7 @@ async fn shared_alias_served_by_ollama_is_unpriced_and_uses_the_snapshot_id_upst
     assert!(log.raw_cost_usd.is_none());
     assert!(log.pricing_revision_id.is_none());
 
-    stop(state, dir, gateway_handle, stop_mock);
+    stop(state, dir, stop_mock);
 }
 
 #[tokio::test]
@@ -437,11 +460,12 @@ async fn unknown_ollama_model_fails_closed_before_any_upstream_call() {
     let account = base_account(&state, "ollama-unknown", OLLAMA_KEY);
     state.db.lock().create_account(&account).unwrap();
     let _route = install_ollama_cloud_loopback_route_for_test("ollama-unknown", base_url).unwrap();
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
 
     // Not in the saved catalog: no raw pin, no alias — a client 400 with zero
     // upstream traffic.
-    let (status, body, _text) = chat_call(port, &quirk_request("gpt-oss:999b"), false, false).await;
+    let (status, body, _text) =
+        chat_call_unprepared(port, &quirk_request("gpt-oss:999b"), false, false).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
         body["error"]["message"]
@@ -453,7 +477,7 @@ async fn unknown_ollama_model_fails_closed_before_any_upstream_call() {
         "unknown models must fail before any upstream call"
     );
 
-    stop(state, dir, gateway_handle, stop_mock);
+    stop(state, dir, stop_mock);
 }
 
 #[tokio::test]
@@ -462,7 +486,7 @@ async fn ollama_catalog_does_not_add_v1_models_entries() {
     let (base_url, calls, stop_mock) = start_fake_upstream(replies).await;
     let (state, dir) = build_state(base_url.clone());
     persist_ollama_catalog(&state, &["deepseek-v4-flash:0731", "gpt-oss:120b"]);
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
 
     let response = loopback_client()
         .get(format!("http://127.0.0.1:{port}/v1/models"))
@@ -496,7 +520,7 @@ async fn ollama_catalog_does_not_add_v1_models_entries() {
     assert_eq!(flash["owned_by"], ocg_core::provider::OPENCODE_PROVIDER_ID);
     assert!(calls.lock().unwrap().is_empty());
 
-    stop(state, dir, gateway_handle, stop_mock);
+    stop(state, dir, stop_mock);
 }
 
 #[tokio::test]
@@ -559,10 +583,10 @@ async fn ollama_soft_quota_overage_does_not_skip_selection() {
         })
         .unwrap();
     let _route = install_ollama_cloud_loopback_route_for_test("ollama-overage", base_url).unwrap();
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
 
     let (status, _body, _text) =
-        chat_call(port, &quirk_request("gpt-oss:120b"), false, false).await;
+        chat_call(&state, port, &quirk_request("gpt-oss:120b"), false, false).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -570,5 +594,5 @@ async fn ollama_soft_quota_overage_does_not_skip_selection() {
     );
     assert_eq!(calls.lock().unwrap().len(), 1);
 
-    stop(state, dir, gateway_handle, stop_mock);
+    stop(state, dir, stop_mock);
 }

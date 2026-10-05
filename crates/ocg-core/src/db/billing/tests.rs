@@ -255,6 +255,44 @@ fn credit_receipt_failure_rolls_back_the_balance_in_caller_transaction() {
 }
 
 #[test]
+fn credit_receipt_uses_the_credential_id_and_the_captured_rate() {
+    let conn = fixture();
+    let attempt = capture_on(&conn, "a", URL, "model", at()).unwrap().unwrap();
+    assert_ne!(attempt.credential_id, attempt.account_id);
+    assert_eq!(attempt.credential_id, "credential-a");
+    assert_eq!(attempt.account_id, "a");
+    let mut changed = config();
+    changed.rates[0].input_per_million = 80.0;
+    configure_on(&conn, "a", changed, None, at()).unwrap();
+    conn.execute(
+        "INSERT INTO forward_logs(id, account_id) VALUES(1, 'credential-a')",
+        [],
+    )
+    .unwrap();
+    attach_attempt_on(&conn, 1, &attempt).unwrap();
+    assert!(attached_pending_on(&conn, 1, &attempt).unwrap());
+    settle(&conn, 1, &attempt, "success_unpriced");
+    assert_eq!(remaining(&conn, "a"), 65.0);
+    assert_eq!(
+        read_view_on(&conn, "a", at())
+            .unwrap()
+            .unwrap()
+            .pending_requests,
+        0
+    );
+    conn.execute(
+        "INSERT INTO forward_logs(id, account_id) VALUES(2, 'stranger')",
+        [],
+    )
+    .unwrap();
+    attach_attempt_on(&conn, 2, &attempt).unwrap();
+    assert!(!attached_pending_on(&conn, 2, &attempt).unwrap());
+    settle(&conn, 2, &attempt, "success");
+    assert_eq!(remaining(&conn, "a"), 65.0);
+    assert_eq!(remaining(&conn, "b"), 75.0);
+}
+
+#[test]
 fn credit_export_is_readonly_and_merge_preserves_target_baseline() {
     let conn = fixture();
     capture(&conn, 1, "model");

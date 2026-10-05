@@ -2,6 +2,8 @@
 
 # Connect Your First Client
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
 Once the gateway is running, connecting a client is mostly a copy-and-paste
 task. Use the exact base URL shown in Connection Center; most OpenAI-compatible
 clients expect the trailing `/v1`.

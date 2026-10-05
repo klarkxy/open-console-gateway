@@ -1,0 +1,196 @@
+{
+  "scope": "paused source/evidence checkpoint; no runtime acceptance",
+  "files": [
+    {
+      "path": "plans/hermetic-managed-contract-plan.md",
+      "sha256": "b74691589353ce94c89fa85e649d7b5407bf06d63c69e92e6c44a0563a3be574",
+      "bytes": 9050
+    },
+    {
+      "path": "plans/hermetic-managed-fitness.md",
+      "sha256": "7f0a5d6a42cc1859327e2669c8c95b300a2949c44b85f57d5ff9ab0f90ab4a94",
+      "bytes": 10238
+    },
+    {
+      "path": "plans/hermetic-managed-signatures.md",
+      "sha256": "ba44143b0bd0ef30246cbdd2ef28fb6bef1dcfa11b2c5916e17f64de326bd144",
+      "bytes": 4829
+    },
+    {
+      "path": "plans/hermetic-managed-implementation-v1.md",
+      "sha256": "3b0535d7dc264a1b03498c53f53a54ebef2fa438833149c957f615c51ec46f55",
+      "bytes": 5120
+    },
+    {
+      "path": "plans/hermetic-source-dispatch-20261005.md",
+      "sha256": "ca6a04e1c8fe338440ce2d68cbc465153effe4a41812322ba034114fbf72f692",
+      "bytes": 4045
+    },
+    {
+      "path": "plans/queued-hermetic-ownership-20261005.md",
+      "sha256": "7c9cb3b2e3188596f375bf5ec503cf05ffc551fc5788a92c89f9ea8709068622",
+      "bytes": 2442
+    },
+    {
+      "path": "plans/native-acceptance-gates-plan.md",
+      "sha256": "1e11ac7736b4ab192414c09ddfc8eecced5257ecc36e8a6f5d4a2a9bcc4a54b9",
+      "bytes": 8810
+    },
+    {
+      "path": "plans/native-acceptance-gates-review.md",
+      "sha256": "2a7625b0d4c6a4e4a0fd6d20b5905475dec9f7371310d8e3ba27e66afd9adff2",
+      "bytes": 11349
+    },
+    {
+      "path": "plans/native-critical-sdk-source-v1.md",
+      "sha256": "403fbdc8aeeb9ffb76d14c2b1090d42b1d4936edd13334df776645b6dc44af53",
+      "bytes": 4127
+    },
+    {
+      "path": "plans/native-critical-sdk-finite-revision.md",
+      "sha256": "a1961acb791774c0f43db04e1a3da14c433e874aae50b8241c6829f41ba67971",
+      "bytes": 2429
+    },
+    {
+      "path": "reviews/rollback-backup-work/cursor-f315-finite-review.md",
+      "sha256": "434b25ed4a3d71787fde3cfd079a1dc81b191e997f249e745e11639b23c498d3",
+      "bytes": 7351
+    },
+    {
+      "path": "reviews/rollback-backup-work/explain-failed-apply-triage.md",
+      "sha256": "134beeb84659a0df782559066eb15fcfb379042fbb7920257d15e63529e4bd77",
+      "bytes": 6548
+    },
+    {
+      "path": "reviews/rollback-backup-work/fallback-current-credential-review.md",
+      "sha256": "cab1cdec1fd371f21ad21a59fd7f1035edda7ddff952a3d41e9c2c018a6e561c",
+      "bytes": 9269
+    },
+    {
+      "path": "reviews/native-cli-gates-work/independent-source-review.md",
+      "sha256": "e3341482e6e70df3c5fa9ff7635f72f96e416b65cc594fd1a4d5ae36148eeb55",
+      "bytes": 6652
+    },
+    {
+      "path": "reviews/native-cli-gates-work/finite-archive-rereview.md",
+      "sha256": "3cbb99c4cc13abeac804b848cd7b10ed894d14be5de53e7632cd357adc9ec656",
+      "bytes": 2949
+    },
+    {
+      "path": "reviews/native-critical-work/independent-source-review.md",
+      "sha256": "f23920f70e30113f8ea43c41e5c9ce47f9ec38250534ad1fde4644e2a22c3f46",
+      "bytes": 19495
+    },
+    {
+      "path": "reviews/native-critical-work/independent-finite-rereview.md",
+      "sha256": "1b31bfbdbd85e4da881bb359dffd5d3d918d57fb201b39e5bc008fc17541c825",
+      "bytes": 14569
+    },
+    {
+      "path": "reviews/native-critical-work/independent-final-three-rereview.md",
+      "sha256": "6f162e3553c31eac4c4ccc76d91e653e816217b1d1130757634ee2a2e29b7e94",
+      "bytes": 9695
+    },
+    {
+      "path": "reviews/retained-controls-work/byok-recovery-source-review.md",
+      "sha256": "714fb53cacc510f24e206a6ee67ff446f50d19234926b19cf812bcaf9a1a9b15",
+      "bytes": 6288
+    },
+    {
+      "path": "reviews/retained-controls-work/finite-rereview.md",
+      "sha256": "4e8c23a26c2607310f08b6bd19f8e7a719a90d022d6a11c9677082ec959ef02c",
+      "bytes": 7672
+    },
+    {
+      "path": "reviews/test-migration-work/finite-cleanup-rereview.md",
+      "sha256": "55f90dcb95d3812b4472ba9b3fddb98fbae4505ce78d0d71aab4b8a4276efb0b",
+      "bytes": 4280
+    },
+    {
+      "path": "native-critical/sdk/cliproxy/auth/ocg_native_critical_http_helpers_test.go",
+      "sha256": "646726b1b35584f53bebc6c49ba0b9b8c40b71156f1d6b3244355bb33c7e84e3",
+      "bytes": 25179
+    },
+    {
+      "path": "native-critical/sdk/cliproxy/auth/ocg_native_critical_http_test.go",
+      "sha256": "a4023a8cf8a08295442a61c5febd4cacfa0934eff8828edbbfde40f05711b962",
+      "bytes": 27531
+    },
+    {
+      "path": "native-critical/host/native_critical_stream_refresh_test.go",
+      "sha256": "9ce16aa05ec01eab918b01328eabc2cff51892b4ca660f4a413d06158c7ca530",
+      "bytes": 20996
+    },
+    {
+      "path": "native-critical/SOURCE-RECEIPT.md",
+      "sha256": "d5a4170458e505202591283cb0e3aa3f335ed1eb2d7e02d4b0793474f5e866c2",
+      "bytes": 11285
+    },
+    {
+      "path": "reports/rollback-backup-work/early-focused-results.md",
+      "sha256": "5f8aa78de5187eb8fd8eeb3bbefd9cb4d55c2bac37ce6695e6cb5af75508f26d",
+      "bytes": 1777
+    },
+    {
+      "path": "reports/rollback-backup-work/g-complete-3-report.json",
+      "sha256": "6398940580c01441bab1adf3e8ab181197aa4bc7d5391fa0d8ee68d008a62049",
+      "bytes": 7880
+    },
+    {
+      "path": "reports/rollback-backup-work/g-complete-4-report.json",
+      "sha256": "ae588c8b874943b4c99be443db620ef5f77cf3e513617b7040e633d045e15b53",
+      "bytes": 7818
+    },
+    {
+      "path": "reports/rollback-backup-work/g-complete-5-report.json",
+      "sha256": "b1e4bbf93c0920fe69af1193e1cbe316be8f0cdedaf5afda89ce471a9ec575ec",
+      "bytes": 8571
+    },
+    {
+      "path": "reports/rollback-backup-work/g-complete-5-barrier.json",
+      "sha256": "f5a02e2dc502430922777494025daee8ae07aad35835990cd12ab85bdffe7533",
+      "bytes": 711
+    },
+    {
+      "path": "reports/rollback-backup-work/diagnostic-receipt.json",
+      "sha256": "41c1d6ac7beda2a95b2e694392600678400c8482b0852039165040cba815e854",
+      "bytes": 5069
+    },
+    {
+      "path": "reports/rollback-backup-work/diagnostic-samples.json",
+      "sha256": "d556be530293d3cc5c50202dbda95066e7d64e678388864ae87724537c8db6e8",
+      "bytes": 6574
+    },
+    {
+      "path": "reports/native-cli-gates-work/inmemory-coverage.json",
+      "sha256": "a894408ff0fa2469f95ba0f35191de9fe075389946b1d621281fc97f25f11928",
+      "bytes": 1297
+    },
+    {
+      "path": "reports/pre-hermetic-current-source-freeze.json",
+      "sha256": "15a505b16f6d689c2635466c7e1dd31d2322bd9db23c83b6c843920c592d2373",
+      "bytes": 80569
+    },
+    {
+      "path": "reports/cursor-f315-review-candidate/inventory.json",
+      "sha256": "9a7896f3e89db06221b3d0e5fa5f6cda8a2f6a198af85bdf80d6741280cee87b",
+      "bytes": 1120
+    },
+    {
+      "path": "reports/primary-registration-mutation-suite-exits.json",
+      "sha256": "d93733429f8e500939f839b41faa6e74dc6d39c22c527219bbf1a627061c79d6",
+      "bytes": 436
+    },
+    {
+      "path": "reports/g-complete-6-interrupted.txt",
+      "sha256": "77216e0e4d1bc86e02dab5b01f9d151364154a294266217969137832e8f7ac32",
+      "bytes": 2091
+    },
+    {
+      "path": "reports/native-critical-isolated-copy-receipt.json",
+      "sha256": "25f53f152a1f8ebc5ae795b0a9e681dbf318d57df96b07e3ebeb239613850416",
+      "bytes": 422222
+    }
+  ],
+  "missingOptionalEvidence": []
+}

@@ -1,7 +1,8 @@
 use super::{
-    Cli, Commands, KeyAction, attach_api_help, build_state, dispatch_to, key_command,
-    key_command_targeting, ping_keys, resolve_cipher_with, resolve_dashboard_dir, resolve_data_dir,
-    start_serve, status_command, stop_serve, toggle_account,
+    BackupCommand, Cli, Commands, KeyAction, attach_api_help, build_state,
+    default_generation_data_dir, dispatch_to, key_command, key_command_targeting, ping_owned_serve,
+    resolve_cipher_with, resolve_dashboard_dir, resolve_data_dir, start_serve, status_command,
+    stop_serve, toggle_account,
 };
 use crate::api_cmd::{self, ApiRequest, BodySink};
 use crate::endpoint;
@@ -21,7 +22,7 @@ use ocg_core::provider::{
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -76,8 +77,20 @@ fn exposes_package_version() {
 }
 
 #[test]
+fn serve_accepts_pinned_host_dir() {
+    let cli = Cli::try_parse_from(["ocg", "serve", "--cpa-host-dir", "runtime-build"]).unwrap();
+    let Commands::Serve { cpa_host_dir, .. } = cli.command else {
+        panic!("expected serve command");
+    };
+    assert_eq!(
+        cpa_host_dir.as_deref(),
+        Some(std::path::Path::new("runtime-build"))
+    );
+}
+
+#[test]
 fn serve_accepts_container_bind_address() {
-    let cli = Cli::try_parse_from(["ocg-manager-cli", "serve", "--host", "0.0.0.0"]).unwrap();
+    let cli = Cli::try_parse_from(["ocg", "serve", "--host", "0.0.0.0"]).unwrap();
     let Commands::Serve { host, .. } = cli.command else {
         panic!("expected serve command");
     };
@@ -86,7 +99,7 @@ fn serve_accepts_container_bind_address() {
 
 #[test]
 fn cli_parses_key_and_status_subcommands() {
-    let list = Cli::try_parse_from(["ocg-manager-cli", "key", "list"]).unwrap();
+    let list = Cli::try_parse_from(["ocg", "key", "list"]).unwrap();
     assert!(matches!(
         list.command,
         Commands::Key {
@@ -95,7 +108,7 @@ fn cli_parses_key_and_status_subcommands() {
     ));
 
     let add = Cli::try_parse_from([
-        "ocg-manager-cli",
+        "ocg",
         "key",
         "add",
         "main",
@@ -123,13 +136,11 @@ fn cli_parses_key_and_status_subcommands() {
     assert_eq!(password.as_deref(), Some("pass"));
 
     assert!(matches!(
-        Cli::try_parse_from(["ocg-manager-cli", "status"])
-            .unwrap()
-            .command,
+        Cli::try_parse_from(["ocg", "status"]).unwrap().command,
         Commands::Status { show_key: false }
     ));
     assert!(matches!(
-        Cli::try_parse_from(["ocg-manager-cli", "status", "--show-key"])
+        Cli::try_parse_from(["ocg", "status", "--show-key"])
             .unwrap()
             .command,
         Commands::Status { show_key: true }
@@ -137,11 +148,96 @@ fn cli_parses_key_and_status_subcommands() {
 }
 
 #[test]
-fn resolve_data_dir_prefers_explicit_path() {
-    let explicit = PathBuf::from("/tmp/custom-ocg-data");
-    assert_eq!(resolve_data_dir(Some(explicit.clone())), explicit);
-    let fallback = resolve_data_dir(None);
-    assert!(fallback.ends_with(".ocg-mgr-cli"));
+fn command_name_is_ocg() {
+    let mut command = Cli::command();
+    attach_api_help(&mut command);
+    assert_eq!(command.get_name(), "ocg");
+    assert_eq!(command.get_bin_name(), Some("ocg"));
+    let mut help = Vec::new();
+    command.write_long_help(&mut help).unwrap();
+    let text = String::from_utf8(help).unwrap();
+    assert!(
+        text.contains("Usage: ocg ") || text.contains("Usage: ocg\n"),
+        "{text}"
+    );
+    assert!(text.contains("ocg serve --port 9042"), "{text}");
+    assert!(text.contains("cargo build -p ocg-cli --locked"), "{text}");
+    assert!(text.contains("~/.ocg3"), "{text}");
+    assert!(text.contains("not opened"), "{text}");
+    assert!(!text.contains("ocg-manager-cli"), "{text}");
+    for name in ["serve", "api", "schema", "backup", "key", "status"] {
+        assert!(command.find_subcommand(name).is_some(), "{name}");
+    }
+}
+
+#[tokio::test]
+async fn default_generation_does_not_adopt_previous_data_dir() {
+    let home = temp_dir("generation-home");
+    let previous = home.join(".ocg-mgr-cli");
+    std::fs::create_dir_all(previous.join("cpa/auth")).unwrap();
+    let marker = previous.join("cpa/auth/token.json");
+    let marker_bytes = b"previous-generation-sentinel";
+    std::fs::write(&marker, marker_bytes).unwrap();
+
+    let explicit = home.join("explicit-root");
+    let parsed =
+        Cli::try_parse_from(["ocg", "--data-dir", explicit.to_str().unwrap(), "status"]).unwrap();
+    assert_eq!(resolve_data_dir(parsed.data_dir), explicit);
+    status_command(explicit.clone(), test_cipher(), false)
+        .await
+        .unwrap();
+    assert!(explicit.join("data.sqlite").is_file());
+    assert!(!home.join(".ocg3").exists());
+    assert_eq!(std::fs::read(&marker).unwrap(), marker_bytes);
+    assert!(!previous.join("data.sqlite").exists());
+
+    let omitted = Cli::try_parse_from(["ocg", "status"]).unwrap();
+    assert!(omitted.data_dir.is_none());
+    let chosen = default_generation_data_dir(&home);
+    assert_eq!(chosen, home.join(".ocg3"));
+    assert_ne!(chosen, previous);
+    status_command(chosen.clone(), test_cipher(), false)
+        .await
+        .unwrap();
+    assert!(chosen.join("data.sqlite").is_file());
+    assert!(!previous.join("data.sqlite").exists());
+    assert_eq!(std::fs::read(&marker).unwrap(), marker_bytes);
+    assert!(
+        !std::fs::read(explicit.join("data.sqlite"))
+            .unwrap()
+            .is_empty()
+    );
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[tokio::test]
+async fn api_request_sends_ocg_user_agent() {
+    let (addr, mock) = spawn_control_mock(vec![http_json(200, "OK", r#"{"ok":true}"#)]).await;
+    let (status, body) = host_request(
+        &format!("http://{addr}"),
+        "GET",
+        "/dashboard/api/v4/contract",
+        None,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body, br#"{"ok":true}"#);
+    let raw = mock.requests.lock().expect("requests").remove(0);
+    let header = raw
+        .lines()
+        .find(|line| line.to_ascii_lowercase().starts_with("user-agent:"))
+        .unwrap_or_else(|| panic!("no user-agent in {raw}"));
+    assert_eq!(header.split_once(':').unwrap().1.trim(), "ocg");
+    assert!(
+        raw.lines()
+            .next()
+            .unwrap()
+            .starts_with("GET /dashboard/api/v4/contract ")
+    );
+    mock.server.abort();
 }
 
 #[test]
@@ -205,7 +301,7 @@ fn dashboard_dir_prefers_explicit_then_existing_packaged_dist() {
     let root = std::env::temp_dir().join(format!("ocg-cli-dashboard-{}", uuid::Uuid::new_v4()));
     let dist = root.join("dist");
     std::fs::create_dir_all(&dist).unwrap();
-    let executable = root.join("ocg-manager-cli");
+    let executable = root.join("ocg");
     let explicit = root.join("custom");
 
     assert_eq!(
@@ -356,17 +452,26 @@ async fn key_lifecycle_and_status_cover_cli_account_commands() {
     assert!(enabled.enabled);
 
     assert!(toggle_account(&state, &pending.id, true).is_err());
+    let pending_before = state.db.lock().get_account(&pending.id).unwrap().unwrap();
+    let ping_error = key_command(
+        dir.clone(),
+        cipher.clone(),
+        KeyAction::Ping {
+            id: pending.id.clone(),
+            model: "deepseek-v4-flash".into(),
+            message: Some("ping".into()),
+            max_tokens: Some(3),
+        },
+    )
+    .await
+    .unwrap_err();
     assert!(
-        ping_keys(
-            &state,
-            Some(pending.id.as_str()),
-            "deepseek-v4-flash",
-            "ping",
-            3,
-        )
-        .await
-        .is_err()
+        ping_error.to_string().contains("requires a running serve"),
+        "{ping_error}"
     );
+    let pending_after = state.db.lock().get_account(&pending.id).unwrap().unwrap();
+    assert_eq!(pending_after.setup_step, pending_before.setup_step);
+    assert_eq!(pending_after.key_cipher, pending_before.key_cipher);
 
     let blank_profiles = browser_profile_paths(&dir, &blank.id).unwrap();
     assert!(blank_profiles.iter().all(|path| path.starts_with(&dir)));
@@ -557,15 +662,19 @@ async fn cli_key_operations_reject_the_provider_owned_zen_singleton() {
         dir.clone(),
         cipher.clone(),
         KeyAction::Ping {
-            id: Some(ZEN_FREE_ACCOUNT_ID.into()),
+            id: ZEN_FREE_ACCOUNT_ID.into(),
             model: "deepseek-v4-flash-free".into(),
-            message: "ping".into(),
-            max_tokens: 3,
+            message: Some("ping".into()),
+            max_tokens: Some(3),
         },
     )
     .await
-    .expect_err("Zen must not be pinged through CLI key commands");
-    assert!(ping_error.to_string().contains("Zen Free"), "{ping_error}");
+    .expect_err("stopped ping must not open the database to classify Zen");
+    assert!(
+        ping_error.to_string().contains("requires a running serve"),
+        "{ping_error}"
+    );
+    assert!(!ping_error.to_string().contains("Zen Free"), "{ping_error}");
 
     let state_after = build_state(dir.clone(), cipher).unwrap();
     let zen_after = state_after
@@ -581,111 +690,260 @@ async fn cli_key_operations_reject_the_provider_owned_zen_singleton() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-async fn spawn_json_upstream(hits: Arc<AtomicUsize>) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+struct ControlMock {
+    requests: Arc<Mutex<Vec<String>>>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+async fn spawn_control_mock(responses: Vec<String>) -> (SocketAddr, ControlMock) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&requests);
+    let queued = Arc::new(Mutex::new(responses));
     let server = tokio::spawn(async move {
         loop {
             let Ok((mut stream, _)) = listener.accept().await else {
                 break;
             };
-            hits.fetch_add(1, Ordering::SeqCst);
+            let mut collected = Vec::new();
             let mut buf = vec![0_u8; 4096];
-            let _ = stream.read(&mut buf).await;
-            let body = br#"{"id":"ping","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
+            loop {
+                let Ok(read) = stream.read(&mut buf).await else {
+                    break;
+                };
+                if read == 0 {
+                    break;
+                }
+                collected.extend_from_slice(&buf[..read]);
+                if request_complete(&collected) {
+                    break;
+                }
+                if collected.len() > 64 * 1024 {
+                    break;
+                }
+            }
+            recorded
+                .lock()
+                .expect("request log")
+                .push(String::from_utf8_lossy(&collected).into_owned());
+            let response = {
+                let mut queue = queued.lock().expect("response queue");
+                if queue.is_empty() {
+                    http_json(
+                        500,
+                        "ERR",
+                        r#"{"code":"empty","message":"no queued response"}"#,
+                    )
+                } else {
+                    queue.remove(0)
+                }
+            };
             let _ = stream.write_all(response.as_bytes()).await;
-            let _ = stream.write_all(body).await;
         }
     });
-    (addr, server)
+    (addr, ControlMock { requests, server })
+}
+
+fn request_complete(bytes: &[u8]) -> bool {
+    let Some(split) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let header = String::from_utf8_lossy(&bytes[..split]);
+    let length = header.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse::<usize>().ok())
+            .flatten()
+    });
+    match length {
+        Some(length) => bytes.len() >= split + 4 + length,
+        None => true,
+    }
+}
+
+fn http_json(status: u16, reason: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+fn request_target(raw: &str) -> (String, String) {
+    let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((raw, ""));
+    let start = head.lines().next().unwrap_or("");
+    (start.to_string(), body.to_string())
+}
+
+fn assert_no_sqlite_writer(dir: &Path) {
+    assert!(!dir.join("data.sqlite").exists(), "ping opened SQLite");
+    assert!(!dir.join(".encryption-key").exists());
 }
 
 #[tokio::test]
-async fn ping_keys_hits_configured_upstream_and_handles_empty_targets() {
-    let hits = Arc::new(AtomicUsize::new(0));
-    let (addr, server) = spawn_json_upstream(hits.clone()).await;
-
-    let dir = temp_dir("ping");
-    let cipher = test_cipher();
-    let state = build_state(dir.clone(), cipher.clone()).unwrap();
-    let mut config = state.config();
-    config.upstream_base_url = format!("http://{addr}");
-    config.non_stream_timeout_secs = 5;
-    state.set_config(config).unwrap();
-
-    ocg_core::account_control::create_go_api_key(
-        &state,
-        "pingable".into(),
-        "sk-ping".into(),
-        None,
-        None,
-    )
-    .unwrap();
-    let account_id = state
-        .db
-        .lock()
-        .list_accounts()
-        .unwrap()
-        .into_iter()
-        .find(|account| account.name == "pingable")
-        .unwrap()
-        .id;
-
-    ping_keys(&state, None, "deepseek-v4-flash", "ping", 3)
-        .await
-        .unwrap();
-    ping_keys(
-        &state,
-        Some(account_id.as_str()),
-        "deepseek-v4-flash",
-        "ping",
-        3,
+async fn key_ping_stopped_refuses_before_the_database_lock() {
+    let dir = temp_dir("ping-stopped");
+    let owner = crate::serve_lock::ServeLock::acquire(&dir).unwrap();
+    let (addr, mock) = spawn_control_mock(Vec::new()).await;
+    let error = dispatch_to(
+        Cli {
+            data_dir: Some(dir.clone()),
+            encryption_key: None,
+            endpoint: format!("http://{addr}"),
+            endpoint_explicit: true,
+            command: Commands::Key {
+                action: KeyAction::Ping {
+                    id: "acct-exact-1".into(),
+                    model: "deepseek-v4-flash".into(),
+                    message: Some("custom prompt".into()),
+                    max_tokens: Some(11),
+                },
+            },
+        },
+        &mut Vec::new(),
     )
     .await
-    .unwrap();
-    assert!(hits.load(Ordering::SeqCst) >= 2);
-
-    toggle_account(&state, &account_id, false).unwrap();
-    ping_keys(&state, None, "deepseek-v4-flash", "ping", 3)
-        .await
-        .unwrap();
-
-    let missing = ping_keys(&state, Some("nope"), "deepseek-v4-flash", "ping", 3).await;
-    assert!(missing.is_err());
-
-    let key_cipher_before = state
-        .db
-        .lock()
-        .get_account(&account_id)
-        .unwrap()
-        .expect("pingable account")
-        .key_cipher;
-    let wrong_cipher: Arc<dyn KeyCipher + Send + Sync> =
-        Arc::new(StaticKeyCipher::new("other-secret"));
-    let open_error = match build_state(dir.clone(), wrong_cipher) {
-        Ok(_) => panic!("wrong host cipher must fail closed on open, not during ping"),
-        Err(error) => format!("{error:#}"),
-    };
-    assert!(open_error.contains("host cipher rejected"), "{open_error}");
+    .expect_err("stopped ping must refuse");
+    let text = error.to_string();
+    assert!(text.contains("requires a running serve"), "{text}");
     assert!(
-        !open_error.contains("sk-ping"),
-        "wrong-cipher open must not leak the plaintext key: {open_error}"
+        !text.contains("another ocg serve"),
+        "ping must not take the serve lock: {text}"
     );
+    assert!(mock.requests.lock().expect("requests").is_empty());
+    assert_no_sqlite_writer(&dir);
+    assert!(
+        crate::serve_lock::ServeLock::acquire(&dir).is_err(),
+        "ping must leave the existing serve lock held"
+    );
+    drop(owner);
+    mock.server.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
 
-    let recovered = build_state(dir.clone(), cipher).unwrap();
-    let restored = recovered
-        .db
-        .lock()
-        .get_account(&account_id)
-        .unwrap()
-        .expect("account still exists after rejected open");
-    assert_eq!(restored.key_cipher, key_cipher_before);
+#[tokio::test]
+async fn key_ping_running_posts_exact_account_model_test() {
+    let dir = temp_dir("ping-running");
+    let owner = crate::serve_lock::ServeLock::acquire(&dir).unwrap();
+    let ok = http_json(
+        200,
+        "OK",
+        r#"{"accountId":"acct-exact-1","modelId":"deepseek-v4-flash","protocol":"chat_completions","success":true,"httpStatus":200,"durationMs":4,"error":null,"hop":"http://10.9.9.9:8317","key":"sk-should-not-print"}"#,
+    );
+    let custom = http_json(
+        200,
+        "OK",
+        r#"{"accountId":"acct-exact-1","modelId":"deepseek-v4-flash","protocol":"messages","success":false,"httpStatus":429,"durationMs":15,"error":"limited https://hop.internal/private sk-live-secret","hop":"http://10.9.9.9:8317","key":"sk-should-not-print"}"#,
+    );
+    let (addr, mock) = spawn_control_mock(vec![ok, custom]).await;
+    listener_owner::write(&dir, &format!("http://{addr}")).unwrap();
 
-    server.abort();
+    let absent = ping_owned_serve(
+        dir.clone(),
+        "acct-exact-1".into(),
+        "deepseek-v4-flash".into(),
+        None,
+        None,
+    )
+    .await
+    .expect("absent message uses the control default");
+    assert!(absent.contains("[OK] acct-exact-1"), "{absent}");
+    assert!(absent.contains("status=200"), "{absent}");
+    assert!(!absent.contains("sk-should-not-print"), "{absent}");
+    assert!(!absent.contains("10.9.9.9"), "{absent}");
+
+    let observed = ping_owned_serve(
+        dir.clone(),
+        "acct-exact-1".into(),
+        "deepseek-v4-flash".into(),
+        Some("custom prompt".into()),
+        Some(11),
+    )
+    .await
+    .expect("custom prompt is a control call");
+    assert!(observed.contains("[FAIL] acct-exact-1"), "{observed}");
+    assert!(observed.contains("status=429"), "{observed}");
+    assert!(observed.contains("protocol=messages"), "{observed}");
+    assert!(observed.contains("[redacted]"), "{observed}");
+    assert!(!observed.contains("sk-live-secret"), "{observed}");
+    assert!(!observed.contains("hop.internal"), "{observed}");
+    assert!(!observed.contains("sk-should-not-print"), "{observed}");
+    assert!(!observed.contains("10.9.9.9"), "{observed}");
+
+    let requests = mock.requests.lock().expect("requests").clone();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    let (first_line, first_body) = request_target(&requests[0]);
+    assert_eq!(
+        first_line,
+        "POST /dashboard/api/v4/accounts/acct-exact-1/model-tests HTTP/1.1"
+    );
+    let first: serde_json::Value = serde_json::from_str(&first_body).unwrap();
+    assert_eq!(first, serde_json::json!({"modelId": "deepseek-v4-flash"}));
+    assert!(!requests[0].contains("Authorization"));
+    assert!(!requests[0].contains("sk-"));
+    let (second_line, second_body) = request_target(&requests[1]);
+    assert_eq!(
+        second_line,
+        "POST /dashboard/api/v4/accounts/acct-exact-1/model-tests HTTP/1.1"
+    );
+    let second: serde_json::Value = serde_json::from_str(&second_body).unwrap();
+    assert_eq!(
+        second,
+        serde_json::json!({
+            "maxTokens": 11,
+            "message": "custom prompt",
+            "modelId": "deepseek-v4-flash"
+        })
+    );
+    assert_no_sqlite_writer(&dir);
+    assert!(crate::serve_lock::ServeLock::acquire(&dir).is_err());
+    drop(owner);
+    mock.server.abort();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn key_ping_control_error_is_redacted_and_zero_tokens_does_not_send() {
+    let dir = temp_dir("ping-error");
+    let (addr, mock) = spawn_control_mock(vec![http_json(
+        401,
+        "Unauthorized",
+        r#"{"code":"unavailable","message":"denied https://hop.internal/private sk-live-secret","hop":"http://10.9.9.9:8317"}"#,
+    )])
+    .await;
+    listener_owner::write(&dir, &format!("http://{addr}")).unwrap();
+    let error = ping_owned_serve(
+        dir.clone(),
+        "acct-exact-1".into(),
+        "deepseek-v4-flash".into(),
+        Some("custom prompt".into()),
+        Some(11),
+    )
+    .await
+    .expect_err("control failure stays visible");
+    let text = error.to_string();
+    assert!(text.contains("401"), "{text}");
+    assert!(!text.contains("sk-live-secret"), "{text}");
+    assert!(!text.contains("hop.internal"), "{text}");
+    assert!(!text.contains("10.9.9.9"), "{text}");
+    assert_eq!(mock.requests.lock().expect("requests").len(), 1);
+
+    let blocked = ping_owned_serve(
+        dir.clone(),
+        "acct-exact-1".into(),
+        "deepseek-v4-flash".into(),
+        Some("custom prompt".into()),
+        Some(0),
+    )
+    .await
+    .expect_err("zero maxTokens is rejected");
+    assert!(
+        blocked.to_string().contains("maxTokens must be positive"),
+        "{blocked}"
+    );
+    assert_eq!(mock.requests.lock().expect("requests").len(), 1);
+    assert_no_sqlite_writer(&dir);
+    mock.server.abort();
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -1121,30 +1379,25 @@ fn help_and_endpoint_flags_match_the_live_contract() {
     assert!(command.find_subcommand("status").is_some());
 
     let explicit = Cli::command()
-        .try_get_matches_from([
-            "ocg-manager-cli",
-            "--endpoint",
-            "http://127.0.0.1:9",
-            "status",
-        ])
+        .try_get_matches_from(["ocg", "--endpoint", "http://127.0.0.1:9", "status"])
         .unwrap();
     assert_eq!(
         explicit.value_source("endpoint"),
         Some(clap::parser::ValueSource::CommandLine)
     );
     let defaulted = Cli::command()
-        .try_get_matches_from(["ocg-manager-cli", "status"])
+        .try_get_matches_from(["ocg", "status"])
         .unwrap();
     assert_ne!(
         defaulted.value_source("endpoint"),
         Some(clap::parser::ValueSource::CommandLine)
     );
 
-    let parsed = Cli::try_parse_from(["ocg-manager-cli", "schema", "v4"]).unwrap();
+    let parsed = Cli::try_parse_from(["ocg", "schema", "v4"]).unwrap();
     assert_eq!(parsed.endpoint, endpoint::DEFAULT_ORIGIN);
 
     let before = Cli::try_parse_from([
-        "ocg-manager-cli",
+        "ocg",
         "--endpoint",
         "http://127.0.0.1:19042",
         "api",
@@ -1155,7 +1408,7 @@ fn help_and_endpoint_flags_match_the_live_contract() {
     assert_eq!(before.endpoint, "http://127.0.0.1:19042");
 
     let on_api = Cli::try_parse_from([
-        "ocg-manager-cli",
+        "ocg",
         "api",
         "--endpoint",
         "http://127.0.0.1:19043",
@@ -1170,21 +1423,15 @@ fn help_and_endpoint_flags_match_the_live_contract() {
 async fn api_and_schema_do_not_create_a_data_directory() {
     let dir = temp_dir("api-no-db");
     std::fs::remove_dir_all(&dir).unwrap();
-    let schema = Cli::try_parse_from([
-        "ocg-manager-cli",
-        "--data-dir",
-        dir.to_str().unwrap(),
-        "schema",
-        "v4",
-    ])
-    .unwrap();
+    let schema =
+        Cli::try_parse_from(["ocg", "--data-dir", dir.to_str().unwrap(), "schema", "v4"]).unwrap();
     let mut sink = Vec::new();
     dispatch_to(schema, &mut sink).await.unwrap();
     assert!(String::from_utf8(sink).unwrap().contains("DashboardApiV4"));
     assert!(!dir.exists());
 
     let api = Cli::try_parse_from([
-        "ocg-manager-cli",
+        "ocg",
         "--data-dir",
         dir.to_str().unwrap(),
         "--endpoint",
@@ -1907,4 +2154,338 @@ async fn marker_follows_the_rebound_port_for_the_next_write() {
     stop_serve(&serving).await;
     assert!(matches!(listener_owner::inspect(&dir), Owner::Absent));
     let _ = std::fs::remove_dir_all(dir);
+}
+
+fn portable_backup_dir(path: &Path) -> String {
+    let mut text = path.to_string_lossy().replace('\\', "/");
+    while text.len() > 1 && text.ends_with('/') {
+        text.pop();
+    }
+    text
+}
+
+fn backup_auth_dir(data_dir: &Path) -> String {
+    format!("{}/cpa/auth", portable_backup_dir(data_dir))
+}
+
+async fn run_backup(args: &[&str]) -> Result<Vec<u8>, anyhow::Error> {
+    let cli = Cli::try_parse_from(args).unwrap();
+    let mut sink = Vec::new();
+    dispatch_to(cli, &mut sink).await?;
+    Ok(sink)
+}
+
+fn assert_receipt(bytes: &[u8], state: &str) -> serde_json::Value {
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(
+        !text.contains("synthetic-encryption-key-material"),
+        "{text}"
+    );
+    assert!(!text.contains("synthetic-oauth-token"), "{text}");
+    assert!(!text.contains("synthetic-cpa-client-key"), "{text}");
+    assert!(!text.contains("portable"), "{text}");
+    let value: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+    let mut keys = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort();
+    assert_eq!(keys, vec!["count", "format", "path", "state", "version"]);
+    assert_eq!(value["format"], "ocg-directory-snapshot");
+    assert_eq!(value["version"], 1);
+    assert_eq!(value["state"], state);
+    assert!(value["count"].as_u64().unwrap() > 0);
+    value
+}
+
+#[tokio::test]
+async fn backup_command_roundtrip_relocates_owned_cpa_auth_without_printing_secrets() {
+    let root = temp_dir("backup-roundtrip");
+    let source = root.join("source-root");
+    let target = root.join("target-root");
+    let output = root.join("snapshot.tar.gz");
+    {
+        let state = build_state(source.clone(), test_cipher()).unwrap();
+        drop(state);
+    }
+    let sqlite_before = std::fs::read(source.join("data.sqlite")).unwrap();
+    std::fs::create_dir_all(source.join("cpa/auth")).unwrap();
+    std::fs::create_dir_all(source.join("cpa/versions")).unwrap();
+    std::fs::create_dir_all(source.join("policy")).unwrap();
+    let managed = br#"{"desiredRunning":true,"note":"keep-bytes"}"#;
+    std::fs::write(source.join("cpa/managed.json"), managed).unwrap();
+    let auth = backup_auth_dir(&source);
+    let yaml = format!(
+        "host: \"127.0.0.1\"\nport: 8085\nauth-dir: \"{auth}\"\ndebug: false\napi-keys:\n  - \"synthetic-cpa-client-key\"\nprojection:\n  generation: 7\n  note: keep-projection\n"
+    );
+    std::fs::write(source.join("cpa/config.yaml"), &yaml).unwrap();
+    std::fs::write(source.join("cpa/config.yaml.previous"), &yaml).unwrap();
+    std::fs::write(source.join("cpa/auth/token.json"), b"synthetic-oauth-token").unwrap();
+    std::fs::write(source.join("cpa/versions/note.txt"), b"installed").unwrap();
+    std::fs::write(source.join("policy/future.txt"), b"future-policy").unwrap();
+    std::fs::write(
+        source.join(".encryption-key"),
+        b"synthetic-encryption-key-material",
+    )
+    .unwrap();
+    std::fs::write(
+        source.join("cli-listener.json"),
+        br#"{"pid":1,"endpoint":"http://127.0.0.1:9"}"#,
+    )
+    .unwrap();
+
+    let parsed = Cli::try_parse_from([
+        "ocg",
+        "--data-dir",
+        source.to_str().unwrap(),
+        "backup",
+        "create",
+        "--output",
+        output.to_str().unwrap(),
+    ])
+    .unwrap();
+    assert!(matches!(
+        parsed.command,
+        Commands::Backup {
+            action: BackupCommand::Create { .. }
+        }
+    ));
+    let mut sink = Vec::new();
+    dispatch_to(parsed, &mut sink).await.unwrap();
+    let created = assert_receipt(&sink, "created");
+
+    std::fs::create_dir(&target).unwrap();
+    let restored_bytes = run_backup(&[
+        "ocg",
+        "--data-dir",
+        target.to_str().unwrap(),
+        "backup",
+        "restore",
+        "--input",
+        output.to_str().unwrap(),
+    ])
+    .await
+    .unwrap();
+    let restored = assert_receipt(&restored_bytes, "restored");
+    assert_eq!(restored["count"], created["count"]);
+
+    let restored_config = std::fs::read_to_string(target.join("cpa/config.yaml")).unwrap();
+    let previous = std::fs::read_to_string(target.join("cpa/config.yaml.previous")).unwrap();
+    let relocated = backup_auth_dir(&target);
+    assert!(restored_config.contains(&relocated), "{restored_config}");
+    assert!(previous.contains(&relocated), "{previous}");
+    assert!(
+        !restored_config.contains("source-root"),
+        "{restored_config}"
+    );
+    assert!(!previous.contains("source-root"), "{previous}");
+    assert!(restored_config.contains("synthetic-cpa-client-key"));
+    assert!(restored_config.contains("keep-projection"));
+    assert_eq!(
+        std::fs::read(target.join("cpa/managed.json")).unwrap(),
+        managed
+    );
+    assert_eq!(
+        std::fs::read(target.join("cpa/auth/token.json")).unwrap(),
+        b"synthetic-oauth-token"
+    );
+    assert_eq!(
+        std::fs::read(target.join("policy/future.txt")).unwrap(),
+        b"future-policy"
+    );
+    assert_eq!(
+        std::fs::read(target.join("data.sqlite")).unwrap(),
+        sqlite_before
+    );
+    assert!(!target.join("cli-listener.json").exists());
+    assert!(!target.join(".cli-serve.lock").exists());
+    assert!(!target.join(".database-open.lock").exists());
+    assert_eq!(
+        std::fs::read(source.join("data.sqlite")).unwrap(),
+        sqlite_before
+    );
+    assert!(
+        std::fs::read_to_string(source.join("cpa/config.yaml"))
+            .unwrap()
+            .contains("source-root")
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn backup_command_refuses_a_held_serve_lock_and_existing_paths() {
+    let root = temp_dir("backup-refuse");
+    let source = root.join("source-root");
+    std::fs::create_dir_all(source.join("plans")).unwrap();
+    std::fs::write(source.join("plans/rank.txt"), b"rank-a").unwrap();
+    let output = root.join("snapshot.tar.gz");
+    std::fs::write(&output, b"keep-me").unwrap();
+    let error = run_backup(&[
+        "ocg",
+        "--data-dir",
+        source.to_str().unwrap(),
+        "backup",
+        "create",
+        "--output",
+        output.to_str().unwrap(),
+    ])
+    .await
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("already exists"), "{error:#}");
+    assert_eq!(std::fs::read(&output).unwrap(), b"keep-me");
+    assert_eq!(
+        std::fs::read(source.join("plans/rank.txt")).unwrap(),
+        b"rank-a"
+    );
+
+    std::fs::remove_file(&output).unwrap();
+    let owner = crate::serve_lock::ServeLock::acquire(&source).unwrap();
+    let error = run_backup(&[
+        "ocg",
+        "--data-dir",
+        source.to_str().unwrap(),
+        "backup",
+        "create",
+        "--output",
+        output.to_str().unwrap(),
+    ])
+    .await
+    .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains(".cli-serve.lock"), "{message}");
+    assert!(message.contains("Stop"), "{message}");
+    assert!(!output.exists());
+    assert_eq!(
+        std::fs::read(source.join("plans/rank.txt")).unwrap(),
+        b"rank-a"
+    );
+    drop(owner);
+
+    run_backup(&[
+        "ocg",
+        "--data-dir",
+        source.to_str().unwrap(),
+        "backup",
+        "create",
+        "--output",
+        output.to_str().unwrap(),
+    ])
+    .await
+    .unwrap();
+    let archive = std::fs::read(&output).unwrap();
+    let target = root.join("target-root");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("user.txt"), b"keep-user").unwrap();
+    let error = run_backup(&[
+        "ocg",
+        "--data-dir",
+        target.to_str().unwrap(),
+        "backup",
+        "restore",
+        "--input",
+        output.to_str().unwrap(),
+    ])
+    .await
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("not empty"), "{error:#}");
+    assert_eq!(
+        std::fs::read(target.join("user.txt")).unwrap(),
+        b"keep-user"
+    );
+    assert!(!target.join("plans").exists());
+    assert_eq!(std::fs::read(&output).unwrap(), archive);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn backup_command_hides_explicit_keys_and_rejects_the_wrong_one() {
+    let root = temp_dir("backup-redact");
+    let source = root.join("source-root");
+    let target = root.join("target-root");
+    let wrong_target = root.join("wrong-root");
+    let output = root.join("snapshot.tar.gz");
+    std::fs::create_dir_all(source.join("notes")).unwrap();
+    std::fs::write(source.join("notes/plain.txt"), b"synthetic-oauth-token").unwrap();
+    std::fs::write(source.join(".encryption-key"), b"synthetic-stale-file-key").unwrap();
+    let explicit = "synthetic-cli-explicit-key";
+    let wrong = "synthetic-cli-wrong-key";
+    let created = run_backup(&[
+        "ocg",
+        "--data-dir",
+        source.to_str().unwrap(),
+        "--encryption-key",
+        explicit,
+        "backup",
+        "create",
+        "--output",
+        output.to_str().unwrap(),
+    ])
+    .await
+    .unwrap();
+    let created_text = String::from_utf8(created.clone()).unwrap();
+    assert!(!created_text.contains(explicit), "{created_text}");
+    assert!(!created_text.contains(wrong), "{created_text}");
+    assert!(
+        !created_text.contains("synthetic-stale-file-key"),
+        "{created_text}"
+    );
+    assert!(
+        !created_text.contains("synthetic-oauth-token"),
+        "{created_text}"
+    );
+    assert_receipt(&created, "created");
+
+    let error = run_backup(&[
+        "ocg",
+        "--data-dir",
+        wrong_target.to_str().unwrap(),
+        "--encryption-key",
+        wrong,
+        "backup",
+        "restore",
+        "--input",
+        output.to_str().unwrap(),
+    ])
+    .await
+    .unwrap_err();
+    let message = format!("{error}");
+    let debug = format!("{error:?}");
+    let alt = format!("{error:#}");
+    for rendered in [&message, &debug, &alt] {
+        assert!(!rendered.contains(explicit), "{rendered}");
+        assert!(!rendered.contains(wrong), "{rendered}");
+        assert!(!rendered.contains("synthetic-stale-file-key"), "{rendered}");
+        assert!(!rendered.contains("synthetic-oauth-token"), "{rendered}");
+    }
+    assert!(alt.contains("witness"), "{alt}");
+    assert!(!wrong_target.exists());
+
+    std::fs::create_dir(&target).unwrap();
+    let restored = run_backup(&[
+        "ocg",
+        "--data-dir",
+        target.to_str().unwrap(),
+        "--encryption-key",
+        explicit,
+        "backup",
+        "restore",
+        "--input",
+        output.to_str().unwrap(),
+    ])
+    .await
+    .unwrap();
+    let restored_text = String::from_utf8(restored.clone()).unwrap();
+    assert!(!restored_text.contains(explicit), "{restored_text}");
+    assert_receipt(&restored, "restored");
+    assert_eq!(
+        std::fs::read(target.join("notes/plain.txt")).unwrap(),
+        b"synthetic-oauth-token"
+    );
+    assert_eq!(
+        std::fs::read(target.join(".encryption-key")).unwrap(),
+        b"synthetic-stale-file-key"
+    );
+    let _ = std::fs::remove_dir_all(root);
 }

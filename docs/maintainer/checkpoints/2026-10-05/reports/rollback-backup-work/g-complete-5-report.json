@@ -1,0 +1,343 @@
+{
+  "binary": "D:\\0 code\\ocg3\\target\\ocg3-cli-production\\debug\\ocg.exe",
+  "binarySha256": "2e8fd0a9d9324fd9a7e0f719f2f67dfda0a5fb3ddb38e95bf1e597f2fb4ed2d5",
+  "inferenceUpstreamsLoopbackOnly": true,
+  "remoteInferenceCalls": 0,
+  "sessionFixture": "CLI public-login bootstrap is tested against a loopback HTTP session fixture; backend auth is separately covered by Rust integration tests.",
+  "shutdownEvidence": "Process termination and restart; graceful host cleanup is checked separately by Rust lifecycle tests.",
+  "results": [
+    {
+      "name": "fresh host and V4 authority",
+      "status": "PASS"
+    },
+    {
+      "name": "schema help without database",
+      "status": "PASS"
+    },
+    {
+      "name": "second writer rejected before opening the database",
+      "status": "PASS"
+    },
+    {
+      "name": "read templates",
+      "status": "PASS"
+    },
+    {
+      "name": "read connections",
+      "status": "PASS"
+    },
+    {
+      "name": "read accounts",
+      "status": "PASS"
+    },
+    {
+      "name": "read account-records",
+      "status": "PASS"
+    },
+    {
+      "name": "read destinations",
+      "status": "PASS"
+    },
+    {
+      "name": "read credentials",
+      "status": "PASS"
+    },
+    {
+      "name": "read settings",
+      "status": "PASS"
+    },
+    {
+      "name": "read provider-contracts",
+      "status": "PASS"
+    },
+    {
+      "name": "read providers",
+      "status": "PASS"
+    },
+    {
+      "name": "read providers/opencode/pricing",
+      "status": "PASS"
+    },
+    {
+      "name": "read platform-accounts",
+      "status": "PASS"
+    },
+    {
+      "name": "read routing/cards",
+      "status": "PASS"
+    },
+    {
+      "name": "read alias-publication",
+      "status": "PASS"
+    },
+    {
+      "name": "read routing/temporary-unavailability",
+      "status": "PASS"
+    },
+    {
+      "name": "read gateway/status",
+      "status": "PASS"
+    },
+    {
+      "name": "read dashboard/summary",
+      "status": "PASS"
+    },
+    {
+      "name": "read dashboard/daily-tokens-by-model",
+      "status": "PASS"
+    },
+    {
+      "name": "read logs/gateway",
+      "status": "PASS"
+    },
+    {
+      "name": "read logs/forward",
+      "status": "PASS"
+    },
+    {
+      "name": "read logs/forward/models",
+      "status": "PASS"
+    },
+    {
+      "name": "read logs/forward/keys",
+      "status": "PASS"
+    },
+    {
+      "name": "read browser/capabilities",
+      "status": "PASS"
+    },
+    {
+      "name": "read external-integrations/cpa",
+      "status": "PASS"
+    },
+    {
+      "name": "read external-integrations/cpa/runtime",
+      "status": "PASS"
+    },
+    {
+      "name": "read applications/dsh",
+      "status": "PASS"
+    },
+    {
+      "name": "read applications/byok/codex",
+      "status": "PASS"
+    },
+    {
+      "name": "read applications/byok/kimi",
+      "status": "PASS"
+    },
+    {
+      "name": "read applications/byok/minimax",
+      "status": "PASS"
+    },
+    {
+      "name": "read applications/byok/zcode",
+      "status": "PASS"
+    },
+    {
+      "name": "read settings/update-status",
+      "status": "PASS"
+    },
+    {
+      "name": "owned CPA host is registered",
+      "status": "PASS"
+    },
+    {
+      "name": "auth register from stdin and persisted session",
+      "status": "PASS"
+    },
+    {
+      "name": "custom onboarding through executable",
+      "status": "PASS"
+    },
+    {
+      "name": "CAS preserves stale expectations and rejects writes",
+      "status": "PASS"
+    },
+    {
+      "name": "missing CAS rejected",
+      "status": "PASS"
+    },
+    {
+      "name": "credential rotation and binding enablement",
+      "status": "PASS"
+    },
+    {
+      "name": "Gateway Key CRUD without changing primary Key",
+      "status": "PASS"
+    },
+    {
+      "name": "routing card replacement persists the current layout",
+      "status": "PASS"
+    },
+    {
+      "name": "destination catalog and model metadata edits",
+      "status": "PASS"
+    },
+    {
+      "name": "billing configuration grants and calibration",
+      "status": "PASS"
+    },
+    {
+      "name": "isolated BYOK codex configure and remove",
+      "status": "PASS"
+    },
+    {
+      "name": "isolated BYOK kimi configure and remove",
+      "status": "PASS"
+    },
+    {
+      "name": "isolated BYOK minimax configure and remove",
+      "status": "PASS"
+    },
+    {
+      "name": "isolated BYOK zcode configure and remove",
+      "status": "PASS"
+    },
+    {
+      "name": "secret-safe connection output and private gateway key",
+      "status": "PASS"
+    },
+    {
+      "name": "local model publication",
+      "status": "PASS"
+    },
+    {
+      "name": "isolated DSH HTTP runtime install and uninstall",
+      "status": "PASS"
+    },
+    {
+      "name": "owned runtime applies before inference",
+      "status": "PASS"
+    },
+    {
+      "name": "inference /v1/chat/completions",
+      "status": "PASS"
+    },
+    {
+      "name": "inference /v1/responses",
+      "status": "PASS"
+    },
+    {
+      "name": "inference /v1/messages",
+      "status": "PASS"
+    },
+    {
+      "name": "inference /v1beta/models/cli-test-model:generateContent",
+      "status": "PASS"
+    },
+    {
+      "name": "inference /v1/models/cli-test-model:generateContent",
+      "status": "PASS"
+    },
+    {
+      "name": "streamed chat without buffering or JSON rewriting",
+      "status": "PASS"
+    },
+    {
+      "name": "stream conversion /v1/responses",
+      "status": "PASS"
+    },
+    {
+      "name": "stream conversion /v1/messages",
+      "status": "PASS"
+    },
+    {
+      "name": "stream conversion /v1beta/models/cli-test-model:generateContent",
+      "status": "PASS"
+    },
+    {
+      "name": "stream conversion /v1/models/cli-test-model:generateContent",
+      "status": "PASS"
+    },
+    {
+      "name": "unsupported stateful Responses rejected before upstream",
+      "status": "PASS"
+    },
+    {
+      "name": "credit settlement completes after JSON and stream inference",
+      "status": "PASS"
+    },
+    {
+      "name": "encrypted transfer export and preview",
+      "status": "PASS"
+    },
+    {
+      "name": "wrong transfer password preserves state",
+      "status": "PASS"
+    },
+    {
+      "name": "encrypted transfer import through CLI",
+      "status": "PASS"
+    },
+    {
+      "name": "settings mutations and port rebind",
+      "status": "PASS"
+    },
+    {
+      "name": "restart persists state and rejects prior generation",
+      "status": "PASS"
+    },
+    {
+      "name": "stopped whole-directory backup restores configuration and credentials",
+      "status": "FAIL",
+      "detail": "restored CPA was not ready: {\"supported\":true,\"unavailableReason\":null,\"installed\":false,\"running\":false,\"desiredRunning\":true,\"owned\":false,\"currentVersion\":null,\"previousVersion\":null,\"assetSha256\":null,\"port\":8143,\"baseUrl\":\"http://127.0.0.1:8143\",\"phase\":\"idle\",\"error\":null,\"latestVersion\":\"v8.0.10\",\"updateAvailable\":false,\"currentOperation\":\"applied\",\"childProcessGeneration\":58192149611473,\"desiredRevision\":3,\"appliedRevision\":3,\"desiredDigest\":\"b1cf80e4b4241dfaed2fdff2717f8484aa31d40f85ff53cfd664a7400dc7e2d2\",\"appliedDigest\":\"b1cf80e4b4241dfaed2fdff2717f8484aa31d40f85ff53cfd664a7400dc7e2d2\",\"applyStatus\":\"applied\",\"policyReady\":true,\"executionUnavailable\":false,\"revision\":219785690624111,\"processGeneration\":157927979504617} "
+    }
+  ],
+  "arrivals": [
+    {
+      "path": "/v1/models",
+      "stream": false
+    },
+    {
+      "path": "/v1/chat/completions",
+      "model": "vendor-cli-model",
+      "stream": false
+    },
+    {
+      "path": "/v1/chat/completions",
+      "model": "vendor-cli-model",
+      "stream": false
+    },
+    {
+      "path": "/v1/chat/completions",
+      "model": "vendor-cli-model",
+      "stream": false
+    },
+    {
+      "path": "/v1/chat/completions",
+      "model": "vendor-cli-model",
+      "stream": false
+    },
+    {
+      "path": "/v1/chat/completions",
+      "model": "vendor-cli-model",
+      "stream": false
+    },
+    {
+      "path": "/v1/chat/completions",
+      "model": "vendor-cli-model",
+      "stream": true
+    },
+    {
+      "path": "/v1/chat/completions",
+      "model": "vendor-cli-model",
+      "stream": true
+    },
+    {
+      "path": "/v1/chat/completions",
+      "model": "vendor-cli-model",
+      "stream": true
+    },
+    {
+      "path": "/v1/chat/completions",
+      "model": "vendor-cli-model",
+      "stream": true
+    },
+    {
+      "path": "/v1/chat/completions",
+      "model": "vendor-cli-model",
+      "stream": true
+    }
+  ]
+}

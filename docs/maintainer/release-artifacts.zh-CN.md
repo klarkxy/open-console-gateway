@@ -2,6 +2,8 @@
 
 # 发布产物
 
+> 适用范围：本页保留当前实现或 OCG2 已发布版本的操作参考，不定义 OCG3 新架构。CPA 底层迁移目标见[架构](../architecture.zh-CN.md)；其中界面步骤不适用于当前 CLI 阶段。
+
 Open Console Gateway 为三个平台提供桌面安装包、各一份 CLI 压缩包，以及一份多架构容器镜像。
 
 | Runner | GUI | CLI |

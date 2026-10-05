@@ -11,9 +11,11 @@
 - **rust**（`ubuntu-22.04`，30 分钟）— `cargo fmt --all -- --check`，然后
   `cargo test --workspace --locked --no-fail-fast --features ocg-core/ollama-cloud-loopback-test`，
   然后带同一 feature 与 `-D warnings` 的 `cargo clippy --workspace --all-targets --locked`。
-- **windows-cli**（`windows-latest`，30 分钟）— `cargo test -p ocg-manager-cli --locked`
-  与 `cargo clippy -p ocg-manager-cli --all-targets --locked -- -D warnings`。
-  这条 job 不传 Ollama loopback feature。
+- **windows-cli**（`windows-latest`，30 分钟）— `cargo test -p ocg-cli --locked`
+  与 `cargo clippy -p ocg-cli --all-targets --locked -- -D warnings`。
+  该包构建的二进制是 `ocg`。这条 job 不传 Ollama loopback feature。
+  `.github/workflows/quality.yml` 里的两处包引用都是 `ocg-cli`。
+  本页不记录一次 CI 运行。
 
 workspace 测试里的 Rust DTO schema 测试是当前 V3/V4 契约门禁。
 `scripts/cli-acceptance.mjs` 不是这个文件里的 job。
@@ -26,7 +28,7 @@ preflight 与 build 仍运行 `pnpm/action-setup`、`pnpm install --frozen-lockf
 `pnpm run test:tooling`、`pnpm run release:check` 和 `pnpm run build`。Windows GUI
 冒烟从 `package.json` 读取版本。build job 仍传入 `TAURI_SIGNING_PRIVATE_KEY`、
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 和 `TAURI_UPDATER_PUBLIC_KEY`。当前分支没有根
-`package.json`，也没有 `src-tauri/` 目录，因此这些步骤不能发布 `ocg-manager-cli`。
+`package.json`，也没有 `src-tauri/` 目录，因此这些步骤不能发布 `ocg-cli` 包里的 `ocg` 二进制。
 
 同一文件仍包含那套旧发布器的桌面包冒烟（安装包、DMG、AppImage）和 updater manifest 步骤。
 写本页时没有重跑这些步骤。其中的平台检查不是当前证据。CLI 宿主上的已签名桌面更新仍然不可用，见 [CLI 指南](../user/cli.zh-CN.md)。
@@ -35,9 +37,6 @@ preflight 与 build 仍运行 `pnpm/action-setup`、`pnpm install --frozen-lockf
 
 该文件在 GitHub Release 被发布时触发，也可通过带 tag 的 `workflow_dispatch` 触发。这次只读了触发头和 resolve job 的头部。镜像名、digest 和平台结果没有复查。它不是当前 CLI 的发布路径。
 
-## pages.yml
-
-该文件在 `workflow_dispatch` 时触发，也在推送到 `main` 且改动工作流、`docs/**` 或 `scripts/build-pages.mjs` 时触发。job 运行 `node scripts/build-pages.mjs`。当前分支的 `scripts/` 里没有这个脚本。本页不把该工作流当作已核实的发布器。
 
 ## CI 覆盖不到的
 

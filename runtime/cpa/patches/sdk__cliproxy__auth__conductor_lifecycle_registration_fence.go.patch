@@ -1,0 +1,19 @@
+diff --git a/diff-a/sdk/cliproxy/auth/conductor_lifecycle.go b/diff-b/sdk/cliproxy/auth/conductor_lifecycle.go
+index 34be538..ocgfence 100644
+--- a/diff-a/sdk/cliproxy/auth/conductor_lifecycle.go
++++ b/diff-b/sdk/cliproxy/auth/conductor_lifecycle.go
+@@ -206,9 +206,14 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode updateAuthMode) (*Auth, error) {
+ 	if auth.RegistrationEpoch >= m.authEpochs[auth.ID] {
+ 		m.authEpochs[auth.ID] = auth.RegistrationEpoch
+ 	} else if auth.RegistrationEpoch == 0 {
+ 		auth.RegistrationEpoch = m.authEpochs[auth.ID]
+ 	}
++	// ocgRegistrationMaterialFence advances only a real credential replacement.
++	if mode == updateModeReplace && CredentialsChanged(existing, auth) {
++		m.authEpochs[auth.ID]++
++		auth.RegistrationEpoch = m.authEpochs[auth.ID]
++	}
+ 	if !auth.indexAssigned && auth.Index == "" {
+ 		auth.Index = existing.Index
+ 		auth.indexAssigned = existing.indexAssigned
+ 	}

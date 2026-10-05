@@ -413,6 +413,7 @@ async fn alias_stream_does_not_cross_account_retry_after_output() {
     let first = harness.create_go_account("go-one", GO_ACCOUNT_KEY).await;
     let _second = harness.create_go_account("go-two", GO_ACCOUNT_KEY_2).await;
     reorder_account_first(&harness, first["id"].as_str().unwrap()).await;
+    harness.ensure_owned_plane().await;
 
     let response = harness
         .client

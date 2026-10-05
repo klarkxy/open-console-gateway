@@ -380,3 +380,136 @@ async fn invalid_destination_blocks_card_read_and_write_without_changing_ranks()
         original_layout
     );
 }
+
+/// Skip-spawn owned plane. The empty task fills `GatewayHandle`; it is not a child process.
+struct OwnedApplyGuard {
+    _shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+}
+
+impl OwnedApplyGuard {
+    fn arm(state: &CoreState) -> Self {
+        crate::cpa_execution::set_skip_spawn(true);
+        crate::cpa_execution::set_fail_ready(false);
+        crate::cpa_execution::set_test_password(Some("synthetic-management".to_string()));
+        crate::cpa_execution::set_before_apply_commit(None);
+        crate::cpa_execution::set_artifact_dir(
+            state,
+            crate::cpa_execution::documented_runtime_dir(),
+        );
+        let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async {});
+        *state.gateway.lock() = Some(crate::gateway_runtime::GatewayHandle {
+            port: 9,
+            listen_addr: "127.0.0.1:9".parse().unwrap(),
+            dashboard_is_local: true,
+            shutdown,
+            task,
+        });
+        Self {
+            _shutdown_rx: shutdown_rx,
+        }
+    }
+}
+
+impl Drop for OwnedApplyGuard {
+    fn drop(&mut self) {
+        crate::cpa_execution::set_skip_spawn(false);
+        crate::cpa_execution::set_fail_ready(false);
+        crate::cpa_execution::set_test_password(None);
+        crate::cpa_execution::set_before_apply_commit(None);
+        clear_postcommit_snapshot_failure();
+    }
+}
+
+async fn started_plane(state: &CoreState) -> crate::cpa_execution::ExecutionReport {
+    let started =
+        crate::cpa_execution::start(state, state.settings_revision(), state.process_generation())
+            .await
+            .expect("owned plane start");
+    assert_eq!(started.apply_status, "applied");
+    assert!(started.desired_running);
+    started
+}
+
+fn stored_cards(state: &CoreState) -> Vec<routing_cards::RoutingCard> {
+    routing_cards::load_on(&state.db.lock().conn).unwrap()
+}
+
+fn assert_plane_unchanged(state: &CoreState, started: &crate::cpa_execution::ExecutionReport) {
+    let after = crate::cpa_execution::execution_report(state);
+    assert_eq!(after.desired_revision, started.desired_revision);
+    assert_eq!(after.applied_revision, started.applied_revision);
+    assert_eq!(after.apply_status, started.apply_status);
+    assert!(state.settings_update.try_lock().is_some());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn replace_stale_cas_does_not_apply() {
+    let f = fixture("https://a.invalid/v1", "https://b.invalid/v1");
+    let state = f.state();
+    let _plane = OwnedApplyGuard::arm(&state);
+    let started = started_plane(&state).await;
+    let cards = interleaved(&snapshot(&state).unwrap());
+    let revision = state.settings_revision();
+    let layout = stored_cards(&state);
+    let error = replace(
+        State(state.clone()),
+        Bytes::from(
+            serde_json::to_vec(&json!({
+                "expectedRevision": revision + 1,
+                "processGeneration": state.process_generation(),
+                "cards": cards,
+            }))
+            .unwrap(),
+        ),
+    )
+    .await
+    .expect_err("stale routing cards");
+    assert!(format!("{error:?}").contains("revisionConflict"));
+    assert_eq!(stored_cards(&state), layout);
+    assert_eq!(state.settings_revision(), revision);
+    assert_plane_unchanged(&state, &started);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn replace_malformed_quota_policy_refuses_before_commit() {
+    let f = fixture("https://a.invalid/v1", "https://b.invalid/v1");
+    let state = f.state();
+    let _plane = OwnedApplyGuard::arm(&state);
+    let started = started_plane(&state).await;
+    let cards = interleaved(&snapshot(&state).unwrap());
+    let revision = state.settings_revision();
+    let layout = stored_cards(&state);
+    state
+        .db
+        .lock()
+        .set_setting(crate::cpa_policy::SETTINGS_KEY, "{")
+        .unwrap();
+    let error = put(&state, &cards)
+        .await
+        .expect_err("malformed quota policy");
+    assert!(format!("{error:?}").contains("official quota policy could not be read"));
+    assert_eq!(stored_cards(&state), layout);
+    assert_eq!(state.settings_revision(), revision);
+    assert_plane_unchanged(&state, &started);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn replace_receipt_failure_after_commit_still_applies() {
+    let f = fixture("https://a.invalid/v1", "https://b.invalid/v1");
+    let state = f.state();
+    let _plane = OwnedApplyGuard::arm(&state);
+    let started = started_plane(&state).await;
+    let cards = interleaved(&snapshot(&state).unwrap());
+    let revision = state.settings_revision();
+    fail_next_postcommit_snapshot();
+    let error = put(&state, &cards).await.expect_err("post-commit snapshot");
+    assert!(format!("{error:?}").contains("official quota policy could not be read"));
+    assert_eq!(stored_cards(&state), cards);
+    assert!(state.settings_revision() > revision);
+    let applied = crate::cpa_execution::execution_report(&state);
+    assert_eq!(applied.desired_revision, started.desired_revision + 1);
+    assert_eq!(applied.applied_revision, applied.desired_revision);
+    assert_eq!(applied.apply_status, "applied");
+    assert!(state.settings_update.try_lock().is_some());
+}

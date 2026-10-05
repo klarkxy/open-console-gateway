@@ -2,10 +2,11 @@
 
 # Docker
 
-Docker 版在同一个端口 `9042` 上无头提供 Dashboard 和 Gateway。镜像在 GHCR 上匿名可拉，`linux/amd64`
-与 `linux/arm64` 自动匹配。把 Release 的 `compose.example.yaml` 存为
-`compose.yaml`，按需加 `.env`，然后执行下面命令；命令用 `VERSION` shell 变量钉住同一个版本，取值与该 Release 附带的 `compose.example.yaml` 一致，运行时可替换为最新发布版。也可以检出对应 tag
-的仓库：
+> 历史范围：`open-console-gateway` 这一代已发布的 Docker 布局。不是当前的 `ocg` 包。本页不定义这一代的 Docker 工作流，也不记录测试或已完成的迁移。
+
+这一代是无界面 `ocg` CLI（Windows 上为 `ocg.exe`，Linux 与 macOS 上为 `ocg`）。`ocg3` 与 `open-console-gateway` 是同一项目的两个代际分支，产品名仍是 Open Console Gateway。执行底座是该进程拥有的一个本地 CPA。自定义 HTTP 供应商仍是该本地 CPA 上的供应商路由。默认数据根是 `~/.ocg3`。启动不打开、不复制、不移动、不删除、也不接管 `~/.ocg-mgr` 或 `~/.ocg-mgr-cli`。GPUI/Ely GUI 推迟。完整 CLI 验收尚未完成。命令见 [CLI 指南](cli.zh-CN.md)。设计见[架构](../architecture.zh-CN.md)。
+
+下面的镜像名、profile 和命令属于那套已发布容器。它在端口 `9042` 上提供 Dashboard 和 Gateway。GHCR 镜像包含 `linux/amd64` 与 `linux/arm64`。已发布的步骤把该 Release 的 `compose.example.yaml` 存为 `compose.yaml`，按需加 `.env`，并用 `VERSION` shell 变量钉住与该 Release 所附 `compose.example.yaml` 一致的版本。另一条已发布路径是检出对应 tag。这些 tag 不是当前的 `ocg` 包。
 
 ```bash
 VERSION=2.6.2
@@ -19,7 +20,7 @@ docker compose up -d --no-build
 docker compose ps
 ```
 
-镜像标签会动；先决定是跟车还是钉死。
+那一代的镜像标签会移动。已发布的建议是先决定跟车还是钉死。
 
 源码仓库是 `klarkxy/open-console-gateway`。已发布的 GHCR 镜像包名是
 `ghcr.io/klarkxy/opencode-go-mgr` 和 `ghcr.io/klarkxy/opencode-go-mgr-browser`；
@@ -29,14 +30,14 @@ Compose 和容器发布工作流使用这些镜像名。
 
 - 仓库源码里的 `compose.yaml` 默认用 `latest`；Release 的
   `compose.example.yaml` 钉死对应完整版本。
-- 生产部署建议在 `.env` 中用 `OCG_IMAGE` 固定完整版本标签，例如
+- 那一代的可重复部署在 `.env` 中用 `OCG_IMAGE` 固定完整版本标签，例如
   `ghcr.io/klarkxy/opencode-go-mgr:<version>`。
 - 完整版本与 `sha-<commit>` 标签指向单次发布，按策略不应移动；
   `latest` 会继续移动。技术上只有 digest
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` 真正不可变。
-- 想调试当前源码时，设置 `OCG_IMAGE=ocg-manager:local`，再执行
+- 那一代的源码构建设置 `OCG_IMAGE=ocg-manager:local`，再执行
   `docker compose up -d --build`。`NPM_REGISTRY` 与 `CARGO_REGISTRY`
-  只属于源码构建参数。
+  只属于该路径的构建参数。
 
 | 变量 | 作用范围 | 含义 |
 | --- | --- | --- |
@@ -46,8 +47,6 @@ Compose 和容器发布工作流使用这些镜像名。
 | `OCG_ADMIN_USERNAME` + `OCG_ADMIN_PASSWORD` | 首次启动 | 可选管理员引导；必须同时设置或都不设置。 |
 | `OCG_CLIENT_ROOT_URL` | 运行时 | 只读覆盖外部客户端根地址。 |
 | `OCG_MAX_REQUEST_BODY_BYTES` | 运行时 | Gateway JSON 请求体大小上限（字节）；默认 64 MiB。 |
-| `OCG_CPA_BASE_URL` | Compose CPA profile | 只读 CPA 并列服务地址；保持 `http://cpa:8317`。 |
-| `CPA_MANAGEMENT_PASSWORD` | Compose CPA profile | CPA Management API 密码；只保存在部署用 `.env`。 |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` | 运行时 | “自动（系统 / 环境）”出站代理模式使用的标准代理变量。 |
 | `OCG_MANAGER_ENCRYPTION_KEY` | 恢复时 | 原部署曾显式使用的混淆密钥。 |
 | `NPM_REGISTRY` + `CARGO_REGISTRY` | 源码构建 | 仅 `--build` 使用的依赖注册表。 |
@@ -55,9 +54,11 @@ Compose 和容器发布工作流使用这些镜像名。
 大多数部署只跑主服务；只有需要在无头主机上做托管注册或官网登录时，
 才加浏览器 Sidecar。
 
-## 可选本机 CPA
+## 上一代 Compose 里的 CPA profile
 
-CPA 是可选的**本机**订阅运行时并列服务，默认关闭。启用前先在 Compose 文件旁复制模板，并设置独立的 CPA 推理 Key：
+已发布的 Compose 文件有一个可选的 `cpa` profile。只有选中该 profile 时它才会启动。它启动的是单独的 CPA 容器，镜像为 `eceasy/cli-proxy-api:v7.2.145`，不用 `latest`。当 `OCG_CPA_BASE_URL` 设为 `http://cpa:8317` 时，OCG 通过该地址访问它。`CPA_MANAGEMENT_PASSWORD` 是该容器的管理密码。这个 profile 不是这一代的产品模式。不要选中它，也不要设置远端 CPA 地址。没有 `OCG_CPA_BASE_URL` 开关。
+
+已发布的启用步骤是：
 
 ```bash
 cp cpa-config.example.yaml cpa-config.yaml
@@ -67,11 +68,11 @@ docker compose --profile cpa up -d
 docker compose --profile cpa ps
 ```
 
-镜像固定为 `eceasy/cli-proxy-api:v7.2.145`，有意不使用 `latest`。CPA 推理端口 `8317` 只发布到私有 `cpa-private` bridge，OCG 通过 `http://cpa:8317` 访问。宿主机只暴露 CPA 的 OAuth 回调端口 `1455`、`54545` 与 `51121`，且都绑定 `127.0.0.1`。不要添加公开的 `8317` 映射、Docker socket 挂载或远程 CPA URL。
+推理端口 `8317` 只发布在私有 `cpa-private` bridge 上。宿主机端口是 OAuth 回调端口 `1455`、`54545` 与 `51121`，且都绑定 `127.0.0.1`。该文件不把 `8317` 发布到宿主机，也不挂载 Docker socket。
 
-CPA 把 OAuth 数据保存在 `cpa-auth` 卷的 `/root/.cli-proxy-api`；OCG 不读取或复制这些文件。`cpa-auth` 必须与 `ocg-data`、`ocg-browser-profiles` 分开备份；恢复它还需要对应的 CPA 配置和 Key。`docker compose down` 保留三个命名卷，`docker compose down -v` 会永久删除它们。
+该 profile 的 OAuth 数据在 `cpa-auth` 卷的 `/root/.cli-proxy-api`。OCG 不读取或复制这些文件。`cpa-auth` 与 `ocg-data`、`ocg-browser-profiles` 分开。`docker compose down` 保留命名卷。`docker compose down -v` 会删除它们。本页不激活也不删除已存储的卷。该布局留下的基址、管理密码或推理 Key 继续保存，直到显式迁移。该迁移尚未实现。
 
-容器运行后打开 **扩展 → CPA**，填入与 `cpa-config.yaml` 相同的 CPA 推理 Key 和 Management password，运行应用级检测，再在 CPA 内完成 OAuth。OCG 容器不会替你启动、停止、升级或 health-check CPA。
+已发布的面板步骤是打开 **扩展 → CPA**，填入 `cpa-config.yaml` 里的推理 Key 和管理密码，再运行应用级检测。OCG 容器不会启动、停止、升级或 health-check 那个 CPA。该连接表单不是当前步骤。
 
 ## 可选远程浏览器
 
@@ -159,14 +160,13 @@ Google 可能把数据中心出口 IP 视为高风险，要求额外验证，甚
 - 支持 `status --show-key` 的 CLI 构建会在启动日志中隐藏 Gateway Key；旧版镜像可能打印过它，因此既有日志和 Docker daemon 权限仍属于敏感信息。
   如果 Docker 主机默认没有限制日志大小，请由部署方配置日志轮转。
 
-常用检查命令：
+该容器的已发布检查命令，不是 `ocg` CLI 的检查：
 
 ```bash
 docker compose config --quiet
 docker compose ps
 docker compose logs --tail=100 -f ocg-manager
 docker compose --profile browser logs --tail=100 -f browser
-docker compose --profile cpa logs --tail=100 -f cpa
 curl --fail http://127.0.0.1:9042/dashboard/
 ```
 

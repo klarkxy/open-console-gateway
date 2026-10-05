@@ -1,0 +1,32 @@
+diff --git a/diff-a/internal/store/objectstore.go b/diff-b/internal/store/objectstore.go
+index 11822cd..8017a05 100644
+--- a/diff-a/internal/store/objectstore.go
++++ b/diff-b/internal/store/objectstore.go
+@@ -214,12 +214,21 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
+ 		} else if errRead != nil && !errors.Is(errRead, fs.ErrNotExist) {
+ 			return "", fmt.Errorf("object store: read existing metadata: %w", errRead)
+ 		}
+-		tmp := path + ".tmp"
+-		if errWrite := os.WriteFile(tmp, raw, 0o600); errWrite != nil {
+-			return "", fmt.Errorf("object store: write temp auth file: %w", errWrite)
+-		}
+-		if errRename := os.Rename(tmp, path); errRename != nil {
+-			return "", fmt.Errorf("object store: rename auth file: %w", errRename)
++		if _, errStat := os.Stat(path); errStat == nil {
++			file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0)
++			if errOpen != nil {
++				return "", fmt.Errorf("object store: open auth file: %w", errOpen)
++			}
++			_, errWrite := file.Write(raw)
++			errClose := file.Close()
++			if errWrite != nil {
++				return "", fmt.Errorf("object store: write auth file: %w", errWrite)
++			}
++			if errClose != nil {
++				return "", fmt.Errorf("object store: close auth file: %w", errClose)
++			}
++		} else if errWrite := os.WriteFile(path, raw, 0o600); errWrite != nil {
++			return "", fmt.Errorf("object store: write auth file: %w", errWrite)
+ 		}
+ 	default:
+ 		return "", fmt.Errorf("object store: nothing to persist for %s", auth.ID)

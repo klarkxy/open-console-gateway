@@ -1,0 +1,16 @@
+diff --git a/diff-a/internal/runtime/executor/codex_executor_stream.go b/diff-b/internal/runtime/executor/codex_executor_stream.go
+index 1111111..2222222 100644
+--- a/diff-a/internal/runtime/executor/codex_executor_stream.go
++++ b/diff-b/internal/runtime/executor/codex_executor_stream.go
+@@ -112,7 +112,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 
+ 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+ 	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
++	if errDispatch := cliproxyauth.BeforeOCGHTTPDispatch(ctx, httpReq); errDispatch != nil {
++		return nil, errDispatch
++	}
+ 	httpResp, err := httpClient.Do(httpReq)
++	cliproxyauth.NoteOCGHTTPDispatch(ctx, err, httpResp)
+ 	if err != nil {
+ 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+ 		return nil, err

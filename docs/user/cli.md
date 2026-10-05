@@ -2,28 +2,53 @@
 
 # CLI
 
-`ocg-manager-cli serve` is the persistent host that applies control-plane mutations. `api` is its HTTP client. It does not create or open the database, even when `--data-dir` is also present. `schema` is offline JSON help: it does not contact `serve` and does not open a data directory.
+This page is the operator guide for the OCG3 generation of Open Console Gateway. `ocg3` and `open-console-gateway` are two generations of the same project, in the way Python 3 and Python 2 are two generations of Python. The product name remains Open Console Gateway. The command on this generation is `ocg` (`ocg.exe` on Windows). The Rust package is `ocg-cli`. The previous generation's command name is not an alias.
 
-The legacy `status`, `key list`, and `key ping` helpers open the local data directory only while its host is stopped. They acquire the same directory lock before initialization. While `serve` is running, use `api` to read settings, account records, gateway status, or run model tests.
+`ocg serve` is the persistent host that applies control-plane mutations. `api` is its HTTP client. It does not create or open the database, even when `--data-dir` is also present. `schema` is offline JSON help: it does not contact `serve` and does not open a data directory.
 
-This page is the operator contract for `serve`, `api`, and `schema`. If `ocg-manager-cli api --help` does not list the flags below, that binary is older than this page. The React dashboard and the desktop shell are a later interface. The same listener can still serve an existing `dist/` placed next to the executable.
+`status` and `key list` open the selected data directory only while its host is stopped. They acquire the same directory lock before initialization. While `serve` is running, use `api` to read settings, account records, and gateway status.
 
-On Windows the executable is `ocg-manager-cli.exe`. On Linux, `chmod +x ocg-manager-cli` after extraction. The default data directory is `~/.ocg-mgr-cli` on every platform. `serve` accepts `--data-dir <path>`. Its cipher is `--encryption-key`, otherwise `OCG_MANAGER_ENCRYPTION_KEY`, otherwise `<data-dir>/.encryption-key`. When that file is absent on Windows, `serve` falls back to the machine cipher. Prefer the key file. A cipher passed on the command line can land in shell history.
+`key ping ACCOUNT_ID` requires the `serve` process recorded for that data directory. It reads `cli-listener.json` and, when that process is live, posts `POST /dashboard/api/v4/accounts/{id}/model-tests` to the recorded listener. It does not open the database, select another account, or call a provider itself. A missing, dead, or unreadable marker refuses before cipher resolution, SQLite, or provider I/O. `--endpoint` does not send this command to another host and does not make a stopped `serve` acceptable. `--model` defaults to `mimo-v2.5` and is always sent as `modelId`. Omit `--message` and `--max-tokens` to keep the server's minimal verification body. A supplied `--message` or a positive `--max-tokens` adds `message` or `maxTokens`. `--max-tokens 0` is rejected before that post. This describes the command. It is not a completed live model-test verification.
+
+```bash
+ocg --data-dir ./ocg-data key ping ACCOUNT_ID
+ocg --data-dir ./ocg-data key ping ACCOUNT_ID --message "synthetic check" --max-tokens 16
+```
+
+This page is the operator contract for `serve`, `api`, `schema`, and `backup`. If the binary's `--help` does not list these commands and flags, it is older than this page. The native desktop GUI is postponed while this CLI is still incomplete. The same listener can still serve an existing `dist/` placed next to the executable; that compatibility behavior does not define a new GUI.
+
+On Windows the executable is `ocg.exe`. On Linux and macOS, `chmod +x ocg` after extraction. The default data directory is `~/.ocg3` on every platform. `ocg` does not open, move, or delete a previous generation's `~/.ocg-mgr-cli`. Pass `--data-dir <path>` to choose a directory. Development and tests use a synthetic directory, not an installed profile. The cipher is `--encryption-key`, otherwise `OCG_MANAGER_ENCRYPTION_KEY`, otherwise `<data-dir>/.encryption-key`. That environment variable name is unchanged. When the key file is absent on Windows, `serve` falls back to the machine cipher. Prefer the key file. A cipher passed on the command line can land in shell history.
+
+CPA for this generation is the one local runtime owned by `ocg serve`. The `external-integrations/cpa` routes stay as the retained refusal and migration surface. Their meaning is [Owned local CPA](#owned-local-cpa). Whole-directory backup keeps the snapshot format tag `ocg-directory-snapshot`.
+
+## Owned local CPA
+
+The product mode is one OCG-owned local CPA. Custom HTTP remains a provider capability executed by that local CPA. Omitting `target` addresses the owned child. A saved historical remote row does not select `integration`. The row stays stored. These routes do not activate it, convert it into a local credential, or delete it. Explicit migration is a separate operation and is not implemented. The routes do not open, copy, move, or delete `~/.ocg-mgr-cli`. `OCG_CPA_BASE_URL` is not a product switch: this view does not parse it, and install, rollback, and apply do not read it. Whole CLI acceptance and this runtime remain pending. The native desktop GUI stays postponed.
+
+`GET /dashboard/api/v4/external-integrations/cpa` returns `CpaIntegration`. `legacyMigrationRequired` is true only when a stored historical remote CPA row is present. It is redacted: the response does not copy the URL, keys, account id, or catalog. Owned health is a separate field. `runtimeUnavailableReason` is the existing platform-unsupported text, the execution-record error or `cpa execution is unavailable`, or JSON `null`. The migration sentence and any `OCG_CPA_BASE_URL` sentence are not values of that field. A stored row can set `legacyMigrationRequired` while `runtimeUnavailableReason` is null, and a health reason can be present while `legacyMigrationRequired` is false. `CpaRuntime.unavailableReason` uses that same health rule. `CpaRuntime` does not carry `legacyMigrationRequired`. Historical data does not turn an installed or running child into unavailable, and it does not turn an absent child into installed or running.
+
+`configured` and `runtimeOwned` are true only when an owned managed record exists or the execution report says the owned executable is installed. A historical row alone leaves both false. `runtimeRunning` is `ExecutionReport.running`. `runtimeSupported` follows `cpa_runtime_supported()`. `installedVersion` is the execution report `current_version` when that artifact is installed, otherwise the owned managed record's `current_version`, otherwise null. `latestVersion` is the execution report `latest_version` (`v8.0.10` on the current report). `updateAvailable` and `currentOperation` come from that report. `baseUrl` is the owned loopback from the execution report port when that port is set, otherwise `http://127.0.0.1:{managed.port}` when a managed record exists, otherwise empty. The saved remote URL is absent from `baseUrl`. `baseUrlReadOnly` is true. `revision` and `processGeneration` stay the control tokens. A GET does not bump revision and does not write the historical row, account, catalog, or destination bytes.
+
+Retired singleton outputs stay parseable and stay empty or false: `managementKeyConfigured` false, `inferenceKeyConfigured` false, `enabled` false, `accountId` null, `modelCount` 0, `modelsRefreshedAt` null. Historical ciphers are not owned execution sources. Owned enablement is per native credential. The historical `CPA_ACCOUNT_ID` is not the owned account. Owned catalogs are per destination in `destination_models`. This integer does not name one canonical owned-native catalog, and the global `provider_model_catalogs` CPA row is not copied here. `destination_models` has no refreshed-at column.
+
+The candidate `CpaControlTarget` schema enum is `owned`. Serde still accepts `integration`, and the handler refuses it before I/O. `CpaIntegrationUpdate` and `CpaTestRequest` still accept `baseUrl`, `managementKey`, and `inferenceKey`; generated schema is expected to omit those three properties. `CpaIntegrationUpdate.enabled` stays in the schema. The checked-in schema JSON is the Rust example export. Both built binaries' `schema v3` and `schema v4` match those files. This page did not export them. `schema v3` and `schema v4` describe the binary you run. The field contract is [Owned CPA control](../maintainer/dashboard-api.md#owned-cpa-control).
+
+`GET /dashboard/api/v4/routing/explain` is one read of owned CPA applied, static, runtime, and quota facts. `model` is required after trim. `clientProtocol` defaults to `chat_completions`. Accepted values are `chat_completions`, `responses`, `messages`, and `gemini`. Public `gemini` is explained through `chat_completions`, and the response `clientProtocol` stays `gemini`. `routingMode` and `conversationSticky` are displayed from stored settings. `conversationBinding` is `not_evaluated`. `expectedBasePolicyFirstPick` is null in every routing mode. A known catalog row with `routeable` false is a successful explanation. Desired routes stay off the eligible list. Eligible rows can still carry `callerPending`, `secretRecheckPending`, and `sendPending`. The wire field `migrationRequired` on `RoutingResolvedMapping` is implemented, including a catalog-only historical remote row. An older payload that omits the field is false, and new responses emit the field. That field is in the checked-in schema export. Cargo assertion runs and normal CLI acceptance of this read remain pending. Eligibility uses the selected routeable mapping for the same destination, provider, and actual upstream, together with the settings captured for that read. Source for that capture is present, and its acceptance remains pending. The read does not decrypt, admit, or write. The wire contract is [Owned CPA routing explain](../maintainer/dashboard-api.md#owned-cpa-routing-explain).
 
 ## Commands
 
 Start the host and leave it running. `--port` is stored in SQLite; a later `serve` without the flag reuses it. The default bind is `127.0.0.1`. On that bind, with no `Origin` and no forwarded headers, loopback callers are already local administrators. `initialized` stays false until you register.
 
 ```bash
-ocg-manager-cli --data-dir ./ocg-data serve --port 9042
+ocg --data-dir ./ocg-data serve --port 9042
 ```
 
-Stop it with Ctrl+C. That process restores an owned CPA runtime when it starts, and shuts that owned process down when it exits. OAuth sessions, browser sessions, the update phase, and the settings epoch live in this process. A second process that opens the same directory is not a substitute.
+Stop it with Ctrl+C. This process owns the local CPA child: startup is the restore path and exit is the shutdown path. The reviewed artifact lock is present. This page does not record a running child, and whole CLI acceptance remains pending. OAuth sessions, browser sessions, the update phase, and the settings epoch live in this process. A second process that opens the same directory is not a substitute.
 
 From another terminal, name the listener once:
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api METHOD PATH \
+ocg --endpoint http://127.0.0.1:9042 api METHOD PATH \
   --input request.json \
   --output response.json \
   --cas-current \
@@ -35,7 +60,7 @@ ocg-manager-cli --endpoint http://127.0.0.1:9042 api METHOD PATH \
 Inference uses the same `api` verb and a bearer file. The file is the gateway key, one line, and it is not a process argument.
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /v1/chat/completions \
+ocg --endpoint http://127.0.0.1:9042 api POST /v1/chat/completions \
   --input chat.json \
   --key-file gateway-key.txt \
   --output chat-out.json
@@ -44,8 +69,8 @@ ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /v1/chat/completions \
 `schema` does not contact `serve` and does not open a data directory. It writes the offline JSON schema to stdout.
 
 ```bash
-ocg-manager-cli schema v4
-ocg-manager-cli schema v3
+ocg schema v4
+ocg schema v3
 ```
 
 Names in the capability table are `$defs` in that output. V4-only bodies are in `schema v4`. Bodies owned by the remounted V3 handlers are in `schema v3`.
@@ -61,8 +86,8 @@ Placeholders below are synthetic. They are shaped like the schema and like `scri
 `status.json` after a fresh loopback start has `local: true`, `authenticated: true`, and `initialized: false`, plus `revision` and `processGeneration`. That public body is what `--cas-current` reads. It carries no password, cookie, or key. `GET /dashboard/api/v4/contract` is session-gated and is the wrong call for a host that has not been registered on a non-local bind.
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/auth/status --output status.json
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/templates --output templates.json
+ocg --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/auth/status --output status.json
+ocg --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/templates --output templates.json
 ```
 
 `register.json`, an `AuthRegister` with the two expectation fields left out because `--cas-current` supplies them:
@@ -72,7 +97,7 @@ ocg-manager-cli --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/templ
 ```
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/auth/register \
+ocg --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/auth/register \
   --input register.json --cas-current --session-file session.json --output register-out.json
 ```
 
@@ -99,7 +124,7 @@ The password stays in `register.json`. It is not written to stdout. `--session-f
 ```
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/onboarding/commit \
+ocg --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/onboarding/commit \
   --input onboarding.json --cas-current --output onboard.json
 ```
 
@@ -110,15 +135,15 @@ Read the account back with `GET /dashboard/api/v4/accounts/{id}` or find the row
 ```
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api PATCH /dashboard/api/v4/alias-publication \
+ocg --endpoint http://127.0.0.1:9042 api PATCH /dashboard/api/v4/alias-publication \
   --input publish.json --cas-current --output publish-out.json
 ```
 
 `GET /dashboard/api/v4/connection` returns `ConnectionInfo`, including `primaryKey`. Write it with `--output connection.json`, then copy `primaryKey` into `gateway-key.txt` yourself. Without `--output`, stdout omits that key.
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/connection --output connection.json
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api GET /v1/models --key-file gateway-key.txt --output models.json
+ocg --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/connection --output connection.json
+ocg --endpoint http://127.0.0.1:9042 api GET /v1/models --key-file gateway-key.txt --output models.json
 ```
 
 `chat.json`:
@@ -128,7 +153,7 @@ ocg-manager-cli --endpoint http://127.0.0.1:9042 api GET /v1/models --key-file g
 ```
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /v1/chat/completions \
+ocg --endpoint http://127.0.0.1:9042 api POST /v1/chat/completions \
   --input chat.json --key-file gateway-key.txt --output chat-out.json
 ```
 
@@ -143,7 +168,7 @@ A mutation that requires the pair fails when both the file and the flag omit it.
 Read, edit, write:
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/accounts/ACCOUNT_ID --output account.json
+ocg --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/accounts/ACCOUNT_ID --output account.json
 ```
 
 `rename.json` is an `AccountUpdate`. With the expectation keys omitted, `--cas-current` fills the live pair:
@@ -153,7 +178,7 @@ ocg-manager-cli --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/accou
 ```
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api PATCH /dashboard/api/v4/accounts/ACCOUNT_ID \
+ocg --endpoint http://127.0.0.1:9042 api PATCH /dashboard/api/v4/accounts/ACCOUNT_ID \
   --input rename.json --cas-current --output rename-out.json
 ```
 
@@ -176,13 +201,13 @@ These bodies reject an injected expectation. Leave `--cas-current` off. Their `$
 Async work stays in `serve`. Poll the matching GET. The POST that started the work is not repeated when the GET is slow, when it returns 409, or when the port moves.
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/external-integrations/cpa/oauth/start \
+ocg --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/external-integrations/cpa/oauth/start \
   --input oauth.json --cas-current --output oauth-start.json
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/external-integrations/cpa/oauth/status \
+ocg --endpoint http://127.0.0.1:9042 api GET /dashboard/api/v4/external-integrations/cpa/oauth/status \
   --output oauth-status.json
 ```
 
-The same pattern is `POST /accounts/{id}/usage/refresh` (`UsageRefreshUpdate`) then `GET /accounts/{id}/usage`, and `GET /external-integrations/cpa/runtime` plus `GET /external-integrations/cpa/runtime/logs` after a runtime install, start, stop, or rollback. `GET /settings/update-status` is the update-phase read. On this headless host the install POST does not start an installer; see the updater rows.
+The OAuth pair omits `target`, so it addresses the owned child. A historical remote row does not select a remote OAuth target. This page does not record a completed provider OAuth. The same pattern is `POST /accounts/{id}/usage/refresh` (`UsageRefreshUpdate`) then `GET /accounts/{id}/usage`, and `GET /external-integrations/cpa/runtime` plus `GET /external-integrations/cpa/runtime/logs` after a runtime install, start, stop, or rollback. `GET /settings/update-status` is the update-phase read. On this headless host the install POST does not start an installer; see the updater rows.
 
 A port change is one settings write, then a new endpoint. `SettingsUpdate` may contain only the fields you intend to change:
 
@@ -191,9 +216,9 @@ A port change is one settings write, then a new endpoint. `SettingsUpdate` may c
 ```
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api PUT /dashboard/api/v4/settings \
+ocg --endpoint http://127.0.0.1:9042 api PUT /dashboard/api/v4/settings \
   --input port.json --cas-current --output port-out.json
-ocg-manager-cli --endpoint http://127.0.0.1:9043 api GET /dashboard/api/v4/settings --output settings.json
+ocg --endpoint http://127.0.0.1:9043 api GET /dashboard/api/v4/settings --output settings.json
 ```
 
 The second command talks to the listener that just bound `9043`. The PUT is not sent again. If the rebind fails, the host compensates and the old endpoint is the one that still answers. Read `gatewayPort` there before you change `--endpoint`.
@@ -245,7 +270,7 @@ One concrete call per family is enough to find the route. `schema v3` and `schem
 | Pricing | `POST /dashboard/api/v4/providers/{id}/pricing/refresh` | v3 `ProviderPricingRefreshUpdate` |
 | Pricing | `PUT /dashboard/api/v4/providers/{id}/pricing/multipliers` | v3 `PricingMultipliersUpdate` |
 | Alias publication | `GET` or `PATCH /dashboard/api/v4/alias-publication` | v4 `AliasPublicationUpdate` |
-| Routing | `GET /dashboard/api/v4/routing/explain` | v4 `RoutingExplanation` |
+| Routing | `GET /dashboard/api/v4/routing/explain` | v4 `RoutingExplanation`; owned CPA applied facts |
 | Routing | `GET` or `PUT /dashboard/api/v4/routing/cards` | v4 `RoutingCardUpdate` |
 | Policies | `GET` or `PUT /dashboard/api/v4/routing/temporary-unavailability` | v4 `TemporaryPolicyUpdate` |
 | Policies | `POST /dashboard/api/v4/routing/temporary-unavailability/restrictions/{id}/clear` | v4 `TemporaryPolicyClearRequest` |
@@ -261,14 +286,14 @@ One concrete call per family is enough to find the route. `schema v3` and `schem
 | Proxy | `POST /dashboard/api/v4/settings/test-proxy` | v3 `ProxyTestRequest` |
 | Portable backup | `POST /dashboard/api/v4/accounts/transfer/export` and `.../preview` | v3 `AccountExportRequest`, `AccountImportPreviewRequest` |
 | Portable backup | `POST /dashboard/api/v4/accounts/transfer/import` | v3 `AccountImportRequest` |
-| Full data backup | Stop `serve`, copy the directory, copy it back, start again | No CLI subcommand. See [Upgrade, backup, restore](upgrade-backup.md). |
+| Full data backup | `backup create --output FILE`, `backup restore --input FILE` | Offline whole-directory snapshot; restore into a new or empty directory. |
 | Logs | `GET /dashboard/api/v4/logs/gateway`, `/logs/forward`, `/logs/forward/models`, `/logs/forward/keys` | Redacted handler bodies |
 | Logs | `GET /dashboard/api/v4/gateway/status`, `/dashboard/summary`, `/dashboard/daily-tokens-by-model` | Session-gated reads |
 | Browser | `GET /dashboard/api/v4/browser/capabilities` | `mode` is `native`, `remote`, or `unsupported` |
 | Browser | `POST /dashboard/api/v4/accounts/{id}/browser` | v3 `BrowserOpenRequest` |
 | Browser | `DELETE /dashboard/api/v4/accounts/{id}/browser-profile` | v3 `MutationExpectation` |
 | Browser socket | Not an `api` call | Server still mounts it. The preserved path is outside the CLI allowlist. |
-| CPA | `GET`, `PUT`, or `DELETE /dashboard/api/v4/external-integrations/cpa` | CAS on `PUT` and `DELETE` |
+| CPA | `GET`, `PUT`, or `DELETE /dashboard/api/v4/external-integrations/cpa` | v3 `CpaIntegration`; CAS on `PUT` and `DELETE`; remote URL and key fields are refused |
 | CPA | `POST .../cpa/oauth/start`, then `GET .../cpa/oauth/status` | v3 `CpaOAuthStartRequest` |
 | CPA process | `POST .../cpa/runtime/start`, `.../stop`, `.../rollback`; `GET .../runtime` and `.../runtime/logs` | CAS on the POSTs and on `DELETE .../runtime` |
 | CPA keys | `POST /dashboard/api/v4/external-integrations/cpa/client-keys` | Response `CpaRuntimeKeyCreated` only in `--output` |
@@ -301,7 +326,7 @@ Transfer bodies are limited to 4 MiB by the router. Export's `bundle` is ciphert
 
 The default CLI build enables `dsh-local-host` and `serve` registers the BYOK and DSH hosts. When a supported Chromium executable is found, it also registers the native browser launcher and stopper, and `GET /browser/capabilities` reports `mode: native`. Open a native session with `POST /accounts/{id}/browser` (`BrowserOpenRequest`). Remote mode is the worker at `OCG_BROWSER_WORKER_URL` with `OCG_BROWSER_CONTROL_TOKEN_FILE` (default file `/run/ocg-browser/control-token`), and only when a native launcher is not registered. Without either runtime, browser capabilities report `unsupported`. A remote session goes idle after 30 minutes and ends after 4 hours. Watching that session is a later remote viewer or an external WebSocket client. `api` does not attach to the socket. Profile reset and account open re-check CAS after the browser operation lock.
 
-`GET /cpa/models` is the local CPA catalog. `GET /external-integrations/cpa/models` is the integration snapshot. Runtime start, stop, rollback, install, and update affect the supervisor inside this `serve`. OAuth start stores its session there too.
+`GET /cpa/models` reads the shared provider catalog slot (`provider_id` `cpa`). `GET /external-integrations/cpa/models` is the retained integration snapshot. Owned-native catalogs stay per destination. The singleton `modelCount` stays 0 and does not copy either catalog. Runtime start, stop, rollback, install, and update address the supervisor inside this `serve` for the owned child. The reviewed artifact lock is present. This page does not record a running child, and whole CLI acceptance remains pending. OAuth start stores its session in this process. This page does not record a completed provider OAuth. Requests that still carry `baseUrl`, `managementKey`, or `inferenceKey` are refused before I/O. Explicit `target` `owned` together with any of those fields returns `owned CPA control does not accept a remote base URL or key`. Explicit `target` `integration`, or any of those fields with `target` omitted, returns `Stored remote CPA configuration requires explicit migration and was left unchanged` when a historical row exists, and `Remote CPA is not a target in this product` when it does not. `DELETE` uses the same sentences and leaves the stored bytes in place. An enabled-only `PUT` returns the owned view, leaves the historical row and account unchanged, and returns `enabled` false. Query `target=integration` on OAuth status and the CPA target query deserializes and is refused the same way before I/O.
 
 BYOK configure and remove, and DSH install and uninstall, are CAS writes. `codex` and `kimi` require `clientClosed: true`. Configure also requires `expectedFingerprint` from a prior GET. An empty published catalog returns 412 `No models are published by this Key yet; configure a model source first`. An unknown `{client}` returns `Unknown BYOK application`. The host creates or reuses an ordinary key named `codex`, `kimi-code`, `minimax-code`, or `zcode`.
 
@@ -313,16 +338,27 @@ This host does not register auto-start, Dock visibility, or a signed desktop-upd
 
 ## Backup
 
-A full backup is the procedure in [Upgrade, backup, restore](upgrade-backup.md): stop `serve`, copy the entire data directory (including `data.sqlite` and `.encryption-key`), and restore by stopping, replacing that directory, and starting the same or a newer build. There is no `backup` subcommand.
+Stop `serve`, then create a whole-directory snapshot. The output must be a new file outside the source directory. Restore into a different, new or empty directory:
+
+```bash
+ocg --data-dir ./ocg-data backup create --output ./ocg-snapshot.tar.gz
+ocg --data-dir ./restored-ocg-data backup restore --input ./ocg-snapshot.tar.gz
+```
+
+The snapshot includes SQLite, its encryption identity, CPA-owned auth/runtime/config files, and other persistent data. Held host/database locks cause immediate refusal. Restore verifies format, schema, file hashes and cipher identity before publishing the directory. It rebases the owned CPA auth directory, omits live listener/lock markers, and does not start a process. Existing output files and nonempty destinations are preserved; there is no replace mode.
+
+Cipher selection follows explicit key, environment key, key file, then the Windows machine cipher. An explicit/environment override wins even if a stale `.encryption-key` exists. Restore needs the same effective external key or Windows machine identity; file-key snapshots carry the key file. Legacy unauthenticated ciphertext is preserved and identified as unverified historical material: readable text alone cannot prove that its original key was correct.
+
+The limits are 4 GiB total expanded data, 2 GiB per file and 1 MiB per owned CPA config. Success prints one JSON receipt with path, format, version, count and state; failure exits nonzero. Keep a compatible binary with the snapshot. See [Upgrade, backup, restore](upgrade-backup.md) for historical installation and directory-copy procedures.
 
 Portable encrypted transfer is three files through `api`. Export and preview omit `--cas-current`. Import passes it. A wrong password fails the import and leaves revision unchanged.
 
 ```bash
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/accounts/transfer/export \
+ocg --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/accounts/transfer/export \
   --input export.json --output export-out.json
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/accounts/transfer/preview \
+ocg --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/accounts/transfer/preview \
   --input preview.json --output preview-out.json
-ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/accounts/transfer/import \
+ocg --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/accounts/transfer/import \
   --input import.json --cas-current --output import-out.json
 ```
 
@@ -333,8 +369,8 @@ ocg-manager-cli --endpoint http://127.0.0.1:9042 api POST /dashboard/api/v4/acco
 Build this binary from the workspace with Cargo. The default feature is `dsh-local-host`.
 
 ```bash
-cargo build -p ocg-manager-cli --locked
-cargo build -p ocg-manager-cli --locked --no-default-features
+cargo build -p ocg-cli --locked
+cargo build -p ocg-cli --locked --no-default-features
 ```
 
 Workspace quality is locked tests and Clippy with the core loopback feature:
@@ -349,6 +385,8 @@ The independent acceptance runner is Node, with no `pnpm`, `package.json`, or `s
 ```bash
 node scripts/cli-acceptance.mjs
 ```
+
+The optional CPA acceptance harness, host-variant alignment, and evidence levels are in the [development notes](../maintainer/development.md#cpa-acceptance-harness). This page does not record a harness result. Whole CLI acceptance remains pending.
 
 The tag workflow remains the historical desktop release path. It is not a release of this all-function CLI. Use the binary you just built.
 

@@ -814,6 +814,7 @@ async fn stream_can_outlive_non_stream_timeout() {
         },
     )
     .await;
+    h.ensure_owned_plane().await;
 
     let (status, body) = tokio::time::timeout(
         StdDuration::from_secs(4),
@@ -845,6 +846,7 @@ async fn non_stream_uses_non_stream_timeout_not_stream_idle_timeout() {
         },
     )
     .await;
+    h.ensure_owned_plane().await;
 
     let (status, body) = tokio::time::timeout(
         StdDuration::from_secs(5),
@@ -871,6 +873,7 @@ async fn streamed_request_with_non_sse_success_body_timeout_is_not_replayed() {
         },
     )
     .await;
+    h.ensure_owned_plane().await;
 
     let (status, body) = tokio::time::timeout(
         StdDuration::from_secs(5),
@@ -901,6 +904,7 @@ async fn streamed_request_with_stalled_error_body_returns_status_without_replay(
         },
     )
     .await;
+    h.ensure_owned_plane().await;
 
     let (status, body) = tokio::time::timeout(
         StdDuration::from_secs(5),
@@ -930,6 +934,7 @@ async fn stream_idle_timeout_emits_protocol_error_and_updates_log() {
         },
     )
     .await;
+    h.ensure_owned_plane().await;
 
     let (status, body) = tokio::time::timeout(
         StdDuration::from_secs(8),
@@ -963,6 +968,7 @@ async fn non_stream_body_timeout_is_outcome_unknown_and_is_not_replayed() {
         },
     )
     .await;
+    h.ensure_owned_plane().await;
 
     let (status, body) = tokio::time::timeout(
         StdDuration::from_secs(5),
@@ -1001,6 +1007,7 @@ async fn truncated_non_stream_success_body_is_outcome_unknown_and_not_replayed()
     .as_bytes()
     .to_vec();
     let h = FallbackHarness::disconnect(raw_response, &["key-1", "key-2"]).await;
+    h.ensure_owned_plane().await;
 
     let (status, body) = tokio::time::timeout(
         StdDuration::from_secs(5),
@@ -1028,6 +1035,7 @@ async fn interrupted_stream_is_outcome_unknown_and_not_replayed() {
     )
     .into_bytes();
     let h = FallbackHarness::disconnect(raw_response, &["key-1", "key-2"]).await;
+    h.ensure_owned_plane().await;
 
     let (status, body) = tokio::time::timeout(
         StdDuration::from_secs(5),
@@ -1051,6 +1059,7 @@ async fn stream_ending_before_downstream_output_retries_same_account_once() {
         &["key-1", "key-2"],
     )
     .await;
+    h.ensure_owned_plane().await;
 
     let (status, body) = tokio::time::timeout(
         StdDuration::from_secs(5),
@@ -1127,6 +1136,7 @@ async fn r06_zero_output_sse_retry_does_not_resend_after_rotation() {
     let (state, dir) = build_state(format!("http://{addr}"), &["key-1"]);
     *state_slot.lock().unwrap() = Some(state.clone());
     let h = FallbackHarness::from_state(state, dir).await;
+    h.ensure_owned_plane().await;
 
     let (status, body) = tokio::time::timeout(
         StdDuration::from_secs(5),
@@ -1166,6 +1176,7 @@ async fn stream_ending_twice_before_downstream_output_stops_after_one_retry() {
         &["key-1", "key-2"],
     )
     .await;
+    h.ensure_owned_plane().await;
 
     let (status, body) = tokio::time::timeout(
         StdDuration::from_secs(5),
@@ -1227,6 +1238,7 @@ async fn connect_failure_retries_once_without_account_fallback() {
     config.connect_timeout_secs = 1;
     state.set_config(config).unwrap();
     let h = FallbackHarness::from_state(state, dir).await;
+    h.ensure_owned_plane().await;
 
     let response = loopback_client()
         .post(format!("http://127.0.0.1:{}/v1/messages", h.port))
@@ -1731,9 +1743,7 @@ async fn unknown_model_is_rejected_before_any_upstream_attempt() {
         &["key-1", "key-2"],
     )
     .await;
-    let (status, body) = h
-        .protocol("/v1/chat/completions", "totally-made-up-xyz")
-        .await;
+    let (status, body) = protocol_call(h.port, "/v1/chat/completions", "totally-made-up-xyz").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.to_string().contains("unknown model"), "{body}");
     assert!(h.calls.lock().unwrap().is_empty());
@@ -2071,6 +2081,7 @@ async fn zen_free_is_anonymous_across_all_client_formats_and_logs_route_identity
         let (status, body) = h.protocol(path, "mimo-v2.5-free").await;
         assert_eq!(status, StatusCode::OK, "{path}: {body}");
     }
+    h.ensure_owned_plane().await;
     let (status, body) = gemini_call(h.port, "mimo-v2.5-free").await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
@@ -2329,6 +2340,7 @@ async fn shared_alias_strict_priority_follows_the_persisted_card_order() {
         .lock()
         .reorder_accounts(&[ZEN_FREE_ACCOUNT_ID.into(), "acct-1".into()])
         .unwrap();
+    h.adopt_owned_plane().await;
     let (status, body) = h.protocol("/v1/chat/completions", "mimo-v2.5").await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(h.call_keys(), ["normal-key", ""]);
@@ -2361,6 +2373,7 @@ async fn goat_loopback_adapter_routes_all_client_formats_with_its_own_auth_contr
             "{path}: {body}"
         );
     }
+    h.ensure_owned_plane().await;
     let (status, body) = gemini_call(h.port, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
@@ -3186,6 +3199,7 @@ async fn concurrent_round_robin_requests_are_evenly_distributed() {
         false,
     )
     .await;
+    h.ensure_owned_plane().await;
 
     let requests = (0..20)
         .map(|_| {
@@ -3846,6 +3860,7 @@ async fn explicit_probe_records_results_without_changing_production_protocol() {
         .clone();
     assert!(!before.protocols.get("chat_completions").unwrap().available);
     assert!(before.protocols.get("responses").unwrap().available);
+    h.ensure_owned_plane().await;
 
     let (status, body) = dashboard_protocol_probe(
         h.port,
@@ -3945,6 +3960,29 @@ async fn explicit_probe_records_results_without_changing_production_protocol() {
     );
 }
 
+fn stored_grant_bytes(
+    state: &CoreStateInner,
+) -> Vec<(String, String, bool, String, Vec<String>, Vec<String>, u64)> {
+    state
+        .db
+        .lock()
+        .list_inference_bindings()
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            (
+                row.account_id,
+                row.binding_id,
+                row.enabled,
+                format!("{:?}", row.model_scope),
+                row.allowed_endpoint_ids,
+                row.allowed_origins,
+                row.credential_version,
+            )
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn cpa_fake_upstream_production_forwarding_uses_bearer_and_bypasses_global_proxy() {
     let replies = script(&[("cpa-inference-key", &[ok()])]);
@@ -3979,46 +4017,123 @@ async fn cpa_fake_upstream_production_forwarding_uses_bearer_and_bypasses_global
         updated_at: now,
     };
     let management = state.encrypt_key("cpa-management-key").unwrap();
+    {
+        let db = state.db.lock();
+        db.upsert_cpa_integration(&account, &base_url, &management)
+            .unwrap();
+        db.replace_cpa_model_catalog(
+            &[ocg_core::db::CpaCatalogModel {
+                id: "cpa-forward-model".into(),
+                owned_by: Some("cpa".into()),
+                enabled: true,
+            }],
+            &base_url,
+            now,
+        )
+        .unwrap();
+    }
+    let binding_id = state
+        .db
+        .lock()
+        .list_inference_bindings()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.account_id == CPA_ACCOUNT_ID)
+        .expect("historical CPA binding")
+        .binding_id;
+    assert!(
+        !binding_id.is_empty(),
+        "historical binding id must be nonempty"
+    );
+    let endpoints = vec!["historical-grant-endpoint".to_string()];
+    let origins = vec!["historical-grant-origin".to_string()];
     state
         .db
         .lock()
-        .upsert_cpa_integration(&account, &base_url, &management)
-        .unwrap();
-    state
-        .activate_cpa_model_catalog(vec!["cpa-forward-model".into()], &base_url, now)
-        .unwrap();
+        .update_credential_binding(
+            &binding_id,
+            None,
+            Some(true),
+            Some(&endpoints),
+            Some(&origins),
+        )
+        .expect("historical grant sentinel must persist");
+    let integration = state.db.lock().cpa_integration().unwrap();
+    let catalog = state.db.lock().cpa_model_catalog().unwrap();
+    let key_cipher = state
+        .db
+        .lock()
+        .get_account(CPA_ACCOUNT_ID)
+        .unwrap()
+        .expect("historical CPA account")
+        .key_cipher;
+    let grants = stored_grant_bytes(&state);
+    let historical = grants
+        .iter()
+        .find(|row| row.0 == CPA_ACCOUNT_ID)
+        .expect("historical CPA grant");
+    assert_eq!(historical.1, binding_id);
+    assert!(historical.2, "historical binding must stay enabled");
+    assert!(
+        !historical.3.is_empty(),
+        "historical model scope must be nonempty"
+    );
+    assert_eq!(historical.4, endpoints);
+    assert_eq!(historical.5, origins);
+    assert!(
+        historical.6 >= 1,
+        "historical credential version must be present"
+    );
+    let revision = state.settings_revision();
+    let generation = state.process_generation();
+    let refused = state
+        .activate_cpa_model_catalog(
+            vec![ocg_core::db::CpaCatalogModel {
+                id: "cpa-forward-model".into(),
+                owned_by: Some("cpa".into()),
+                enabled: true,
+            }],
+            &base_url,
+            now,
+        )
+        .expect_err("retired catalog activation must fail before any remote call");
+    assert!(
+        refused
+            .to_string()
+            .contains("dedicated CPA catalog is retired and cannot be changed"),
+        "{refused}"
+    );
+    assert_eq!(state.db.lock().cpa_integration().unwrap(), integration);
+    assert_eq!(state.db.lock().cpa_model_catalog().unwrap(), catalog);
+    assert_eq!(
+        state
+            .db
+            .lock()
+            .get_account(CPA_ACCOUNT_ID)
+            .unwrap()
+            .expect("historical CPA account")
+            .key_cipher,
+        key_cipher
+    );
+    assert_eq!(stored_grant_bytes(&state), grants);
+    assert_eq!(state.settings_revision(), revision);
+    assert_eq!(state.process_generation(), generation);
+    assert!(state.cpa_model_catalog().is_empty());
     let mut config = state.config();
     config.proxy_mode = ProxyMode::Manual;
     config.proxy_url = "http://127.0.0.1:1".into();
     state.set_config(config).unwrap();
 
     let h = FallbackHarness::from_parts(state, dir, calls, Some(stop_mock), None).await;
-    let (status, body) = h
-        .protocol("/v1/chat/completions", "cpa-forward-model")
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-
-    let captured = h.calls.lock().unwrap().clone();
-    assert_eq!(captured.len(), 1);
-    assert_eq!(captured[0].path, "/v1/chat/completions");
-    assert_eq!(
-        captured[0].authorization.as_deref(),
-        Some("Bearer cpa-inference-key")
-    );
     assert!(
-        captured[0].body.contains("\"cpa-forward-model\""),
-        "CPA must forward the exact catalog model: {}",
-        captured[0].body
+        h.calls.lock().unwrap().is_empty(),
+        "retired CPA activation must not forward"
     );
-    let logs = h.logs();
+    assert_eq!(h.state.config().proxy_mode, ProxyMode::Manual);
+    assert_eq!(h.state.config().proxy_url, "http://127.0.0.1:1");
     assert!(
-        logs.iter().any(|log| {
-            log.provider_id.as_deref() == Some(CPA_PROVIDER_ID)
-                && log.route_account_id.as_deref() == Some(CPA_ACCOUNT_ID)
-                && log.model == "cpa-forward-model"
-                && log.http_status == Some(200)
-        }),
-        "CPA attribution missing: {logs:?}"
+        h.logs().is_empty(),
+        "retired CPA activation must not log a hop"
     );
     h.stop();
 }

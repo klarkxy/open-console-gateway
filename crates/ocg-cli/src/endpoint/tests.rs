@@ -29,6 +29,9 @@ fn route_allowlist_keeps_v4_auth_inference_and_transfer() {
     assert!(route_allowed("/dashboard/api/v4/accounts/transfer/export"));
     assert!(route_allowed("/dashboard/api/auth/login"));
     assert!(route_allowed("/v1/chat/completions"));
+    assert!(route_allowed("/v1/messages/count_tokens"));
+    assert!(super::is_inference("/v1/messages/count_tokens"));
+    assert!(!route_allowed("/v1/messages/count_tokens/extra"));
     assert!(route_allowed("/v1/models/gemini:generateContent"));
     assert!(route_allowed("/v1beta/models/gemini:countTokens"));
     assert!(!route_allowed("/dashboard/api/v3/accounts"));

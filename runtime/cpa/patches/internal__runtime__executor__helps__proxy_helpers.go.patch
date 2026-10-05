@@ -1,0 +1,25 @@
+diff --git a/diff-a/internal/runtime/executor/helps/proxy_helpers.go b/diff-b/internal/runtime/executor/helps/proxy_helpers.go
+index 1111111..2222222 100644
+--- a/diff-a/internal/runtime/executor/helps/proxy_helpers.go
++++ b/diff-b/internal/runtime/executor/helps/proxy_helpers.go
+@@ -29,7 +29,7 @@ import (
+ // Returns:
+ //   - *http.Client: An HTTP client with configured proxy or transport
+ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+-	httpClient := &http.Client{}
++	httpClient := &http.Client{CheckRedirect: RefuseUnmanagedRedirect}
+ 	if timeout > 0 {
+ 		httpClient.Timeout = timeout
+ 	}
+@@ -56,6 +56,11 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
+ 	return httpClient
+ }
+ 
++// RefuseUnmanagedRedirect stops 301, 302, 303, 307, and 308 from becoming another provider send.
++func RefuseUnmanagedRedirect(*http.Request, []*http.Request) error {
++	return http.ErrUseLastResponse
++}
++
+ var devinTransportCache = NewTransportCache[string](DefaultTransportCacheCapacity)
+ 
+ // NewDevinHTTPClient creates an HTTP client customized for Devin Connect-RPC upstream.

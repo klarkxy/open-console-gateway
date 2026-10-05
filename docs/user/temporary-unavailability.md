@@ -2,6 +2,8 @@
 
 # Temporary Unavailability
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
 On **Settings**, the temporary-unavailability section skips a Key or model locally after a matching upstream error, then retries on real traffic that already uses that route. There is no new navigation item.
 
 Choose **Global** or one connection. A connection rule with the same id replaces the entire global rule; fields are not merged. A disabled local row hides the inherited global rule. Delete the local row to restore inheritance.

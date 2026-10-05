@@ -1,0 +1,13 @@
+{
+  "buildIdentity": "011f360291c4c026cee9a57c3707ebe5a975b100f4fe54a500fdb0fb6aa6fe4b",
+  "productionExit": 0,
+  "fixtureExit": 0,
+  "productionSession": 37484,
+  "fixtureSession": 47500,
+  "productionHostSeconds": 85.06,
+  "productionSDKSeconds": 0.141,
+  "fixtureHostSeconds": 78.033,
+  "fixtureSDKSeconds": 0.123,
+  "sourceReview": "registration-mutation-fence-independent-review.md READY",
+  "wholeCLIAccepted": false
+}

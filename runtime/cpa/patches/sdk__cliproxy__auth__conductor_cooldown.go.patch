@@ -1,0 +1,46 @@
+diff --git a/diff-a/sdk/cliproxy/auth/conductor_cooldown.go b/diff-b/sdk/cliproxy/auth/conductor_cooldown.go
+index 2c2d8c3..a3233f0 100644
+--- a/diff-a/sdk/cliproxy/auth/conductor_cooldown.go
++++ b/diff-b/sdk/cliproxy/auth/conductor_cooldown.go
+@@ -748,6 +748,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
+ 		ctx = context.Background()
+ 	}
+ 	if m != nil {
++		m.observeGenerationResult(ctx, &result)
++		if result.AuthID == "" {
++			return
++		}
+ 		if policy := m.ResultPolicy(); policy != nil {
+ 			result = policy.ApplyResultPolicy(ctx, result)
+ 			if result.AuthID == "" {
+@@ -763,6 +767,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
+ 
+ 	m.mu.Lock()
+ 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
++		if !generationIdentityAllows(auth, result) {
++			m.mu.Unlock()
++			return
++		}
+ 		if modelKey == "" && strings.TrimSpace(result.RouteModel) != "" {
+ 			if m != nil {
+ 				modelKey = m.selectionModelKeyForAuth(auth, result.RouteModel)
+@@ -802,7 +810,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
+ 			} else {
+ 				clearAuthStateOnSuccess(auth, now)
+ 			}
+-		} else {
++		} else if !result.HaltRotation {
+ 			if modelKey != "" {
+ 				if !shouldSkipCredentialCooldown(result.Error) {
+ 					disableCooling := m.cooldownDisabledForAuth(auth)
+@@ -1056,6 +1064,10 @@ func (m *Manager) reportHomeResult(ctx context.Context, result Result, auth *Aut
+ 	if m == nil || result.AuthID == "" {
+ 		return
+ 	}
++	m.observeGenerationResult(ctx, &result)
++	if result.AuthID == "" {
++		return
++	}
+ 	var snapshot *Auth
+ 	if auth != nil {
+ 		snapshot = auth.Clone()

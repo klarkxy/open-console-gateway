@@ -1,0 +1,29 @@
+{
+  "Scope": "Current six-file f315 checkpoint only; source/runtimeowner9814 maylaterrevise; not finalsource/runtimeaccepted",
+  "Files": [
+    {
+      "Path": "crates/ocg-core/src/cpa_execution.rs",
+      "SHA256": "E54A91BC30F2130A761FA9AC62F83762C13A4B0617BF317CE1C3182C9BE9EAF7"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/store.rs",
+      "SHA256": "0C526A45E4DCB01AD6D3B4D58F7DF99B1D9D053148005E6AB3A97A64102F0257"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/store/tests.rs",
+      "SHA256": "2745B46C91E07D70B9883ACA24614749C2C5D25BF5803EE5FB47CB45B4845F5C"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/project.rs",
+      "SHA256": "76148F0DC2D75D25ED2410AEE7DC38B331DC29E052A7AA8D01BAB8946ABA2E2E"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/project/tests.rs",
+      "SHA256": "58D66EFB332DF58C16067BDD3CD2781CE5FC991FC04A8B6BD8A75A7099C8E3FE"
+    },
+    {
+      "Path": "crates/ocg-core/src/cpa_execution/tests.rs",
+      "SHA256": "58EAE6FBDA49B191A67220FCEF3B458F09A563AA4C470492B6EABE0262E4572E"
+    }
+  ]
+}

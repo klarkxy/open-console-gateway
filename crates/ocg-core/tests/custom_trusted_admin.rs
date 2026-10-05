@@ -56,6 +56,9 @@ fn protocol_success_replies(
 }
 
 async fn verify_account(harness: &BlackBoxHarness, id: &str) -> (StatusCode, Value) {
+    // The account row and endpoint already exist. Reapply so this verify
+    // projects that endpoint, then read CAS.
+    harness.reapply_owned_plane().await;
     let (status, body) = harness
         .post_json(
             &format!("/accounts/{id}/verify"),
@@ -381,6 +384,7 @@ async fn responses_and_messages_use_configured_protocol_and_auth_isolation() {
         "x-api-key",
     )
     .await;
+    harness.ensure_owned_plane().await;
 
     let response = harness
         .client
@@ -690,6 +694,7 @@ async fn custom_stream_does_not_cross_account_retry_after_output() {
         id
     };
     let _ = second_id;
+    harness.ensure_owned_plane().await;
 
     let response = harness
         .client
@@ -967,6 +972,7 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
         )
         .await;
         let id = draft["id"].as_str().unwrap().to_string();
+        harness.ensure_owned_plane().await;
         let verify = tokio::spawn({
             let client = harness.client.clone();
             let url = harness.dashboard(&format!("/accounts/{id}/verify"));
@@ -999,6 +1005,7 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
         )
         .await;
         let id = draft["id"].as_str().unwrap().to_string();
+        harness.ensure_owned_plane().await;
         let verify = tokio::spawn({
             let client = harness.client.clone();
             let url = harness.dashboard(&format!("/accounts/{id}/verify"));
@@ -1046,6 +1053,7 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
         )
         .await;
         let id = draft["id"].as_str().unwrap().to_string();
+        harness.ensure_owned_plane().await;
         let verify = tokio::spawn({
             let client = harness.client.clone();
             let url = harness.dashboard(&format!("/accounts/{id}/verify"));
@@ -1093,6 +1101,7 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
         )
         .await;
         let id = draft["id"].as_str().unwrap().to_string();
+        harness.ensure_owned_plane().await;
         let verify = tokio::spawn({
             let client = harness.client.clone();
             let url = harness.dashboard(&format!("/accounts/{id}/verify"));
@@ -1132,6 +1141,7 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
         )
         .await;
         let id = draft["id"].as_str().unwrap().to_string();
+        harness.ensure_owned_plane().await;
         let spawn_verify = || {
             let client = harness.client.clone();
             let url = harness.dashboard(&format!("/accounts/{id}/verify"));
@@ -1190,6 +1200,7 @@ async fn custom_overlay_of_chat_preferred_builtin_preserves_native_structured_fo
         "x-api-key",
     )
     .await;
+    harness.ensure_owned_plane().await;
     let response = harness
         .client
         .post(harness.gateway("/v1/responses"))
@@ -1419,6 +1430,7 @@ async fn custom_timeouts_use_connect_and_per_request_limits() {
     config.non_stream_timeout_secs = 1;
     config.stream_idle_timeout_secs = 5;
     harness.state.set_config(config).unwrap();
+    harness.ensure_owned_plane().await;
     let response = harness
         .client
         .post(harness.gateway("/v1/chat/completions"))

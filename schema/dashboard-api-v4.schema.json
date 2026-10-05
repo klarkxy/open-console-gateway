@@ -1334,6 +1334,259 @@
       ],
       "type": "object"
     },
+    "CpaControlTarget": {
+      "description": "Retired compatibility selector for shared CPA operations.\n`owned` is this process's child. `integration` remains parseable so an\nexplicit historical request is refused before any I/O. It is not a product\nmode and is omitted from the generated schema.",
+      "oneOf": [
+        {
+          "enum": [
+            "owned"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "CpaRuntime": {
+      "additionalProperties": false,
+      "description": "Secret-free CPA runtime snapshot. `supported` is true only on an\ninstalled desktop Host on Windows x64, macOS, or Linux x64.",
+      "properties": {
+        "appliedDigest": {
+          "default": null,
+          "description": "64 lowercase hex, or absent when the plane has no digest yet.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "appliedRevision": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "applyStatus": {
+          "default": null,
+          "description": "`not_prepared`, `installed`, `apply_pending`, `applied`, `apply_failed`, or `stopped`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "assetSha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "baseUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "childProcessGeneration": {
+          "default": null,
+          "description": "Owned child generation. Distinct from `process_generation`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "currentOperation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "currentVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "desiredDigest": {
+          "default": null,
+          "description": "64 lowercase hex, or absent when the plane has no digest yet.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "desiredRevision": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "desiredRunning": {
+          "description": "Last explicit Start/Stop intent for the OCG-owned child. True means the\nnext Open Console Gateway process should restore that child once.",
+          "type": "boolean"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "executionUnavailable": {
+          "default": false,
+          "type": "boolean"
+        },
+        "installed": {
+          "type": "boolean"
+        },
+        "latestVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "owned": {
+          "type": "boolean"
+        },
+        "phase": {
+          "$ref": "#/$defs/CpaRuntimePhase"
+        },
+        "policyReady": {
+          "default": false,
+          "type": "boolean"
+        },
+        "port": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "previousVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "running": {
+          "type": "boolean"
+        },
+        "supported": {
+          "type": "boolean"
+        },
+        "unavailableReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updateAvailable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "supported",
+        "unavailableReason",
+        "installed",
+        "running",
+        "desiredRunning",
+        "owned",
+        "currentVersion",
+        "previousVersion",
+        "assetSha256",
+        "port",
+        "baseUrl",
+        "phase",
+        "error",
+        "latestVersion",
+        "updateAvailable",
+        "currentOperation",
+        "childProcessGeneration",
+        "desiredRevision",
+        "appliedRevision",
+        "desiredDigest",
+        "appliedDigest",
+        "applyStatus",
+        "policyReady",
+        "executionUnavailable",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CpaRuntimeInstall": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "artifactDir": {
+          "default": null,
+          "description": "Directory that contains `manifest.json` and the pinned host executable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expectedVersion": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CpaControlTarget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CpaRuntimePhase": {
+      "enum": [
+        "idle",
+        "checking",
+        "downloading",
+        "installing",
+        "starting",
+        "failed"
+      ],
+      "type": "string"
+    },
     "CredentialCooldownsDto": {
       "additionalProperties": false,
       "description": "Per-window cooldown timestamps on a projected credential.",
@@ -5346,6 +5599,19 @@
       ],
       "type": "string"
     },
+    "RoutingConfiguredRoute": {
+      "additionalProperties": false,
+      "description": "Desired-plane route. It is not a public eligible candidate.",
+      "properties": {
+        "authority": {
+          "$ref": "#/$defs/RoutingRouteAuthority"
+        }
+      },
+      "required": [
+        "authority"
+      ],
+      "type": "object"
+    },
     "RoutingConversationBinding": {
       "description": "Conversation stickiness is reported, not applied: this endpoint has no\nconversation input.",
       "enum": [
@@ -5364,6 +5630,10 @@
         },
         "adapterKind": {
           "type": "string"
+        },
+        "authority": {
+          "$ref": "#/$defs/RoutingRouteAuthority",
+          "description": "Redacted applied proof. Pending caller, secret, and send flags stay here."
         },
         "channel": {
           "$ref": "#/$defs/RoutingChannel"
@@ -5405,7 +5675,8 @@
         "channel",
         "resolvedModel",
         "upstreamProtocol",
-        "routingRank"
+        "routingRank",
+        "authority"
       ],
       "type": "object"
     },
@@ -5417,6 +5688,17 @@
             "string",
             "null"
           ]
+        },
+        "authority": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RoutingRouteAuthority"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Structured applied proof, including quota. Null is an older payload with no proof."
         },
         "code": {
           "$ref": "#/$defs/RoutingExclusionCode"
@@ -5442,7 +5724,8 @@
         "detail",
         "accountId",
         "providerId",
-        "upstreamModel"
+        "upstreamModel",
+        "authority"
       ],
       "type": "object"
     },
@@ -5465,13 +5748,44 @@
         "free_channel_unavailable",
         "quota_waiting",
         "quota_due",
-        "quota_probing"
+        "quota_probing",
+        "identity",
+        "rebound",
+        "version",
+        "setup_blocked",
+        "disabled",
+        "draft",
+        "scope",
+        "model",
+        "protocol",
+        "capability",
+        "native_presence",
+        "native_mode",
+        "native_targets",
+        "not_granted",
+        "material",
+        "configuration_unavailable",
+        "validation_only",
+        "quota_known_reset",
+        "quota_unknown_reset",
+        "quota_malformed",
+        "migration_required",
+        "state_changed",
+        "stopped",
+        "untrusted",
+        "owned_not_running",
+        "origin_unverified",
+        "not_ready",
+        "policy_not_ready",
+        "pin_capabilities",
+        "tuple_unaligned",
+        "policy_malformed"
       ],
       "type": "string"
     },
     "RoutingExplanation": {
       "additionalProperties": false,
-      "description": "Read-only routing prediction for `GET /routing/explain`.\n\nThis is not a send guarantee. `runtimeOnlyUncertainty` names the live\nsteps this snapshot does not execute.",
+      "description": "Read-only owned routing facts for `GET /routing/explain`.\n\n`eligible` is not a send guarantee. Caller, key, secret, and CPA attempt\nchecks that were not performed stay on each route authority.",
       "properties": {
         "clientProtocol": {
           "$ref": "#/$defs/RoutingClientProtocol"
@@ -5481,6 +5795,12 @@
         },
         "conversationSticky": {
           "type": "boolean"
+        },
+        "desiredRoutes": {
+          "items": {
+            "$ref": "#/$defs/RoutingConfiguredRoute"
+          },
+          "type": "array"
         },
         "eligible": {
           "items": {
@@ -5506,6 +5826,9 @@
         },
         "observedAt": {
           "type": "string"
+        },
+        "ownedProjection": {
+          "$ref": "#/$defs/RoutingOwnedProjection"
         },
         "requestedModel": {
           "type": "string"
@@ -5538,9 +5861,92 @@
         "eligible",
         "exclusions",
         "expectedBasePolicyFirstPick",
-        "runtimeOnlyUncertainty"
+        "runtimeOnlyUncertainty",
+        "desiredRoutes",
+        "ownedProjection"
       ],
       "type": "object"
+    },
+    "RoutingGrantDisposition": {
+      "description": "Granted pins, or the reason this generation kind has none.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "granted",
+              "type": "string"
+            },
+            "pins": {
+              "items": {
+                "$ref": "#/$defs/RoutingNativePin"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "pins"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "not_granted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "local_only",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RoutingHistoricalPlacement": {
+      "enum": [
+        "not_applicable",
+        "owned_pool",
+        "remote"
+      ],
+      "type": "string"
+    },
+    "RoutingMaterialFact": {
+      "enum": [
+        "http_none",
+        "keyed_unchecked",
+        "native_present",
+        "unproven"
+      ],
+      "type": "string"
     },
     "RoutingMode": {
       "description": "Account selection mode. Wire values stay kebab-case, matching V2.",
@@ -5548,6 +5954,281 @@
         "strict-priority",
         "sticky-global",
         "round-robin"
+      ],
+      "type": "string"
+    },
+    "RoutingNativePin": {
+      "additionalProperties": false,
+      "description": "One native HTTP pin copied from the public route fact.",
+      "properties": {
+        "endpointFingerprint": {
+          "type": "string"
+        },
+        "endpointId": {
+          "type": "string"
+        },
+        "httpMethod": {
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        },
+        "protocol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol",
+        "endpointId",
+        "origin",
+        "endpointFingerprint",
+        "httpMethod"
+      ],
+      "type": "object"
+    },
+    "RoutingOperationFact": {
+      "additionalProperties": false,
+      "properties": {
+        "disposition": {
+          "$ref": "#/$defs/RoutingGrantDisposition"
+        },
+        "generationKind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "generationKind",
+        "disposition"
+      ],
+      "type": "object"
+    },
+    "RoutingOwnedProjection": {
+      "additionalProperties": false,
+      "description": "Stored desired and applied tuples plus the live availability bits.\n\n`desiredRunning` and `applyStatus` do not mean the child is ready.",
+      "properties": {
+        "applied": {
+          "$ref": "#/$defs/RoutingPlaneTuple"
+        },
+        "applyStatus": {
+          "type": "string"
+        },
+        "desired": {
+          "$ref": "#/$defs/RoutingPlaneTuple"
+        },
+        "desiredRunning": {
+          "type": "boolean"
+        },
+        "originVerified": {
+          "type": "boolean"
+        },
+        "ownedRunning": {
+          "type": "boolean"
+        },
+        "ownedRunningAfter": {
+          "type": "boolean"
+        },
+        "ownedRunningBefore": {
+          "type": "boolean"
+        },
+        "pinCapabilitiesReady": {
+          "type": "boolean"
+        },
+        "poisoned": {
+          "type": "boolean"
+        },
+        "policyMalformed": {
+          "type": "boolean"
+        },
+        "policyReady": {
+          "type": "boolean"
+        },
+        "runtimeChildGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stateChanged": {
+          "type": "boolean"
+        },
+        "stopped": {
+          "type": "boolean"
+        },
+        "tupleAligned": {
+          "type": "boolean"
+        },
+        "unavailable": {
+          "type": "boolean"
+        },
+        "verifiedReady": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "desired",
+        "applied",
+        "applyStatus",
+        "desiredRunning",
+        "runtimeChildGeneration",
+        "unavailable",
+        "stateChanged",
+        "stopped",
+        "poisoned",
+        "originVerified",
+        "verifiedReady",
+        "policyReady",
+        "policyMalformed",
+        "tupleAligned",
+        "pinCapabilitiesReady",
+        "ownedRunningBefore",
+        "ownedRunningAfter",
+        "ownedRunning"
+      ],
+      "type": "object"
+    },
+    "RoutingPlaneTuple": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "generation",
+        "revision",
+        "digest"
+      ],
+      "type": "object"
+    },
+    "RoutingQuotaEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "applicable": {
+          "type": "boolean"
+        },
+        "bindingId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credentialId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credentialVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "observationId": {
+          "type": "string"
+        },
+        "observedAt": {
+          "type": "string"
+        },
+        "poolId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "poolVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "providerId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "publicModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reset": {
+          "type": "string"
+        },
+        "resetAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "subjectKind": {
+          "type": "string"
+        },
+        "window": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "subjectKind",
+        "credentialId",
+        "credentialVersion",
+        "providerId",
+        "bindingId",
+        "poolId",
+        "poolVersion",
+        "publicModel",
+        "window",
+        "source",
+        "observedAt",
+        "observationId",
+        "reset",
+        "resetAt",
+        "applicable"
+      ],
+      "type": "object"
+    },
+    "RoutingQuotaFact": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/RoutingQuotaEvidence"
+          },
+          "type": "array"
+        },
+        "state": {
+          "$ref": "#/$defs/RoutingQuotaState"
+        }
+      },
+      "required": [
+        "state",
+        "evidence"
+      ],
+      "type": "object"
+    },
+    "RoutingQuotaState": {
+      "enum": [
+        "unknown",
+        "evidence",
+        "malformed"
       ],
       "type": "string"
     },
@@ -5562,6 +6243,19 @@
     "RoutingResolvedMapping": {
       "additionalProperties": false,
       "properties": {
+        "adapterKind": {
+          "description": "Destination `AdapterKind` string. Not the product channel.",
+          "type": "string"
+        },
+        "destinationId": {
+          "description": "Destination that owns this catalog row. Empty only when the facade has none.",
+          "type": "string"
+        },
+        "migrationRequired": {
+          "default": false,
+          "description": "Historical remote CPA base from the facade mapping.\n\nOlder payloads may omit it; missing means false. New responses always emit it.",
+          "type": "boolean"
+        },
         "providerId": {
           "type": "string"
         },
@@ -5575,7 +6269,10 @@
       "required": [
         "providerId",
         "upstreamModel",
-        "routeable"
+        "routeable",
+        "destinationId",
+        "adapterKind",
+        "migrationRequired"
       ],
       "type": "object"
     },
@@ -5605,13 +6302,247 @@
       ],
       "type": "object"
     },
+    "RoutingRouteAuthority": {
+      "additionalProperties": false,
+      "description": "Redacted configuration proof for one stored route.\n\nMaterial fingerprints, ciphers, hop tokens, and auth file paths are absent.\nThe endpoint fingerprint is the public route pin.",
+      "properties": {
+        "accountLabel": {
+          "type": "string"
+        },
+        "adapterKind": {
+          "type": "string"
+        },
+        "authId": {
+          "type": "string"
+        },
+        "bindingEnabled": {
+          "type": "boolean"
+        },
+        "bindingId": {
+          "type": "string"
+        },
+        "callerPending": {
+          "type": "boolean"
+        },
+        "capabilityListed": {
+          "type": "boolean"
+        },
+        "channel": {
+          "$ref": "#/$defs/RoutingChannel"
+        },
+        "clientConfigurationEligible": {
+          "type": "boolean"
+        },
+        "credentialEnabled": {
+          "type": "boolean"
+        },
+        "credentialId": {
+          "type": "string"
+        },
+        "credentialVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "currentVersion": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "destinationDraft": {
+          "type": "boolean"
+        },
+        "destinationEnabled": {
+          "type": "boolean"
+        },
+        "destinationId": {
+          "type": "string"
+        },
+        "destinationLabel": {
+          "type": "string"
+        },
+        "endpointFingerprint": {
+          "type": "string"
+        },
+        "endpointId": {
+          "type": "string"
+        },
+        "exclusions": {
+          "items": {
+            "$ref": "#/$defs/RoutingExclusionCode"
+          },
+          "type": "array"
+        },
+        "grantsCover": {
+          "type": "boolean"
+        },
+        "historicalPlacement": {
+          "$ref": "#/$defs/RoutingHistoricalPlacement"
+        },
+        "knownRestrictionBlocks": {
+          "type": "boolean"
+        },
+        "legacyAccountId": {
+          "type": "string"
+        },
+        "material": {
+          "$ref": "#/$defs/RoutingMaterialFact"
+        },
+        "migrationRequired": {
+          "type": "boolean"
+        },
+        "nativeMode": {
+          "type": "string"
+        },
+        "nativeOperations": {
+          "items": {
+            "$ref": "#/$defs/RoutingOperationFact"
+          },
+          "type": "array"
+        },
+        "nativeProvider": {
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        },
+        "plane": {
+          "$ref": "#/$defs/RoutingRoutePlane"
+        },
+        "posture": {
+          "$ref": "#/$defs/RoutingRoutePosture"
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "publicModel": {
+          "type": "string"
+        },
+        "quota": {
+          "$ref": "#/$defs/RoutingQuotaFact"
+        },
+        "registrationEpoch": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "routingRank": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "secretRecheckPending": {
+          "type": "boolean"
+        },
+        "sendPending": {
+          "type": "boolean"
+        },
+        "setupStep": {
+          "type": "string"
+        },
+        "spelling": {
+          "$ref": "#/$defs/RoutingSpelling"
+        },
+        "trialPending": {
+          "type": "boolean"
+        },
+        "upstreamModel": {
+          "type": "string"
+        },
+        "validationOnly": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "plane",
+        "credentialId",
+        "credentialVersion",
+        "currentVersion",
+        "providerId",
+        "bindingId",
+        "authId",
+        "registrationEpoch",
+        "routingRank",
+        "destinationId",
+        "legacyAccountId",
+        "accountLabel",
+        "destinationLabel",
+        "publicModel",
+        "upstreamModel",
+        "spelling",
+        "protocol",
+        "endpointId",
+        "origin",
+        "endpointFingerprint",
+        "validationOnly",
+        "channel",
+        "adapterKind",
+        "material",
+        "posture",
+        "exclusions",
+        "credentialEnabled",
+        "bindingEnabled",
+        "destinationEnabled",
+        "destinationDraft",
+        "setupStep",
+        "nativeProvider",
+        "nativeMode",
+        "capabilityListed",
+        "grantsCover",
+        "nativeOperations",
+        "callerPending",
+        "secretRecheckPending",
+        "sendPending",
+        "quota",
+        "knownRestrictionBlocks",
+        "trialPending",
+        "clientConfigurationEligible",
+        "migrationRequired",
+        "historicalPlacement"
+      ],
+      "type": "object"
+    },
+    "RoutingRoutePlane": {
+      "enum": [
+        "desired",
+        "applied"
+      ],
+      "type": "string"
+    },
+    "RoutingRoutePosture": {
+      "enum": [
+        "client",
+        "validation_only",
+        "excluded"
+      ],
+      "type": "string"
+    },
+    "RoutingSpelling": {
+      "enum": [
+        "empty",
+        "same",
+        "distinct_upstream"
+      ],
+      "type": "string"
+    },
     "RuntimeOnlyUncertainty": {
       "enum": [
         "state_changed_after_snapshot",
         "conversation_binding_not_evaluated",
         "retry_exclusions_not_applied",
         "credential_recheck_pending",
-        "upstream_result_unknown"
+        "upstream_result_unknown",
+        "cpa_selection_not_evaluated",
+        "quota_trial_not_evaluated"
       ],
       "type": "string"
     },
@@ -6611,6 +7542,18 @@
     },
     {
       "$ref": "#/$defs/TemporaryPolicyClearRequest"
+    },
+    {
+      "$ref": "#/$defs/CpaControlTarget"
+    },
+    {
+      "$ref": "#/$defs/CpaRuntime"
+    },
+    {
+      "$ref": "#/$defs/CpaRuntimePhase"
+    },
+    {
+      "$ref": "#/$defs/CpaRuntimeInstall"
     }
   ],
   "title": "DashboardApiV4"

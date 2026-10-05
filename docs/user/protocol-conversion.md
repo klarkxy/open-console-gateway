@@ -2,6 +2,8 @@
 
 # Protocol Conversion
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
 Open Console Gateway speaks four client protocols on one port, then translates each
 request into whatever the upstream Plan actually understands. The conversion
 layer is deterministic: it resolves the Alias, checks account

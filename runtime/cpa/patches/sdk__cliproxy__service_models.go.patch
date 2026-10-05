@@ -1,0 +1,75 @@
+diff --git a/diff-a/sdk/cliproxy/service_models.go b/diff-b/sdk/cliproxy/service_models.go
+index 1111111..2222222 100644
+--- a/diff-a/sdk/cliproxy/service_models.go
++++ b/diff-b/sdk/cliproxy/service_models.go
+@@ -34,7 +34,11 @@
+ 				return
+ 			}
+ 		}
+-		GlobalModelRegistry().UnregisterClient(a.ID)
++		var registrationManager *coreauth.Manager
++		if s != nil {
++			registrationManager = s.coreManager
++		}
++		coreauth.OCGCommitDisabledUnregister(registrationManager, a)
+ 		return
+ 	}
+ 	if s != nil && s.coreManager != nil {
+@@ -50,6 +54,12 @@
+ 				GlobalModelRegistry().UnregisterClient(rid)
+ 			}
+ 		}
++	}
++	if coreauth.OCGHoldModelPublication != nil {
++		coreauth.OCGHoldModelPublication(a)
++	}
++	if coreauth.OCGPublishFencedModelScope(s.coreManager, a) {
++		return
+ 	}
+ 	provider := strings.ToLower(strings.TrimSpace(a.Provider))
+ 	compatProviderKey, compatDisplayName, compatDetected := openAICompatInfoFromAuth(a)
+@@ -234,7 +244,7 @@
+ 					if len(ms) > 0 {
+ 						s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
+ 					} else {
+-						GlobalModelRegistry().UnregisterClient(a.ID)
++						s.registerResolvedModelsForAuth(a, "", nil)
+ 					}
+ 				}
+ 				return true
+@@ -256,7 +266,7 @@
+ 					if len(ms) > 0 {
+ 						s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
+ 					} else {
+-						GlobalModelRegistry().UnregisterClient(a.ID)
++						s.registerResolvedModelsForAuth(a, "", nil)
+ 					}
+ 				}
+ 				return
+@@ -276,7 +286,7 @@
+ 					s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
+ 				} else {
+ 					// No matching provider found or models removed entirely; drop any prior registration.
+-					GlobalModelRegistry().UnregisterClient(a.ID)
++					s.registerResolvedModelsForAuth(a, "", nil)
+ 				}
+ 				return
+ 			}
+@@ -303,7 +313,7 @@
+ 		return
+ 	}
+ 
+-	GlobalModelRegistry().UnregisterClient(a.ID)
++	s.registerResolvedModelsForAuth(a, "", nil)
+ }
+ 
+ // refreshModelRegistrationForAuth re-applies the latest model registration for
+@@ -342,7 +352,7 @@
+ 
+ 	latest, ok := s.latestAuthForModelRegistration(current.ID)
+ 	if !ok || latest.Disabled {
+-		GlobalModelRegistry().UnregisterClient(current.ID)
++		coreauth.OCGCommitDisabledUnregister(s.coreManager, current)
+ 		s.coreManager.RefreshSchedulerEntry(current.ID)
+ 		return false
+ 	}

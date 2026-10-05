@@ -1,0 +1,2 @@
+# Preserve archived evidence bytes and the MANIFEST SHA-256 values on every host.
+* -text -whitespace

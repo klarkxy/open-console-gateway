@@ -569,6 +569,7 @@ async fn delayed_400_still_records_b_after_a_is_disabled() {
     h.push_stop(stop);
     let (status, body) = put_policy(h.port, &h.state, two_custom_status_rules()).await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    h.ensure_owned_plane().await;
     let port = h.port;
     let pending =
         tokio::spawn(async move { protocol_call(port, "/v1/chat/completions", MODEL).await });
@@ -627,6 +628,7 @@ async fn delayed_400_does_not_record_after_same_id_recreate() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    h.ensure_owned_plane().await;
     let port = h.port;
     let pending =
         tokio::spawn(async move { protocol_call(port, "/v1/chat/completions", MODEL).await });
@@ -689,6 +691,7 @@ async fn delayed_400_does_not_record_after_connection_override() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    h.ensure_owned_plane().await;
     let port = h.port;
     let pending =
         tokio::spawn(async move { protocol_call(port, "/v1/chat/completions", MODEL).await });
@@ -752,6 +755,7 @@ async fn in_flight_success_does_not_clear_b_recorded_after_lease() {
     h.push_stop(stop);
     let (status, body) = put_policy(h.port, &h.state, code_rules()).await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    h.ensure_owned_plane().await;
     let port = h.port;
     let pending_x =
         tokio::spawn(async move { protocol_call(port, "/v1/chat/completions", MODEL).await });
@@ -762,6 +766,7 @@ async fn in_flight_success_does_not_clear_b_recorded_after_lease() {
     let (status, _) = protocol_call(h.port, "/v1/chat/completions", MODEL).await;
     assert_eq!(status.as_u16(), 400);
     clock.store(40, Ordering::SeqCst);
+    h.ensure_owned_plane().await;
     let port = h.port;
     let pending_p =
         tokio::spawn(async move { protocol_call(port, "/v1/chat/completions", MODEL).await });
@@ -916,6 +921,7 @@ async fn expired_retry_after_admits_concurrent_success() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     clock.store(5, Ordering::SeqCst);
+    h.ensure_owned_plane().await;
     let port = h.port;
     let pending =
         tokio::spawn(async move { protocol_call(port, "/v1/chat/completions", MODEL).await });

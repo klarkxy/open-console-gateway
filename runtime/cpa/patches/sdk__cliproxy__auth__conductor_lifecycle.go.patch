@@ -1,0 +1,109 @@
+diff --git a/diff-a/sdk/cliproxy/auth/conductor_lifecycle.go b/diff-b/sdk/cliproxy/auth/conductor_lifecycle.go
+index 34be538..6cffecc 100644
+--- a/diff-a/sdk/cliproxy/auth/conductor_lifecycle.go
++++ b/diff-b/sdk/cliproxy/auth/conductor_lifecycle.go
+@@ -108,6 +108,9 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
+ 	if existing, exists := m.auths[auth.ID]; exists && existing != nil && existing.RegistrationEpoch > m.authEpochs[auth.ID] {
+ 		m.authEpochs[auth.ID] = existing.RegistrationEpoch
+ 	}
++	if existing, exists := m.auths[auth.ID]; exists && existing != nil {
++		preserveOCGAuthFields(existing, auth)
++	}
+ 	if auth.RegistrationEpoch > m.authEpochs[auth.ID] {
+ 		m.authEpochs[auth.ID] = auth.RegistrationEpoch
+ 	}
+@@ -137,6 +140,67 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
+ 	return auth.Clone(), nil
+ }
+ 
++func preserveOCGAuthFields(existing, incoming *Auth) {
++	if existing == nil || incoming == nil {
++		return
++	}
++	if incoming.Metadata == nil {
++		incoming.Metadata = map[string]any{}
++	}
++	if existing.Metadata != nil {
++		for _, key := range []string{"ocg_credential_id", "ocg_credential_version", "ocg_binding_id", "ocg_material_revision", "ocg_oauth"} {
++			if _, present := incoming.Metadata[key]; present {
++				continue
++			}
++			if value, ok := existing.Metadata[key]; ok {
++				incoming.Metadata[key] = value
++			}
++		}
++	}
++	if incoming.Attributes == nil {
++		incoming.Attributes = map[string]string{}
++	}
++	credentialChanged := ocgCredentialIdentityChanged(existing, incoming)
++	if credentialChanged {
++		if _, present := incoming.Attributes["ocg_model_scope"]; !present {
++			incoming.Attributes["ocg_model_scope"] = ""
++		}
++	}
++	for key, value := range existing.Attributes {
++		if _, present := incoming.Attributes[key]; present {
++			continue
++		}
++		if credentialChanged && (key == "ocg_model_scope" || key == "excluded_models") {
++			continue
++		}
++		if strings.HasPrefix(key, "ocg_") || strings.HasPrefix(key, "header:") || key == "websockets" || key == "priority" || key == "excluded_models" {
++			incoming.Attributes[key] = value
++		}
++	}
++	// A token-file priority must not replace an operator rank already stamped on the live auth.
++	if existing.Attributes[AttributeFilePriority] == "" && existing.Attributes["priority"] != "" {
++		if _, fromFile := incoming.Attributes[AttributeFilePriority]; fromFile {
++			incoming.Attributes["priority"] = existing.Attributes["priority"]
++			delete(incoming.Attributes, AttributeFilePriority)
++		}
++	}
++	refreshOCGMaterial(incoming)
++}
++
++func ocgCredentialIdentityChanged(existing, incoming *Auth) bool {
++	if existing == nil || incoming == nil || existing.Metadata == nil || incoming.Metadata == nil {
++		return false
++	}
++	inID, inOK := incoming.Metadata["ocg_credential_id"].(string)
++	exID, exOK := existing.Metadata["ocg_credential_id"].(string)
++	if inOK && exOK && strings.TrimSpace(inID) != strings.TrimSpace(exID) {
++		return true
++	}
++	inVer, inVerOK := incoming.Metadata["ocg_credential_version"].(string)
++	exVer, exVerOK := existing.Metadata["ocg_credential_version"].(string)
++	return inVerOK && exVerOK && strings.TrimSpace(inVer) != strings.TrimSpace(exVer)
++}
++
+ type updateAuthMode int
+ 
+ const (
+@@ -175,6 +218,9 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode updateAuthMode) (*Auth, error) {
+ 	existing, ok := m.auths[auth.ID]
+ 	if !ok || existing == nil {
+ 		m.mu.Unlock()
+ 		return nil, nil
+ 	}
++	if mode == updateModeReplace {
++		preserveOCGAuthFields(existing, auth)
++	}
+ 	if m.authEpochs == nil {
+@@ -189,5 +235,6 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode updateAuthMode) (*Auth, error) {
+ 		if merged != nil {
+ 			auth = merged
+ 			NormalizeCredentialMetadata(auth.Metadata)
+ 		}
++		refreshOCGMaterial(auth)
+ 	} else if mode == updateModePrepare {
+@@ -267,6 +267,9 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode updateAuthMode) (*Auth, error) {
+ 	authClone := auth.Clone()
+ 	m.auths[auth.ID] = authClone
++	if mode == updateModeReplace && !authClone.Disabled && authClone.Status != StatusDisabled {
++		publishStoredModelScope(authClone)
++	}
+ 	m.mu.Unlock()
+ 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
+ 		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+ 	}

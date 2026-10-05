@@ -524,6 +524,23 @@ async fn fetch_rejects_chunked_oversize_without_trusting_content_length() {
 }
 
 #[test]
+fn accepted_fetch_rewrites_only_the_canonical_usage_url() {
+    assert_eq!(endpoint_from_rewrite(Ok(None)).unwrap(), GO_USAGE_URL);
+    let loopback = "http://127.0.0.1:9/zen/go/v1/usage";
+    assert_eq!(
+        endpoint_from_rewrite(Ok(Some(loopback.to_string()))).unwrap(),
+        loopback
+    );
+    assert_eq!(
+        endpoint_from_rewrite(Err("OCG_CPA_TEST_ENDPOINTS is malformed".to_string())).unwrap_err(),
+        GoUsageError::Network
+    );
+    let seam =
+        crate::cpa_test_endpoints::rewrite_url(ocg_domain::ids::OPENCODE_PROVIDER_ID, GO_USAGE_URL);
+    assert_eq!(official_usage_endpoint(), endpoint_from_rewrite(seam));
+}
+
+#[test]
 fn error_display_never_contains_a_test_bearer() {
     for error in [
         GoUsageError::Unauthorized,

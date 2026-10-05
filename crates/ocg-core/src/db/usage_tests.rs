@@ -1297,3 +1297,135 @@ pub(super) fn daily_tokens_by_model_includes_midnight_of_the_earliest_utc_day() 
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+pub(super) fn managed_key_stage_bumps_identity_once_and_unchanged_completion_does_not() {
+    let dir = temp_data_dir("managed-key-version");
+    let db = Database::open(dir.clone()).unwrap();
+    let mut managed = account("managed-version");
+    managed.account_type = crate::models::AccountType::Managed;
+    managed.setup_step = crate::models::AccountSetupStep::KeyVerification;
+    managed.enabled = false;
+    managed.key_cipher = "original-cipher".into();
+    db.create_account(&managed).unwrap();
+
+    fn identity(db: &Database, id: &str) -> (i64, i64, Option<String>) {
+        db.conn
+            .query_row(
+                "SELECT COALESCE(credential_version, 1), COALESCE(auth_state_version, 1), rotated_at
+                 FROM credentials WHERE legacy_account_id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    }
+
+    let (version, auth_state, rotated) = identity(&db, "managed-version");
+    assert!(rotated.is_none());
+    let before = db.get_account("managed-version").unwrap().unwrap();
+    let staged = db
+        .commit_managed_key_verification(
+            "managed-version",
+            &ManagedKeyVerificationCas::from_account(&before),
+            "candidate-cipher",
+            &ManagedKeyVerificationWrite::Pending,
+        )
+        .unwrap();
+    assert_eq!(staged, ManagedKeyVerificationCommit::Applied);
+    let (next_version, next_auth, next_rotated) = identity(&db, "managed-version");
+    assert_eq!(next_version, version + 1);
+    assert_eq!(next_auth, auth_state + 1);
+    assert!(next_rotated.is_some());
+    let pending = db.get_account("managed-version").unwrap().unwrap();
+    assert_eq!(pending.key_cipher, "candidate-cipher");
+    assert!(!pending.enabled);
+    assert_eq!(
+        pending.setup_step,
+        crate::models::AccountSetupStep::KeyVerification
+    );
+
+    let completed = db
+        .commit_managed_key_verification(
+            "managed-version",
+            &ManagedKeyVerificationCas::from_account(&pending),
+            "candidate-cipher",
+            &ManagedKeyVerificationWrite::Verified {
+                rate_limit: None,
+                account_name: pending.name.clone(),
+            },
+        )
+        .unwrap();
+    assert_eq!(completed, ManagedKeyVerificationCommit::Applied);
+    let (done_version, done_auth, done_rotated) = identity(&db, "managed-version");
+    assert_eq!(done_version, next_version);
+    assert_eq!(done_auth, next_auth);
+    assert_eq!(done_rotated, next_rotated);
+    let ready = db.get_account("managed-version").unwrap().unwrap();
+    assert!(ready.enabled);
+    assert_eq!(ready.setup_step, crate::models::AccountSetupStep::Ready);
+    assert_eq!(ready.key_cipher, "candidate-cipher");
+
+    let mut stale = account("managed-stale");
+    stale.account_type = crate::models::AccountType::Managed;
+    stale.setup_step = crate::models::AccountSetupStep::KeyVerification;
+    stale.enabled = false;
+    stale.key_cipher = "original-cipher".into();
+    db.create_account(&stale).unwrap();
+    let stale_before = identity(&db, "managed-stale");
+    let row = db.get_account("managed-stale").unwrap().unwrap();
+    let mut cas = ManagedKeyVerificationCas::from_account(&row);
+    cas.updated_at = cas.updated_at - chrono::Duration::seconds(5);
+    let conflict = db
+        .commit_managed_key_verification(
+            "managed-stale",
+            &cas,
+            "candidate-cipher",
+            &ManagedKeyVerificationWrite::Pending,
+        )
+        .unwrap();
+    assert_eq!(conflict, ManagedKeyVerificationCommit::Conflict);
+    assert_eq!(identity(&db, "managed-stale"), stale_before);
+    assert_eq!(
+        db.get_account("managed-stale").unwrap().unwrap().key_cipher,
+        "original-cipher"
+    );
+
+    let mut moved = account("managed-setup");
+    moved.account_type = crate::models::AccountType::Managed;
+    moved.setup_step = crate::models::AccountSetupStep::KeyVerification;
+    moved.enabled = false;
+    moved.key_cipher = "original-cipher".into();
+    db.create_account(&moved).unwrap();
+    let setup_before = identity(&db, "managed-setup");
+    let setup_row = db.get_account("managed-setup").unwrap().unwrap();
+    let setup_cas = ManagedKeyVerificationCas::from_account(&setup_row);
+    let changed = db
+        .conn
+        .execute(
+            "UPDATE credentials SET setup_step = 'payment' WHERE legacy_account_id = ?1",
+            ["managed-setup"],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    let setup_conflict = db
+        .commit_managed_key_verification(
+            "managed-setup",
+            &setup_cas,
+            "candidate-cipher",
+            &ManagedKeyVerificationWrite::Pending,
+        )
+        .unwrap();
+    assert_eq!(setup_conflict, ManagedKeyVerificationCommit::Conflict);
+    assert_eq!(identity(&db, "managed-setup"), setup_before);
+    assert_eq!(
+        db.get_account("managed-setup").unwrap().unwrap().setup_step,
+        crate::models::AccountSetupStep::Payment
+    );
+    assert_eq!(
+        db.get_account("managed-setup").unwrap().unwrap().key_cipher,
+        "original-cipher"
+    );
+
+    drop(db);
+    fs::remove_dir_all(dir).unwrap();
+}

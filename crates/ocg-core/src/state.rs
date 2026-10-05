@@ -391,6 +391,11 @@ pub(crate) enum CpaSelectionError {
     Internal(anyhow::Error),
 }
 
+/// Shared catalog selection, activation, and `PUT /cpa/models` refusal.
+/// Stored catalog bytes are left in place.
+pub(crate) const RETIRED_CPA_CATALOG: &str =
+    "dedicated CPA catalog is retired and cannot be changed";
+
 pub struct CoreStateInner {
     pub(crate) debug_capture: crate::gateway::debug_capture::DebugCapture,
     pub db: Mutex<Database>,
@@ -448,6 +453,9 @@ pub struct CoreStateInner {
     /// at startup on Windows/Unix; unset only on other targets. Dashboard CPA
     /// mutations are serialized by `cpa_operations`.
     pub(crate) cpa_runtime: crate::cpa_runtime::CpaRuntimeCapabilities,
+    /// Pinned CPA execution plane. A poisoned settings record stays on this
+    /// field and fails closed at start; construction itself still succeeds.
+    pub(crate) cpa_execution: crate::cpa_execution::ExecutionPlane,
     provider_contracts: RwLock<Arc<crate::provider_contracts::EffectiveContractSet>>,
     dynamic_providers: RwLock<Arc<Vec<crate::dynamic::DynamicProviderRuntime>>>,
     pub routing: RoutingRuntime,
@@ -467,6 +475,7 @@ pub struct CoreStateInner {
     pub data_dir: PathBuf,
     pub cipher: Arc<dyn KeyCipher + Send + Sync>,
     router_factory: std::sync::OnceLock<crate::gateway::listener::RouterFactory>,
+    cpa_endpoint_fixtures: crate::cpa_test_endpoints::EndpointFixtureSlot,
 }
 
 pub type CoreState = Arc<CoreStateInner>;
@@ -755,10 +764,9 @@ impl CoreStateInner {
         };
         let zen_free_models = db.zen_free_model_catalog()?.unwrap_or_default();
         let modelsdev_catalog = crate::modelsdev::load(&db)?;
-        let cpa_models = db
-            .cpa_model_catalog()?
-            .map(|catalog| crate::db::CpaCatalogModel::enabled_ids(&catalog.models))
-            .unwrap_or_default();
+        // Historical enabled ids are not the live route list. The stored
+        // `provider_model_catalogs` row is not read or rewritten here.
+        let cpa_models = Vec::<String>::new();
         let unpublished_public_models = db
             .list_unpublished_public_models()?
             .into_iter()
@@ -775,6 +783,8 @@ impl CoreStateInner {
         let http_client =
             build_proxy_route_set(&config, &crate::destination_projection::load_runtime(&db)?)?;
         let policy_snapshot = crate::gateway::policy::load_runtime_snapshot(&db)?;
+        let process_generation = (uuid::Uuid::new_v4().as_u128() as u64) & 0x0000_FFFF_FFFF_FFFF;
+        let cpa_execution = crate::cpa_execution::ExecutionPlane::open(&db, process_generation);
         Ok(Self {
             debug_capture: crate::gateway::debug_capture::DebugCapture::from_env(&data_dir),
             db: Mutex::new(db),
@@ -789,7 +799,7 @@ impl CoreStateInner {
             settings_revision: AtomicU64::new(
                 (uuid::Uuid::new_v4().as_u128() as u64) & 0x0000_FFFF_FFFF_FFFF,
             ),
-            process_generation: (uuid::Uuid::new_v4().as_u128() as u64) & 0x0000_FFFF_FFFF_FFFF,
+            process_generation,
             credential_snapshot: RwLock::new(credential_snapshot),
             gateway: Mutex::new(None),
             gateway_lifecycle: tokio::sync::Mutex::new(()),
@@ -814,6 +824,7 @@ impl CoreStateInner {
             ),
             cpa_operations: tokio::sync::Mutex::new(()),
             cpa_runtime: crate::cpa_runtime::CpaRuntimeCapabilities::new(),
+            cpa_execution,
             provider_contracts: RwLock::new(Arc::new(provider_contracts)),
             dynamic_providers: RwLock::new(Arc::new(dynamic_providers)),
             routing: RoutingRuntime::new(),
@@ -827,6 +838,8 @@ impl CoreStateInner {
             data_dir,
             cipher,
             router_factory: OnceLock::new(),
+            cpa_endpoint_fixtures:
+                crate::cpa_test_endpoints::EndpointFixtureSlot::capture_child_environment(),
         })
     }
 
@@ -837,6 +850,35 @@ impl CoreStateInner {
     /// cycle. Later binds and rebinds use the same factory.
     pub fn set_router_factory(&self, factory: crate::gateway::listener::RouterFactory) -> bool {
         self.router_factory.set(factory).is_ok()
+    }
+
+    /// Feature-only instance fixture map. Must run before the first render.
+    #[cfg(feature = "ollama-cloud-loopback-test")]
+    #[doc(hidden)]
+    pub fn install_cpa_test_endpoints(&self, raw: &str) -> Result<(), String> {
+        self.cpa_endpoint_fixtures.install_instance(raw)
+    }
+
+    pub(crate) fn cpa_endpoint_authority(
+        &self,
+    ) -> Result<Arc<crate::cpa_test_endpoints::EndpointAuthority>, String> {
+        self.cpa_endpoint_fixtures.authority()
+    }
+
+    pub(crate) fn seal_cpa_endpoint_authority_for_render(
+        &self,
+    ) -> Result<Arc<crate::cpa_test_endpoints::EndpointAuthority>, String> {
+        self.cpa_endpoint_fixtures.seal_for_render()
+    }
+
+    /// Controlled usage fetch before the scheduler starts. Not trusted quota.
+    #[doc(hidden)]
+    pub fn isolate_inference_usage_for_test(&self) {
+        #[cfg(any(debug_assertions, feature = "ollama-cloud-loopback-test"))]
+        self.usage_sync.set_reactive_refresh_enabled_for_test(false);
+        self.usage_sync.set_fetch_for_test(|_, _| {
+            Box::pin(async { Err(crate::go_usage::GoUsageError::Network) })
+        });
     }
 
     /// Persist temporary-unavailability rules and install the compiled snapshot
@@ -1180,35 +1222,15 @@ impl CoreStateInner {
 
     pub fn activate_cpa_model_catalog(
         &self,
-        models: Vec<crate::db::CpaCatalogModel>,
-        source_url: &str,
-        refreshed_at: chrono::DateTime<chrono::Utc>,
+        _models: Vec<crate::db::CpaCatalogModel>,
+        _source_url: &str,
+        _refreshed_at: chrono::DateTime<chrono::Utc>,
     ) -> crate::Result<()> {
-        let ids = crate::db::CpaCatalogModel::enabled_ids(&models);
-        let mut projection = crate::destination_projection::load_runtime(&self.db.lock())?;
-        if let Some(destination) = projection
-            .destinations
-            .iter_mut()
-            .find(|destination| destination.adapter == ocg_domain::destination::AdapterKind::Cpa)
-        {
-            destination.catalog = crate::db::destination_store::cpa_catalog(&models);
-        }
-        let route_set = build_proxy_route_set(&self.config(), &projection)?;
-        {
-            let db = self.db.lock();
-            let mut http_client = self.http_client.lock();
-            let mut active = self.cpa_models.write();
-            db.replace_cpa_model_catalog(&models, source_url, refreshed_at)?;
-            *http_client = Arc::new(route_set);
-            *active = Arc::new(ids);
-        }
-        self.routing.reset();
-        Ok(())
+        anyhow::bail!(RETIRED_CPA_CATALOG)
     }
 
-    /// Replace the routed CPA catalog subset. Unknown IDs are rejected; an
-    /// empty selection publishes no CPA models.
-    #[expect(dead_code)]
+    /// CAS-shaped entry for the retired shared catalog. A conflict and a
+    /// matching CAS both leave stored bytes, revision, and grants unchanged.
     pub(crate) fn replace_cpa_model_selection(
         &self,
         expected_revision: u64,
@@ -1225,77 +1247,16 @@ impl CoreStateInner {
     }
 
     /// Caller holds `settings_update` and has already checked CAS.
+    /// A matching CAS still does not write the catalog, revision, or grants.
     pub(crate) fn replace_cpa_model_selection_locked(
         &self,
-        enabled_ids: &[String],
+        _enabled_ids: &[String],
     ) -> Result<(), CpaSelectionError> {
-        let catalog = {
-            let db = self.db.lock();
-            db.cpa_model_catalog()
-                .map_err(CpaSelectionError::Internal)?
-        };
-        let Some(catalog) = catalog else {
-            return Err(CpaSelectionError::Unavailable(
-                "CPA model catalog has not been refreshed".into(),
-            ));
-        };
-        let known: std::collections::HashSet<&str> = catalog
-            .models
-            .iter()
-            .map(|model| model.id.as_str())
-            .collect();
-        let mut seen = std::collections::HashSet::new();
-        let mut selected = Vec::new();
-        for id in enabled_ids {
-            let id = id.trim();
-            if id.is_empty() || !known.contains(id) || !seen.insert(id) {
-                return Err(CpaSelectionError::Invalid(
-                    "enabledIds must be distinct models from the saved CPA catalog".into(),
-                ));
-            }
-            selected.push(id.to_string());
-        }
-        self.set_cpa_model_routing(&selected)
-            .map_err(CpaSelectionError::Internal)?;
-        self.bump_settings_revision();
-        Ok(())
+        Err(CpaSelectionError::Unavailable(RETIRED_CPA_CATALOG.into()))
     }
 
-    pub fn set_cpa_model_routing(&self, enabled_ids: &[String]) -> crate::Result<()> {
-        let catalog = {
-            let db = self.db.lock();
-            db.cpa_model_catalog()?
-        };
-        let Some(catalog) = catalog else {
-            anyhow::bail!("CPA model catalog has not been refreshed");
-        };
-        let known: std::collections::HashSet<&str> = catalog
-            .models
-            .iter()
-            .map(|model| model.id.as_str())
-            .collect();
-        let enabled_ids: Vec<String> = enabled_ids.iter().map(|id| id.trim().to_string()).collect();
-        for id in &enabled_ids {
-            anyhow::ensure!(
-                known.contains(id.as_str()),
-                "enabledIds must be models from the saved CPA catalog"
-            );
-        }
-        let selected: std::collections::HashSet<&str> =
-            enabled_ids.iter().map(String::as_str).collect();
-        let models = catalog
-            .models
-            .into_iter()
-            .map(|mut model| {
-                model.enabled = selected.contains(model.id.as_str());
-                model
-            })
-            .collect();
-        self.activate_cpa_model_catalog(
-            models,
-            &catalog.source_url,
-            catalog.refreshed_at.unwrap_or_else(chrono::Utc::now),
-        )
+    pub fn set_cpa_model_routing(&self, _enabled_ids: &[String]) -> crate::Result<()> {
+        anyhow::bail!(RETIRED_CPA_CATALOG)
     }
 
     /// Atomically remove OCG-owned CPA configuration, singleton account, and
@@ -1380,8 +1341,9 @@ impl CoreStateInner {
         self.reload_provider_contracts_locked(&db)
     }
 
-    /// Caller holds settings_update. Build every fallible runtime view before
-    /// committing, then install while the DB lock still excludes new readers.
+    /// Caller holds settings_update. Build every fallible runtime view, including
+    /// the temporary-policy snapshot, before committing. Install that same
+    /// compiled snapshot after commit. Installation does not fail the save.
     pub(crate) fn commit_configuration_update<T>(
         &self,
         mutation: impl FnOnce(&Database) -> crate::Result<T>,
@@ -1391,16 +1353,35 @@ impl CoreStateInner {
         let result = mutation(&db)?;
         crate::db::routing_cards::reconcile_on(&db.conn)?;
         let runtime = self.prepare_imported_node_runtime(&db)?;
+        let compiled = self.compile_temporary_policy(&db)?;
         tx.commit()?;
         self.install_imported_node_runtime(runtime);
-        self.publish_temporary_policy(&db)?;
+        self.install_temporary_policy(compiled);
         Ok(result)
     }
 
-    pub(crate) fn publish_temporary_policy(&self, db: &Database) -> crate::Result<()> {
+    /// Compile `temporary_unavailability_v1` against the current snapshot.
+    /// Does not replace the live snapshot.
+    fn compile_temporary_policy(
+        &self,
+        db: &Database,
+    ) -> crate::Result<crate::gateway::policy::EffectivePolicySnapshot> {
         let previous = self.recovery.policy_snapshot();
-        let compiled = crate::gateway::policy::compile_published(db, &previous)?;
+        crate::gateway::policy::compile_published(db, &previous)
+    }
+
+    fn install_temporary_policy(&self, compiled: crate::gateway::policy::EffectivePolicySnapshot) {
         self.recovery.install_snapshot(compiled);
+    }
+
+    /// Compile and install temporary-unavailability policy outside an open
+    /// configuration transaction. `commit_configuration_update` compiles
+    /// before `tx.commit` and installs that value afterward, so it does not
+    /// call this after commit.
+    #[expect(dead_code)]
+    pub(crate) fn publish_temporary_policy(&self, db: &Database) -> crate::Result<()> {
+        let compiled = self.compile_temporary_policy(db)?;
+        self.install_temporary_policy(compiled);
         Ok(())
     }
 
@@ -2427,6 +2408,27 @@ impl crate::usage_sync::UsageSyncStore for Database {
         crate::db::quota_recovery::reconcile_official_go_usage(
             &self.conn, account_id, snapshot, now,
         )
+    }
+
+    fn quota_pool_ids(
+        &self,
+        credential_id: &str,
+        legacy_account_id: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        crate::cpa_quota::pool_ids(&self.conn, credential_id, legacy_account_id)
+    }
+
+    fn apply_official_plan_observation(
+        &self,
+        commit: &crate::usage_sync::OfficialPlanCommit,
+    ) -> crate::usage_sync::OfficialPlanHook {
+        match self.apply_official_plan(commit) {
+            Ok(crate::cpa_policy::QuotaApply::Applied) => {
+                crate::usage_sync::OfficialPlanHook::Applied
+            }
+            Ok(crate::cpa_policy::QuotaApply::Stale) => crate::usage_sync::OfficialPlanHook::Stale,
+            Err(_) => crate::usage_sync::OfficialPlanHook::Rejected,
+        }
     }
 
     fn list_accounts(&self) -> anyhow::Result<Vec<crate::models::Account>> {

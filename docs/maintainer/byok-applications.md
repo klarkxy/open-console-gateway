@@ -2,7 +2,9 @@
 
 # Local BYOK applications
 
-Applications has four fixed native adapters: Codex, Kimi Code, MiniMax Code, and ZCode. This is independent custom-provider configuration, not the native-login proxy described in the older [Codex proposal](codex-integration-proposal.md). DSH keeps its plugin workflow.
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
+Applications has four fixed native adapters: Codex, Kimi Code, MiniMax Code, and ZCode. This is independent custom-provider configuration, distinct from proxying a client’s native login. DSH keeps its plugin workflow.
 
 The authenticated V4 endpoints are `GET|POST|DELETE /dashboard/api/v4/applications/byok/{client}` and `POST .../{client}/recover`. Writes require the current revision, process generation, and inspected file fingerprint. Configure accepts no Key, model selection, metadata overrides, or default-model choice. Under the settings lock it exports every exact public ID from the same publisher used by authenticated `/v1/models`, rejects an empty catalog, then creates or reuses the enabled ordinary Key named `codex`, `kimi-code`, `minimax-code`, or `zcode`. DSH defaults to `dsh`; its optional `keyId` remains compatible with existing API callers. New Key creation immediately advances the revision, including when a later native write fails. GET never creates Keys or builds a model picker catalog. Removal and recovery do not depend on a still-existing Key or model. Native CLI and Tauri register the shared host; builds without `dsh-local-host` return `unsupported_runtime`.
 

@@ -2,6 +2,8 @@
 
 # Manual Client Setup
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
 Use this guide to connect a client directly through the ordinary Gateway API.
 The [Applications page](applications.md) also offers local BYOK configuration
 for Codex, Kimi Code, MiniMax Code and ZCode, alongside the DSH plugin flow.

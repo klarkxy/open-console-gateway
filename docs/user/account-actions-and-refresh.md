@@ -2,6 +2,8 @@
 
 # Account actions and refresh
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
 ## Saving and continuing work
 
 A confirmed account or Key save closes its editor without waiting for account lists, model catalogs, or usage to reload. These follow-up reads run in the background. If a read fails, the saved change remains saved; use the affected section's retry action instead of submitting the change again. When local credit setup is part of creating an account, a failed credit setup remains attached to that same account so retrying does not create another.

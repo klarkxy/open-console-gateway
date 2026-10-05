@@ -38,6 +38,7 @@ PATHS
   POST /v1/chat/completions
   POST /v1/responses
   POST /v1/messages
+  POST /v1/messages/count_tokens
   GET /v1/models
   POST /v1/models/{model}:{action}
   POST /v1beta/models/{model}:{action}
@@ -74,6 +75,19 @@ CAS
   routes is not success. The unversioned /dashboard/api/auth paths do not
   read those fields.
 
+CPA RUNTIME
+  GET /dashboard/api/v4/external-integrations/cpa/runtime
+  POST /dashboard/api/v4/external-integrations/cpa/runtime/check-update
+  POST /dashboard/api/v4/external-integrations/cpa/runtime/install
+  POST /dashboard/api/v4/external-integrations/cpa/runtime/update
+  POST /dashboard/api/v4/external-integrations/cpa/runtime/start
+  POST /dashboard/api/v4/external-integrations/cpa/runtime/stop
+  POST /dashboard/api/v4/external-integrations/cpa/runtime/rollback
+  GET /dashboard/api/v4/external-integrations/cpa/runtime/logs
+  These are the existing V4 routes. install and start use the pinned host
+  selected by serve --cpa-host-dir. A saved product change is not applied
+  until start. check-update reports the pinned v8.0.10 artifact.
+
 SECRETS
   Put JSON in --input file or --input -. The file contents are not echoed.
   --key-file is sent as Authorization: Bearer on inference routes only and
@@ -82,10 +96,10 @@ SECRETS
   never printed. Dashboard cookies are not attached to /v1 routes.
 
 EXAMPLES
-  ocg-manager-cli api GET /dashboard/api/v4/contract
-  ocg-manager-cli api --session-file session.json --cas-current POST /dashboard/api/v4/auth/login --input login.json
-  ocg-manager-cli api --cas-current PATCH /dashboard/api/v4/accounts/ACCOUNT_ID --input patch.json --output result.json
-  ocg-manager-cli api --key-file gateway.key POST /v1/chat/completions --input request.json
+  ocg api GET /dashboard/api/v4/contract
+  ocg api --session-file session.json --cas-current POST /dashboard/api/v4/auth/login --input login.json
+  ocg api --cas-current PATCH /dashboard/api/v4/accounts/ACCOUNT_ID --input patch.json --output result.json
+  ocg api --key-file gateway.key POST /v1/chat/completions --input request.json
 
 Success writes the response body to stdout, or to --output and nothing else.
 Stdout JSON redacts primaryKey, subKeys[].value, one-time secret, and known
@@ -498,7 +512,7 @@ async fn execute_prepared(
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(CONNECT_TIMEOUT)
         .no_proxy()
-        .user_agent("ocg-manager-cli")
+        .user_agent("ocg")
         .build()
         .map_err(|error| transport(&redact(&error.to_string(), secrets)))?;
     let http_method = reqwest::Method::from_bytes(method.as_bytes())

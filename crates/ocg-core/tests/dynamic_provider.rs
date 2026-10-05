@@ -66,10 +66,6 @@ async fn discovered_model_probes_and_routes_all_three_client_formats_with_stream
                 status: 200,
                 body: r#"{"data":[{"id":"vendor/second"}],"has_more":false}"#,
             },
-            FakeReply {
-                status: 200,
-                body: reply,
-            },
         ]);
         for _ in 0..3 {
             queue.push_back(FakeReply {
@@ -98,16 +94,25 @@ async fn discovered_model_probes_and_routes_all_three_client_formats_with_stream
             json!(["vendor/opus", "vendor/second"])
         );
         assert_eq!(discovered["truncated"], false);
+        let calls_after_discovery = calls.lock().unwrap().len();
         let (status, probed) = send_json(&harness, Method::POST, "/providers/test", &json!({
             "endpointUrl": endpoint, "upstreamProtocol": upstream_protocol, "authKind": auth, "key": "sk-matrix",
             "publicModel": "lab-opus", "upstreamModel": discovered["models"][0]
         })).await;
-        assert_eq!(status, StatusCode::OK, "{probed}");
-        assert_eq!(probed["ok"], true, "{probed}");
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{probed}");
+        assert_eq!(probed["code"], "preconditionFailed");
+        assert!(
+            probed["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("model test")),
+            "{probed}"
+        );
+        assert!(!probed.to_string().contains("sk-matrix"), "{probed}");
+        assert_eq!(calls.lock().unwrap().len(), calls_after_discovery);
         assert_eq!(
             harness.state.settings_revision(),
             before,
-            "discovery/probes must not save routing"
+            "discovery and a refused draft test must not save routing"
         );
         let (status, created) = send_json(
             &harness,
@@ -191,7 +196,7 @@ async fn discovered_model_probes_and_routes_all_three_client_formats_with_stream
             }
         }
         let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 9);
+        assert_eq!(calls.len(), 8);
         assert_eq!(calls[0].path, "/tenant/api/v1/models");
         assert_eq!(calls[1].path, "/tenant/api/v1/models");
         for call in calls.iter().skip(2) {
@@ -216,7 +221,7 @@ async fn discovered_model_probes_and_routes_all_three_client_formats_with_stream
                 assert!(call.anthropic_version.is_some());
             }
         }
-        for (index, call) in calls.iter().skip(3).enumerate() {
+        for (index, call) in calls.iter().skip(2).enumerate() {
             let sent: Value = serde_json::from_str(&call.body).unwrap();
             assert_eq!(sent["stream"], index % 2 == 1, "{sent}");
             if upstream_protocol == "responses" {
@@ -361,39 +366,62 @@ async fn preset_provenance_survives_save_edit_and_can_be_cleared() {
 }
 
 #[tokio::test]
-async fn draft_protocol_probe_rejects_wrong_shapes_and_error_objects_without_saving() {
+async fn draft_provider_test_does_not_send_and_keeps_the_secret() {
     let harness = start_loopback("dyn-probe-false-success").await;
     let mut config = harness.state.config();
     config.proxy_mode = ProxyMode::Direct;
     harness.state.set_config(config).unwrap();
     let before = harness.state.settings_revision();
-    for (protocol, body) in [
-        ("chat_completions", r#"{"ok":true}"#),
-        ("responses", CHAT_OK),
-        ("responses", r#"{"output":[]}"#),
-        ("messages", CHAT_OK),
-        (
-            "chat_completions",
-            r#"{"error":{"message":"sk-secret-do-not-echo"}}"#,
-        ),
-        ("responses", r#"{"status":"failed","output":[]}"#),
-    ] {
-        let (upstream, calls, _stop) = start_fake_upstream(HashMap::from([(
-            "sk-secret-do-not-echo".into(),
-            VecDeque::from([FakeReply { status: 200, body }]),
-        )]))
-        .await;
+    let (upstream, calls, _stop) = start_fake_upstream(HashMap::from([(
+        "sk-secret-do-not-echo".into(),
+        VecDeque::from([FakeReply {
+            status: 200,
+            body: CHAT_OK,
+        }]),
+    )]))
+    .await;
+    for protocol in ["chat_completions", "responses", "messages"] {
         let (status, tested) = send_json(&harness, Method::POST, "/providers/test", &json!({
             "endpointUrl": upstream, "upstreamProtocol": protocol, "authKind":"bearer", "key":"sk-secret-do-not-echo",
             "publicModel":"lab-opus", "upstreamModel":"vendor/opus"
         })).await;
-        assert_eq!(status, StatusCode::OK, "{tested}");
-        assert_eq!(tested["ok"], false, "{tested}");
-        assert!(tested["error"].is_string());
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{tested}");
+        assert_eq!(tested["code"], "preconditionFailed");
+        assert!(
+            tested["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("model test")),
+            "{tested}"
+        );
         assert!(!tested.to_string().contains("sk-secret-do-not-echo"));
-        assert_eq!(calls.lock().unwrap().len(), 1);
-        assert_eq!(harness.state.settings_revision(), before);
+        assert!(tested.get("ok").is_none(), "{tested}");
     }
+    let (status, missing_key) = send_json(
+        &harness,
+        Method::POST,
+        "/providers/test",
+        &json!({
+            "endpointUrl": upstream, "upstreamProtocol": "chat_completions", "authKind":"bearer",
+            "publicModel":"lab-opus", "upstreamModel":"vendor/opus"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{missing_key}");
+    assert_eq!(missing_key["code"], "invalidRequest");
+    let (status, anonymous) = send_json(
+        &harness,
+        Method::POST,
+        "/providers/test",
+        &json!({
+            "endpointUrl": upstream, "upstreamProtocol": "chat_completions", "authKind":"none",
+            "publicModel":"lab-opus", "upstreamModel":"vendor/opus"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{anonymous}");
+    assert!(!anonymous.to_string().contains("sk-secret-do-not-echo"));
+    assert_eq!(calls.lock().unwrap().len(), 0);
+    assert_eq!(harness.state.settings_revision(), before);
     harness.stop();
 }
 
@@ -433,6 +461,7 @@ fn create_body(name: &str, endpoint: &str, protocol: &str, auth: &str, key: Opti
 }
 
 async fn chat_completion(harness: &V3Harness, model: &str) -> (StatusCode, String) {
+    harness.ensure_owned_plane().await;
     let response = harness
         .client
         .post(format!(
@@ -745,6 +774,7 @@ async fn none_auth_dynamic_provider_forwards_without_upstream_auth() {
     assert_eq!(status, StatusCode::OK, "{created}");
     let provider_id = created["provider"]["id"].as_str().unwrap().to_string();
     enable_accounts_for_provider(&harness, &provider_id);
+    harness.ensure_owned_plane().await;
 
     let response = harness
         .client
@@ -1015,7 +1045,7 @@ async fn discover_and_test_do_not_persist_keys_or_providers() {
             },
         ]),
     );
-    let (upstream, _calls, _stop) = start_fake_upstream(replies).await;
+    let (upstream, calls, _stop) = start_fake_upstream(replies).await;
     let harness = start_loopback("dyn-probe").await;
     let mut config = harness.state.config();
     config.proxy_mode = ProxyMode::Direct;
@@ -1042,6 +1072,7 @@ async fn discover_and_test_do_not_persist_keys_or_providers() {
     assert_eq!(status, StatusCode::OK, "{discovered}");
     assert!(discovered.get("key").is_none());
     assert!(!discovered.to_string().contains("sk-probe"));
+    assert_eq!(calls.lock().unwrap().len(), 1);
     let (status, tested) = send_json(
         &harness,
         Method::POST,
@@ -1056,9 +1087,12 @@ async fn discover_and_test_do_not_persist_keys_or_providers() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{tested}");
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{tested}");
+    assert_eq!(tested["code"], "preconditionFailed");
     assert!(tested.get("key").is_none());
+    assert!(tested.get("ok").is_none(), "{tested}");
     assert!(!tested.to_string().contains("sk-probe"));
+    assert_eq!(calls.lock().unwrap().len(), 1);
     assert_eq!(
         harness
             .state
@@ -1420,6 +1454,7 @@ async fn in_flight_fallback_stops_after_provider_destination_changes() {
     .await;
     assert_eq!(status, StatusCode::OK, "{second}");
     enable_accounts_for_provider(&harness, &provider_id);
+    harness.ensure_owned_plane().await;
 
     let client = harness.client.clone();
     let port = harness.handle.port;

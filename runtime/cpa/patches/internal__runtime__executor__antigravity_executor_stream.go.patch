@@ -1,0 +1,35 @@
+diff --git a/diff-a/internal/runtime/executor/antigravity_executor_stream.go b/diff-b/internal/runtime/executor/antigravity_executor_stream.go
+index 1111111..2222222 100644
+--- a/diff-a/internal/runtime/executor/antigravity_executor_stream.go
++++ b/diff-b/internal/runtime/executor/antigravity_executor_stream.go
+@@ -205,6 +205,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
+ 		scanner.Buffer(nil, streamScannerBuffer)
+ 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
+ 		var streamUsage helps.StreamUsageBuffer
++		sawTerminal := false
+ 		defer streamUsage.Publish(ctx, reporter)
+ 		var param any
+ 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, &param)
+@@ -225,8 +226,12 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
+ 			}
+ 			reporter.ObserveResponseModel(payload)
+ 
++			if helps.AntigravityTerminal(payload) {
++				sawTerminal = true
++			}
+ 			if detail, ok := helps.ParseAntigravityStreamUsage(payload); ok {
+ 				streamUsage.Observe(detail, true)
++				helps.PublishOCGAntigravityUsage(ctx, detail)
+ 			}
+ 
+ 			payload = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, payload)
+@@ -254,6 +259,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
+ 			case <-ctx.Done():
+ 			}
+ 		} else {
++			if sawTerminal {
++				cliproxyauth.NoteGenerationBodyComplete(ctx)
++			}
+ 			// Only a clean end of stream may produce a synthetic terminal event.
+ 			// Translating [DONE] after a read error would report a truncated
+ 			// stream as a successful completion.

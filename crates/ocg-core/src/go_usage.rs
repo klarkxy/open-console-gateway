@@ -105,23 +105,81 @@ impl From<WindowOutOfRange> for GoUsageError {
     }
 }
 
+/// Accepted official response. The body is the policy input; the snapshot's
+/// rounded minutes stay on the calibration path.
+pub(crate) struct AcceptedGoUsage {
+    pub snapshot: GoUsageSnapshot,
+    pub body: Vec<u8>,
+    pub fetched_at: DateTime<Utc>,
+}
+
+impl fmt::Debug for AcceptedGoUsage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AcceptedGoUsage")
+            .field("snapshot", &self.snapshot)
+            .field("body_len", &self.body.len())
+            .field("fetched_at", &self.fetched_at)
+            .finish()
+    }
+}
+
 /// Fetch the official Go usage snapshot for `api_key`.
 ///
-/// Always uses [`GO_USAGE_URL`]. Tests that need a local server must call the
-/// crate-internal endpoint seam instead of changing this function.
+/// Calls [`fetch_accepted`], which starts from [`GO_USAGE_URL`]. Tests that
+/// need a local server call [`fetch_go_usage_from`].
 pub async fn fetch_go_usage(
     config: &AppConfig,
     api_key: &str,
 ) -> Result<GoUsageSnapshot, GoUsageError> {
-    fetch_go_usage_from(config, api_key, GO_USAGE_URL).await
+    Ok(fetch_accepted(config, api_key).await?.snapshot)
 }
 
-/// Internal endpoint seam for tests. Production code must call [`fetch_go_usage`].
+/// Official body plus the clock used to parse it. Starts from [`GO_USAGE_URL`].
+pub(crate) async fn fetch_accepted(
+    config: &AppConfig,
+    api_key: &str,
+) -> Result<AcceptedGoUsage, GoUsageError> {
+    let endpoint = official_usage_endpoint()?;
+    fetch_accepted_from(config, api_key, &endpoint).await
+}
+
+/// Canonical usage URL, or the test-feature rewrite of that same URL.
+/// A rewrite error does not send.
+pub(crate) fn official_usage_endpoint() -> Result<String, GoUsageError> {
+    endpoint_from_rewrite(crate::cpa_test_endpoints::rewrite_url(
+        ocg_domain::ids::OPENCODE_PROVIDER_ID,
+        GO_USAGE_URL,
+    ))
+}
+
+pub(crate) fn endpoint_from_rewrite(
+    rewritten: Result<Option<String>, String>,
+) -> Result<String, GoUsageError> {
+    match rewritten {
+        Ok(Some(url)) => Ok(url),
+        Ok(None) => Ok(GO_USAGE_URL.to_string()),
+        Err(_) => Err(GoUsageError::Network),
+    }
+}
+
+/// Internal endpoint seam for tests. Production code must call [`fetch_go_usage`]
+/// or [`fetch_accepted`].
 pub(crate) async fn fetch_go_usage_from(
     config: &AppConfig,
     api_key: &str,
     endpoint: &str,
 ) -> Result<GoUsageSnapshot, GoUsageError> {
+    Ok(fetch_accepted_from(config, api_key, endpoint)
+        .await?
+        .snapshot)
+}
+
+async fn fetch_accepted_from(
+    config: &AppConfig,
+    api_key: &str,
+    endpoint: &str,
+) -> Result<AcceptedGoUsage, GoUsageError> {
     let client = crate::http_client::configured_builder(config)
         .map_err(|_| GoUsageError::Network)?
         .redirect(crate::http_client::no_redirect_policy())
@@ -139,50 +197,105 @@ pub(crate) async fn fetch_go_usage_from(
     let body = read_ok_body(response, MAX_BODY_BYTES)
         .await
         .map_err(GoUsageError::from)?;
-    parse_go_usage_body(&body, Utc::now())
+    let fetched_at = Utc::now();
+    let snapshot = parse_go_usage_body(&body, fetched_at)?;
+    Ok(AcceptedGoUsage {
+        snapshot,
+        body,
+        fetched_at,
+    })
+}
+
+/// Normalized official windows. Percent stays on the calibration snapshot and
+/// is not an admission fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GoUsageWindowFact {
+    pub status: GoUsageWindowStatus,
+    pub resets_at: DateTime<Utc>,
+}
+
+/// Pure facts from the official usage parser. Percent is not included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GoUsageFacts {
+    pub rolling: GoUsageWindowFact,
+    pub weekly: GoUsageWindowFact,
+    pub monthly: GoUsageWindowFact,
+}
+
+/// Parse one official usage body without fetching. `now` is the observation
+/// clock used for the existing rolling and weekly bounds.
+pub(crate) fn official_usage_facts(
+    bytes: &[u8],
+    now: DateTime<Utc>,
+) -> Result<GoUsageFacts, GoUsageError> {
+    let parsed = parse_official_usage(bytes, now)?;
+    Ok(GoUsageFacts {
+        rolling: window_fact(parsed.rolling),
+        weekly: window_fact(parsed.weekly),
+        monthly: window_fact(parsed.monthly),
+    })
+}
+
+fn window_fact(window: ParsedWindow) -> GoUsageWindowFact {
+    GoUsageWindowFact {
+        status: window.status,
+        resets_at: window.resets_at,
+    }
 }
 
 fn parse_go_usage_body(bytes: &[u8], now: DateTime<Utc>) -> Result<GoUsageSnapshot, GoUsageError> {
-    let value: Value = serde_json::from_slice(bytes).map_err(|_| GoUsageError::Schema)?;
-    let usage = value.get("usage").ok_or(GoUsageError::Schema)?;
-    if !usage.is_object() {
-        return Err(GoUsageError::Schema);
-    }
-
-    let rolling = parse_window(
-        usage.get("rolling").ok_or(GoUsageError::Schema)?,
-        now,
-        Some(ROLLING_MAX_MINUTES),
-    )?;
-    let weekly = parse_window(
-        usage.get("weekly").ok_or(GoUsageError::Schema)?,
-        now,
-        Some(WEEKLY_MAX_MINUTES),
-    )?;
-    let monthly = parse_window(usage.get("monthly").ok_or(GoUsageError::Schema)?, now, None)?;
-
-    let rolling_resets_in_minutes = rolling
+    let parsed = parse_official_usage(bytes, now)?;
+    let rolling_resets_in_minutes = parsed
+        .rolling
         .resets_in_minutes
         .expect("rolling minutes are computed");
-    let weekly_resets_in_minutes = weekly
+    let weekly_resets_in_minutes = parsed
+        .weekly
         .resets_in_minutes
         .expect("weekly minutes are computed");
-    let monthly_resets_in_minutes = ceil_minutes_until(monthly.resets_at, now);
+    let monthly_resets_in_minutes = ceil_minutes_until(parsed.monthly.resets_at, now);
     let earliest_resets_in_minutes = rolling_resets_in_minutes
         .min(weekly_resets_in_minutes)
         .min(monthly_resets_in_minutes);
 
     Ok(GoUsageSnapshot {
-        rolling_status: rolling.status,
-        weekly_status: weekly.status,
-        monthly_status: monthly.status,
-        rolling_percent: rolling.percent,
-        weekly_percent: weekly.percent,
-        monthly_percent: monthly.percent,
+        rolling_status: parsed.rolling.status,
+        weekly_status: parsed.weekly.status,
+        monthly_status: parsed.monthly.status,
+        rolling_percent: parsed.rolling.percent,
+        weekly_percent: parsed.weekly.percent,
+        monthly_percent: parsed.monthly.percent,
         rolling_resets_in_minutes,
         weekly_resets_in_minutes,
         monthly_resets_in_minutes,
         earliest_resets_in_minutes,
+    })
+}
+
+struct ParsedUsage {
+    rolling: ParsedWindow,
+    weekly: ParsedWindow,
+    monthly: ParsedWindow,
+}
+
+fn parse_official_usage(bytes: &[u8], now: DateTime<Utc>) -> Result<ParsedUsage, GoUsageError> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| GoUsageError::Schema)?;
+    let usage = value.get("usage").ok_or(GoUsageError::Schema)?;
+    if !usage.is_object() {
+        return Err(GoUsageError::Schema);
+    }
+    Ok(ParsedUsage {
+        rolling: parse_window(
+            usage.get("rolling").ok_or(GoUsageError::Schema)?,
+            now,
+            Some(ROLLING_MAX_MINUTES),
+        )?,
+        weekly: parse_window(
+            usage.get("weekly").ok_or(GoUsageError::Schema)?,
+            now,
+            Some(WEEKLY_MAX_MINUTES),
+        )?,
+        monthly: parse_window(usage.get("monthly").ok_or(GoUsageError::Schema)?, now, None)?,
     })
 }
 

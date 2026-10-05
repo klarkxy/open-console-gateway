@@ -7,7 +7,10 @@ use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::Database;
 use ocg_core::gateway;
 use ocg_core::models::{Account, ProxyMode, RoutingMode};
-use ocg_core::state::{CoreStateInner, GatewayHandle};
+use ocg_core::state::CoreStateInner;
+
+#[path = "fixtures/owned_cpa.rs"]
+mod owned_cpa;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -90,22 +93,21 @@ fn build_state(base_url: String, keys: &[&str]) -> (Arc<CoreStateInner>, PathBuf
     (state, dir)
 }
 
-async fn start_gateway(state: Arc<CoreStateInner>) -> (u16, GatewayHandle) {
+async fn start_gateway(state: Arc<CoreStateInner>) -> u16 {
     let listener = StdTcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
-    let handle = gateway::start_gateway(state, port).await.unwrap();
+    let handle = gateway::start_gateway(state.clone(), port).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    (port, handle)
+    owned_cpa::store_listener(&state, handle)
 }
 
-fn stop(
-    state: Arc<CoreStateInner>,
-    dir: PathBuf,
-    gateway: GatewayHandle,
-    mock: tokio::sync::oneshot::Sender<()>,
-) {
-    gateway::stop_gateway(gateway);
+async fn prepare_inference(state: &Arc<CoreStateInner>) {
+    owned_cpa::ensure_owned_plane(state).await;
+}
+
+fn stop(state: Arc<CoreStateInner>, dir: PathBuf, mock: tokio::sync::oneshot::Sender<()>) {
+    owned_cpa::shutdown_owned(&state);
     let _ = mock.send(());
     drop(state);
     let _ = fs::remove_dir_all(dir);
@@ -171,7 +173,7 @@ async fn models_list_ignores_raw_only_and_empty_fake_upstream() {
     ]);
     let (base_url, calls, stop_mock) = start_fake_upstream(replies).await;
     let (state, dir) = build_state(base_url, &["key-1", "key-2"]);
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
 
     let response = loopback_client()
         .get(format!("http://127.0.0.1:{port}/v1/models"))
@@ -194,7 +196,7 @@ async fn models_list_ignores_raw_only_and_empty_fake_upstream() {
         assert!(account.auth_error.is_none());
     }
 
-    stop(state, dir, gateway_handle, stop_mock);
+    stop(state, dir, stop_mock);
 }
 
 #[tokio::test]
@@ -208,7 +210,7 @@ async fn slash_form_chat_model_does_not_collapse_and_does_not_hit_upstream() {
     )]);
     let (base_url, calls, stop_mock) = start_fake_upstream(replies).await;
     let (state, dir) = build_state(base_url, &["key-1"]);
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
 
     let response = loopback_client()
         .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
@@ -229,7 +231,7 @@ async fn slash_form_chat_model_does_not_collapse_and_does_not_hit_upstream() {
     );
     assert!(calls.lock().unwrap().is_empty());
 
-    stop(state, dir, gateway_handle, stop_mock);
+    stop(state, dir, stop_mock);
 }
 
 #[tokio::test]
@@ -315,7 +317,8 @@ async fn successful_alias_chat_persists_requested_alias_and_upstream() {
     )]);
     let (base_url, calls, stop_mock) = start_fake_upstream(replies).await;
     let (state, dir) = build_state(base_url, &["key-1"]);
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
+    prepare_inference(&state).await;
 
     let response = loopback_client()
         .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
@@ -349,7 +352,7 @@ async fn successful_alias_chat_persists_requested_alias_and_upstream() {
     assert!(attribution.native_cost_value.is_some());
     assert_eq!(attribution.native_cost_unit.as_deref(), Some("usd"));
 
-    stop(state, dir, gateway_handle, stop_mock);
+    stop(state, dir, stop_mock);
 }
 
 #[tokio::test]
@@ -363,7 +366,8 @@ async fn mixed_case_alias_chat_persists_canonical_alias() {
     )]);
     let (base_url, calls, stop_mock) = start_fake_upstream(replies).await;
     let (state, dir) = build_state(base_url, &["key-1"]);
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
+    prepare_inference(&state).await;
 
     let response = loopback_client()
         .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
@@ -389,7 +393,7 @@ async fn mixed_case_alias_chat_persists_canonical_alias() {
     assert_eq!(attribution.resolved_alias.as_deref(), Some("minimax-m3"));
     assert_eq!(attribution.upstream_model.as_deref(), Some("MINIMAX-M3"));
 
-    stop(state, dir, gateway_handle, stop_mock);
+    stop(state, dir, stop_mock);
 }
 
 #[tokio::test]
@@ -403,7 +407,8 @@ async fn successful_alias_chat_stream_preserves_identity_after_finalize() {
     )]);
     let (base_url, calls, stop_mock) = start_fake_upstream(replies).await;
     let (state, dir) = build_state(base_url, &["key-1"]);
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
+    prepare_inference(&state).await;
 
     let response = loopback_client()
         .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
@@ -438,7 +443,7 @@ async fn successful_alias_chat_stream_preserves_identity_after_finalize() {
     assert!(attribution.native_cost_value.is_some());
     assert_eq!(attribution.native_cost_unit.as_deref(), Some("usd"));
 
-    stop(state, dir, gateway_handle, stop_mock);
+    stop(state, dir, stop_mock);
 }
 
 #[tokio::test]
@@ -452,7 +457,8 @@ async fn alias_upstream_error_still_persists_identity() {
     )]);
     let (base_url, calls, stop_mock) = start_fake_upstream(replies).await;
     let (state, dir) = build_state(base_url, &["key-1"]);
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
+    prepare_inference(&state).await;
 
     let response = loopback_client()
         .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
@@ -482,7 +488,7 @@ async fn alias_upstream_error_still_persists_identity() {
         Some("deepseek-v4-flash")
     );
 
-    stop(state, dir, gateway_handle, stop_mock);
+    stop(state, dir, stop_mock);
 }
 
 #[tokio::test]
@@ -496,7 +502,8 @@ async fn alias_client_error_still_persists_identity() {
     )]);
     let (base_url, _calls, stop_mock) = start_fake_upstream(replies).await;
     let (state, dir) = build_state(base_url, &["key-1"]);
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
+    prepare_inference(&state).await;
 
     let response = loopback_client()
         .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
@@ -525,5 +532,5 @@ async fn alias_client_error_still_persists_identity() {
         Some("deepseek-v4-flash")
     );
 
-    stop(state, dir, gateway_handle, stop_mock);
+    stop(state, dir, stop_mock);
 }

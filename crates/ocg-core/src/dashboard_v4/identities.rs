@@ -91,7 +91,11 @@ pub(super) async fn create_credential(
     body: Bytes,
 ) -> Result<Json<IdentityCredentialCreateResult>, V3ApiError> {
     let input = parse_mutation_json::<IdentityCredentialCreateRequest>(&body)?;
-    create_credential_locked(&state, &id, input).map(Json)
+    let saved = create_credential_locked(&state, &id, input)?;
+    if !saved.replayed {
+        crate::cpa_execution::note_product_apply(&state).await;
+    }
+    Ok(Json(saved))
 }
 
 fn create_credential_locked(

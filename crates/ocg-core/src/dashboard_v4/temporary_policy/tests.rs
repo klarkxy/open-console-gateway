@@ -350,3 +350,129 @@ async fn put_rejects_each_supplied_empty_match_field_with_other_without_write() 
         );
     }
 }
+
+fn insert_go(state: &CoreState, id: &str) {
+    let now = chrono::Utc::now();
+    state
+        .db
+        .lock()
+        .create_account(&crate::models::Account {
+            id: id.into(),
+            provider_id: crate::provider::OPENCODE_PROVIDER_ID.into(),
+            credential_kind: crate::provider::CredentialKind::ApiKey,
+            quota_scope: crate::provider::QuotaScope::Key,
+            name: id.into(),
+            username: None,
+            password_cipher: None,
+            key_cipher: "cipher".into(),
+            enabled: true,
+            account_type: crate::models::AccountType::Key,
+            setup_step: crate::models::AccountSetupStep::Ready,
+            referral_code: None,
+            purchase_date: String::new(),
+            expires_on: String::new(),
+            cooldown_until: None,
+            cooldown_generic_until: None,
+            cooldown_5h_until: None,
+            cooldown_week_until: None,
+            cooldown_month_until: None,
+            cooldown_free_until: None,
+            last_error: None,
+            auth_error: None,
+            notes: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+}
+
+#[tokio::test]
+async fn official_plan_rows_stay_when_clear_is_rejected() {
+    let state = fresh();
+    insert_go(&state, "acct-plan");
+    let credential_id =
+        ocg_domain::credential::credential_id_for_legacy_account("acct-plan").to_string();
+    let fetched_at = chrono::Utc::now();
+    let rolling = fetched_at + chrono::Duration::seconds(90);
+    let weekly = fetched_at + chrono::Duration::days(2);
+    let monthly = fetched_at + chrono::Duration::days(40);
+    let body = format!(
+        r#"{{"usage":{{"rolling":{{"status":"rate-limited","percent":0,"resetsAt":"{rolling}"}},"weekly":{{"status":"ok","percent":0,"resetsAt":"{weekly}"}},"monthly":{{"status":"ok","percent":1,"resetsAt":"{monthly}"}}}},"note":"sk-planted-secret"}}"#,
+        rolling = rolling.to_rfc3339(),
+        weekly = weekly.to_rfc3339(),
+        monthly = monthly.to_rfc3339(),
+    );
+    {
+        let mut db = state.db.lock();
+        let fence = crate::cpa_quota::capture_live_fence(&db.conn, &credential_id).unwrap();
+        let commit = crate::cpa_quota::OfficialPlanCommit {
+            provider_id: fence.provider_id.clone(),
+            fence,
+            observation_id: uuid::Uuid::new_v4().to_string(),
+            fetched_at,
+            body: body.into_bytes(),
+        };
+        let applied = crate::cpa_quota::apply_accepted(&mut db.conn, &commit).unwrap();
+        assert_eq!(applied, crate::cpa_policy::QuotaApply::Applied);
+    }
+
+    let Json(listed) = get_restrictions(State(state.clone())).await.unwrap();
+    let expected = format!("plan:{credential_id}:five_hours:-:credential");
+    let plan = listed
+        .restrictions
+        .iter()
+        .find(|row| row.id == expected)
+        .expect("credential five-hour plan row");
+    assert_eq!(plan.rule_id, "official-quota");
+    assert_eq!(plan.rule_generation, 1);
+    assert_eq!(plan.credential_id, credential_id);
+    assert_eq!(plan.scope, TemporaryPolicyScope::Credential);
+    assert_eq!(plan.upstream_model, None);
+    assert_eq!(plan.state, TemporaryPolicyRestrictionState::Waiting);
+    assert!(!plan.probe_in_flight);
+    assert!(
+        plan.next_probe_in_seconds
+            .is_some_and(|seconds| seconds > 0)
+    );
+    assert!(listed.restrictions.iter().all(|row| {
+        !row.id.contains(":week:") && !row.id.contains(":month:") && !row.id.contains(":free:")
+    }));
+    assert!(listed.restrictions.iter().any(|row| {
+        row.id.starts_with("plan:") && row.rule_id == "official-quota" && row.id.contains(":pool-")
+    }));
+
+    let revision = state.settings_revision();
+    let body = Bytes::from(
+        serde_json::to_vec(&json!({
+            "expectedRevision": revision,
+            "processGeneration": state.process_generation(),
+        }))
+        .unwrap(),
+    );
+    let error = clear_restriction(State(state.clone()), Path(expected.clone()), body)
+        .await
+        .unwrap_err();
+    let text = format!("{error:?}");
+    assert!(
+        text.contains("official quota restrictions clear only from a newer official observation")
+    );
+    assert_eq!(state.settings_revision(), revision);
+
+    let missing = Bytes::from(
+        serde_json::to_vec(&json!({
+            "expectedRevision": state.settings_revision(),
+            "processGeneration": state.process_generation(),
+        }))
+        .unwrap(),
+    );
+    let Json(after) = clear_restriction(State(state.clone()), Path("tp-missing".into()), missing)
+        .await
+        .unwrap();
+    assert!(after.restrictions.iter().any(|row| row.id == expected));
+    assert!(
+        after
+            .restrictions
+            .iter()
+            .any(|row| row.id.contains(":pool-"))
+    );
+}

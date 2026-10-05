@@ -2,6 +2,8 @@
 
 # Plan and API presets
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
 Browse Plan/API presets from **Accounts → Add account** or **Providers → Add Provider**. Both buttons open the same Accounts chooser. Existing connections list only built-in families that still have an account plus saved user-defined Providers; unused built-in templates stay with these creation templates. Presets group by vendor, with a compact selector for regional or plan variants. Search includes vendor and variant names, preset IDs and endpoint hosts. The chooser shows a read-only connection summary before the Key field. Fixed presets supply the address, protocol, authentication and an editable default model; Azure and Bedrock still require resource/regional addresses and deployment/model information. Completing a preset requires a Key and creates the Provider and its first account together; **Save draft** may omit the Key. Custom API and manual configuration retain their full settings.
 
 Presets are build-time data, not per-vendor code: `crates/ocg-domain/build.rs` compiles `resources/provider-presets.json` into the static `PRESET_OFFERINGS` table that the dashboard renders. Adding or correcting a preset means editing that JSON; this page documents behavior, not the row contents.

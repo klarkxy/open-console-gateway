@@ -9,7 +9,6 @@ fn internal(message: impl Into<String>) -> DshApplicationError {
 #[cfg(windows)]
 pub fn set_private_permissions(path: &Path) -> DshApplicationResult<()> {
     use std::ffi::c_void;
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, GENERIC_ALL, LocalFree};
     use windows_sys::Win32::Security::Authorization::{
         EXPLICIT_ACCESS_W, SE_FILE_OBJECT, SET_ACCESS, SetEntriesInAclW, SetNamedSecurityInfoW,
@@ -109,7 +108,7 @@ pub fn set_private_permissions(path: &Path) -> DshApplicationResult<()> {
         }
     }
     let _acl = LocalGuard(acl.cast());
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let wide = security_object_name(path);
     let status = unsafe {
         SetNamedSecurityInfoW(
             wide.as_ptr(),
@@ -136,7 +135,6 @@ fn verify_windows_private_dacl(
     system_sid: windows_sys::Win32::Security::PSID,
 ) -> DshApplicationResult<()> {
     use std::ffi::c_void;
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{ERROR_SUCCESS, GENERIC_ALL, LocalFree};
     use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
     use windows_sys::Win32::Security::{
@@ -147,7 +145,7 @@ fn verify_windows_private_dacl(
     use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
     use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
 
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let wide = security_object_name(path);
     let mut acl = std::ptr::null_mut();
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     let status = unsafe {
@@ -246,4 +244,40 @@ fn verify_windows_private_dacl(
         ));
     }
     Ok(())
+}
+
+/// `SetNamedSecurityInfoW` returns error 123 for an ordinary path past MAX_PATH.
+/// The extended prefix is accepted and is not stored as a different DACL.
+#[cfg(windows)]
+fn security_object_name(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .map(|unit| {
+            if unit == '/' as u16 {
+                '\\' as u16
+            } else {
+                unit
+            }
+        })
+        .collect();
+    let extended = wide.len() >= 4
+        && wide[0] == '\\' as u16
+        && wide[1] == '\\' as u16
+        && (wide[2] == '?' as u16 || wide[2] == '.' as u16)
+        && wide[3] == '\\' as u16;
+    if !extended && path.is_absolute() {
+        let mut prefixed = Vec::with_capacity(wide.len() + 8);
+        prefixed.extend(['\\' as u16, '\\' as u16, '?' as u16, '\\' as u16]);
+        if wide.len() >= 2 && wide[0] == '\\' as u16 && wide[1] == '\\' as u16 {
+            prefixed.extend(['U' as u16, 'N' as u16, 'C' as u16, '\\' as u16]);
+            prefixed.extend_from_slice(&wide[2..]);
+        } else {
+            prefixed.extend_from_slice(&wide);
+        }
+        wide = prefixed;
+    }
+    wide.push(0);
+    wide
 }

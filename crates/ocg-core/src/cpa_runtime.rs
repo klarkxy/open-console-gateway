@@ -19,6 +19,7 @@ use crate::state::CoreStateInner;
 use chrono::Utc;
 use futures_util::StreamExt;
 use parking_lot::Mutex;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -330,6 +331,10 @@ impl CpaRuntimeCapabilities {
         self.host
             .get()
             .ok_or_else(|| CpaRuntimeError::Unavailable(UNAVAILABLE_REASON.into()))
+    }
+
+    pub(crate) fn installed_host(&self) -> Result<CpaRuntimeHost, CpaRuntimeError> {
+        self.host().cloned()
     }
 
     fn set_phase(&self, phase: CpaRuntimePhase, error: Option<String>) {
@@ -1276,7 +1281,9 @@ impl CoreStateInner {
         ) {
             return self.rollback_failed(error, restore).await;
         }
-        let models = match self
+        // The probe confirms the restored child answers. Probed model ids are
+        // not published: the shared catalog writer is retired.
+        if let Err(error) = self
             .probe_candidate(
                 managed.port,
                 &secrets.management_key,
@@ -1284,11 +1291,8 @@ impl CoreStateInner {
             )
             .await
         {
-            Ok(models) => models,
-            Err(error) => {
-                return self.rollback_failed(error, restore).await;
-            }
-        };
+            return self.rollback_failed(error, restore).await;
+        }
         if let Err(error) = self.ensure_cas(expected_revision, expected_generation) {
             return self.rollback_failed(error, restore).await;
         }
@@ -1310,12 +1314,6 @@ impl CoreStateInner {
             let _settings = self.settings_update.lock();
             self.ensure_cas(expected_revision, expected_generation)
                 .and_then(|_| {
-                    self.activate_cpa_model_catalog(
-                        models,
-                        &format!("http://127.0.0.1:{}", managed.port),
-                        Utc::now(),
-                    )
-                    .map_err(|error| CpaRuntimeError::Failed(error.to_string()))?;
                     if let Err(error) = save_managed(&self.data_dir, &next_managed) {
                         let restore = self.restore_persistence_backup(
                             persistence_before
@@ -1820,12 +1818,15 @@ impl CoreStateInner {
                     )
                     .map_err(|error| CpaRuntimeError::Failed(error.to_string()))?;
                 if let Some(catalog) = backup.catalog {
-                    self.activate_cpa_model_catalog(
-                        catalog.models,
-                        &catalog.source_url,
-                        catalog.refreshed_at.unwrap_or_else(Utc::now),
-                    )
-                    .map_err(|error| CpaRuntimeError::Failed(error.to_string()))?;
+                    // Put the stored snapshot back. This does not install a live route list.
+                    self.db
+                        .lock()
+                        .replace_cpa_model_catalog(
+                            &catalog.models,
+                            &catalog.source_url,
+                            catalog.refreshed_at.unwrap_or_else(Utc::now),
+                        )
+                        .map_err(|error| CpaRuntimeError::Failed(error.to_string()))?;
                 }
                 self.routing.reset();
                 Ok(())
@@ -1939,6 +1940,32 @@ impl CoreStateInner {
         parse_api_keys_from_yaml(&text)
     }
 
+    pub(crate) fn reject_downstream_inference_key(&self, key: &str) -> Result<(), CpaRuntimeError> {
+        let gateway = self.config().gateway_key;
+        if !gateway.is_empty() && key == gateway {
+            return Err(CpaRuntimeError::Invalid(
+                "downstream client keys stay off the private CPA".into(),
+            ));
+        }
+        let found = {
+            let db = self.db.lock();
+            db.conn
+                .query_row(
+                    "SELECT 1 FROM access_keys WHERE key = ?1 AND deleted_at IS NULL",
+                    [key],
+                    |_| Ok(1i64),
+                )
+                .optional()
+                .map_err(|error| CpaRuntimeError::Failed(error.to_string()))?
+        };
+        if found.is_some() {
+            return Err(CpaRuntimeError::Invalid(
+                "downstream client keys stay off the private CPA".into(),
+            ));
+        }
+        Ok(())
+    }
+
     async fn commit_client_keys(
         &self,
         expected_revision: u64,
@@ -1946,6 +1973,9 @@ impl CoreStateInner {
         next_keys: Vec<String>,
         new_protected: Option<String>,
     ) -> Result<(), CpaRuntimeError> {
+        for key in next_keys.iter().chain(new_protected.iter()) {
+            self.reject_downstream_inference_key(key)?;
+        }
         let managed = require_managed(&self.data_dir)?;
         let saved = self.load_saved_secrets()?;
         let protected = new_protected
@@ -2078,9 +2108,12 @@ impl CoreStateInner {
         port: u16,
         management_key: &str,
         inference_key: &str,
-        models: Vec<CpaCatalogModel>,
+        _models: Vec<CpaCatalogModel>,
     ) -> Result<(), CpaRuntimeError> {
         let base_url = format!("http://127.0.0.1:{port}");
+        if self.foreign_remote_integration(&base_url)? {
+            return Ok(());
+        }
         let management_key_cipher = self
             .encrypt_key(management_key)
             .map_err(|error| CpaRuntimeError::Failed(error.to_string()))?;
@@ -2120,29 +2153,25 @@ impl CoreStateInner {
             created_at: existing.as_ref().map_or(now, |item| item.created_at),
             updated_at: now,
         };
-        let previous = self
-            .db
-            .lock()
-            .cpa_model_catalog()
-            .map_err(|error| CpaRuntimeError::Failed(error.to_string()))?;
-        let models = CpaCatalogModel::merge_refresh(
-            models,
-            previous
-                .as_ref()
-                .map(|item| item.models.as_slice())
-                .unwrap_or(&[]),
-        );
+        // Shared catalog publication is retired. The account is saved and the
+        // stored catalog bytes stay as they are.
         self.db
             .lock()
             .upsert_cpa_integration(&account, &base_url, &management_key_cipher)
-            .map_err(|error| CpaRuntimeError::Failed(error.to_string()))?;
-        self.activate_cpa_model_catalog(models, &base_url, now)
             .map_err(|error| CpaRuntimeError::Failed(error.to_string()))?;
         self.routing.reset();
         Ok(())
     }
 
     fn persist_inference_key(&self, inference_key: &str) -> Result<(), CpaRuntimeError> {
+        let owned_origin = load_managed(&self.data_dir)
+            .ok()
+            .flatten()
+            .map(|item| format!("http://127.0.0.1:{}", item.port))
+            .unwrap_or_default();
+        if self.foreign_remote_integration(&owned_origin)? {
+            return Ok(());
+        }
         let (record, account) = {
             let db = self.db.lock();
             (
@@ -2166,6 +2195,18 @@ impl CoreStateInner {
             .map_err(|error| CpaRuntimeError::Failed(error.to_string()))?;
         self.routing.reset();
         Ok(())
+    }
+
+    fn foreign_remote_integration(&self, owned_origin: &str) -> Result<bool, CpaRuntimeError> {
+        let existing = self
+            .db
+            .lock()
+            .cpa_integration()
+            .map_err(|error| CpaRuntimeError::Failed(error.to_string()))?;
+        Ok(existing.is_some_and(|record| {
+            let saved = record.base_url.trim().trim_end_matches('/');
+            !saved.is_empty() && saved != owned_origin.trim().trim_end_matches('/')
+        }))
     }
 
     fn load_saved_secrets(&self) -> Result<SavedSecrets, CpaRuntimeError> {

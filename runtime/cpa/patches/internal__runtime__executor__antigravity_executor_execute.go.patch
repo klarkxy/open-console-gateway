@@ -1,0 +1,32 @@
+diff --git a/diff-a/internal/runtime/executor/antigravity_executor_execute.go b/diff-b/internal/runtime/executor/antigravity_executor_execute.go
+index 27c9c4d..90e8141 100644
+--- a/diff-a/internal/runtime/executor/antigravity_executor_execute.go
++++ b/diff-b/internal/runtime/executor/antigravity_executor_execute.go
+@@ -195,7 +195,9 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+ 	if helps.ApplyPatchTranslationError(param) != nil || len(converted) == 0 {
+ 		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+ 	}
+-	reporter.Publish(ctx, helps.ParseAntigravityUsage(bodyBytes))
++	parsedUsage := helps.ParseAntigravityUsage(bodyBytes)
++	reporter.Publish(ctx, parsedUsage)
++	helps.PublishOCGAntigravityUsage(ctx, parsedUsage)
+ 	if responseFormat == sdktranslator.FormatOpenAIResponse {
+ 		converted = helps.EnsureResponsesUsageDetails(converted)
+ 	}
+@@ -224,7 +226,15 @@ func (e *AntigravityExecutor) executeCompaction(ctx context.Context, auth *clipr
+ 	summaryOpts.SourceFormat = sdktranslator.FormatOpenAIResponse
+ 	summaryOpts.ResponseFormat = sdktranslator.FormatOpenAIResponse
+ 
+-	summaryResp, errSummary := e.Execute(ctx, auth, summaryReq, summaryOpts)
++	admitted := ctx
++	if cliproxyauth.CurrentAttemptID(ctx) == "" {
++		var errGate error
++		admitted, errGate = cliproxyauth.AdmitInternalGeneration(ctx, auth, summaryReq.Model)
++		if errGate != nil {
++			return resp, errGate
++		}
++	}
++	summaryResp, errSummary := e.Execute(admitted, auth, summaryReq, summaryOpts)
+ 	if errSummary != nil {
+ 		return resp, errSummary
+ 	}

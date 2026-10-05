@@ -2,6 +2,12 @@
 
 # Upgrade, Backup, Restore, And Uninstall
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
+## Current CLI snapshots
+
+The development CLI implements offline `backup create --output FILE` and `backup restore --input FILE`. Stop the host first; restore into a new or empty directory. These snapshots include SQLite, encryption identity and CPA-owned auth/runtime/config state, verify hashes and the cipher, and rebase the owned auth directory. See the [CLI backup procedure](cli.md#backup) for commands and prerequisites. The procedures below retain their installation and published-version scope.
+
 Download upgrades from the
 [latest GitHub Release](https://github.com/klarkxy/open-console-gateway/releases/latest)
 and verify them against the release's `SHA256SUMS`:
@@ -47,7 +53,7 @@ explicit routes is rejected rather than losing those routes.
 V4–V11 backups remain importable; V7 receives deterministic resolution defaults.
 Payload V1–V3 backups, and V12 or newer, are rejected with an
 explicit unsupported-version error; that is not a wrong password or a damaged
-file. The maintainer-facing payload policy is documented in [Runtime invariants](../maintainer/runtime-invariants.md).
+file. The current payload policy is defined in the [account-transfer implementation](../../crates/ocg-core/src/dashboard_v3/account_transfer.rs).
 
 Supplier card IDs, grouping and order travel in V9 backups. Multiple cards can reference the same supplier without duplicating its configuration or Keys. During a merge, existing accounts keep their order and card membership; source grouping applies to newly imported accounts. Older backups retain their saved credential priority and receive matching cards on import.
 

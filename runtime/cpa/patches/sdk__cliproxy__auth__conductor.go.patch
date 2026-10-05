@@ -1,0 +1,30 @@
+diff --git a/diff-a/sdk/cliproxy/auth/conductor.go b/diff-b/sdk/cliproxy/auth/conductor.go
+index 8b46a3e..1c14b2c 100644
+--- a/diff-a/sdk/cliproxy/auth/conductor.go
++++ b/diff-b/sdk/cliproxy/auth/conductor.go
+@@ -72,6 +72,17 @@ type Result struct {
+ 	// observed watermark. Count-tokens requests reuse the credential but are not
+ 	// generation traffic; their response headers are not a generation snapshot.
+ 	SkipQuotaObservation bool
++	// RegistrationEpoch, credential identity, version, and material revision
++	// fence this result onto the credential that was sent. SDK Generation is not
++	// a fence: MarkResult increments it after every ordinary result.
++	RegistrationEpoch uint64
++	CredentialID      string
++	CredentialVersion string
++	MaterialRevision  string
++	OAuthIdentity     bool
++	IdentityBound     bool
++	// HaltRotation stops later generation sends for this request after the result is applied.
++	HaltRotation bool
+ }
+ 
+ // Selector chooses an auth candidate for execution.
+@@ -150,6 +161,7 @@ type Manager struct {
+ 	selector                  Selector
+ 	hook                      Hook
+ 	resultPolicy              atomic.Pointer[resultPolicyHolder]
++	generationBoundary        atomic.Pointer[generationBoundaryHolder]
+ 	mu                        sync.RWMutex
+ 	selectorMu                sync.Mutex
+ 	configCooldownMu          sync.Mutex

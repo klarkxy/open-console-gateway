@@ -1,0 +1,77 @@
+diff --git a/diff-a/sdk/cliproxy/builder.go b/diff-b/sdk/cliproxy/builder.go
+index b3a93f7..da1ac78 100644
+--- a/diff-a/sdk/cliproxy/builder.go
++++ b/diff-b/sdk/cliproxy/builder.go
+@@ -60,6 +60,12 @@ type Builder struct {
+ 	// resultPolicy intercepts execution results before quota mutation and persistence.
+ 	resultPolicy coreauth.ResultPolicy
+ 
++	// generationBoundary is the per-attempt policy hook installed before Run.
++	generationBoundary coreauth.GenerationBoundary
++
++	// keepInjectedSelector preserves a caller-supplied selector across the first config apply.
++	keepInjectedSelector bool
++
+ 	// serverOptions contains additional server configuration options.
+ 	serverOptions []api.ServerOption
+ }
+@@ -195,6 +201,18 @@ func (b *Builder) WithResultPolicy(policy coreauth.ResultPolicy) *Builder {
+ 	return b
+ }
+ 
++// WithGenerationBoundary installs the per-attempt policy hook before the service runs.
++func (b *Builder) WithGenerationBoundary(boundary coreauth.GenerationBoundary) *Builder {
++	b.generationBoundary = boundary
++	return b
++}
++
++// WithKeepInjectedSelector keeps an injected selector when the first runtime config is applied.
++func (b *Builder) WithKeepInjectedSelector(keep bool) *Builder {
++	b.keepInjectedSelector = keep
++	return b
++}
++
+ // Build validates inputs, applies defaults, and returns a ready-to-run service.
+ func (b *Builder) Build() (*Service, error) {
+ 	if b.cfg == nil {
+@@ -275,22 +293,26 @@ func (b *Builder) Build() (*Service, error) {
+ 	if b.resultPolicy != nil {
+ 		coreManager.SetResultPolicy(b.resultPolicy)
+ 	}
++	if b.generationBoundary != nil {
++		coreManager.SetGenerationBoundary(b.generationBoundary)
++	}
+ 
+ 	service := &Service{
+-		cfg:                 b.cfg,
+-		configPath:          b.configPath,
+-		tokenProvider:       tokenProvider,
+-		apiKeyProvider:      apiKeyProvider,
+-		watcherFactory:      watcherFactory,
+-		hooks:               b.hooks,
+-		authManager:         authManager,
+-		accessManager:       accessManager,
+-		coreManager:         coreManager,
+-		cooldownStateStore:  cooldownStateStore,
+-		pluginHost:          pluginHost,
+-		discoveryManager:    newDiscoveryAdvertiserManager(),
+-		appliedRoutingState: appliedRoutingState,
+-		serverOptions:       append([]api.ServerOption(nil), b.serverOptions...),
++		cfg:                  b.cfg,
++		configPath:           b.configPath,
++		tokenProvider:        tokenProvider,
++		apiKeyProvider:       apiKeyProvider,
++		watcherFactory:       watcherFactory,
++		hooks:                b.hooks,
++		authManager:          authManager,
++		accessManager:        accessManager,
++		coreManager:          coreManager,
++		cooldownStateStore:   cooldownStateStore,
++		pluginHost:           pluginHost,
++		discoveryManager:     newDiscoveryAdvertiserManager(),
++		appliedRoutingState:  appliedRoutingState,
++		keepInjectedSelector: b.keepInjectedSelector,
++		serverOptions:        append([]api.ServerOption(nil), b.serverOptions...),
+ 	}
+ 	if b.postAuthHook != nil {
+ 		service.serverOptions = append(service.serverOptions, api.WithPostAuthHook(b.postAuthHook))

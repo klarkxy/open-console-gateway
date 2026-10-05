@@ -2,12 +2,15 @@
 // No credentials, provider configuration, or installed client homes are consulted.
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { resolve, join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { delimiter, dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 
-const binary = resolve(process.argv[2] ?? (process.platform === 'win32' ? 'target/debug/ocg-manager-cli.exe' : 'target/debug/ocg-manager-cli'));
+const binary = resolve(process.argv[2] ?? (process.platform === 'win32' ? 'target/debug/ocg.exe' : 'target/debug/ocg'));
+const cpaHostDir = process.argv[4] || process.env.OCG_CPA_HOST_DIR || '';
 const binarySha256 = createHash('sha256').update(await readFile(binary)).digest('hex');
 const root = resolve(process.argv[3] ?? `tmp/ocg3-cli-delivery/acceptance-${Date.now()}`);
 await mkdir(root, { recursive: true });
@@ -18,6 +21,8 @@ const dshMethods = [];
 let dshInstalled = false;
 let endpoint;
 let host;
+let serveLog = '';
+let dataDirName = 'data';
 let serial = 0;
 const parseJson = text => JSON.parse(text, (_key, value, context) =>
   typeof value === 'number' && Number.isInteger(value) && !Number.isSafeInteger(value) && /^-?\d+$/.test(context?.source ?? '') ? BigInt(context.source) : value);
@@ -28,14 +33,66 @@ await mkdir(environment.HOME, { recursive: true });
 await mkdir(join(environment.HOME, '.dsh'), { recursive: true });
 await writeFile(join(environment.HOME, '.dsh', '.credentials.yaml'), 'version: 1\nrecords:\n  client-connection/browser-session:\n    kind: grant\n    payload:\n      version: 1\n      secret: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n');
 
-function invoke(args, input) {
+function runCaptured(command, args, env) {
+  return new Promise((done, reject) => {
+    const child = spawn(command, args, { env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', chunk => { stdout += chunk; });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('exit', code => done({ code, stdout, stderr }));
+  });
+}
+
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+async function installSyntheticBrowser() {
+  const isolation = join(root, 'browser-isolation');
+  const programFiles = join(isolation, 'ProgramFiles');
+  const programFilesX86 = join(isolation, 'ProgramFilesX86');
+  const localAppData = join(isolation, 'LocalAppData');
+  const pathBin = join(isolation, 'bin');
+  const edgeDir = join(programFilesX86, 'Microsoft', 'Edge', 'Application');
+  await mkdir(programFiles, { recursive: true });
+  await mkdir(edgeDir, { recursive: true });
+  await mkdir(localAppData, { recursive: true });
+  await mkdir(pathBin, { recursive: true });
+  const scriptDir = dirname(fileURLToPath(import.meta.url));
+  const workspace = resolve(scriptDir, '..');
+  const source = join(workspace, 'scripts', 'acceptance-fixtures', 'fake-browser.rs');
+  const outDir = join(workspace, 'target', 'ocg3-cli-tests');
+  await mkdir(outDir, { recursive: true });
+  const compiled = join(outDir, process.platform === 'win32' ? 'ocg-fake-msedge.exe' : 'ocg-fake-msedge');
+  const rustcArgs = ['--edition', '2021', '-C', 'debuginfo=0', '-C', 'opt-level=1', '--crate-type', 'bin', '-o', compiled, source];
+  const built = await runCaptured('rustc', rustcArgs, process.env);
+  if (built.code !== 0 || !existsSync(compiled)) {
+    throw new Error(`synthetic browser fixture failed to compile: ${(built.stderr || built.stdout).slice(0, 1500)}`);
+  }
+  const fakeName = process.platform === 'win32' ? 'msedge.exe' : 'msedge';
+  const fakeEdge = join(edgeDir, fakeName);
+  await copyFile(compiled, fakeEdge);
+  await copyFile(compiled, join(pathBin, fakeName));
+  environment.ProgramFiles = programFiles;
+  environment['ProgramFiles(x86)'] = programFilesX86;
+  environment.LOCALAPPDATA = localAppData;
+  const systemRoot = environment.SystemRoot || environment.SYSTEMROOT || (process.platform === 'win32' ? 'C:\\Windows' : '/usr');
+  environment.PATH = [pathBin, join(systemRoot, process.platform === 'win32' ? 'System32' : 'bin'), systemRoot].join(delimiter);
+  environment.Path = environment.PATH;
+  return { capturePath: join(edgeDir, 'ocg-browser-capture.json'), fakeEdge, isolation };
+}
+
+const syntheticBrowser = await installSyntheticBrowser();
+
+function invoke(args, input, timeoutMs = 45000) {
   return new Promise((done, reject) => {
     const child = spawn(binary, args, { env: environment, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
     child.stdout.on('data', chunk => { stdout += chunk; });
     child.stderr.on('data', chunk => { stderr += chunk; });
     child.on('error', reject);
-    const timer = setTimeout(() => child.kill(), 45000);
+    const timer = setTimeout(() => child.kill(), timeoutMs);
     child.on('exit', code => { clearTimeout(timer); done({ code, stdout, stderr }); });
     child.stdin.end(input);
   });
@@ -63,6 +120,31 @@ async function api(method, path, body, { cas = false, success = true, stdin = fa
   let value;
   try { value = parseJson(text); } catch { value = text; }
   return { ...run, value };
+}
+
+function nonzeroGeneration(value) {
+  if (typeof value === 'bigint') return value > 0n;
+  if (typeof value === 'number') return Number.isFinite(value) && value > 0;
+  return false;
+}
+
+function restoredOwnedReady(runtime) {
+  if (!runtime || typeof runtime !== 'object') return false;
+  return runtime.installed === true
+    && runtime.running === true
+    && runtime.owned === true
+    && runtime.desiredRunning === true
+    && runtime.phase === 'idle'
+    && runtime.policyReady === true
+    && runtime.applyStatus === 'applied'
+    && runtime.executionUnavailable === false
+    && nonzeroGeneration(runtime.childProcessGeneration)
+    && runtime.desiredRevision != null
+    && runtime.appliedRevision != null
+    && runtime.desiredRevision === runtime.appliedRevision
+    && typeof runtime.desiredDigest === 'string'
+    && runtime.desiredDigest.length === 64
+    && runtime.desiredDigest === runtime.appliedDigest;
 }
 
 async function check(name, fn) {
@@ -142,10 +224,14 @@ async function freePort() {
 }
 
 async function start(port, data = 'data') {
+  dataDirName = data;
   endpoint = `http://127.0.0.1:${port}`;
-  host = spawn(binary, ['--data-dir', join(root, data), 'serve', '--port', String(port)], { env: environment, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  serveLog = '';
+  const args = ['--data-dir', join(root, data), 'serve', '--port', String(port)];
+  if (cpaHostDir) args.push('--cpa-host-dir', cpaHostDir);
+  host = spawn(binary, args, { env: environment, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let error = '';
-  host.stderr.on('data', chunk => { error += chunk; });
+  host.stderr.on('data', chunk => { error += chunk; serveLog += chunk; });
   host.stdout.resume();
   for (let attempt = 0; attempt < 100; attempt++) {
     if (host.exitCode !== null) throw new Error(`serve exited ${host.exitCode}: ${error.slice(0, 1000)}`);
@@ -308,6 +394,13 @@ try {
     assert.equal(removed.installed, false);
     assert.ok(dshMethods.includes('pluginManager/installBundle')); assert.ok(dshMethods.includes('pluginManager/removeBundle'));
   });
+  await check('owned runtime applies before inference', async () => {
+    assert.ok(cpaHostDir, 'pinned CPA host directory was not provided');
+    const started = (await api('POST', `${prefix}/external-integrations/cpa/runtime/start`, {}, { cas: true })).value;
+    assert.equal(started.applyStatus, 'applied', JSON.stringify(started));
+    assert.equal(started.policyReady, true);
+    assert.equal(started.desiredRunning, true);
+  });
   const formats = [
     ['/v1/chat/completions', { model: 'cli-test-model', messages: [{ role: 'user', content: 'test' }] }, value => value.choices?.[0]?.message?.content],
     ['/v1/responses', { model: 'cli-test-model', input: 'test', store: false }, value => JSON.stringify(value.output)],
@@ -371,13 +464,41 @@ try {
   await check('stopped whole-directory backup restores configuration and credentials', async () => {
     const restorePort = Number(new URL(endpoint).port);
     await stop();
-    await cp(join(root, 'data'), join(root, 'backup'), { recursive: true, force: false, errorOnExist: true });
-    await cp(join(root, 'backup'), join(root, 'restored-data'), { recursive: true, force: false, errorOnExist: true });
+    const snapshot = join(root, 'profile.snapshot');
+    const created = await invoke(['--data-dir', join(root, 'data'), 'backup', 'create', '--output', snapshot], undefined, 180000);
+    assert.equal(created.code, 0, created.stderr);
+    const receipt = parseJson(created.stdout);
+    assert.equal(receipt.state, 'created');
+    assert.ok(receipt.count > 0);
+    const restoredDir = join(root, 'restored-data');
+    const restoredRun = await invoke(['--data-dir', restoredDir, 'backup', 'restore', '--input', snapshot], undefined, 180000);
+    assert.equal(restoredRun.code, 0, restoredRun.stderr);
+    assert.equal(parseJson(restoredRun.stdout).state, 'restored');
     await start(restorePort, 'restored-data');
+    const deadline = Date.now() + 120000;
+    let runtimeText = '';
+    let ready = false;
+    while (Date.now() < deadline) {
+      const output = join(root, 'runtime-barrier.json');
+      const run = await invoke(['--endpoint', endpoint, 'api', 'GET', `${prefix}/external-integrations/cpa/runtime`, '--output', output]);
+      try { runtimeText = await readFile(output, 'utf8'); } catch { runtimeText = run.stderr; }
+      if (run.code === 0 && runtimeText) {
+        try {
+          if (restoredOwnedReady(parseJson(runtimeText))) {
+            ready = true;
+            break;
+          }
+        } catch {}
+      }
+      await new Promise(done => setTimeout(done, 200));
+    }
+    if (!ready) throw new Error(`restored CPA was not ready: ${runtimeText.slice(0, 4000)} ${serveLog.slice(0, 4000)}`);
+    const restoredConfig = (await readFile(join(restoredDir, 'cpa', 'config.yaml'), 'utf8')).replaceAll('\\', '/');
+    assert.match(restoredConfig, /restored-data\/cpa\/auth/);
     assert.equal((await api('GET', `${prefix}/accounts/${accountId}`)).value.name, 'CLI renamed');
     assert.equal((await api('GET', `${prefix}/settings`)).value.routingMode, 'round-robin');
-    const restored = (await api('POST', '/v1/chat/completions', { model: 'cli-test-model', messages: [{ role: 'user', content: 'restore test' }] }, { extra: ['--key-file', gatewayKeyFile] })).value;
-    assert.equal(restored.choices[0].message.content, 'cli-loopback-ok');
+    const restored = await api('POST', '/v1/chat/completions', { model: 'cli-test-model', messages: [{ role: 'user', content: 'restore test' }] }, { extra: ['--key-file', gatewayKeyFile] });
+    assert.equal(restored.value?.choices?.[0]?.message?.content, 'cli-loopback-ok', `restored inference failed ${JSON.stringify(restored.value).slice(0, 800)} ${runtimeText.slice(0, 800)} ${serveLog.slice(0, 800)}`);
   });
   await check('invalid method and path escape fail locally', async () => {
     for (const path of ['http://example.com/', '//example.com/', '/dashboard/api/v3/accounts', '/dashboard/api/v4/../api/auth/status']) {
@@ -401,10 +522,32 @@ try {
     assert.equal((await api('GET', `${prefix}/browser/capabilities`)).value.mode, 'native');
     const created = (await api('POST', `${prefix}/accounts/managed`, { name: 'CLI browser acceptance' }, { cas: true })).value;
     const id = created.account.id;
+    const dataRoot = resolve(join(root, dataDirName)).replaceAll('\\', '/');
     try {
       const opened = (await api('POST', `${prefix}/accounts/${id}/browser`, { target: 'console' }, { cas: true })).value;
       assert.equal(opened.mode, 'native'); assert.equal(opened.sessionToken, null);
+      const capture = parseJson(await readFile(syntheticBrowser.capturePath, 'utf8'));
+      assert.equal(capture.url, 'https://opencode.ai/auth', `captured URL ${capture.url}`);
+      assert.ok(Array.isArray(capture.argv) && capture.argv.some(arg => String(arg).startsWith('--user-data-dir=')), `argv ${JSON.stringify(capture.argv)}`);
+      const profileDir = String(capture.userDataDir || '').replaceAll('\\', '/');
+      assert.ok(dataDirName === 'restored-data', `browser ran against ${dataDirName}, not restored-data`);
+      assert.ok(profileDir.startsWith(dataRoot), `user-data-dir ${profileDir} is outside active ${dataRoot}`);
+      assert.ok(profileDir.includes('/restored-data/') && profileDir.includes(`/browser-profiles/${id}`), `user-data-dir ${profileDir} is not the active restored profile`);
+      assert.ok(!profileDir.includes('/data/browser-profiles/'), `user-data-dir ${profileDir} used the stopped pre-restore data directory`);
+      assert.ok(Number.isInteger(capture.pid) && capture.pid > 0, 'synthetic browser pid missing');
+      assert.ok(pidAlive(capture.pid), 'synthetic browser exited before profile delete');
+      assert.ok(existsSync(capture.userDataDir), `active profile ${capture.userDataDir} was not created`);
       await api('DELETE', `${prefix}/accounts/${id}/browser-profile`, {}, { cas: true });
+      const deadline = Date.now() + 8000;
+      let stopped = !pidAlive(capture.pid);
+      let deleted = !existsSync(capture.userDataDir);
+      while ((!stopped || !deleted) && Date.now() < deadline) {
+        await new Promise(done => setTimeout(done, 50));
+        stopped = !pidAlive(capture.pid);
+        deleted = !existsSync(capture.userDataDir);
+      }
+      assert.ok(stopped, `owned synthetic browser pid ${capture.pid} was not stopped`);
+      assert.ok(deleted, `active restored profile ${capture.userDataDir} was not deleted`);
     } finally {
       await api('DELETE', `${prefix}/accounts/${id}`, {}, { cas: true });
     }

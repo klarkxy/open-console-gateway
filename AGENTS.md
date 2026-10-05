@@ -1,31 +1,40 @@
 # Open Console Gateway — agent guidance
 
-Open Console Gateway is a local multi-Plan console: Rust workspace, Vue 3 dashboard, and Tauri desktop Host. Treat current code as authoritative. Preserve unrelated changes.
+OCG3 is a local multi-Plan gateway with a complete headless CLI and an adopted native GPUI/Ely GUI target for Windows, Linux, and macOS. The adopted execution target is **CPA as the sole execution foundation**; OCG owns configuration, access Keys, public models, Plan evidence, and runtime management. Read [architecture](docs/architecture.md), [migration](docs/maintainer/cpa-migration.md), and [completed CPA findings](docs/maintainer/cpa-validation.md).
 
-## Boundaries that affect changes
+Current Rust source still implements the former gateway and external CPA integration; the native GUI is not implemented. Target documents own design; source determines current implementation. Preserve unrelated changes and never claim migration or GUI acceptance is complete because it is documented.
 
-- The dashboard uses HTTP `/dashboard/api/v4`; mutations use CAS. `/dashboard/api/v3` is a 410 tombstone. Contract changes belong in `schema/dashboard-api-v4.schema.json` and generated types. There is no V2 or V3 REST surface and no Tauri `invoke` commands; do not add either.
-- The V3 kernel DTO contract toolchain stays active: `contract:v3:generate/check` maintains `schema/dashboard-api-v3.schema.json` and `src/api/generated/dashboard-v3.ts` for V3 kernel handlers remounted under the V4 prefix. The REST surface remains V4-only; do not add V3 routes.
-- Provider and Plan share `provider_id` on catalog rows. Adapter implementations stay static/sealed; user-defined Provider data binds Configurable HTTP. Legacy Custom API rows are distinct configurable `http` destinations that may hold multiple credentials while preserving public-name-only resolution; CPA is a separate static external integration.
-- Preserve authentication, Key obfuscation/redaction, URL validation, cooldown state writes, SSE pass-through, data integrity, and supported compatibility. There is no remote sync and no Admin API; do not add either.
-- Changes to user-visible facts update paired English and `.zh-CN.md` guides. Keep capability tables in `docs/user/`, not the root README.
-- Rust tests belong in sibling `tests.rs` modules. Test behavior, not source text, documentation wording, or workflow spelling. Frontend tests likewise never assert literal UI copy: domain functions return semantic codes, copy mapping lives in exported `*_KEYS` tables (`Record<Code, MessageKey>`), and views compose text with `t()`.
-- Frontend server state has a single owner: the Pinia stores in `src/stores/`. Loads are generation-guarded so stale responses never commit, mutations commit their results into the store in place, revalidations keep current content rendered (loading gates show skeletons only before the first successful load), and `dropSession` wipes cached resources on logout/401. Views keep only UI-local state (modals, drafts, filters, optimistic layers) and must not copy store data into local refs; shared presentation logic stays pure in `src/domain/`.
-- New components and pages prefer Reka UI primitives with Tailwind CSS v4 utilities; existing Naive UI usage stays as-is. The token bridge is `src/styles/tailwind.css` (theme + utilities only, never preflight), and overlay components are wrapped once under `src/components/ocg/`.
+## Execution and product boundaries
+
+- CPA owns provider execution, authentication refresh, translation, per-attempt credential selection, streaming, ordinary cooldown, and retries. Do not build an OCG outer retry/fallback loop or transparently restore the former kernel after CPA failure.
+- OCG owns CLI/control services, configuration, client Key authentication, model scopes/aliases, Plan facts, trusted quota adapters, logs, and owned runtime lifecycle.
+- Precise quota evidence has explicit credential/model/pool scope, identity/version, windows, and reset time. Unknown stays unknown; ordinary 429 is not persistent Plan exhaustion. Estimates never control admission.
+- Mandatory quotas and selective no-replay belong at synchronous per-attempt boundaries inside CPA. Async usage/completion is observational. The experimental probe is not production enforcement; SDK/patch integration remains unimplemented.
+- Desktop design uses Rust, GPUI, and Ely: A overview as home, C Plan master-detail, B optional compact mode. No WebUI, WebView-based main interface, or tray is in the adopted scope. CLI completeness covers initialization, configuration, Keys, accounts/Plans, models, quota, logs, backup/restore, and start/stop.
+- Current implementation priority is complete CPA-based CLI acceptance before GUI construction; preserve the adopted GUI design while completing the headless workflows and execution guarantees.
+- GUI and CLI reuse shared V4/CAS controls; the control service owns storage, evidence, and CPA lifecycle. Closing the GUI does not stop the gateway. Bootstrap/authorization/reconnect and full shared backup/restore remain implementation gaps. Keep Windows/Linux/macOS targets separate from observed native platform acceptance.
+
+## Compatibility while migrating
+
+- Current HTTP control remains /dashboard/api/v4 with CAS. V3 stays tombstoned; remounted kernel DTO tooling is not V3 REST. Add no other control API or arbitrary CPA raw-management proxy.
+- V4 contract source is schema/dashboard-api-v4.schema.json; remounted DTOs remain in schema/dashboard-api-v3.schema.json. Use the Rust schema checks in [development](docs/maintainer/development.md); this branch has no frontend package/toolchain.
+- Preserve authentication/redaction, URL/proxy validation, private secrets, storage integrity, persisted authoritative deadlines, credential-version fences, cancellation, SSE delivery, and migration/rollback.
+- Existing provider/configurable-HTTP code describes current behavior until consumers migrate. Map each supported provider/application capability to CPA or an explicit gap; do not silently retire it.
+- OCG owns product configuration and generated CPA projections. CPA owns OAuth/refresh state. Manage only owned processes/directories and keep inference/management private to prevent authorization bypass.
+- No remote node sync, multitenant control plane, or Tauri invoke data paths are added by this design.
 
 ## Read for the affected task
 
-- Gateway routing, aliases, provider/catalog, protocols, Keys, proxy, usage, or CPA: [runtime invariants](docs/maintainer/runtime-invariants.md).
-- Vue appearance: [DESIGN.md](DESIGN.md) and `src/theme.ts`. Keep the **Key** name and fixed navigation.
-- SQLite/schema: [storage migration](docs/maintainer/storage-migration.md).
-- Commands and checks: [development](docs/maintainer/development.md).
-- Release: [releasing](docs/maintainer/releasing.md).
-- Extension paths: [extending](docs/maintainer/extending.md).
-- Known limits: [known debt](docs/maintainer/known-debt.md).
-- User docs: [docs/USER.md](docs/USER.md). Maintainer index: [docs/MAINTAINER.md](docs/MAINTAINER.md).
+- Architecture, native GUI layouts/platforms, quotas, retries, provider mapping, CPA, lifecycle: [architecture](docs/architecture.md) and [migration](docs/maintainer/cpa-migration.md).
+- Current operation: [CLI](docs/user/cli.md), [HTTP contracts](docs/maintainer/dashboard-api.md), [routes](docs/maintainer/http-routes.md).
+- SQLite/encryption/backup: [storage migration](docs/maintainer/storage-migration.md).
+- Commands/checks: [development](docs/maintainer/development.md) and [CI](docs/maintainer/ci.md).
+- Documentation: [conventions](docs/maintainer/conventions.md), [user guide](docs/USER.md), [maintainer guide](docs/MAINTAINER.md).
 
-Use checks that can expose a failure in the changed behavior. Documentation-only work needs paired English and `.zh-CN.md` content review, not a Rust or frontend build. Contract changes require `pnpm run contract:v4:check`; Vue changes require `pnpm run build:web`.
+## Verification and documentation
 
-Quit the release tray app before local Tauri development. Report source checks, builds, and real desktop use as distinct evidence.
+Rust behavior tests belong in sibling tests.rs modules. Test behavior, not source text or literal copy. Select checks that expose changed behavior; distinguish source, build, packaged runtime, live-provider behavior, and deployment.
 
-For releases, use the current release procedure as the gate and completion checklist. Reuse exact-commit CI evidence; do not add blanket local packaging, repeated full suites, all-platform asset downloads, or local image pulls after CI has already verified them. Select extra runtime checks by the changed boundary and report material stage changes or failures rather than narrating every poll.
+Documentation-only changes require paired English/Chinese content and link review, not Rust builds or further CPA experiments. New-version design has one source in docs/architecture.*; current/historical operation guides identify their scope. Product capability tables stay in docs/user/.
+
+Release guides describe historical desktop packaging. Use an implemented publication procedure for the actual deliverable; documenting architecture does not authorize publication/deployment.

@@ -2,6 +2,8 @@
 
 # Accounts
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
 Edit Custom API endpoints, protocols and model mappings on the account, even when it has multiple Keys. For a user-defined HTTP Provider, edit these in **Providers**, even if it has only one Key. Only Plans with a modeled subscription period display expiry; CPA and user-defined API/Plan presets do not.
 
 Choose **Account routing** from the dropdown above the account list and use the adjacent **Conversation sticky** switch. Each change saves immediately; a successful change resets runtime routing state. Hover or focus the question-mark buttons for explanations.

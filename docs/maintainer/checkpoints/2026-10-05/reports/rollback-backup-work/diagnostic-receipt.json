@@ -1,0 +1,136 @@
+{
+  "controlReady": true,
+  "servePid": 52700,
+  "serveExitBeforeTeardown": null,
+  "artifact": {
+    "accepted": "8648fd683cef40bb3ffc8dc9af68caf9f7d5a8737cf442dd575669f730f0fc6a",
+    "productionBinary": {
+      "path": "D:\\0 code\\ocg3\\target\\ocg3-cli-production\\debug\\ocg.exe",
+      "exists": true,
+      "length": 45565952,
+      "sha256": "2e8fd0a9d9324fd9a7e0f719f2f67dfda0a5fb3ddb38e95bf1e597f2fb4ed2d5"
+    },
+    "acceptedHost": {
+      "path": "D:\\0 code\\ocg3\\tmp\\ocg3-cli-delivery\\orchestration-20261004\\runtime-build\\ocg-cpa-host.exe",
+      "exists": true,
+      "length": 65662976,
+      "sha256": "8648fd683cef40bb3ffc8dc9af68caf9f7d5a8737cf442dd575669f730f0fc6a"
+    },
+    "sourceExe": {
+      "path": "D:\\0 code\\ocg3\\tmp\\ocg3-cli-delivery\\g-65bf1ea1-79f0-492e-9ac2-7c463c8980f1\\data\\cpa\\versions\\8648fd683cef40bb3ffc8dc9af68caf9f7d5a8737cf442dd575669f730f0fc6a\\ocg-cpa-host.exe",
+      "exists": true,
+      "length": 65662976,
+      "sha256": "8648fd683cef40bb3ffc8dc9af68caf9f7d5a8737cf442dd575669f730f0fc6a"
+    },
+    "restoredExe": {
+      "path": "D:\\0 code\\ocg3\\tmp\\ocg3-cli-delivery\\g-65bf1ea1-79f0-492e-9ac2-7c463c8980f1\\restored-data\\cpa\\versions\\8648fd683cef40bb3ffc8dc9af68caf9f7d5a8737cf442dd575669f730f0fc6a\\ocg-cpa-host.exe",
+      "exists": true,
+      "length": 65662976,
+      "sha256": "8648fd683cef40bb3ffc8dc9af68caf9f7d5a8737cf442dd575669f730f0fc6a"
+    },
+    "sourceMarker": "8648fd683cef40bb3ffc8dc9af68caf9f7d5a8737cf442dd575669f730f0fc6a",
+    "restoredMarker": "8648fd683cef40bb3ffc8dc9af68caf9f7d5a8737cf442dd575669f730f0fc6a",
+    "sourceManaged": {
+      "currentVersion": "8.0.10",
+      "assetSha256": "8648fd683cef40bb3ffc8dc9af68caf9f7d5a8737cf442dd575669f730f0fc6a",
+      "port": 8143,
+      "desiredRunning": true
+    },
+    "restoredManaged": {
+      "currentVersion": "8.0.10",
+      "assetSha256": "8648fd683cef40bb3ffc8dc9af68caf9f7d5a8737cf442dd575669f730f0fc6a",
+      "port": 8143,
+      "desiredRunning": true
+    }
+  },
+  "afterObserve": {
+    "elapsedMs": 32005,
+    "autoReady": true,
+    "serveExit": null,
+    "last": {
+      "atMs": 28858,
+      "servePid": 52700,
+      "serveExit": null,
+      "apiCode": 0,
+      "runtime": {
+        "installed": true,
+        "running": true,
+        "owned": true,
+        "desiredRunning": true,
+        "phase": "idle",
+        "error": null,
+        "policyReady": true,
+        "applyStatus": "applied",
+        "executionUnavailable": false,
+        "currentOperation": "applied",
+        "currentVersion": "8.0.10",
+        "assetSha256": "8648fd683cef40bb3ffc8dc9af68caf9f7d5a8737cf442dd575669f730f0fc6a",
+        "port": 8143,
+        "childProcessGeneration": 33821649817928,
+        "desiredRevision": 4,
+        "appliedRevision": 4,
+        "desiredDigest": "dca1510581abe2185addb5fc595c6cbd722b745b3a29d7404b51368a89ce36c7",
+        "appliedDigest": "dca1510581abe2185addb5fc595c6cbd722b745b3a29d7404b51368a89ce36c7"
+      }
+    }
+  },
+  "diagnosticStart": {
+    "skipped": true,
+    "reason": "automatic Ready arrived"
+  },
+  "sampleCount": 8,
+  "first": {
+    "atMs": 159,
+    "servePid": 52700,
+    "serveExit": null,
+    "apiCode": 0,
+    "runtime": {
+      "installed": true,
+      "running": false,
+      "owned": true,
+      "desiredRunning": true,
+      "phase": "idle",
+      "error": null,
+      "policyReady": true,
+      "applyStatus": "applied",
+      "executionUnavailable": false,
+      "currentOperation": "applied",
+      "currentVersion": "8.0.10",
+      "assetSha256": "8648fd683cef40bb3ffc8dc9af68caf9f7d5a8737cf442dd575669f730f0fc6a",
+      "port": 8143,
+      "childProcessGeneration": 33821649817928,
+      "desiredRevision": 3,
+      "appliedRevision": 3,
+      "desiredDigest": "b1cf80e4b4241dfaed2fdff2717f8484aa31d40f85ff53cfd664a7400dc7e2d2",
+      "appliedDigest": "b1cf80e4b4241dfaed2fdff2717f8484aa31d40f85ff53cfd664a7400dc7e2d2"
+    }
+  },
+  "last": {
+    "atMs": 28858,
+    "servePid": 52700,
+    "serveExit": null,
+    "apiCode": 0,
+    "runtime": {
+      "installed": true,
+      "running": true,
+      "owned": true,
+      "desiredRunning": true,
+      "phase": "idle",
+      "error": null,
+      "policyReady": true,
+      "applyStatus": "applied",
+      "executionUnavailable": false,
+      "currentOperation": "applied",
+      "currentVersion": "8.0.10",
+      "assetSha256": "8648fd683cef40bb3ffc8dc9af68caf9f7d5a8737cf442dd575669f730f0fc6a",
+      "port": 8143,
+      "childProcessGeneration": 33821649817928,
+      "desiredRevision": 4,
+      "appliedRevision": 4,
+      "desiredDigest": "dca1510581abe2185addb5fc595c6cbd722b745b3a29d7404b51368a89ce36c7",
+      "appliedDigest": "dca1510581abe2185addb5fc595c6cbd722b745b3a29d7404b51368a89ce36c7"
+    }
+  },
+  "serveLog": "gateway started on http://127.0.0.1:5309\ngateway key: [hidden; use status --show-key in a private terminal]\ndashboard api: http://127.0.0.1:5309/dashboard/api/v4\ninference: http://127.0.0.1:5309/v1\nupstream: https://opencode.ai/zen/go\npress Ctrl+C to stop\n",
+  "serveExitAfterTeardown": null
+}

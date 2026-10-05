@@ -211,6 +211,10 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "TemporaryPolicyRestrictions",
     "TemporaryPolicyUpdate",
     "TemporaryPolicyClearRequest",
+    "CpaControlTarget",
+    "CpaRuntime",
+    "CpaRuntimePhase",
+    "CpaRuntimeInstall",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1607,6 +1611,15 @@ pub struct RoutingResolvedMapping {
     pub provider_id: String,
     pub upstream_model: String,
     pub routeable: bool,
+    /// Destination that owns this catalog row. Empty only when the facade has none.
+    pub destination_id: String,
+    /// Destination `AdapterKind` string. Not the product channel.
+    pub adapter_kind: String,
+    /// Historical remote CPA base from the facade mapping.
+    ///
+    /// Older payloads may omit it; missing means false. New responses always emit it.
+    #[serde(default)]
+    pub migration_required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1640,6 +1653,8 @@ pub struct RoutingEligibleCandidate {
     pub resolved_model: String,
     pub upstream_protocol: RoutingClientProtocol,
     pub routing_rank: u32,
+    /// Redacted applied proof. Pending caller, secret, and send flags stay here.
+    pub authority: RoutingRouteAuthority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1664,6 +1679,37 @@ pub enum RoutingExclusionCode {
     QuotaWaiting,
     QuotaDue,
     QuotaProbing,
+    Identity,
+    Rebound,
+    Version,
+    SetupBlocked,
+    Disabled,
+    Draft,
+    Scope,
+    Model,
+    Protocol,
+    Capability,
+    NativePresence,
+    NativeMode,
+    NativeTargets,
+    NotGranted,
+    Material,
+    ConfigurationUnavailable,
+    ValidationOnly,
+    QuotaKnownReset,
+    QuotaUnknownReset,
+    QuotaMalformed,
+    MigrationRequired,
+    StateChanged,
+    Stopped,
+    Untrusted,
+    OwnedNotRunning,
+    OriginUnverified,
+    NotReady,
+    PolicyNotReady,
+    PinCapabilities,
+    TupleUnaligned,
+    PolicyMalformed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1675,6 +1721,8 @@ pub struct RoutingExclusion {
     pub account_id: Option<String>,
     pub provider_id: Option<String>,
     pub upstream_model: Option<String>,
+    /// Structured applied proof, including quota. Null is an older payload with no proof.
+    pub authority: Option<RoutingRouteAuthority>,
 }
 
 /// Conversation stickiness is reported, not applied: this endpoint has no
@@ -1695,12 +1743,227 @@ pub enum RuntimeOnlyUncertainty {
     RetryExclusionsNotApplied,
     CredentialRecheckPending,
     UpstreamResultUnknown,
+    CpaSelectionNotEvaluated,
+    QuotaTrialNotEvaluated,
 }
 
-/// Read-only routing prediction for `GET /routing/explain`.
+/// One native HTTP pin copied from the public route fact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingNativePin {
+    pub protocol: String,
+    pub endpoint_id: String,
+    pub origin: String,
+    pub endpoint_fingerprint: String,
+    pub http_method: String,
+}
+
+/// Granted pins, or the reason this generation kind has none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[schemars(rename_all = "snake_case", deny_unknown_fields)]
+pub enum RoutingGrantDisposition {
+    Granted { pins: Vec<RoutingNativePin> },
+    NotGranted,
+    LocalOnly,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingOperationFact {
+    pub generation_kind: String,
+    pub disposition: RoutingGrantDisposition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum RoutingRoutePlane {
+    Desired,
+    Applied,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum RoutingSpelling {
+    Empty,
+    Same,
+    DistinctUpstream,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum RoutingMaterialFact {
+    HttpNone,
+    KeyedUnchecked,
+    NativePresent,
+    Unproven,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum RoutingRoutePosture {
+    Client,
+    ValidationOnly,
+    Excluded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum RoutingHistoricalPlacement {
+    NotApplicable,
+    OwnedPool,
+    Remote,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum RoutingQuotaState {
+    Unknown,
+    Evidence,
+    Malformed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingQuotaEvidence {
+    pub subject_kind: String,
+    pub credential_id: Option<String>,
+    pub credential_version: Option<u64>,
+    pub provider_id: Option<String>,
+    pub binding_id: Option<String>,
+    pub pool_id: Option<String>,
+    pub pool_version: Option<u64>,
+    pub public_model: Option<String>,
+    pub window: String,
+    pub source: String,
+    pub observed_at: String,
+    pub observation_id: String,
+    pub reset: String,
+    pub reset_at: Option<String>,
+    pub applicable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingQuotaFact {
+    pub state: RoutingQuotaState,
+    pub evidence: Vec<RoutingQuotaEvidence>,
+}
+
+/// Redacted configuration proof for one stored route.
 ///
-/// This is not a send guarantee. `runtimeOnlyUncertainty` names the live
-/// steps this snapshot does not execute.
+/// Material fingerprints, ciphers, hop tokens, and auth file paths are absent.
+/// The endpoint fingerprint is the public route pin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingRouteAuthority {
+    pub plane: RoutingRoutePlane,
+    pub credential_id: String,
+    pub credential_version: u64,
+    pub current_version: Option<u64>,
+    pub provider_id: String,
+    pub binding_id: String,
+    pub auth_id: String,
+    pub registration_epoch: Option<u64>,
+    pub routing_rank: u32,
+    pub destination_id: String,
+    pub legacy_account_id: String,
+    pub account_label: String,
+    pub destination_label: String,
+    pub public_model: String,
+    pub upstream_model: String,
+    pub spelling: RoutingSpelling,
+    pub protocol: String,
+    pub endpoint_id: String,
+    pub origin: String,
+    pub endpoint_fingerprint: String,
+    pub validation_only: bool,
+    pub channel: RoutingChannel,
+    pub adapter_kind: String,
+    pub material: RoutingMaterialFact,
+    pub posture: RoutingRoutePosture,
+    pub exclusions: Vec<RoutingExclusionCode>,
+    pub credential_enabled: bool,
+    pub binding_enabled: bool,
+    pub destination_enabled: bool,
+    pub destination_draft: bool,
+    pub setup_step: String,
+    pub native_provider: String,
+    pub native_mode: String,
+    pub capability_listed: bool,
+    pub grants_cover: bool,
+    pub native_operations: Vec<RoutingOperationFact>,
+    pub caller_pending: bool,
+    pub secret_recheck_pending: bool,
+    pub send_pending: bool,
+    pub quota: RoutingQuotaFact,
+    pub known_restriction_blocks: bool,
+    pub trial_pending: bool,
+    pub client_configuration_eligible: bool,
+    pub migration_required: bool,
+    pub historical_placement: RoutingHistoricalPlacement,
+}
+
+/// Desired-plane route. It is not a public eligible candidate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingConfiguredRoute {
+    pub authority: RoutingRouteAuthority,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingPlaneTuple {
+    pub generation: u64,
+    pub revision: u64,
+    pub digest: String,
+}
+
+/// Stored desired and applied tuples plus the live availability bits.
+///
+/// `desiredRunning` and `applyStatus` do not mean the child is ready.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingOwnedProjection {
+    pub desired: RoutingPlaneTuple,
+    pub applied: RoutingPlaneTuple,
+    pub apply_status: String,
+    pub desired_running: bool,
+    pub runtime_child_generation: u64,
+    pub unavailable: bool,
+    pub state_changed: bool,
+    pub stopped: bool,
+    pub poisoned: bool,
+    pub origin_verified: bool,
+    pub verified_ready: bool,
+    pub policy_ready: bool,
+    pub policy_malformed: bool,
+    pub tuple_aligned: bool,
+    pub pin_capabilities_ready: bool,
+    pub owned_running_before: bool,
+    pub owned_running_after: bool,
+    pub owned_running: bool,
+}
+
+/// Read-only owned routing facts for `GET /routing/explain`.
+///
+/// `eligible` is not a send guarantee. Caller, key, secret, and CPA attempt
+/// checks that were not performed stay on each route authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
@@ -1717,6 +1980,8 @@ pub struct RoutingExplanation {
     pub exclusions: Vec<RoutingExclusion>,
     pub expected_base_policy_first_pick: Option<RoutingEligibleCandidate>,
     pub runtime_only_uncertainty: Vec<RuntimeOnlyUncertainty>,
+    pub desired_routes: Vec<RoutingConfiguredRoute>,
+    pub owned_projection: RoutingOwnedProjection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1956,6 +2221,8 @@ pub fn contract_schema() -> Value {
     include_type::<TemporaryPolicyConfiguration>(&mut serialize);
     include_type::<TemporaryPolicyRestriction>(&mut serialize);
     include_type::<TemporaryPolicyRestrictions>(&mut serialize);
+    include_type::<crate::dashboard_v3::CpaRuntime>(&mut serialize);
+    include_type::<crate::dashboard_v3::CpaRuntimePhase>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -1991,6 +2258,8 @@ pub fn contract_schema() -> Value {
     include_type::<CreditGrantRequest>(&mut deserialize);
     include_type::<TemporaryPolicyUpdate>(&mut deserialize);
     include_type::<TemporaryPolicyClearRequest>(&mut deserialize);
+    include_type::<crate::dashboard_v3::CpaRuntimeInstall>(&mut deserialize);
+    include_type::<crate::dashboard_v3::CpaControlTarget>(&mut deserialize);
     include_type::<TemporaryPolicyRule>(&mut deserialize);
     include_type::<TemporaryPolicyMatch>(&mut deserialize);
     include_type::<TemporaryPolicyBackoff>(&mut deserialize);

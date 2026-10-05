@@ -1624,26 +1624,27 @@ fn configurable_http_capabilities(plan: BuiltinProvider) -> ProviderCapabilities
 }
 
 fn cpa_capabilities(plan: BuiltinProvider) -> ProviderCapabilities {
+    // `plan.routable` stays set. `provider_allows_enablement` keys only on
+    // provider id, and owned-native accounts share that id. The flags below
+    // describe the retired dedicated catalog, not that destination.
     ProviderCapabilities {
         model_catalog: ModelCatalogDescriptor {
             kind: ModelCatalogKind::ProviderPersistedSnapshot,
             catalog_source: plan.model_source,
-            publishes_client_aliases: true,
-            admin_explicit_refresh: true,
+            publishes_client_aliases: false,
+            admin_explicit_refresh: false,
             overlays_declared_ids: false,
             snapshot_is_adapter_input_only: false,
         },
         inference: InferenceRoutingDescriptor {
-            catalog_routable: plan.routable,
-            production_inference: true,
-            // CPA participates in ordinary keyed account selection rather than
-            // the Zen egress-IP special channel.
-            channel: Some(InferenceChannelKind::Go),
+            catalog_routable: false,
+            production_inference: false,
+            channel: None,
             credential_kind: plan.credential_kind,
             quota_scope: plan.quota_scope,
-            auth: InferenceAuthDescriptor::Bearer,
+            auth: InferenceAuthDescriptor::None,
             follow_redirects: false,
-            origin: InferenceOriginKind::LocalExternalIntegration,
+            origin: InferenceOriginKind::None,
             loopback_test_seam_only: false,
         },
         protocol_probe: ProtocolProbeDescriptor {
@@ -1658,7 +1659,7 @@ fn cpa_capabilities(plan: BuiltinProvider) -> ProviderCapabilities {
             runtime_availability: plan.verification_runtime_availability,
             never_auto_enable: true,
             probe_first_declared_model: false,
-            uses_get_models: true,
+            uses_get_models: false,
         },
         usage: UsageDescriptor {
             catalog_availability: plan.usage_availability,
@@ -1684,7 +1685,7 @@ fn cpa_capabilities(plan: BuiltinProvider) -> ProviderCapabilities {
             connection_verify: CardVerifyAction::NotApplicable,
             protocol_and_auth_immutable_after_create: true,
             protocol_probe: false,
-            catalog_refresh: true,
+            catalog_refresh: false,
         },
     }
 }

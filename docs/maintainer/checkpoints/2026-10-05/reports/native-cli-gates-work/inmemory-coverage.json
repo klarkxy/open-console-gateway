@@ -1,0 +1,51 @@
+{
+  "status": "source-checkpoint",
+  "closeout": false,
+  "wholeCli": "incomplete",
+  "runtime": "UNRUN",
+  "currentSha256": "0DEEA0B34B95451F881E77A9A90106AA63C2DF742C5AEE6E324347FF843BDCDC",
+  "baselineSha256": "C510A1EA3C24CA6AC10CB864F8AD9FA89DD32B42189691C4CD64B85DDDE10D69",
+  "changed": true,
+  "coverage": {
+    "catalogCells": 137,
+    "live": 90,
+    "liveCompact": 2,
+    "liveInternal": 0,
+    "agCompact": 2,
+    "coverage": {
+      "catalogCells": 137,
+      "network": 78,
+      "localUnsent": 12,
+      "sourceRefusal": 10,
+      "pending": 42,
+      "runnable": 90,
+      "publicCompaction": 2,
+      "sdkRequired": 42,
+      "interfaces": [
+        "internal",
+        "source-compact",
+        "refresh-resend",
+        "stream-refresh",
+        "original-host",
+        "generation-kinds",
+        "stream-bootstrap"
+      ]
+    },
+    "ordinaryPermit": "execute",
+    "ordinaryInternal": false,
+    "streamedPermit": "stream",
+    "streamedTrigger": true,
+    "sourceAltLive": false,
+    "sourceAltKind": "source-refusal",
+    "bearer": {
+      "positive": "PASS",
+      "positiveClaim": true,
+      "mismatch": "FAIL",
+      "mismatchClaim": false,
+      "empty": "FAIL",
+      "ambiguous": "OPEN",
+      "ambiguousClaim": false
+    }
+  },
+  "productRuntimeStarted": false
+}

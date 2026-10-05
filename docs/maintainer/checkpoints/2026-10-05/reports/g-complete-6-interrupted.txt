@@ -1,0 +1,54 @@
+G_ROOT=tmp\ocg3-cli-delivery\g-f9736b2f-850d-4ff8-a486-65ebac888d36
+G_BIN=D:\0 code\ocg3\target\ocg3-cli-production\debug\ocg.exe
+G_HOST=D:\0 code\ocg3\tmp\ocg3-cli-delivery\orchestration-20261004\runtime-build
+G_START=2026-10-05T09:48:51.0985331+08:00
+PASS fresh host and V4 authority
+PASS schema help without database
+PASS second writer rejected before opening the database
+PASS read templates
+PASS read connections
+PASS read accounts
+PASS read account-records
+PASS read destinations
+PASS read credentials
+PASS read settings
+PASS read provider-contracts
+PASS read providers
+PASS read providers/opencode/pricing
+PASS read platform-accounts
+PASS read routing/cards
+PASS read alias-publication
+PASS read routing/temporary-unavailability
+PASS read gateway/status
+PASS read dashboard/summary
+PASS read dashboard/daily-tokens-by-model
+PASS read logs/gateway
+PASS read logs/forward
+PASS read logs/forward/models
+PASS read logs/forward/keys
+PASS read browser/capabilities
+PASS read external-integrations/cpa
+PASS read external-integrations/cpa/runtime
+PASS read applications/dsh
+PASS read applications/byok/codex
+PASS read applications/byok/kimi
+PASS read applications/byok/minimax
+PASS read applications/byok/zcode
+PASS read settings/update-status
+PASS owned CPA host is registered
+PASS auth register from stdin and persisted session
+PASS custom onboarding through executable
+PASS CAS preserves stale expectations and rejects writes
+PASS missing CAS rejected
+PASS credential rotation and binding enablement
+PASS Gateway Key CRUD without changing primary Key
+PASS routing card replacement persists the current layout
+PASS destination catalog and model metadata edits
+PASS billing configuration grants and calibration
+PASS isolated BYOK codex configure and remove
+PASS isolated BYOK kimi configure and remove
+PASS isolated BYOK minimax configure and remove
+PASS isolated BYOK zcode configure and remove
+PASS secret-safe connection output and private gateway key
+PASS local model publication
+PASS isolated DSH HTTP runtime install and uninstall

@@ -10,10 +10,9 @@ use crate::dashboard_v3::{
 };
 use crate::state::CoreState;
 
-use super::destinations::{DestinationsError, overlay_one_credential_dto, projection_refused};
+use super::destinations::{DestinationsError, projection_refused, with_policy_quota};
 use super::types::{CredentialRotateRequest, CredentialRotateResult, QuotaRetryResult};
 use crate::destination_projection::read_v4_projection;
-use crate::quota_recovery::QuotaEpisode;
 
 /// Rotate the Key on an existing Credential.
 ///
@@ -26,7 +25,9 @@ pub(super) async fn rotate(
     body: Bytes,
 ) -> Result<Json<CredentialRotateResult>, V3ApiError> {
     let input = parse_mutation_json::<CredentialRotateRequest>(&body)?;
-    rotate_locked(&state, &id, input).map(Json)
+    let saved = rotate_locked(&state, &id, input)?;
+    crate::cpa_execution::note_product_apply(&state).await;
+    Ok(Json(saved))
 }
 
 fn rotate_locked(
@@ -81,73 +82,42 @@ fn quota_retry_locked(
     let _settings_update = state.settings_update.lock();
     check_expectation(state, &expectation)?;
     let now = state.sample_gateway_clock().0;
-    let (projection, recovery, probing, revision) = {
-        let db = state.db.lock();
-        let projection = read_v4_projection(&db)
-            .map_err(V3ApiError::internal)?
-            .map_err(|refusals| DestinationsError::Refused(projection_refused(state, &refusals)))?;
-        let account_id = projection
-            .credentials
-            .iter()
-            .find(|credential| credential.id == credential_id)
-            .ok_or_else(|| V3ApiError::not_found_at(state, "credential not found"))?
-            .legacy_account_id
-            .clone();
-        let loaded = crate::db::quota_recovery::load_for_legacy_on(&db.conn, &account_id)
-            .map_err(V3ApiError::internal)?;
-        let Some((id, version, key_cipher, Some(recovery))) = loaded else {
+    let mut db = state.db.lock();
+    let projection = read_v4_projection(&db)
+        .map_err(V3ApiError::internal)?
+        .map_err(|refusals| DestinationsError::Refused(projection_refused(state, &refusals)))?;
+    let credential = projection
+        .credentials
+        .iter()
+        .find(|credential| credential.id == credential_id)
+        .cloned()
+        .ok_or_else(|| V3ApiError::not_found_at(state, "credential not found"))?;
+    match crate::cpa_quota::mark_manual_opportunity(&mut db.conn, credential_id, now)
+        .map_err(|_| V3ApiError::internal("official quota policy could not be updated"))?
+    {
+        crate::cpa_quota::ManualOpportunity::NotRestricted => {
+            drop(db);
             return Err(V3ApiError::invalid_request_at(
                 state,
                 "credential has no confirmed quota exhaustion",
             )
             .into());
-        };
-        let probing = state.is_quota_probing(&id, version, &key_cipher, recovery.epoch);
-        let due = recovery.due_at(now);
-        let episode = QuotaEpisode {
-            credential_id: id,
-            account_id,
-            credential_version: version,
-            epoch: recovery.epoch,
-            key_cipher,
-        };
-        if probing || due {
-            (
-                projection,
-                recovery,
-                probing,
-                ControlRevision::from_state(state),
-            )
-        } else {
-            let mut updated = recovery.clone();
-            updated.next_retry_at = now;
-            let saved = crate::db::quota_recovery::save_on(&db.conn, &episode, &updated)
-                .map_err(V3ApiError::internal)?;
-            if !saved {
-                return Err(V3ApiError::invalid_request_at(
-                    state,
-                    "credential has no confirmed quota exhaustion",
-                )
-                .into());
-            }
-            state.bump_settings_revision();
-            (
-                projection,
-                updated,
-                probing,
-                ControlRevision::from_state(state),
-            )
         }
-    };
-    let credential = projection
-        .credentials
-        .iter()
-        .find(|credential| credential.id == credential_id)
-        .expect("credential existed under settings lock");
-    Ok(QuotaRetryResult {
-        revision,
-        credential: overlay_one_credential_dto(state, credential, Some(&recovery), probing),
-    })
+        opened => {
+            let plan = crate::cpa_quota::present_credential(&db.conn, credential_id, now)
+                .map_err(|_| V3ApiError::internal("official quota policy could not be read"))?
+                .ok_or_else(|| V3ApiError::internal("official quota policy could not be read"))?;
+            if matches!(opened, crate::cpa_quota::ManualOpportunity::Opened) {
+                state.bump_settings_revision();
+            }
+            let revision = ControlRevision::from_state(state);
+            drop(db);
+            return Ok(QuotaRetryResult {
+                revision,
+                credential: with_policy_quota(&credential, &plan),
+            });
+        }
+    }
 }
 
 #[cfg(test)]

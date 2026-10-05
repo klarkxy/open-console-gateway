@@ -2,6 +2,8 @@
 
 # Applications
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
 ## Codex, Kimi Code, MiniMax Code, and ZCode
 
 These tabs add an **Open Console Gateway** model provider to an existing local client configuration. Codex means local Codex workflows in the CLI or desktop app; it does not redirect ordinary ChatGPT Chat or cloud Work.

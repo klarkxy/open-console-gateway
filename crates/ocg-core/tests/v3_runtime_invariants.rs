@@ -10,7 +10,6 @@ use axum::http::StatusCode;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::Database;
-use ocg_core::gateway;
 use ocg_core::models::{Account, ProxyMode, RoutingMode, UsageWindowKind};
 use ocg_core::provider::{
     COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_PROVIDER_ID, CUSTOM_PROVIDER_ID,
@@ -89,17 +88,28 @@ fn inflate_active_pricing(state: &Arc<ocg_core::state::CoreStateInner>, model_id
     revision
 }
 
-fn go_state_with_keys(keys: &[&str]) -> (Arc<ocg_core::state::CoreStateInner>, std::path::PathBuf) {
+fn go_state_with_keys(
+    keys: &[&str],
+) -> (
+    Arc<ocg_core::state::CoreStateInner>,
+    std::path::PathBuf,
+    OwnedProfile,
+) {
     local_go_state("http://127.0.0.1:1".into(), keys)
 }
 
 fn local_go_state(
     base_url: String,
     keys: &[&str],
-) -> (Arc<ocg_core::state::CoreStateInner>, std::path::PathBuf) {
+) -> (
+    Arc<ocg_core::state::CoreStateInner>,
+    std::path::PathBuf,
+    OwnedProfile,
+) {
     let (state, dir) = build_go_state(base_url, keys);
     install_local_usage_sync_seams(&state);
-    (state, dir)
+    let profile = OwnedProfile::arm(Arc::clone(&state), dir.clone());
+    (state, dir, profile)
 }
 
 fn install_local_usage_sync_seams(state: &Arc<CoreStateInner>) {
@@ -115,7 +125,7 @@ fn go_state_with_keys_and_clock(
     keys: &[&str],
     wall: impl Fn() -> DateTime<Utc> + Send + Sync + 'static,
     mono: impl Fn() -> Instant + Send + Sync + 'static,
-) -> (Arc<CoreStateInner>, std::path::PathBuf) {
+) -> (Arc<CoreStateInner>, std::path::PathBuf, OwnedProfile) {
     let dir = temp_data_dir("state");
     let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("v3-tests"));
     let db = Database::open(dir.clone()).unwrap();
@@ -164,7 +174,8 @@ fn go_state_with_keys_and_clock(
     persist_refreshed_go_catalog(&state);
     persist_enabled_zen_catalog(&state);
     install_local_usage_sync_seams(&state);
-    (state, dir)
+    let profile = OwnedProfile::arm(Arc::clone(&state), dir.clone());
+    (state, dir, profile)
 }
 
 fn closed_upstream_url() -> String {
@@ -181,7 +192,7 @@ fn closed_upstream_url() -> String {
 
 #[tokio::test]
 async fn entry_pricing_snapshot_survives_midflight_activation() {
-    let (state, dir) = go_state_with_keys(&["key-1", "key-2"]);
+    let (state, dir, mut profile) = go_state_with_keys(&["key-1", "key-2"]);
     let captured_revision = state.pricing_snapshot().revision.clone();
     let expected_cost = state.estimate_cost(GO_MODEL, 10, 2, 0, 0, None).quota_debit;
 
@@ -210,8 +221,8 @@ async fn entry_pricing_snapshot_survives_midflight_activation() {
     config.upstream_base_url = base_url;
     state.set_config(config).unwrap();
 
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
-    let (status, body) = chat(port, GO_MODEL).await;
+    let port = start_gateway(state.clone()).await;
+    let (status, body) = chat(&state, port, GO_MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 
@@ -232,14 +243,14 @@ async fn entry_pricing_snapshot_survives_midflight_activation() {
         "live pricing must have flipped after the first attempt"
     );
 
-    gateway::stop_gateway(gateway_handle);
+    profile.stop_child_and_listener();
     let _ = stop.send(());
     let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
 async fn entry_route_snapshot_stops_after_live_protocol_revocation() {
-    let (state, dir) = go_state_with_keys(&["key-1", "key-2"]);
+    let (state, dir, mut profile) = go_state_with_keys(&["key-1", "key-2"]);
     let state_for_cb = state.clone();
     let (base_url, calls, stop) = start_scripted_upstream(
         vec![
@@ -263,8 +274,8 @@ async fn entry_route_snapshot_stops_after_live_protocol_revocation() {
     config.upstream_base_url = base_url;
     state.set_config(config).unwrap();
 
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
-    let (status, body) = chat(port, GO_MODEL).await;
+    let port = start_gateway(state.clone()).await;
+    let (status, body) = chat(&state, port, GO_MODEL).await;
     assert_eq!(
         status,
         StatusCode::SERVICE_UNAVAILABLE,
@@ -295,7 +306,7 @@ async fn entry_route_snapshot_stops_after_live_protocol_revocation() {
     assert_eq!(rejected.http_status, Some(503));
     assert!(rejected.diagnostic.as_ref().unwrap()["upstream_status"].is_null());
 
-    let (status, body) = chat(port, GO_MODEL).await;
+    let (status, body) = chat(&state, port, GO_MODEL).await;
     assert_ne!(
         status,
         StatusCode::OK,
@@ -307,14 +318,14 @@ async fn entry_route_snapshot_stops_after_live_protocol_revocation() {
         "the follow-up request must fail locally without another upstream call"
     );
 
-    gateway::stop_gateway(gateway_handle);
+    profile.stop_child_and_listener();
     let _ = stop.send(());
     let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
 async fn entry_alias_snapshot_survives_midflight_zen_catalog_replace() {
-    let (state, dir) = go_state_with_keys(&["key-1"]);
+    let (state, dir, mut profile) = go_state_with_keys(&["key-1"]);
     state
         .db
         .lock()
@@ -344,8 +355,8 @@ async fn entry_alias_snapshot_survives_midflight_zen_catalog_replace() {
     config.upstream_base_url = format!("{base_url}/zen/go");
     state.set_config(config).unwrap();
 
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
-    let (status, body) = chat(port, ZEN_ONLY_MODEL).await;
+    let port = start_gateway(state.clone()).await;
+    let (status, body) = chat(&state, port, ZEN_ONLY_MODEL).await;
     assert_eq!(
         status,
         StatusCode::TOO_MANY_REQUESTS,
@@ -372,7 +383,7 @@ async fn entry_alias_snapshot_survives_midflight_zen_catalog_replace() {
         "temporary Free waits stay process-local, not durable settings"
     );
 
-    let (status, body) = chat(port, ZEN_ONLY_MODEL).await;
+    let (status, body) = chat(&state, port, ZEN_ONLY_MODEL).await;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
@@ -384,14 +395,14 @@ async fn entry_alias_snapshot_survives_midflight_zen_catalog_replace() {
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-    gateway::stop_gateway(gateway_handle);
+    profile.stop_child_and_listener();
     let _ = stop.send(());
     let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
 async fn fallback_rereads_accounts_and_skips_a_card_disabled_mid_request() {
-    let (state, dir) = go_state_with_keys(&["key-1", "key-2", "key-3"]);
+    let (state, dir, mut profile) = go_state_with_keys(&["key-1", "key-2", "key-3"]);
     let state_for_cb = state.clone();
     let (base_url, calls, stop) = start_scripted_upstream(
         vec![
@@ -415,8 +426,8 @@ async fn fallback_rereads_accounts_and_skips_a_card_disabled_mid_request() {
     config.upstream_base_url = base_url;
     state.set_config(config).unwrap();
 
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
-    let (status, body) = chat(port, GO_MODEL).await;
+    let port = start_gateway(state.clone()).await;
+    let (status, body) = chat(&state, port, GO_MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 
@@ -432,14 +443,14 @@ async fn fallback_rereads_accounts_and_skips_a_card_disabled_mid_request() {
         "disabled card must be skipped after the per-fallback account re-read: {logs:?}"
     );
 
-    gateway::stop_gateway(gateway_handle);
+    profile.stop_child_and_listener();
     let _ = stop.send(());
     let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
 async fn fallback_rereads_free_cooldown_and_skips_zen() {
-    let (state, dir) = go_state_with_keys(&["key-1"]);
+    let (state, dir, mut profile) = go_state_with_keys(&["key-1"]);
     state
         .db
         .lock()
@@ -479,8 +490,8 @@ async fn fallback_rereads_free_cooldown_and_skips_zen() {
     config.upstream_base_url = format!("{base_url}/zen/go");
     state.set_config(config).unwrap();
 
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
-    let (status, body) = chat(port, SHARED_ALIAS).await;
+    let port = start_gateway(state.clone()).await;
+    let (status, body) = chat(&state, port, SHARED_ALIAS).await;
     assert_ne!(
         status,
         StatusCode::OK,
@@ -492,7 +503,7 @@ async fn fallback_rereads_free_cooldown_and_skips_zen() {
         "only the rejected Go attempt should have reached upstream"
     );
 
-    gateway::stop_gateway(gateway_handle);
+    profile.stop_child_and_listener();
     let _ = stop.send(());
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -513,12 +524,12 @@ async fn go_success_without_usage_is_success_no_usage_for_non_stream_and_stream(
         ]),
     )]);
     let (base_url, _calls, stop) = start_fake_upstream(replies).await;
-    let (state, dir) = local_go_state(base_url, &["key-1"]);
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let (state, dir, mut profile) = local_go_state(base_url, &["key-1"]);
+    let port = start_gateway(state.clone()).await;
 
-    let (status, body) = chat(port, GO_MODEL).await;
+    let (status, body) = chat(&state, port, GO_MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let (status, body) = chat_stream(port, GO_MODEL).await;
+    let (status, body) = chat_stream(&state, port, GO_MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
     let mut logs = state.db.lock().list_forward_logs(10).unwrap();
@@ -534,7 +545,7 @@ async fn go_success_without_usage_is_success_no_usage_for_non_stream_and_stream(
         assert_eq!(log.attempt, Some(1));
     }
 
-    gateway::stop_gateway(gateway_handle);
+    profile.stop_child_and_listener();
     let _ = stop.send(());
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -549,7 +560,7 @@ async fn go_inference_429_returns_before_one_reactive_usage_fetch_completes() {
         }]),
     )]);
     let (base_url, _calls, stop) = start_fake_upstream(replies).await;
-    let (state, dir) = local_go_state(base_url, &["key-1"]);
+    let (state, dir, mut profile) = local_go_state(base_url, &["key-1"]);
     let now = chrono::DateTime::parse_from_rfc3339("2026-08-18T12:00:00Z")
         .unwrap()
         .with_timezone(&Utc);
@@ -586,8 +597,9 @@ async fn go_inference_429_returns_before_one_reactive_usage_fetch_completes() {
         )
         .unwrap();
 
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
-    let (status, body) = tokio::time::timeout(Duration::from_secs(1), chat(port, GO_MODEL))
+    let port = start_gateway(state.clone()).await;
+    ensure_owned_plane(&state).await;
+    let (status, body) = tokio::time::timeout(Duration::from_secs(1), chat(&state, port, GO_MODEL))
         .await
         .expect("the inference response must not wait for official usage");
     assert_eq!(
@@ -612,14 +624,14 @@ async fn go_inference_429_returns_before_one_reactive_usage_fetch_completes() {
         .expect("the held reactive fetch must complete after release");
 
     state.usage_sync.clear_test_seams();
-    gateway::stop_gateway(gateway_handle);
+    profile.stop_child_and_listener();
     let _ = stop.send(());
     let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
 async fn custom_401_rotates_persists_auth_error_and_skips_a_runtime_disabled_mid_request() {
-    let (state, dir) = go_state_with_keys(&[]);
+    let (state, dir, mut profile) = go_state_with_keys(&[]);
     let disable_id: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
     let disable_id_cb = disable_id.clone();
     let state_for_cb = state.clone();
@@ -655,14 +667,14 @@ async fn custom_401_rotates_persists_auth_error_and_skips_a_runtime_disabled_mid
         }),
     )
     .await;
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
 
     let first = create_verified_custom(port, &state, "custom-a", CUSTOM_KEY_A, &origin).await;
     let second = create_verified_custom(port, &state, "custom-b", CUSTOM_KEY_B, &origin).await;
     let third = create_verified_custom(port, &state, "custom-c", CUSTOM_KEY_C, &origin).await;
     *disable_id.lock().unwrap() = Some(second.clone());
 
-    let (status, body) = chat(port, CUSTOM_MODEL).await;
+    let (status, body) = chat(&state, port, CUSTOM_MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(
         calls.load(Ordering::SeqCst) >= 5,
@@ -695,7 +707,7 @@ async fn custom_401_rotates_persists_auth_error_and_skips_a_runtime_disabled_mid
         "disabled Custom runtime must not be attempted: {logs:?}"
     );
 
-    gateway::stop_gateway(gateway_handle);
+    profile.stop_child_and_listener();
     let _ = stop.send(());
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -705,7 +717,7 @@ async fn outer_fallback_resamples_injected_wall_for_cooldown() {
     let until = Utc::now() + ChronoDuration::hours(1);
     let wall = Arc::new(std::sync::Mutex::new(until - ChronoDuration::seconds(1)));
     let t0 = Instant::now();
-    let (state, dir) = go_state_with_keys_and_clock(
+    let (state, dir, mut profile) = go_state_with_keys_and_clock(
         &["key-1", "key-2"],
         {
             let wall = wall.clone();
@@ -742,8 +754,8 @@ async fn outer_fallback_resamples_injected_wall_for_cooldown() {
     config.upstream_base_url = base_url;
     state.set_config(config).unwrap();
 
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
-    let (status, body) = chat(port, GO_MODEL).await;
+    let port = start_gateway(state.clone()).await;
+    let (status, body) = chat(&state, port, GO_MODEL).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -759,7 +771,7 @@ async fn outer_fallback_resamples_injected_wall_for_cooldown() {
     assert_eq!(logs[0].account_id, "acct-1");
     assert_eq!(logs[1].account_id, "acct-2");
 
-    gateway::stop_gateway(gateway_handle);
+    profile.stop_child_and_listener();
     let _ = stop.send(());
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -768,16 +780,16 @@ async fn outer_fallback_resamples_injected_wall_for_cooldown() {
 async fn same_account_retry_does_not_reselect_or_advance_round_robin() {
     let frozen = Utc::now();
     let t0 = Instant::now();
-    let (state, dir) =
+    let (state, dir, mut profile) =
         go_state_with_keys_and_clock(&["key-1", "key-2"], move || frozen, move || t0);
     let mut config = state.config();
     config.upstream_base_url = closed_upstream_url();
     config.connect_timeout_secs = 1;
     config.routing_mode = RoutingMode::RoundRobin;
     state.set_config(config).unwrap();
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
     for (expected_account, total) in [("acct-1", 2), ("acct-2", 4)] {
-        let (status, _) = chat(port, GO_MODEL).await;
+        let (status, _) = chat(&state, port, GO_MODEL).await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         let logs = state.db.lock().list_forward_logs(10).unwrap();
         assert_eq!(logs.len(), total, "{logs:?}");
@@ -799,7 +811,7 @@ async fn same_account_retry_does_not_reselect_or_advance_round_robin() {
     }
     // The second logical request choosing acct-2 proves the first retry did
     // not advance round-robin selection, regardless of recovery clock reads.
-    gateway::stop_gateway(gateway_handle);
+    profile.stop_child_and_listener();
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -932,15 +944,15 @@ async fn strict_priority_keeps_first_available_card_across_requests() {
         Arc::new(|_| {}),
     )
     .await;
-    let (state, dir) = local_go_state(base_url, &["key-1", "key-2"]);
+    let (state, dir, mut profile) = local_go_state(base_url, &["key-1", "key-2"]);
     let mut config = state.config();
     config.routing_mode = RoutingMode::StrictPriority;
     state.set_config(config).unwrap();
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
 
-    let (status, body) = chat(port, GO_MODEL).await;
+    let (status, body) = chat(&state, port, GO_MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let (status, body) = chat(port, GO_MODEL).await;
+    let (status, body) = chat(&state, port, GO_MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 
@@ -952,7 +964,7 @@ async fn strict_priority_keeps_first_available_card_across_requests() {
         "strict priority must keep card 0: {logs:?}"
     );
 
-    gateway::stop_gateway(gateway_handle);
+    profile.stop_child_and_listener();
     let _ = stop.send(());
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -973,15 +985,15 @@ async fn round_robin_cycles_exact_card_order() {
         Arc::new(|_| {}),
     )
     .await;
-    let (state, dir) = local_go_state(base_url, &["key-1", "key-2"]);
+    let (state, dir, mut profile) = local_go_state(base_url, &["key-1", "key-2"]);
     let mut config = state.config();
     config.routing_mode = RoutingMode::RoundRobin;
     state.set_config(config).unwrap();
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
 
-    let (status, body) = chat(port, GO_MODEL).await;
+    let (status, body) = chat(&state, port, GO_MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let (status, body) = chat(port, GO_MODEL).await;
+    let (status, body) = chat(&state, port, GO_MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 
@@ -995,7 +1007,7 @@ async fn round_robin_cycles_exact_card_order() {
         "{logs:?}"
     );
 
-    gateway::stop_gateway(gateway_handle);
+    profile.stop_child_and_listener();
     let _ = stop.send(());
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -1020,15 +1032,15 @@ async fn sticky_global_transient_exclude_does_not_rewrite_next_request() {
         Arc::new(|_| {}),
     )
     .await;
-    let (state, dir) = local_go_state(base_url, &["key-1", "key-2"]);
+    let (state, dir, mut profile) = local_go_state(base_url, &["key-1", "key-2"]);
     let mut config = state.config();
     config.routing_mode = RoutingMode::StickyGlobal;
     state.set_config(config).unwrap();
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
 
-    let (status, body) = chat(port, GO_MODEL).await;
+    let (status, body) = chat(&state, port, GO_MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let (status, body) = chat(port, GO_MODEL).await;
+    let (status, body) = chat(&state, port, GO_MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(calls.load(Ordering::SeqCst), 3);
 
@@ -1042,7 +1054,7 @@ async fn sticky_global_transient_exclude_does_not_rewrite_next_request() {
         "transient 403 must not rewrite global sticky: {logs:?}"
     );
 
-    gateway::stop_gateway(gateway_handle);
+    profile.stop_child_and_listener();
     let _ = stop.send(());
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -1057,7 +1069,7 @@ async fn free_gates_close_only_free_candidates_on_shared_alias() {
         Arc::new(|_| {}),
     )
     .await;
-    let (state, dir) = local_go_state(base_url.clone(), &["key-1"]);
+    let (state, dir, mut profile) = local_go_state(base_url.clone(), &["key-1"]);
     state
         .db
         .lock()
@@ -1077,9 +1089,9 @@ async fn free_gates_close_only_free_candidates_on_shared_alias() {
     let mut config = state.config();
     config.upstream_base_url = format!("{base_url}/zen/go");
     state.set_config(config).unwrap();
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
 
-    let (status, body) = chat(port, SHARED_ALIAS).await;
+    let (status, body) = chat(&state, port, SHARED_ALIAS).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let logs = state.db.lock().list_forward_logs(10).unwrap();
@@ -1090,7 +1102,7 @@ async fn free_gates_close_only_free_candidates_on_shared_alias() {
         "Free gates must close Zen without closing Go: {logs:?}"
     );
 
-    gateway::stop_gateway(gateway_handle);
+    profile.stop_child_and_listener();
     let _ = stop.send(());
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -1105,7 +1117,7 @@ async fn disabled_goat_is_skipped_and_unavailable_raw_has_no_route() {
         Arc::new(|_| {}),
     )
     .await;
-    let (state, dir) = local_go_state(base_url, &["key-1"]);
+    let (state, dir, mut profile) = local_go_state(base_url, &["key-1"]);
     insert_disabled_offering(
         &state,
         "acct-1",
@@ -1122,9 +1134,9 @@ async fn disabled_goat_is_skipped_and_unavailable_raw_has_no_route() {
             ZEN_FREE_ACCOUNT_ID.into(),
         ])
         .unwrap();
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let port = start_gateway(state.clone()).await;
 
-    let (status, body) = chat(port, GO_MODEL).await;
+    let (status, body) = chat(&state, port, GO_MODEL).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let logs = state.db.lock().list_forward_logs(10).unwrap();
@@ -1135,7 +1147,7 @@ async fn disabled_goat_is_skipped_and_unavailable_raw_has_no_route() {
         "disabled GOAT must stay off the production route set: {logs:?}"
     );
 
-    let (status, body) = chat(port, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM).await;
+    let (status, body) = chat(&state, port, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM).await;
     assert_ne!(status, StatusCode::OK, "{body}");
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -1143,7 +1155,45 @@ async fn disabled_goat_is_skipped_and_unavailable_raw_has_no_route() {
         "unroutable GOAT must not reach upstream"
     );
 
-    gateway::stop_gateway(gateway_handle);
+    profile.stop_child_and_listener();
     let _ = stop.send(());
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn owned_cleanup_stops_child_before_listener_and_profile_delete() {
+    let (state, dir, mut profile) = go_state_with_keys(&[]);
+    let _port = start_gateway(state.clone()).await;
+    ocg_core::cpa_runtime::host::register_owned_host(&state);
+    profile.stop_child_and_listener();
+    assert!(state.gateway.lock().is_none());
+    assert!(dir.exists());
+    let report = ocg_core::cpa_execution::execution_report(&state);
+    assert!(!report.running);
+    assert!(!report.listener_bound);
+    assert!(!report.desired_running);
+    drop(profile);
+    assert!(!dir.exists());
+}
+
+#[tokio::test]
+async fn owned_cleanup_stops_child_when_setup_unwinds() {
+    let (state, dir, profile) = go_state_with_keys(&[]);
+    let _port = start_gateway(state.clone()).await;
+    ocg_core::cpa_runtime::host::register_owned_host(&state);
+    let dir_after = dir.clone();
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _profile = profile;
+        fail_setup(&state, "cleanup unwind sentinel");
+    }));
+    let message = caught
+        .expect_err("setup failure must unwind")
+        .downcast::<String>()
+        .expect("setup panic payload");
+    assert!(message.contains("cleanup unwind sentinel"), "{message}");
+    assert!(state.gateway.lock().is_none());
+    assert!(!dir_after.exists());
+    let report = ocg_core::cpa_execution::execution_report(&state);
+    assert!(!report.running);
+    assert!(!report.listener_bound);
 }

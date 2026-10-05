@@ -1194,7 +1194,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ocg-manager-cli"
+name = "ocg-cli"
 version = "2.6.4"
 dependencies = [
  "anyhow",

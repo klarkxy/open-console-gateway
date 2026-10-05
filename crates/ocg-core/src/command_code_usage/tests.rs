@@ -302,3 +302,141 @@ fn production_endpoint_is_fixed_to_command_code_account_usage() {
         "https://api.commandcode.ai/alpha/billing/credits"
     );
 }
+
+#[tokio::test]
+async fn usage_resolver_keeps_a_loopback_override_and_fetches_it() {
+    let now = Utc::now();
+    let (url, request) = serve_once(200, "OK", usage_body(now)).await;
+    let mut called = false;
+    let selected = resolve_command_code_usage_endpoint_with(&url, |_| {
+        called = true;
+        Err("malformed".to_string())
+    })
+    .unwrap();
+    assert!(!called);
+    assert_eq!(selected, url);
+    let snapshot =
+        fetch_command_code_usage_from(&AppConfig::default(), TEST_KEY, &selected, Utc::now)
+            .await
+            .unwrap();
+    assert!(snapshot.monthly_percent >= 0.0);
+    assert_eq!(request.await.unwrap().path, "/alpha/billing/credits");
+}
+
+#[cfg(feature = "ollama-cloud-loopback-test")]
+#[tokio::test]
+async fn feature_on_usage_rewrite_preserves_official_path_and_query() {
+    let now = Utc::now();
+    let (url, request) = serve_once(200, "OK", usage_body(now)).await;
+    let parsed_bound = reqwest::Url::parse(&url).unwrap();
+    let origin = format!(
+        "http://{}:{}",
+        parsed_bound.host_str().unwrap(),
+        parsed_bound.port().unwrap()
+    );
+    let mapping = format!(r#"{{"command-code":"{origin}"}}"#);
+    let provider_id = crate::provider::COMMAND_CODE_PROVIDER_ID;
+    let plain = crate::cpa_test_endpoints::rewrite_url_with_mapping(
+        provider_id,
+        COMMAND_CODE_GOAT_USAGE_URL,
+        Some(&mapping),
+    )
+    .unwrap()
+    .expect("official usage URL rewrites");
+    let selected = resolve_command_code_usage_endpoint_with(COMMAND_CODE_GOAT_USAGE_URL, |_| {
+        Ok(Some(plain.clone()))
+    })
+    .unwrap();
+    assert_eq!(selected, plain);
+    let plain_url = reqwest::Url::parse(&plain).unwrap();
+    assert_eq!(plain_url.scheme(), "http");
+    assert_eq!(plain_url.host_str(), Some("127.0.0.1"));
+    assert_eq!(plain_url.port(), parsed_bound.port());
+    assert_eq!(plain_url.path(), "/alpha/billing/credits");
+    assert!(plain_url.query().is_none());
+
+    let canonical = format!("{COMMAND_CODE_GOAT_USAGE_URL}?view=usage");
+    let rewritten = crate::cpa_test_endpoints::rewrite_url_with_mapping(
+        provider_id,
+        &canonical,
+        Some(&mapping),
+    )
+    .unwrap()
+    .expect("official usage query is preserved");
+    let parsed = reqwest::Url::parse(&rewritten).unwrap();
+    assert_eq!(parsed.path(), "/alpha/billing/credits");
+    assert_eq!(parsed.query(), Some("view=usage"));
+    let snapshot =
+        fetch_command_code_usage_from(&AppConfig::default(), TEST_KEY, &rewritten, Utc::now)
+            .await
+            .unwrap();
+    assert!(snapshot.monthly_percent >= 0.0);
+    assert_eq!(
+        request.await.unwrap().path,
+        "/alpha/billing/credits?view=usage"
+    );
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn public_usage_fetch_keeps_debug_override_on_loopback() {
+    let now = Utc::now();
+    let (url, request) = serve_once(200, "OK", usage_body(now)).await;
+    let generation = 9_001_424_242_u64;
+    let _guard = install_command_code_usage_target_for_tests(generation, url);
+    let snapshot = fetch_command_code_usage(&AppConfig::default(), TEST_KEY, generation, Utc::now)
+        .await
+        .unwrap();
+    assert!(snapshot.monthly_percent >= 0.0);
+    assert_eq!(request.await.unwrap().path, "/alpha/billing/credits");
+}
+
+#[cfg(feature = "ollama-cloud-loopback-test")]
+#[test]
+fn malformed_usage_mapping_returns_network_before_fetch() {
+    let parsed = crate::cpa_test_endpoints::rewrite_url_with_mapping(
+        crate::provider::COMMAND_CODE_PROVIDER_ID,
+        COMMAND_CODE_GOAT_USAGE_URL,
+        Some("{"),
+    );
+    assert!(parsed.is_err());
+    let error =
+        resolve_command_code_usage_endpoint_with(COMMAND_CODE_GOAT_USAGE_URL, |_| parsed.clone())
+            .unwrap_err();
+    assert_eq!(error, CommandCodeUsageError::Network);
+    let kept = resolve_command_code_usage_endpoint_with(COMMAND_CODE_GOAT_USAGE_URL, |_| Ok(None))
+        .unwrap();
+    assert_eq!(kept, COMMAND_CODE_GOAT_USAGE_URL);
+}
+
+#[cfg(not(feature = "ollama-cloud-loopback-test"))]
+#[test]
+fn feature_off_usage_ignores_endpoint_env_mapping() {
+    let populated = r#"{"command-code":"http://127.0.0.1:18080"}"#;
+    assert_eq!(
+        crate::cpa_test_endpoints::rewrite_url(
+            crate::provider::COMMAND_CODE_PROVIDER_ID,
+            COMMAND_CODE_GOAT_USAGE_URL
+        ),
+        Ok(None)
+    );
+    assert_eq!(
+        crate::cpa_test_endpoints::rewrite_url_with_mapping(
+            crate::provider::COMMAND_CODE_PROVIDER_ID,
+            COMMAND_CODE_GOAT_USAGE_URL,
+            Some(populated)
+        ),
+        Ok(None)
+    );
+    assert_eq!(
+        crate::cpa_test_endpoints::rewrite_url_with_mapping(
+            crate::provider::COMMAND_CODE_PROVIDER_ID,
+            COMMAND_CODE_GOAT_USAGE_URL,
+            Some("{")
+        ),
+        Ok(None)
+    );
+    let selected = resolve_command_code_usage_endpoint(COMMAND_CODE_GOAT_USAGE_URL).unwrap();
+    assert_eq!(selected, COMMAND_CODE_GOAT_USAGE_URL);
+    assert!(selected.starts_with("https://api.commandcode.ai/"));
+}

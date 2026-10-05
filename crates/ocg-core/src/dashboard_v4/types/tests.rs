@@ -116,6 +116,9 @@ fn routing_explanation_emits_camel_case_and_null_optionals() {
                 provider_id: "opencode".into(),
                 upstream_model: "glm-5.2".into(),
                 routeable: true,
+                destination_id: "dest-opencode".into(),
+                adapter_kind: "opencode_go".into(),
+                migration_required: false,
             }],
         },
         revision: ControlRevision {
@@ -134,9 +137,39 @@ fn routing_explanation_emits_camel_case_and_null_optionals() {
             account_id: Some("a".into()),
             provider_id: Some("opencode".into()),
             upstream_model: None,
+            authority: None,
         }],
         expected_base_policy_first_pick: None,
         runtime_only_uncertainty: vec![RuntimeOnlyUncertainty::UpstreamResultUnknown],
+        desired_routes: Vec::new(),
+        owned_projection: RoutingOwnedProjection {
+            desired: RoutingPlaneTuple {
+                generation: 0,
+                revision: 0,
+                digest: String::new(),
+            },
+            applied: RoutingPlaneTuple {
+                generation: 0,
+                revision: 0,
+                digest: String::new(),
+            },
+            apply_status: "not_prepared".into(),
+            desired_running: false,
+            runtime_child_generation: 0,
+            unavailable: false,
+            state_changed: false,
+            stopped: false,
+            poisoned: false,
+            origin_verified: false,
+            verified_ready: false,
+            policy_ready: false,
+            policy_malformed: false,
+            tuple_aligned: false,
+            pin_capabilities_ready: false,
+            owned_running_before: false,
+            owned_running_after: false,
+            owned_running: false,
+        },
     };
     let value = serde_json::to_value(&explanation).unwrap();
     assert_eq!(value["requestedModel"], "glm-5.2");
@@ -149,6 +182,29 @@ fn routing_explanation_emits_camel_case_and_null_optionals() {
     assert_eq!(value["exclusions"][0]["accountId"], "a");
     assert_eq!(value["exclusions"][0]["upstreamModel"], Value::Null);
     assert_eq!(value["exclusions"][0]["code"], "account_disabled");
+    assert_eq!(value["exclusions"][0]["authority"], Value::Null);
+    assert_eq!(
+        value["resolved"]["mappings"][0]["destinationId"],
+        "dest-opencode"
+    );
+    assert_eq!(
+        value["resolved"]["mappings"][0]["adapterKind"],
+        "opencode_go"
+    );
+    assert_eq!(value["resolved"]["mappings"][0]["migrationRequired"], false);
+    assert_eq!(value["desiredRoutes"], json!([]));
+    assert_eq!(value["ownedProjection"]["applyStatus"], "not_prepared");
+    assert_eq!(value["ownedProjection"]["runtimeChildGeneration"], 0);
+    assert_eq!(value["ownedProjection"]["verifiedReady"], false);
+    let older: RoutingResolvedMapping = serde_json::from_value(json!({
+        "providerId": "opencode",
+        "upstreamModel": "glm-5.2",
+        "routeable": true,
+        "destinationId": "dest-opencode",
+        "adapterKind": "opencode_go"
+    }))
+    .unwrap();
+    assert!(!older.migration_required);
     assert_eq!(
         value["runtimeOnlyUncertainty"],
         json!(["upstream_result_unknown"])

@@ -2,6 +2,8 @@
 
 # 应用
 
+> 适用范围：本页保留当前实现或 OCG2 已发布版本的操作参考，不定义 OCG3 新架构。CPA 底层迁移目标见[架构](../architecture.zh-CN.md)；其中界面步骤不适用于当前 CLI 阶段。
+
 ## Codex、Kimi Code、MiniMax Code 与 ZCode
 
 这些页签向本机客户端配置添加 **Open Console Gateway** 模型供应商。Codex 指 CLI 或桌面中的本地 Codex 工作流，不会改变普通 ChatGPT Chat 或云端 Work 的推理地址。

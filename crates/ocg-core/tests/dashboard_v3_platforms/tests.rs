@@ -134,6 +134,7 @@ async fn platform_refresh_fallback_stream_and_stale_price_end_to_end() {
         );
         keys.push(key_id);
     }
+    h.ensure_owned_plane().await;
     let response=h.client.post(format!("http://127.0.0.1:{}/v1/chat/completions",h.handle.port)).bearer_auth(h.state.config().gateway_key).json(&json!({"model":"platform-e2e-model","stream":true,"messages":[{"role":"user","content":"hello"}]})).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let stream = response.text().await.unwrap();

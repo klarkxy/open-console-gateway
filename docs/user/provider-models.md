@@ -2,6 +2,8 @@
 
 # Manage individual supplier models
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
 On **Providers**, select a built-in provider or a configurable HTTP supplier, including preset-derived HTTP suppliers and legacy Custom API connections. All provider model tables use the same toolbar: **Add model**, one model/alias search field, and **Enabled only**. Use the pencil in the row’s **Actions** column to edit that model. **Add model** remains available before the first catalog refresh, including an empty catalog. The existing table still supports single-model and selected-model deletion.
 
 ## Built-in providers

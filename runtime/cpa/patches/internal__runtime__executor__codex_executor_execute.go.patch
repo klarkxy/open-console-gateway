@@ -1,0 +1,66 @@
+diff --git a/diff-a/internal/runtime/executor/codex_executor_execute.go b/diff-b/internal/runtime/executor/codex_executor_execute.go
+index 1111111..2222222 100644
+--- a/diff-a/internal/runtime/executor/codex_executor_execute.go
++++ b/diff-b/internal/runtime/executor/codex_executor_execute.go
+@@ -84,26 +84,30 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+ 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg, opts.Headers)
+ 	applyCodexRoutingHint(ctx, httpReq.Header, auth, baseModel, upstreamBody, opts.Headers)
+ 	applyModelHeaderOverrides(httpReq.Header, baseModel)
+ 	var authID, authLabel, authType, authValue string
+ 	if auth != nil {
+ 		authID = auth.ID
+ 		authLabel = auth.Label
+ 		authType, authValue = auth.AccountInfo()
+ 	}
+ 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+ 		URL:       url,
+ 		Method:    http.MethodPost,
+ 		Headers:   httpReq.Header.Clone(),
+ 		Body:      upstreamBody,
+ 		Provider:  e.Identifier(),
+ 		AuthID:    authID,
+ 		AuthLabel: authLabel,
+ 		AuthType:  authType,
+ 		AuthValue: authValue,
+ 	})
+ 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+ 	httpClient = reporter.TrackHTTPClient(httpClient)
++	if errDispatch := cliproxyauth.BeforeOCGHTTPDispatch(ctx, httpReq); errDispatch != nil {
++		return resp, errDispatch
++	}
+ 	httpResp, err := httpClient.Do(httpReq)
++	cliproxyauth.NoteOCGHTTPDispatch(ctx, err, httpResp)
+ 	if err != nil {
+ 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+ 		return resp, err
+@@ -255,26 +259,30 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+ 	applyCodexHeaders(httpReq, auth, apiKey, false, e.cfg, opts.Headers)
+ 	applyCodexRoutingHint(ctx, httpReq.Header, auth, baseModel, upstreamBody, opts.Headers)
+ 	applyModelHeaderOverrides(httpReq.Header, baseModel)
+ 	var authID, authLabel, authType, authValue string
+ 	if auth != nil {
+ 		authID = auth.ID
+ 		authLabel = auth.Label
+ 		authType, authValue = auth.AccountInfo()
+ 	}
+ 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+ 		URL:       url,
+ 		Method:    http.MethodPost,
+ 		Headers:   httpReq.Header.Clone(),
+ 		Body:      upstreamBody,
+ 		Provider:  e.Identifier(),
+ 		AuthID:    authID,
+ 		AuthLabel: authLabel,
+ 		AuthType:  authType,
+ 		AuthValue: authValue,
+ 	})
+ 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+ 	httpClient = reporter.TrackHTTPClient(httpClient)
++	if errDispatch := cliproxyauth.BeforeOCGHTTPDispatch(ctx, httpReq); errDispatch != nil {
++		return resp, errDispatch
++	}
+ 	httpResp, err := httpClient.Do(httpReq)
++	cliproxyauth.NoteOCGHTTPDispatch(ctx, err, httpResp)
+ 	if err != nil {
+ 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+ 		return resp, err

@@ -2,6 +2,8 @@
 
 # Logs And Settings
 
+> Scope: retained current-implementation or published OCG2 operation reference, not the OCG3 design. See [architecture](../architecture.md) for the CPA migration target; UI steps do not apply to this CLI phase.
+
 ## Logs
 
 The **Logs** view opens on **Request Logs** and is the rolling receipt tape for

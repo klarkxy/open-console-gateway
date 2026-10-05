@@ -2,6 +2,12 @@
 
 # 升级、备份、恢复与卸载
 
+> 适用范围：本页保留当前实现或 OCG2 已发布版本的操作参考，不定义 OCG3 新架构。CPA 底层迁移目标见[架构](../architecture.zh-CN.md)；其中界面步骤不适用于当前 CLI 阶段。
+
+## 当前 CLI 快照
+
+开发版 CLI 已实现离线 `backup create --output FILE` 与 `backup restore --input FILE`。先停止宿主，再恢复到新目录或空目录。这类快照包含 SQLite、加密身份与 CPA 托管的认证、运行时和配置状态，会验证哈希与密钥，并重定位托管认证目录。命令及前提见 [CLI 备份流程](cli.zh-CN.md#备份)。下文仍保留其安装与已发布版本的适用范围。
+
 从 [GitHub 最新 Release](https://github.com/klarkxy/open-console-gateway/releases/latest) 下载升级包，并用同一 Release 的 `SHA256SUMS` 校验：PowerShell 用 `Get-FileHash <文件> -Algorithm SHA256`，macOS 用 `shasum -a 256 <文件>`，Linux 用 `sha256sum <文件>`。下面把备份、恢复和卸载一起讲完——都是平时很枯燥、关键时刻恨自己没看的操作。
 
 Windows 上，安装、应用内更新和再次运行安装包都会沿用已有安装目录。安装器不会先卸载再安装。升级保留数据目录与开机启动设置，并迁移已有桌面和开始菜单快捷方式。只从 Windows **已安装的应用** 卸载。
@@ -14,7 +20,7 @@ Windows 上，安装、应用内更新和再次运行安装包都会沿用已有
 
 ### 节点备份载荷
 
-节点备份当前导出 payload V11，以目的地与凭据为权威（密钥与 identity extras 只存在加密信封内），并携带模型解析策略与按模型路由覆盖。V11 还携带显式 HTTP 协议路由；早于 V11 但携带非空显式路由的备份会被拒绝，避免丢失这些路由。V4–V11 备份可导入（V7 会补确定性解析默认值）；payload V1–V3 与 V12 或更新版本会返回明确的不支持版本错误——那不是密码错误，也不是文件损坏。维护者向的 payload 策略见[运行时不变量](../maintainer/runtime-invariants.zh-CN.md)。
+节点备份当前导出 payload V11，以目的地与凭据为权威（密钥与 identity extras 只存在加密信封内），并携带模型解析策略与按模型路由覆盖。V11 还携带显式 HTTP 协议路由；早于 V11 但携带非空显式路由的备份会被拒绝，避免丢失这些路由。V4–V11 备份可导入（V7 会补确定性解析默认值）；payload V1–V3 与 V12 或更新版本会返回明确的不支持版本错误——那不是密码错误，也不是文件损坏。当前 payload 策略以[账号转移实现](../../crates/ocg-core/src/dashboard_v3/account_transfer.rs)为准。
 
 V9 备份同时保存供应商卡片的身份、分组与顺序。多张卡可引用同一供应商，不会复制配置或 Key。合并导入时，目标已有账号保留顺序和卡片归属，新增账号采用来源分组。旧备份导入时保留已存的凭据优先级，并生成对应卡片。
 

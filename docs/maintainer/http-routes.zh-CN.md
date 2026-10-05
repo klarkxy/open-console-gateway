@@ -2,7 +2,9 @@
 
 # HTTP 路由
 
-所有路由共享一个端口：推理、Dashboard V4（含挂回去的 V3 处理器）、V2 与 V3 墓碑、以及 SPA。详见[架构](architecture.zh-CN.md)。
+> 适用范围：本页保留当前实现或 OCG2 已发布版本的操作参考，不定义 OCG3 新架构。CPA 底层迁移目标见[架构](../architecture.zh-CN.md)；其中界面步骤不适用于当前 CLI 阶段。
+
+所有路由共享一个端口：推理、Dashboard V4（含挂回去的 V3 处理器）、V2 与 V3 墓碑、以及 SPA。详见[架构](../architecture.zh-CN.md)。
 
 被墓碑化的 `/dashboard/api/...` REST：匿名时返回空 body 的 **401**（鉴权先于墓碑），已鉴权时（含回环本地模式）返回 **410** `{ "code": "dashboardV2Removed", "message": "Dashboard API V2 has been removed; refresh the page and retry." }`。`/dashboard/api/v3` 前缀是另一套 410：`{ "code": "dashboardV3Removed", "message": "Dashboard API V3 has been removed; refresh the page and retry." }`。既非 V3 墓碑前缀、非 V4，也非保留家族的未知 `/dashboard/api/...` 路径，在已鉴权时同样 410。未知的 V4 路径是 V4 的 `404`，不是墓碑。保留的 `/dashboard/api` 家族（精确路径，无尾斜杠，无额外段）：`auth/status`、`auth/register`、`auth/login`、`auth/logout`，以及 `browser/sessions/{token}/ws`（token 非空）。受保护的 V2 REST 返回墓碑；活的 Dashboard JSON 只走 V4。
 

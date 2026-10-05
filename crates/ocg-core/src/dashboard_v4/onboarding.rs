@@ -59,7 +59,11 @@ pub(super) async fn commit(
             "operationId must be a UUID",
         ));
     }
-    commit_locked(&state, input).map(Json)
+    let saved = commit_locked(&state, input)?;
+    if !saved.replayed {
+        crate::cpa_execution::note_product_apply(&state).await;
+    }
+    Ok(Json(saved))
 }
 
 pub(crate) fn commit_locked(

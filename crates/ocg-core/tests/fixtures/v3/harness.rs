@@ -18,11 +18,54 @@ use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::Database;
 use ocg_core::gateway;
 use ocg_core::models::{Account, AccountUpdate, ProxyMode, RoutingMode};
-use ocg_core::state::{CoreStateInner, GatewayHandle};
+use ocg_core::state::CoreStateInner;
+
+#[path = "../owned_cpa.rs"]
+mod owned_cpa;
+
+pub(crate) use owned_cpa::fail_setup;
+
+pub(crate) async fn ensure_owned_plane(state: &ocg_core::state::CoreState) {
+    owned_cpa::ensure_owned_plane(state).await;
+}
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Holds the profile until the owned child and listener have stopped.
+/// Drop uses operator Stop, then deletes the directory. Explicit teardown
+/// calls `stop_child_and_listener` before its own directory delete.
+pub(crate) struct OwnedProfile {
+    state: Arc<CoreStateInner>,
+    dir: PathBuf,
+    stopped: bool,
+}
+
+impl OwnedProfile {
+    pub(crate) fn arm(state: Arc<CoreStateInner>, dir: PathBuf) -> Self {
+        Self {
+            state,
+            dir,
+            stopped: false,
+        }
+    }
+
+    pub(crate) fn stop_child_and_listener(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
+        owned_cpa::shutdown_owned(&self.state);
+    }
+}
+
+impl Drop for OwnedProfile {
+    fn drop(&mut self) {
+        self.stop_child_and_listener();
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
 
 #[path = "../fake_upstream.rs"]
 mod fake_upstream;
@@ -103,11 +146,14 @@ pub(crate) fn build_go_state(base_url: String, keys: &[&str]) -> (Arc<CoreStateI
     (state, dir)
 }
 
-pub(crate) async fn start_gateway(state: Arc<CoreStateInner>) -> (u16, GatewayHandle) {
-    let handle = gateway::start_gateway_on(state, std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-        .await
-        .unwrap();
-    (handle.port, handle)
+pub(crate) async fn start_gateway(state: Arc<CoreStateInner>) -> u16 {
+    let handle = gateway::start_gateway_on(
+        state.clone(),
+        std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+    )
+    .await
+    .unwrap();
+    owned_cpa::store_listener(&state, handle)
 }
 
 pub(crate) fn set_account_enabled(state: &Arc<CoreStateInner>, account_id: &str, enabled: bool) {
@@ -132,7 +178,12 @@ pub(crate) fn set_account_enabled(state: &Arc<CoreStateInner>, account_id: &str,
         .unwrap();
 }
 
-pub(crate) async fn chat(port: u16, model: &str) -> (reqwest::StatusCode, String) {
+pub(crate) async fn chat(
+    state: &ocg_core::state::CoreState,
+    port: u16,
+    model: &str,
+) -> (reqwest::StatusCode, String) {
+    ensure_owned_plane(state).await;
     let response = loopback_client()
         .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
         .header(
@@ -153,7 +204,12 @@ pub(crate) async fn chat(port: u16, model: &str) -> (reqwest::StatusCode, String
     (status, body)
 }
 
-pub(crate) async fn chat_stream(port: u16, model: &str) -> (reqwest::StatusCode, String) {
+pub(crate) async fn chat_stream(
+    state: &ocg_core::state::CoreState,
+    port: u16,
+    model: &str,
+) -> (reqwest::StatusCode, String) {
+    ensure_owned_plane(state).await;
     let response = loopback_client()
         .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
         .header(

@@ -2,7 +2,11 @@
 
 # 管理面板
 
-管理面板是 Gateway 提供的单页 Vue 3 应用。左侧边栏（宽度低于 1024px 时改为顶部横向菜单）有八个固定核心页面：**仪表盘**、**接入 Key**、**账号**、**供应商**、**别名**、**应用**、**日志**、**设置**。应用页承载 DSH 插件流程。设置下方的分界线之后是可选的 **扩展** 分组；CPA 是其中仅本机使用的入口。Windows x64、macOS 和 Linux x64 的桌面应用或 CLI 还可以在该页安装并手动启动由 OCG 拥有的 CPA 运行时；其他平台仍只支持连接外部 CPA。顶栏右侧是主题切换、语言切换、退出登录。面板原生支持十种语言：简体中文、繁體中文、English、日本語、한국어、Español、 Français、Deutsch、Português (Brasil)、Русский，默认简体中文。语言选择持久化在 `localStorage` 的 `ocg-manager.locale`；浏览器拒绝持久化时，当前会话仍正常工作。
+> 历史范围：`open-console-gateway` 这一代已发布的 Vue 面板。不是推迟中的 GPUI/Ely GUI，也不是当前的无界面 CLI。本页不新增 API，也不记录测试或已完成的迁移。
+
+这一代是无界面 `ocg` CLI（Windows 上为 `ocg.exe`，Linux 与 macOS 上为 `ocg`）。`ocg3` 与 `open-console-gateway` 是同一项目的两个代际分支，产品名仍是 Open Console Gateway。执行底座是该进程拥有的一个本地 CPA。自定义 HTTP 供应商仍是该本地 CPA 上的供应商路由。默认数据根是 `~/.ocg3`。启动不打开、不复制、不移动、不删除、也不接管 `~/.ocg-mgr` 或 `~/.ocg-mgr-cli`。GPUI/Ely GUI 推迟。完整 CLI 验收尚未完成。命令见 [CLI 指南](cli.zh-CN.md)。设计见[架构](../architecture.zh-CN.md)。
+
+下面的页面是那一代的单页 Vue 3 应用，随桌面包和已发布容器提供。左侧边栏（宽度低于 1024px 时改为顶部横向菜单）有八个固定核心页面：**仪表盘**、**接入 Key**、**账号**、**供应商**、**别名**、**应用**、**日志**、**设置**。应用页承载 DSH 插件流程。设置下方的分界线之后是可选的 **扩展** 分组，CPA 出现在这里。部分 Windows x64、macOS 和 Linux x64 构建可以在该页安装并手动启动自有运行时。其他平台在当时的文档里只连接外部 CPA。只连接外部 CPA 不是这一代的产品模式。已保存的外部行不会因阅读本页而被激活或删除。顶栏右侧是主题切换、语言切换、退出登录。面板原生支持十种语言：简体中文、繁體中文、English、日本語、한국어、Español、 Français、Deutsch、Português (Brasil)、Русский，默认简体中文。语言选择持久化在 `localStorage` 的 `ocg-manager.locale`；浏览器拒绝持久化时，当前会话仍正常工作。
 
 面板、浏览器标签页和桌面图标统一使用看板娘的大脸标识。面板暗色主题为 Logo 添加细浅色轮廓，浏览器和桌面图标保留原图。
 
@@ -12,7 +16,7 @@
 
 ## 面板 API
 
-当前 SPA **只走 `/dashboard/api/v4`**。`/dashboard/api/v3` 是 410 墓碑。账号、设置、鉴权、日志与转移处理器挂回 V4，与原生的目的地、凭据和 DSH 路由并列。DSH 安装请求携带 `expectedRevision`、`processGeneration` 和用于校验外部 DSH 状态的检查指纹。若另一个标签页或进程先改变任一侧，服务端返回冲突，页面会刷新而不会自动重放写入。这些 token 只属于当前 OCG 进程；多个进程共用一个数据目录时，并不构成统一的 CAS 域。OpenCode Go 价格快照使用独立的 `pricingRevision`，与设置 token 无关。
+那份已发布 SPA **只走 `/dashboard/api/v4`**。`/dashboard/api/v3` 是 410 墓碑。账号、设置、鉴权、日志与转移处理器挂回 V4，与原生的目的地、凭据和 DSH 路由并列。DSH 安装请求携带 `expectedRevision`、`processGeneration` 和用于校验外部 DSH 状态的检查指纹。若另一个标签页或进程先改变任一侧，服务端返回冲突，页面会刷新而不会自动重放写入。这些 token 只属于当前 OCG 进程；多个进程共用一个数据目录时，并不构成统一的 CAS 域。OpenCode Go 价格快照使用独立的 `pricingRevision`，与设置 token 无关。
 
 明文 Key 只出现在接入中心载荷（`GET /dashboard/api/v4/connection`）里。Settings 资源从不包含 Key 值。浏览器只把秘密留在内存；退出登录或 401 会话失效会立即清除。
 
