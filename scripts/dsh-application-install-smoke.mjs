@@ -100,7 +100,10 @@ function wireFact(record) {
 
 function assertWire(records) {
   assert.equal(records.some((record) => record.pathname.includes("/v1/v1")), false);
-  assert.equal(records.some((record) => record.body?.model === "legacy-model"), false);
+    assert.equal(records.some((record) => record.body?.model === "legacy-model"), false);
+    assert.equal(records.some((record) => record.body?.model === "gemini-3.1-pro"), false);
+    assert.equal(records.some((record) => record.body?.model === "malformed-protocol"), false);
+    assert.equal(records.some((record) => record.body?.model === "dup-model"), false);
   for (const record of records) {
     if (record.pathname === FLIP_PATH) continue;
     if (record.pathname === "/ocg/v1/messages") {
@@ -207,6 +210,26 @@ function servedCatalog(generation) {
       protocols: { preferred: "messages", supported: ["messages"] },
     },
   });
+  payload.data.push({
+    id: "gemini-3.1-pro",
+    ocg: { schemaVersion: 2, status: "unknown", sources: [] },
+  });
+  payload.data.push({
+    id: "malformed-protocol",
+    ocg: {
+      schemaVersion: 2,
+      protocols: { preferred: "responses", supported: ["chat_completions"] },
+    },
+  });
+  payload.data.push({
+    id: "schema-1",
+    ocg: { schemaVersion: 1, protocols: { preferred: "chat_completions", supported: ["chat_completions"] } },
+  });
+  const duplicate = {
+    id: "dup-model",
+    ocg: { schemaVersion: 2, protocols: { preferred: "chat_completions", supported: ["chat_completions"] } },
+  };
+  payload.data.push(duplicate, { ...duplicate });
   return payload;
 }
 
@@ -323,6 +346,12 @@ function runnerSource(bin, installedIndex, flipUrl) {
     const gateIds = ["smoke-chat", "smoke-responses", "smoke-messages", "smoke-responses-plain", "minimax-m3.1"];
     const resolved = {};
     const resolveErrors = {};
+    let posts = 0;
+    const baseFetch = globalThis.fetch.bind(globalThis);
+    globalThis.fetch = async (input, init) => {
+      if ((init?.method ?? "GET") !== "GET") posts += 1;
+      return baseFetch(input, init);
+    };
     for (const model of listed) {
       try {
         resolved[model.id] = await ctx.llm.resolveModelInfo("ocg", model.id);
@@ -331,11 +360,38 @@ function runnerSource(bin, installedIndex, flipUrl) {
         resolveErrors[model.id] = { code: error?.code ?? null, message: error instanceof Error ? error.message : String(error) };
       }
     }
-    let posts = 0;
-    const baseFetch = globalThis.fetch.bind(globalThis);
-    globalThis.fetch = async (input, init) => {
-      if ((init?.method ?? "GET") !== "GET") posts += 1;
-      return baseFetch(input, init);
+    async function rejectExact(id) {
+      const before = posts;
+      const result = { resolve: null, prepare: null, posts: 0 };
+      try {
+        await ctx.llm.resolveModelInfo("ocg", id);
+        result.resolve = { threw: false, code: null, message: null };
+      } catch (error) {
+        result.resolve = {
+          threw: true,
+          code: error?.code ?? null,
+          message: error instanceof Error ? error.message : String(error),
+        };
+      }
+      try {
+        await ctx.llm.prepareCall({ provider: "ocg", model: id });
+        result.prepare = { threw: false, code: null, message: null };
+      } catch (error) {
+        result.prepare = {
+          threw: true,
+          code: error?.code ?? null,
+          message: error instanceof Error ? error.message : String(error),
+        };
+      }
+      result.posts = posts - before;
+      return result;
+    }
+    const rejected = {
+      legacy: await rejectExact("legacy-model"),
+      noProtocol: await rejectExact("gemini-3.1-pro"),
+      malformed: await rejectExact("malformed-protocol"),
+      schema1: await rejectExact("schema-1"),
+      duplicate: await rejectExact("dup-model"),
     };
     async function undeclared(id) {
       const before = posts;
@@ -485,7 +541,8 @@ function runnerSource(bin, installedIndex, flipUrl) {
           context: resolved[id]?.context?.contextWindow ?? null,
           error: resolveErrors[id]?.code ?? null,
         })),
-        legacy: resolveErrors["legacy-model"] ?? null,
+        advertisedErrors: resolveErrors,
+        rejected,
         chat: effortView(resolved["smoke-chat"]),
         responses: effortView(resolved["smoke-responses"]),
         messages: effortView(resolved["smoke-messages"]),
@@ -635,7 +692,7 @@ async function main() {
     assert.equal(runtime.storedRef, "OCG_GATEWAY_KEY");
     assert.equal(runtime.storedValueMatches, true);
     assert.deepEqual(runtime.ids, [
-      "smoke-chat", "smoke-responses", "smoke-messages", "smoke-responses-plain", "legacy-model", "minimax-m3.1",
+      "smoke-chat", "smoke-responses", "smoke-messages", "smoke-responses-plain", "minimax-m3.1",
     ]);
     assert.deepEqual(runtime.catalogIds, runtime.ids);
     const menu = [
@@ -649,8 +706,15 @@ async function main() {
     assert.equal(runtime.gate.plain, null);
     assert.equal(runtime.gate.minimax, null);
     assert.equal(runtime.gate.minimaxContext, 204800);
-    assert.equal(runtime.gate.legacy?.code, "INVALID_CONFIG");
-    assert.equal(runtime.gate.ids.some((row) => row.error === "INVALID_MODEL_REASONING"), false);
+    assert.deepEqual(runtime.gate.advertisedErrors, {});
+    assert.equal(runtime.gate.ids.some((row) => row.error), false);
+    for (const [id, entry] of Object.entries(runtime.gate.rejected)) {
+      assert.equal(entry.resolve.threw, true, id);
+      assert.equal(entry.resolve.code, "INVALID_CONFIG", id);
+      assert.equal(entry.prepare.threw, true, id);
+      assert.equal(entry.prepare.code, "INVALID_CONFIG", id);
+      assert.equal(entry.posts, 0, id);
+    }
     assert.equal(runtime.gate.undeclaredMinimax.threw, true);
     assert.equal(runtime.gate.undeclaredMinimax.code, "UNSUPPORTED_REASONING_EFFORT");
     assert.equal(runtime.gate.undeclaredMinimax.posts, 0);

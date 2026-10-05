@@ -694,7 +694,8 @@ pub(crate) fn enrich(
 
 /// Capability intersection and protocol facts share one qualified-candidate set.
 /// Rows that do not resolve stay untouched. A resolved row with no carrying
-/// credential still publishes unknown metadata and omits `protocols`.
+/// credential still receives unknown metadata and omits `protocols`; the
+/// `/v1/models` publisher then drops those rows.
 fn published_model_facts(
     records: &[Record],
     modelsdev: &crate::modelsdev::ModelsDevCatalog,

@@ -113,7 +113,11 @@ async function writePluginRuntime(root) {
         async resolveModel(provider, model) {
           const profile = this.config.profiles().get(provider);
           const failure = profile.modelErrors.get(model);
-          if (failure !== undefined) throw new Error(failure);
+          if (failure !== undefined) {
+            const error = new Error(failure);
+            error.code = "INVALID_CONFIG";
+            throw error;
+          }
           return this.modelInfo(provider, model);
         }
         async prepareCall(provider, model) { return { model: await this.resolveModel(provider, model) }; }
@@ -239,6 +243,16 @@ test("generated DSH plugin dispatches v2 protocols and does not send rejected mo
             contextWindow: 204800,
           },
         },
+        { id: "no-protocol", ocg: { schemaVersion: 2, status: "unknown", sources: [] } },
+        {
+          id: "malformed-protocol",
+          ocg: {
+            schemaVersion: 2,
+            protocols: { preferred: "responses", supported: ["chat_completions"] },
+          },
+        },
+        { id: "dup-id", ocg: { schemaVersion: 2, protocols: { preferred: "chat_completions", supported: ["chat_completions"] } } },
+        { id: "dup-id", ocg: { schemaVersion: 2, protocols: { preferred: "chat_completions", supported: ["chat_completions"] } } },
       ],
     };
     const result = await runEntry(
@@ -252,9 +266,10 @@ test("generated DSH plugin dispatches v2 protocols and does not send rejected mo
         globalThis.__ocgSent = [];
         globalThis.__ocgProviders = [];
         globalThis.__ocgPiModelInfo = {};
+        let payload = ${JSON.stringify(catalog)};
         globalThis.fetch = async (url) => {
           requests.push(String(url));
-          return { ok: true, status: 200, async json() { return ${JSON.stringify(catalog)}; } };
+          return { ok: true, status: 200, async json() { return payload; } };
         };
         const credentials = {
           async set(ref, value) { stored = { ref, value }; },
@@ -289,17 +304,48 @@ test("generated DSH plugin dispatches v2 protocols and does not send rejected mo
             prepareErrors.legacy = "";
           } catch (error) {
             prepareErrors.legacy = error instanceof Error ? error.message : String(error);
+            prepareErrors.legacyCode = error?.code ?? null;
           }
           try {
             await adapter.prepareCall(provider, "schema-1");
             prepareErrors.schema1 = "";
           } catch (error) {
             prepareErrors.schema1 = error instanceof Error ? error.message : String(error);
+            prepareErrors.schema1Code = error?.code ?? null;
+          }
+          const rejected = ["legacy-model", "schema-1", "no-protocol", "malformed-protocol", "dup-id"];
+          routes[provider].rejected = {};
+          for (const id of rejected) {
+            const entry = {};
+            try {
+              await adapter.resolveModel(provider, id);
+              entry.resolve = "";
+            } catch (error) {
+              entry.resolve = error instanceof Error ? error.message : String(error);
+              entry.resolveCode = error?.code ?? null;
+            }
+            try {
+              await adapter.prepareCall(provider, id);
+              entry.prepare = "";
+            } catch (error) {
+              entry.prepare = error instanceof Error ? error.message : String(error);
+              entry.prepareCode = error?.code ?? null;
+            }
+            routes[provider].rejected[id] = entry;
           }
         }
         const piProvider = globalThis.__ocgProviders.at(-1);
         const rejected = piProvider.getModels().find((model) => model.id === "legacy-model");
         const messages = piProvider.getModels().find((model) => model.id === "mimo-v2.6-flash");
+        payload = {
+          object: "list",
+          data: [
+            { id: "legacy-model" },
+            { id: "no-protocol", ocg: { schemaVersion: 2 } },
+            { id: "malformed-protocol", ocg: { schemaVersion: 2, protocols: { preferred: "responses", supported: ["chat_completions"] } } },
+          ],
+        };
+        const emptyList = await adapter.listModels("ocg");
         let rejectedStream = "";
         try {
           piProvider.streamSimple(rejected, { messages: [] }, {});
@@ -332,6 +378,7 @@ test("generated DSH plugin dispatches v2 protocols and does not send rejected mo
           sent: globalThis.__ocgSent,
           requests,
           piMenus: globalThis.__ocgPiModelInfo,
+          emptyList: emptyList.map((model) => model.id),
         }));
       `,
     );
@@ -343,7 +390,9 @@ test("generated DSH plugin dispatches v2 protocols and does not send rejected mo
     assert.equal(result.apiIsSingleStream, false);
     assert.equal(result.prepareErrors.modelA, undefined);
     assert.match(result.prepareErrors.legacy, /schema/i);
+    assert.equal(result.prepareErrors.legacyCode, "INVALID_CONFIG");
     assert.match(result.prepareErrors.schema1, /schema/i);
+    assert.equal(result.prepareErrors.schema1Code, "INVALID_CONFIG");
     assert.equal(result.rejectedStream, "NO_API");
     assert.deepEqual(result.sentBeforeMessages, []);
     assert.equal(result.messagesCall.api, "anthropic-messages");
@@ -352,8 +401,17 @@ test("generated DSH plugin dispatches v2 protocols and does not send rejected mo
     assert.ok(result.requests.every((url) => url.endsWith("/v1/models")));
     const models = result.routes.ocg.models;
     assert.deepEqual(models.map(({ id }) => id), [
-      "legacy-model", "schema-1", "model-a", "org/model-b", "mimo-v2.6-flash", "minimax-m3.1",
+      "model-a", "org/model-b", "mimo-v2.6-flash", "minimax-m3.1",
     ]);
+    const rejected = result.routes.ocg.rejected;
+    assert.equal(models.some((model) => Object.hasOwn(rejected, model.id)), false);
+    for (const [id, entry] of Object.entries(rejected)) {
+      assert.equal(entry.resolveCode, "INVALID_CONFIG", id);
+      assert.equal(entry.prepareCode, "INVALID_CONFIG", id);
+      assert.ok(entry.resolve.length > 0, id);
+      assert.ok(entry.prepare.length > 0, id);
+    }
+    assert.deepEqual(result.emptyList, []);
     assert.equal(models.find(({ id }) => id === "model-a").api, "openai-completions");
     assert.equal(models.find(({ id }) => id === "org/model-b").api, "openai-responses");
     assert.equal(models.find(({ id }) => id === "mimo-v2.6-flash").api, "anthropic-messages");

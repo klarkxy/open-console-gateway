@@ -33,7 +33,10 @@ value listed in `protocols.supported`. It maps `chat_completions` to
 `openai-completions`, `responses` to `openai-responses`, and `messages` to
 `anthropic-messages`, one API per model. A row that fails those checks is an
 `ocg-rejected` placeholder and is reported in that model's errors. It is not
-registered as Chat.
+registered as Chat. `listModels` advertises only rows that are not recorded
+in those errors, so an all-invalid catalog is an empty list and a duplicate
+ID is omitted. Exact `resolve` and `prepare` of a rejected id stay
+`INVALID_CONFIG` and do not POST.
 
 Chat Completions and Responses keep the published `/v1` base. Messages drops
 a trailing `/v1` and keeps a deployment subpath. The Messages SDK sends the

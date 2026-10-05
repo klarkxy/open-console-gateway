@@ -295,8 +295,12 @@ export async function apply(ctx) {
 
     async listModels(provider) {
       await refreshCatalog(true);
-      const metadata = profiles.get(provider)?.ocgMetadata;
-      return (await super.listModels(provider)).map((info) => describeOcgModel(info, metadata?.get(info.id)));
+      const profile = profiles.get(provider);
+      const metadata = profile?.ocgMetadata;
+      const errors = profile?.modelErrors;
+      return (await super.listModels(provider))
+        .filter((info) => !errors?.has(info.id))
+        .map((info) => describeOcgModel(info, metadata?.get(info.id)));
     }
 
     async resolveModel(provider, model, signal) {

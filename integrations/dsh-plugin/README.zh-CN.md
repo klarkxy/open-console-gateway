@@ -12,7 +12,7 @@
 
 ## 模型细节与推理档位
 
-`model-catalog.js` 要求 `ocg.schemaVersion` 为 2，并且 `protocols.preferred` 出现在 `protocols.supported` 中。它把 `chat_completions` 映射为 `openai-completions`，把 `responses` 映射为 `openai-responses`，把 `messages` 映射为 `anthropic-messages`，每个模型一种 API。未通过这些检查的行是 `ocg-rejected` 占位，并记入该模型的错误。它不会被注册成 Chat。
+`model-catalog.js` 要求 `ocg.schemaVersion` 为 2，并且 `protocols.preferred` 出现在 `protocols.supported` 中。它把 `chat_completions` 映射为 `openai-completions`，把 `responses` 映射为 `openai-responses`，把 `messages` 映射为 `anthropic-messages`，每个模型一种 API。未通过这些检查的行是 `ocg-rejected` 占位，并记入该模型的错误。它不会被注册成 Chat。`listModels` 只公布未记入这些错误的行，因此全无效目录是空列表，重复 ID 也不会出现在列表里。对已拒绝 id 的精确 `resolve` 和 `prepare` 仍是 `INVALID_CONFIG`，并且不会发出 POST。
 
 Chat Completions 与 Responses 保留公布的 `/v1` 基址。Messages 去掉末尾的 `/v1`，并保留部署子路径。Messages SDK 把 Gateway Key 放在 `x-api-key` 中，并带上 `anthropic-version`。本包不改写这些请求头。
 

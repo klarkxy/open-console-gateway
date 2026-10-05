@@ -577,6 +577,13 @@ fn publish_models_endpoint_fixture(state: &crate::state::CoreState, ids: &[&str]
 }
 
 fn models_endpoint_state(label: &str) -> (std::path::PathBuf, crate::state::CoreState) {
+    models_endpoint_state_with(label, &[CATALOGED_MODEL, UNCATEGORIZED_MODEL])
+}
+
+fn models_endpoint_state_with(
+    label: &str,
+    ids: &[&str],
+) -> (std::path::PathBuf, crate::state::CoreState) {
     let dir = std::env::temp_dir().join(format!("ocg-models-{label}-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&dir).unwrap();
     let state = Arc::new(
@@ -605,7 +612,7 @@ fn models_endpoint_state(label: &str) -> (std::path::PathBuf, crate::state::Core
         .into_iter()
         .collect(),
     ));
-    publish_models_endpoint_fixture(&state, &[CATALOGED_MODEL, UNCATEGORIZED_MODEL]);
+    publish_models_endpoint_fixture(&state, ids);
     (dir, state)
 }
 
@@ -693,6 +700,86 @@ async fn models_endpoint_serves_the_enriched_rows_captured_under_the_lock() {
     assert!(
         unknown.get("contextWindow").is_none(),
         "an unknown model must not declare a context window"
+    );
+
+    drop(state);
+    fs::remove_dir_all(dir).expect("test data directory should be removed");
+}
+
+const SCOPED_OUT_MODEL: &str = "vendor/scoped-out";
+
+/// Catalog-enabled names still need a derived protocol profile. Scope gaps are
+/// omitted; unknown capability with a valid profile is kept; cooldown and an
+/// old auth error do not gate that profile. Keyless AuthScheme::None routes
+/// already qualify in model_metadata tests and survive the same retain.
+#[tokio::test]
+async fn models_endpoint_omits_unqualified_rows_and_ignores_cooldown() {
+    use crate::model_metadata::read_published_protocol_profile;
+    use ocg_domain::credential::ModelScope;
+
+    let (dir, state) = models_endpoint_state_with(
+        "unqualified",
+        &[CATALOGED_MODEL, UNCATEGORIZED_MODEL, SCOPED_OUT_MODEL],
+    );
+    let scope = serde_json::to_string(&ModelScope::Only {
+        models: vec![CATALOGED_MODEL.into(), UNCATEGORIZED_MODEL.into()],
+    })
+    .unwrap();
+    {
+        let db = state.db.lock();
+        let updated = db
+            .conn
+            .execute(
+                "UPDATE credentials
+                 SET scope_json = ?1, cooldown_until = ?2, auth_error = ?3
+                 WHERE legacy_account_id = ?4",
+                rusqlite::params![
+                    scope,
+                    "2099-01-01T00:00:00Z",
+                    "stale-auth",
+                    "models-endpoint-custom"
+                ],
+            )
+            .expect("fresh schema 66 credentials row should accept the fixture write");
+        assert!(
+            updated > 0,
+            "expected a credentials row for legacy_account_id=models-endpoint-custom"
+        );
+    }
+
+    let rows = {
+        let _settings_update = state.settings_update.lock();
+        super::handler::published_models_data_locked(&state)
+            .expect("locked model rows should build")
+    };
+    let mut ids: Vec<_> = rows
+        .iter()
+        .map(|row| row["id"].as_str().unwrap().to_string())
+        .collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec![CATALOGED_MODEL.to_string(), UNCATEGORIZED_MODEL.to_string()]
+    );
+    for row in &rows {
+        assert!(
+            read_published_protocol_profile(
+                row.get("ocg").and_then(|value| value.get("protocols"))
+            )
+            .is_ok(),
+            "{}",
+            row["id"]
+        );
+    }
+    let unknown = rows
+        .iter()
+        .find(|row| row["id"] == json!(UNCATEGORIZED_MODEL))
+        .unwrap();
+    assert_eq!(unknown["ocg"]["status"], json!("unknown"));
+    assert!(unknown.get("contextWindow").is_none());
+    assert_eq!(
+        unknown["ocg"]["protocols"],
+        json!({"preferred": "chat_completions", "supported": ["chat_completions"]})
     );
 
     drop(state);

@@ -344,6 +344,12 @@ pub(crate) fn published_models_data_locked(
     let modelsdev = state.modelsdev_catalog();
     crate::model_metadata::enrich(&state.db.lock(), &modelsdev, &snapshot, &mut data)
         .map_err(|_| "failed to load model metadata".to_string())?;
+    data.retain(|row| {
+        crate::model_metadata::read_published_protocol_profile(
+            row.get("ocg").and_then(|value| value.get("protocols")),
+        )
+        .is_ok()
+    });
     Ok(data)
 }
 
