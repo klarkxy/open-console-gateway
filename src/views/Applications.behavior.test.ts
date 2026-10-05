@@ -125,7 +125,9 @@ function applicationsHarnessPlugin() {
         return () => ctx.current.value === props.value ? h("div", { role: "tabpanel" }, slots.default?.()) : null;
       } });
     `,
-    dashboard: `
+    dashboard: `export { DashboardRequestError, isRevisionConflict } from ${JSON.stringify(`${prefix}dashboardV3`)};`,
+    dashboardV3: `
+      export const PRIMARY_KEY_ID = "00000000-0000-0000-0000-000000000001";
       export class DashboardRequestError extends Error {
         constructor(message, status = 0, code = "") {
           super(message);
@@ -136,10 +138,13 @@ function applicationsHarnessPlugin() {
       }
       globalThis.__DshDashboardRequestError = DashboardRequestError;
       export function isRevisionConflict(error) {
-        return Boolean(error && error.status === 409 && error.code === "revisionConflict");
+        return Boolean(
+          error instanceof DashboardRequestError
+          && error.status === 409
+          && error.code === "revisionConflict"
+        );
       }
     `,
-    dashboardV3: `export const PRIMARY_KEY_ID = "00000000-0000-0000-0000-000000000001";`,
     api: `
       export const dashboardV4 = new Proxy({}, { get: (_, key) => (...args) => globalThis.__dshComponentApi[key](...args) });
     `,
@@ -178,6 +183,7 @@ function applicationsHarnessPlugin() {
     resolveId(source: string, importer?: string) {
       if (source === "naive-ui") return `${prefix}naive`;
       if (source === "reka-ui") return `${prefix}reka`;
+      if (source.startsWith(prefix)) return source;
       if (!importer || !source.startsWith(".")) return null;
       const cleanImporter = importer.split("?")[0]!.replaceAll("\\", "/");
       const absolute = path.posix.normalize(path.posix.join(path.posix.dirname(cleanImporter), source));

@@ -74,7 +74,6 @@ const displayName = "Open Console Gateway";
 const baseUrl = "__OCG_GATEWAY_V1_URL__";
 const credentialRef = "OCG_GATEWAY_KEY";
 const credentialBootstrapPath = __OCG_CREDENTIAL_BOOTSTRAP_PATH_JSON__;
-const catalogTtlMs = 5_000;
 const catalogTimeoutMs = 10_000;
 
 const HANDOFF_CLAIM_MARKER = ".claimed-";
@@ -205,7 +204,6 @@ export async function apply(ctx) {
   }
 
   let profiles = new Map();
-  let refreshedAt = 0;
   let refreshPromise;
 
   const resolveApiKey = async () => {
@@ -220,69 +218,202 @@ export async function apply(ctx) {
     );
   };
 
-  const refreshCatalog = async (force = false) => {
-    if (!force && profiles.size > 0 && Date.now() - refreshedAt < catalogTtlMs) return;
-    if (refreshPromise !== undefined) return refreshPromise;
-    refreshPromise = (async () => {
-      const apiKey = await resolveApiKey();
-      const response = await fetch(`${baseUrl}/models`, {
-        headers: { Authorization: `Bearer ${apiKey}` },
-        signal: AbortSignal.timeout(catalogTimeoutMs),
+  const abortedError = (signal) => {
+    if (signal?.reason instanceof Error) return signal.reason;
+    const error = new Error("This operation was aborted");
+    error.name = "AbortError";
+    return error;
+  };
+
+  const throwIfAborted = (signal) => {
+    if (signal?.aborted) throw abortedError(signal);
+  };
+
+  const waitIsolated = (flight, signal) => {
+    if (signal === undefined) return flight;
+    if (signal.aborted) return Promise.reject(abortedError(signal));
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        signal.removeEventListener("abort", onAbort);
+        reject(abortedError(signal));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      flight.then(
+        (value) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(value);
+        },
+        (error) => {
+          signal.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+      );
+    });
+  };
+
+  const isTimeoutError = (error) => error != null && (error.name === "TimeoutError" || error.code === 23);
+
+  const catalogDiscoveryError = (error, signal) => {
+    if (error instanceof LlmError) return error;
+    if (error instanceof SyntaxError) {
+      return new LlmError("Open Console Gateway returned an invalid /v1/models payload", "INVALID_CONFIG", {
+        cause: error,
       });
-      if (!response.ok) {
-        throw new LlmError(
-          `Open Console Gateway model discovery failed with HTTP ${response.status}`,
-          "INVALID_CONFIG",
-        );
+    }
+    if (isTimeoutError(error) || isTimeoutError(signal?.reason)) {
+      return new LlmError("Open Console Gateway model discovery timed out", "TIMEOUT", { cause: error });
+    }
+    return new LlmError("Open Console Gateway model discovery failed", "TRANSPORT", { cause: error });
+  };
+
+  const applyCatalog = (payload) => {
+    profiles = new Map(providerIds.map((providerId) => {
+      let catalog;
+      try {
+        catalog = parseModelCatalog(payload, { providerId, baseUrl });
+      } catch {
+        throw new LlmError("Open Console Gateway returned an invalid /v1/models payload", "INVALID_CONFIG");
       }
-      const payload = await response.json();
-      profiles = new Map(providerIds.map((providerId) => {
-        let catalog;
-        try {
-          catalog = parseModelCatalog(payload, { providerId, baseUrl });
-        } catch {
-          throw new LlmError("Open Console Gateway returned an invalid /v1/models payload", "INVALID_CONFIG");
-        }
-        const { models, modelErrors, metadata } = catalog;
-        const piProvider = createProvider({
-          id: providerId,
-          name: displayName,
-          baseUrl,
-          auth: {
-            apiKey: {
-              name: `${displayName} Key`,
-              async resolve({ credential }) {
-                return {
-                  auth: credential?.key ? { apiKey: credential.key } : {},
-                  source: displayName,
-                };
-              },
+      const { models, modelErrors, metadata } = catalog;
+      const piProvider = createProvider({
+        id: providerId,
+        name: displayName,
+        baseUrl,
+        auth: {
+          apiKey: {
+            name: `${displayName} Key`,
+            async resolve({ credential }) {
+              return {
+                auth: credential?.key ? { apiKey: credential.key } : {},
+                source: displayName,
+              };
             },
           },
-          models,
-          api: providerApis,
-        });
-        return [providerId, {
-          provider: providerId,
-          displayName,
-          apiKeyEnv: credentialRef,
-          baseURL: baseUrl,
-          streamIdleTimeoutMs: 300_000,
-          maxRequestImageBytes: 20 * 1024 * 1024,
-          requestImagePixelBudget: 2048 * 2048,
-          requestImageMaxBytes: 1024 * 1024,
-          retryPolicy: resolveRetryPolicy(undefined, name),
-          configuredMaxTokens: new Map(),
-          modelErrors,
-          ocgMetadata: metadata,
-          piProvider,
-        }];
-      }));
-      refreshedAt = Date.now();
-    })().finally(() => {
+        },
+        models,
+        api: providerApis,
+      });
+      return [providerId, {
+        provider: providerId,
+        displayName,
+        apiKeyEnv: credentialRef,
+        baseURL: baseUrl,
+        streamIdleTimeoutMs: 300_000,
+        maxRequestImageBytes: 20 * 1024 * 1024,
+        requestImagePixelBudget: 2048 * 2048,
+        requestImageMaxBytes: 1024 * 1024,
+        retryPolicy: resolveRetryPolicy(undefined, name),
+        configuredMaxTokens: new Map(),
+        modelErrors,
+        ocgMetadata: metadata,
+        piProvider,
+      }];
+    }));
+  };
+
+  const invalidateCatalog = () => {
+    profiles = new Map();
+  };
+
+  const catalogLoaded = () => profiles.size > 0;
+
+  const modelIsKnown = (provider, model) => {
+    const profile = profiles.get(provider);
+    return profile !== undefined
+      && (profile.ocgMetadata.has(model) || profile.modelErrors.has(model));
+  };
+
+  const requireKnownModel = (provider, model) => {
+    const profile = profiles.get(provider);
+    if (profile?.ocgMetadata.has(model) || profile?.modelErrors.has(model)) {
+      return profile;
+    }
+    throw new LlmError(
+      `${name}: model ${model} is not in the Open Console Gateway catalog`,
+      "INVALID_CONFIG",
+    );
+  };
+
+  const fetchCatalog = async () => {
+    const apiKey = await resolveApiKey();
+    const signal = AbortSignal.timeout(catalogTimeoutMs);
+    let response;
+    try {
+      response = await fetch(`${baseUrl}/models`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal,
+      });
+    } catch (error) {
+      throw catalogDiscoveryError(error, signal);
+    }
+    if (response.status === 401 || response.status === 403) {
+      throw new LlmError(
+        `Open Console Gateway model discovery failed with HTTP ${response.status}`,
+        "AUTH",
+        { status: response.status },
+      );
+    }
+    if (response.status === 429) {
+      throw new LlmError(
+        `Open Console Gateway model discovery failed with HTTP ${response.status}`,
+        "RATE_LIMIT",
+        { status: response.status },
+      );
+    }
+    if (response.status >= 500) {
+      throw new LlmError(
+        `Open Console Gateway model discovery failed with HTTP ${response.status}`,
+        "SERVER",
+        { status: response.status },
+      );
+    }
+    if (!response.ok) {
+      throw new LlmError(
+        `Open Console Gateway model discovery failed with HTTP ${response.status}`,
+        "INVALID_CONFIG",
+        { status: response.status },
+      );
+    }
+    let payload;
+    try {
+      payload = await response.json();
+    } catch (error) {
+      throw catalogDiscoveryError(error, signal);
+    }
+    applyCatalog(payload);
+  };
+
+  const startRefresh = () => {
+    if (refreshPromise !== undefined) return refreshPromise;
+    refreshPromise = fetchCatalog().catch((error) => {
+      const mapped = error instanceof LlmError ? error : catalogDiscoveryError(error);
+      if (
+        mapped.code !== "TIMEOUT"
+        && mapped.code !== "TRANSPORT"
+        && mapped.code !== "SERVER"
+        && mapped.code !== "RATE_LIMIT"
+      ) {
+        invalidateCatalog();
+      }
+      throw mapped;
+    }).finally(() => {
       refreshPromise = undefined;
     });
     return refreshPromise;
+  };
+
+  const awaitRefresh = async (signal) => {
+    throwIfAborted(signal);
+    await waitIsolated(startRefresh(), signal);
+    throwIfAborted(signal);
+  };
+
+  const ensureModelCatalog = async (provider, model, signal) => {
+    throwIfAborted(signal);
+    if (!catalogLoaded() || !modelIsKnown(provider, model)) {
+      await waitIsolated(startRefresh(), signal);
+    }
+    throwIfAborted(signal);
   };
 
   class OcgAdapter extends PiAiAdapter {
@@ -294,7 +425,7 @@ export async function apply(ctx) {
     }
 
     async listModels(provider) {
-      await refreshCatalog(true);
+      await awaitRefresh();
       const profile = profiles.get(provider);
       const metadata = profile?.ocgMetadata;
       const errors = profile?.modelErrors;
@@ -304,16 +435,23 @@ export async function apply(ctx) {
     }
 
     async resolveModel(provider, model, signal) {
-      await refreshCatalog();
-      const metadata = profiles.get(provider)?.ocgMetadata.get(model);
-      return describeOcgModel(await super.resolveModel(provider, model, signal), metadata);
+      await ensureModelCatalog(provider, model, signal);
+      throwIfAborted(signal);
+      const profile = requireKnownModel(provider, model);
+      const metadata = profile.ocgMetadata.get(model);
+      const resolved = await super.resolveModel(provider, model, signal);
+      throwIfAborted(signal);
+      return describeOcgModel(resolved, metadata);
     }
 
     async prepareCall(provider, model, signal) {
-      await refreshCatalog();
+      await ensureModelCatalog(provider, model, signal);
+      throwIfAborted(signal);
+      const profile = requireKnownModel(provider, model);
       // Capture metadata before the await, just like PiAiAdapter captures its provider.
-      const metadata = profiles.get(provider)?.ocgMetadata.get(model);
+      const metadata = profile.ocgMetadata.get(model);
       const prepared = await super.prepareCall(provider, model, signal);
+      throwIfAborted(signal);
       return { ...prepared, model: describeOcgModel(prepared.model, metadata) };
     }
 

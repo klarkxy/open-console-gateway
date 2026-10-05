@@ -627,8 +627,8 @@ fn models_endpoint_headers(state: &crate::state::CoreState) -> axum::http::Heade
     headers
 }
 
-/// The body is encoded after the control-plane lock is released; the rows and
-/// their enrichment must be identical to what the locked read produced.
+/// GET `/v1/models` captures under `settings_update`, then builds the same
+/// inventory BYOK callers see while they already hold that gate.
 #[tokio::test]
 async fn models_endpoint_serves_the_enriched_rows_captured_under_the_lock() {
     use axum::body::to_bytes;
@@ -702,6 +702,58 @@ async fn models_endpoint_serves_the_enriched_rows_captured_under_the_lock() {
         "an unknown model must not declare a context window"
     );
 
+    drop(state);
+    fs::remove_dir_all(dir).expect("test data directory should be removed");
+}
+
+#[tokio::test]
+async fn models_endpoint_releases_the_settings_gate_before_building_rows() {
+    use axum::body::to_bytes;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (dir, state) = models_endpoint_state("catalog-gate");
+    let headers = models_endpoint_headers(&state);
+    let acquired = std::sync::Arc::new(AtomicBool::new(false));
+    struct CaptureHookGuard;
+    impl Drop for CaptureHookGuard {
+        fn drop(&mut self) {
+            super::handler::clear_after_published_models_capture();
+        }
+    }
+    let _guard = CaptureHookGuard;
+    let acquired_flag = acquired.clone();
+    let probe_state = state.clone();
+    super::handler::set_after_published_models_capture(Box::new(move || {
+        let Some(_gate) = probe_state.settings_update.try_lock() else {
+            panic!("GET /v1/models must drop settings_update before building rows");
+        };
+        acquired_flag.store(true, Ordering::SeqCst);
+    }));
+    let response = super::handler::models(axum::extract::State(state.clone()), headers).await;
+    assert!(
+        acquired.load(Ordering::SeqCst),
+        "capture probe must run after the settings_update gate is released"
+    );
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("response body should be readable");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("response should be JSON");
+    assert_eq!(body["object"], json!("list"));
+    assert_eq!(
+        body["data"].as_array().map(|rows| rows.len()),
+        Some(2),
+        "releasing settings_update before the row builder must not change publication eligibility"
+    );
+    let locked_rows = {
+        let _settings_update = state.settings_update.lock();
+        super::handler::published_models_data_locked(&state)
+            .expect("locked model rows should build")
+    };
+    assert_eq!(
+        body["data"],
+        json!(locked_rows),
+        "GET rows must stay consistent with a later gate-held capture"
+    );
     drop(state);
     fs::remove_dir_all(dir).expect("test data directory should be removed");
 }

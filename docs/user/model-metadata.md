@@ -2,7 +2,9 @@
 
 # Model Metadata And Reasoning Tiers In DSH
 
-Use **Applications → DSH** to install the OCG provider. After upgrading OCG to a build containing this feature, install/replace the plugin once and reload the selected DSH runtime. Updating the gateway alone does not replace a previously installed plugin. Model-list reads refresh the directory; requests reuse its snapshot for up to five seconds. Existing Key handoff and credential storage are unchanged.
+Use **Applications → DSH** to install the OCG provider. After upgrading OCG to a build containing this feature, install/replace the plugin once and reload the selected DSH runtime. Updating the gateway alone does not replace a previously installed plugin. Existing Key handoff and credential storage are unchanged.
+
+The plugin loads the directory on first use. Reading the model list or resolving a model that is absent from the loaded directory fetches a fresh copy. Calls to known models reuse the loaded snapshot without a timed refresh. After changing published models, protocols, or capabilities in OCG, refresh the model list in DSH to load those changes. Authentication failures and invalid catalogs invalidate the cached directory. Concurrent refreshes share one request, and cancelling one caller's wait leaves other callers unaffected.
 
 ## What Is Reported
 

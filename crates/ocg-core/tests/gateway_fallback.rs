@@ -27,6 +27,74 @@ mod fallback_fix;
 
 use fallback_fix::*;
 
+fn create_keyed_plan_account(
+    state: &Arc<CoreStateInner>,
+    id: &str,
+    provider_id: &str,
+    key: &str,
+    enabled: bool,
+) {
+    let now = Utc::now();
+    let account = Account {
+        id: id.to_string(),
+        provider_id: provider_id.to_string(),
+        credential_kind: ocg_core::provider::default_credential_kind(),
+        quota_scope: ocg_core::provider::default_quota_scope(),
+        name: id.to_string(),
+        username: None,
+        password_cipher: None,
+        key_cipher: state.encrypt_key(key).unwrap(),
+        enabled,
+        account_type: AccountType::Key,
+        setup_step: AccountSetupStep::Ready,
+        referral_code: None,
+        purchase_date: String::new(),
+        expires_on: String::new(),
+        cooldown_until: None,
+        cooldown_generic_until: None,
+        cooldown_5h_until: None,
+        cooldown_week_until: None,
+        cooldown_month_until: None,
+        cooldown_free_until: None,
+        last_error: None,
+        auth_error: None,
+        notes: None,
+        created_at: now,
+        updated_at: now,
+    };
+    state.db.lock().create_account(&account).unwrap();
+}
+
+fn force_on_saved_protocols(
+    state: &Arc<CoreStateInner>,
+    provider_id: &str,
+    models: &[&str],
+    protocols: &[ocg_core::provider::UpstreamProtocolKind],
+) {
+    let now = Utc::now();
+    let scope = ocg_core::provider_contracts::ContractScope::provider(provider_id);
+    let overrides = models
+        .iter()
+        .flat_map(|model| {
+            protocols.iter().copied().map(move |protocol| {
+                (
+                    (*model).to_string(),
+                    protocol,
+                    ocg_core::provider_contracts::ProtocolOverrideState::ForceOn,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    state
+        .db
+        .lock()
+        .set_model_protocol_overrides(&scope, &overrides, now)
+        .unwrap();
+    state.reload_provider_contracts().unwrap();
+}
+
+const UNSIGNED_THINKING_WITH_ECHOED_KEY: &str = r#"{"id":"msg-ok","type":"message","role":"assistant","model":"minimax-m2.7","content":[{"type":"thinking","thinking":"opaque/account+key=42","signature":""},{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":2,"cache_read_input_tokens":0}}"#;
+
 #[tokio::test]
 async fn fake_upstream_captures_protocol_auth_and_scripts_status_streams() {
     let replies = script(&[
@@ -105,7 +173,41 @@ async fn model_discovery_returns_local_list_with_zero_accounts() {
 
     let (status, body) = h.models().await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_local_openai_alias_list(&h.state, &body);
+    let payload: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(payload["object"], "list", "{body}");
+    let data = payload["data"].as_array().unwrap();
+    let ids = data
+        .iter()
+        .filter_map(|item| item["id"].as_str())
+        .collect::<HashSet<_>>();
+    let owned = data
+        .iter()
+        .filter_map(|item| item["owned_by"].as_str())
+        .collect::<HashSet<_>>();
+    for provider in [
+        ocg_core::provider::MINIMAX_PROVIDER_ID,
+        ocg_core::provider::KIMI_PROVIDER_ID,
+        COMMAND_CODE_PROVIDER_ID,
+        ocg_core::provider::OLLAMA_PROVIDER_ID,
+    ] {
+        assert!(
+            !owned.contains(provider),
+            "{provider} mappings must not publish without a carrying credential: {body}"
+        );
+    }
+    for go_only in [
+        "glm-5.3",
+        "glm-5.2",
+        "grok-4.5",
+        "hy3",
+        "minimax-m2.7",
+        "minimax-m3",
+    ] {
+        assert!(
+            !ids.contains(go_only),
+            "Go catalog rows must not publish {go_only} without a carrying Go credential: {body}"
+        );
+    }
     assert!(
         h.calls.lock().unwrap().is_empty(),
         "GET /v1/models must not call upstream: {:?}",
@@ -152,6 +254,39 @@ async fn model_discovery_publishes_saved_sealed_cn_public_names() {
         .unwrap();
     }
     p.state.reload_provider_contracts().unwrap();
+    create_keyed_plan_account(
+        &p.state,
+        "minimax-1",
+        ocg_core::provider::MINIMAX_PROVIDER_ID,
+        "minimax-key",
+        true,
+    );
+    create_keyed_plan_account(
+        &p.state,
+        "kimi-1",
+        ocg_core::provider::KIMI_PROVIDER_ID,
+        "kimi-key",
+        true,
+    );
+    force_on_saved_protocols(
+        &p.state,
+        ocg_core::provider::MINIMAX_PROVIDER_ID,
+        &["MiniMax-M2.1", "MiniMax-M2.1-highspeed", "MiniMax-M2"],
+        &[
+            ocg_core::provider::UpstreamProtocolKind::ChatCompletions,
+            ocg_core::provider::UpstreamProtocolKind::Messages,
+            ocg_core::provider::UpstreamProtocolKind::Responses,
+        ],
+    );
+    force_on_saved_protocols(
+        &p.state,
+        ocg_core::provider::KIMI_PROVIDER_ID,
+        &["kimi-for-coding-highspeed", "k3", "k3-256k"],
+        &[
+            ocg_core::provider::UpstreamProtocolKind::ChatCompletions,
+            ocg_core::provider::UpstreamProtocolKind::Messages,
+        ],
+    );
     let h = p.bind().await;
 
     let (status, body) = h.models().await;
@@ -196,7 +331,15 @@ async fn model_discovery_publishes_enabled_goat_short_alias_without_raw_id() {
             source_url: ocg_core::kernel::zen::ZEN_MODELS_SOURCE_URL.to_string(),
         })
         .unwrap();
-    persist_goat_verified_catalog(&p.state, "unused", &[RAW]);
+    create_keyed_plan_account(
+        &p.state,
+        "goat-pub",
+        COMMAND_CODE_PROVIDER_ID,
+        "goat-key",
+        false,
+    );
+    force_enable_unroutable_account_for_loopback_test(&p.dir, "goat-pub");
+    persist_goat_verified_catalog(&p.state, "goat-pub", &[RAW]);
     let h = p.bind().await;
 
     let (status, body) = h.models().await;
@@ -429,10 +572,16 @@ async fn routes_all_client_formats_to_each_models_native_protocol() {
             MESSAGES_SUCCESS_BODY,
         ),
         (
-            "/v1/responses",
-            "deepseek-v4-flash",
+            "/v1/chat/completions",
+            "grok-4.5",
             "/v1/responses",
             RESPONSES_SUCCESS_BODY,
+        ),
+        (
+            "/v1/responses",
+            "deepseek-v4-flash",
+            "/v1/chat/completions",
+            SUCCESS_BODY,
         ),
         ("/v1/responses", "hy3", "/v1/chat/completions", SUCCESS_BODY),
         (
@@ -448,10 +597,16 @@ async fn routes_all_client_formats_to_each_models_native_protocol() {
             MESSAGES_SUCCESS_BODY,
         ),
         (
+            "/v1/responses",
+            "grok-4.5",
+            "/v1/responses",
+            RESPONSES_SUCCESS_BODY,
+        ),
+        (
             "/v1/messages",
             "deepseek-v4-flash",
-            "/v1/messages",
-            MESSAGES_SUCCESS_BODY,
+            "/v1/chat/completions",
+            SUCCESS_BODY,
         ),
         ("/v1/messages", "hy3", "/v1/chat/completions", SUCCESS_BODY),
         (
@@ -465,6 +620,12 @@ async fn routes_all_client_formats_to_each_models_native_protocol() {
             "glm-5.2",
             "/v1/chat/completions",
             SUCCESS_BODY,
+        ),
+        (
+            "/v1/messages",
+            "grok-4.5",
+            "/v1/responses",
+            RESPONSES_SUCCESS_BODY,
         ),
     ] {
         let h = FallbackHarness::go(&[("key-1", &[reply(200, upstream_body)])], &["key-1"]).await;
@@ -615,7 +776,35 @@ async fn successful_conversion_redacts_a_key_before_opaque_reasoning_replay_enco
     )
     .await;
     let (status, response) = h.protocol("/v1/responses", "minimax-m2.7").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{response}");
+    let leaked = response.to_string();
+    assert!(
+        !leaked.contains(OPAQUE_ACCOUNT_KEY),
+        "signed redaction must not leak the selected account Key: {response}"
+    );
+    assert!(
+        leaked.contains("signed native history cannot be preserved by secret redaction"),
+        "{response}"
+    );
+}
+
+#[tokio::test]
+async fn unsigned_thinking_conversion_still_redacts_a_key_before_opaque_replay_encoding() {
+    let h = FallbackHarness::go(
+        &[(
+            OPAQUE_ACCOUNT_KEY,
+            &[reply(200, UNSIGNED_THINKING_WITH_ECHOED_KEY)],
+        )],
+        &[OPAQUE_ACCOUNT_KEY],
+    )
+    .await;
+    let (status, response) = h.protocol("/v1/responses", "minimax-m2.7").await;
     assert_eq!(status, StatusCode::OK, "{response}");
+    let leaked = response.to_string();
+    assert!(
+        !leaked.contains(OPAQUE_ACCOUNT_KEY),
+        "unsigned thinking conversion must not leak the selected account Key: {response}"
+    );
     let encrypted = response["output"]
         .as_array()
         .unwrap()
@@ -624,8 +813,9 @@ async fn successful_conversion_redacts_a_key_before_opaque_reasoning_replay_enco
         .and_then(|item| item["encrypted_content"].as_str())
         .expect("converted response should retain a safe reasoning replay block");
     let encoded = encrypted
-        .strip_prefix("ocg-anthropic-thinking-v1:")
-        .expect("reasoning replay should use the Anthropic envelope");
+        .strip_prefix("ocg-chat-reasoning-v1:")
+        .or_else(|| encrypted.strip_prefix("ocg-anthropic-thinking-v1:"))
+        .expect("unsigned thinking must stay in a reasoning envelope");
     let decoded = String::from_utf8(URL_SAFE_NO_PAD.decode(encoded).unwrap()).unwrap();
     assert!(
         !decoded.contains(OPAQUE_ACCOUNT_KEY),
@@ -694,8 +884,8 @@ async fn inference_skips_accounts_with_unusable_stored_credentials() {
         (
             "/v1/responses",
             "deepseek-v4-flash",
-            "/v1/responses",
-            RESPONSES_SUCCESS_BODY,
+            "/v1/chat/completions",
+            SUCCESS_BODY,
         ),
         (
             "/v1/messages",
@@ -2389,7 +2579,7 @@ async fn goat_loopback_adapter_routes_all_client_formats_with_its_own_auth_contr
             .collect::<Vec<_>>(),
         [
             "/provider/v1/chat/completions",
-            "/provider/v1/responses",
+            "/provider/v1/chat/completions",
             "/provider/v1/chat/completions",
             "/provider/v1/chat/completions",
         ]
@@ -2433,8 +2623,8 @@ async fn goat_loopback_adapter_routes_all_client_formats_with_its_own_auth_contr
         logs.iter()
             .filter(|log| log.status == "success_no_usage")
             .count(),
-        1,
-        "native Responses mock has no usage while converted Chat responses do: {logs:#?}"
+        0,
+        "preferred Chat uses the Chat mock with usage on every client format: {logs:#?}"
     );
 }
 
@@ -3742,7 +3932,7 @@ async fn disabled_protocols_fail_locally_without_upstream() {
 #[tokio::test]
 async fn protocol_switch_filters_v1_models_and_application_models() {
     let p = PreparedFallback::go(&[("key-1", &[ok()])], &["key-1"]).await;
-    persist_goat_verified_catalog(&p.state, "catalog-only", &["zai-org/GLM-5.3"]);
+    prepare_goat(&p.state, "goat-key", &["zai-org/GLM-5.3"], true);
     disable_go_protocols(&p.state, "glm-5.3", false, true, true);
     let h = p.bind().await;
 

@@ -1344,6 +1344,140 @@ fn responses_encrypted_history_is_not_dropped_on_messages_client() {
     );
 }
 
+fn responses_created_and_completed(response: Value) -> String {
+    format!(
+        "event: response.created\ndata: {}\n\n\
+         event: response.completed\ndata: {}\n\n",
+        json!({"type":"response.created","response":{"id":"resp_1","model":"m","status":"in_progress"}}),
+        json!({"type":"response.completed","response":response}),
+    )
+}
+
+fn ordinary_reasoning_lookalike() -> Value {
+    json!({"type":"reasoning","encrypted_content":"ticket-123"})
+}
+
+fn assistant_message_item(text: &str) -> Value {
+    json!({
+        "type":"message",
+        "id":"msg_1",
+        "role":"assistant",
+        "status":"completed",
+        "content":[{"type":"output_text","text":text}]
+    })
+}
+
+/// Same-protocol Responses: replay markers bind native encrypted reasoning,
+/// not ordinary `metadata` / tool payload trees that only look like it.
+#[test]
+fn responses_ordinary_data_is_not_bound_as_native_opaque() {
+    let mut request = plan(ApiFormat::Responses, ApiFormat::Responses);
+    let domain = replay_domain();
+    request.replay_domain = Some(domain);
+    let prefix = ocg_gateway::protocol::replay_marker_prefix(domain);
+    let source = responses_created_and_completed(json!({
+        "id":"resp_1",
+        "status":"completed",
+        "output":[
+            {
+                "type":"reasoning",
+                "id":"rs_1",
+                "summary":[],
+                "encrypted_content":"cipher-1"
+            },
+            assistant_message_item("ok"),
+            {
+                "type":"function_call",
+                "id":"call_1",
+                "name":"lookup",
+                "arguments": ordinary_reasoning_lookalike(),
+                "args": ordinary_reasoning_lookalike(),
+                "parameters": ordinary_reasoning_lookalike(),
+                "input":{"nested": ordinary_reasoning_lookalike()}
+            }
+        ],
+        "metadata": ordinary_reasoning_lookalike()
+    }));
+    let output = finish_stream(&request, &source).unwrap();
+    assert!(
+        output.contains(&format!("{prefix}cipher-1")),
+        "native encrypted reasoning must still bind: {output}"
+    );
+    assert!(
+        output.contains("\"encrypted_content\":\"ticket-123\""),
+        "ordinary metadata/payload lookalikes must stay raw: {output}"
+    );
+    assert!(
+        !output.contains(&format!("{prefix}ticket-123")),
+        "ordinary data must not receive a replay marker: {output}"
+    );
+    assert_eq!(
+        output.matches(prefix.as_str()).count(),
+        1,
+        "only the native cipher is marked: {output}"
+    );
+}
+
+/// Converting Responses must keep a visible answer when the only
+/// `type: reasoning` object lives under ordinary data keys. A real native
+/// encrypted reasoning item on the same stream still fails closed.
+#[test]
+fn responses_ordinary_data_does_not_block_protocol_conversion() {
+    let lookalike = responses_created_and_completed(json!({
+        "id":"resp_1",
+        "status":"completed",
+        "output":[assistant_message_item("ok")],
+        "metadata": ordinary_reasoning_lookalike()
+    }));
+    for client in [ApiFormat::ChatCompletions, ApiFormat::Messages] {
+        let mut request = plan(client, ApiFormat::Responses);
+        request.replay_domain = Some(replay_domain());
+        let output = finish_stream(&request, &lookalike).unwrap();
+        match client {
+            ApiFormat::ChatCompletions => {
+                assert!(
+                    output.contains("\"content\":\"ok\""),
+                    "Chat must keep the answer: {output}"
+                );
+                assert!(output.contains("data: [DONE]"), "{output}");
+            }
+            ApiFormat::Messages => {
+                assert_eq!(messages_text(&output), "ok", "{output}");
+                assert!(output.contains("message_stop"), "{output}");
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            !output.contains("ocg-replay-v1:"),
+            "ordinary metadata must not be marked during conversion: {output}"
+        );
+    }
+
+    let native = responses_created_and_completed(json!({
+        "id":"resp_1",
+        "status":"completed",
+        "output":[{
+            "type":"reasoning",
+            "id":"rs_1",
+            "summary":[],
+            "encrypted_content":"cipher-1"
+        }],
+        "metadata": ordinary_reasoning_lookalike()
+    }));
+    for client in [ApiFormat::ChatCompletions, ApiFormat::Messages] {
+        let mut request = plan(client, ApiFormat::Responses);
+        request.replay_domain = Some(replay_domain());
+        let error = finish_stream(&request, &native).unwrap_err();
+        assert!(
+            error.message.contains("cannot be preserved"),
+            "{client:?} {}",
+            error.message
+        );
+        assert!(!error.message.contains("ticket-123"), "{}", error.message);
+        assert!(!error.message.contains("cipher-1"), "{}", error.message);
+    }
+}
+
 #[test]
 fn signature_redaction_rejects_a_bound_route_without_leaking_the_secret() {
     let mut request = plan(ApiFormat::Messages, ApiFormat::Messages);

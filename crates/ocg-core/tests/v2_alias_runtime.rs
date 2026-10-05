@@ -283,6 +283,7 @@ async fn ambiguous_model_id_is_structured_across_client_formats() {
 }
 
 const CHAT_SUCCESS_BODY: &str = r#"{"id":"ok","object":"chat.completion","model":"upstream-should-not-leak","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}}}"#;
+const MESSAGES_SUCCESS_BODY: &str = r#"{"id":"msg-ok","type":"message","role":"assistant","model":"minimax-m3","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":2,"cache_read_input_tokens":0}}"#;
 const CHAT_STREAM_BODY: &str = concat!(
     "data: {\"id\":\"chat-stream\",\"model\":\"upstream-should-not-leak\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
     "data: {\"id\":\"chat-stream\",\"model\":\"upstream-should-not-leak\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n",
@@ -359,7 +360,7 @@ async fn mixed_case_alias_chat_persists_canonical_alias() {
         "key-1".to_string(),
         VecDeque::from([FakeReply {
             status: 200,
-            body: CHAT_SUCCESS_BODY,
+            body: MESSAGES_SUCCESS_BODY,
         }]),
     )]);
     let (base_url, calls, stop_mock) = start_fake_upstream(replies).await;
@@ -381,7 +382,7 @@ async fn mixed_case_alias_chat_persists_canonical_alias() {
     assert_eq!(body["model"], "MINIMAX-M3");
     let recorded = calls.lock().unwrap();
     assert_eq!(recorded.len(), 1);
-    assert_eq!(recorded[0].path, "/v1/chat/completions");
+    assert_eq!(recorded[0].path, "/v1/messages");
     drop(recorded);
 
     let (status, attribution) = latest_log_identity(&state);

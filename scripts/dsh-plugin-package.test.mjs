@@ -3,11 +3,18 @@ import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 
 const execFileAsync = promisify(execFile);
 const sourceRoot = new URL("../integrations/dsh-plugin/", import.meta.url);
+const workspaceTmp = join(fileURLToPath(new URL("..", import.meta.url)), "tmp");
+
+async function makePluginTemp(prefix) {
+  await mkdir(workspaceTmp, { recursive: true });
+  return mkdtemp(join(workspaceTmp, prefix));
+}
 
 async function writePackage(root, name, files) {
   const packageRoot = join(root, "node_modules", ...name.split("/"));
@@ -31,7 +38,7 @@ async function writePluginRuntime(root) {
         const apis = input.api ?? {};
         const single = typeof apis.streamSimple === "function";
         if (!input.auth?.apiKey || single || !input.models.every((model) => model.provider === input.id && model.api && model.baseUrl)) {
-          throw new Error("invalid pi-ai provider contract");
+            throw new Error("invalid pi-ai provider contract");
         }
         const provider = {
           ...input,
@@ -68,7 +75,12 @@ async function writePluginRuntime(root) {
   });
   await writePackage(root, "@deepseek-ai/dsh-llm", {
     "lib/index.js": `
-      export class LlmError extends Error { constructor(message, code) { super(message); this.code = code; } }
+      export class LlmError extends Error {
+        constructor(message, code, options) {
+          super(message, options);
+          this.code = code;
+        }
+      }
       export function assertUsableApiKey(value) { return value; }
       export function resolveRetryPolicy() { return { mode: "normal", maxRetries: 0 }; }
     `,
@@ -111,6 +123,7 @@ async function writePluginRuntime(root) {
           };
         }
         async resolveModel(provider, model) {
+          if (globalThis.__ocgResolveHold !== undefined) await globalThis.__ocgResolveHold;
           const profile = this.config.profiles().get(provider);
           const failure = profile.modelErrors.get(model);
           if (failure !== undefined) {
@@ -120,7 +133,10 @@ async function writePluginRuntime(root) {
           }
           return this.modelInfo(provider, model);
         }
-        async prepareCall(provider, model) { return { model: await this.resolveModel(provider, model) }; }
+        async prepareCall(provider, model) {
+          if (globalThis.__ocgPrepareHold !== undefined) await globalThis.__ocgPrepareHold;
+          return { model: await this.resolveModel(provider, model) };
+        }
       }
     `,
   });
@@ -613,6 +629,364 @@ test("multiple stale claims consume the newest and leave no claims", async () =>
     assert.deepEqual(result.stored, { ref: "OCG_GATEWAY_KEY", value: "newest-stale" });
     assert.equal(result.live, null);
     assert.deepEqual(result.claims, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("generated DSH plugin refreshes on demand and isolates cancellation", async () => {
+  const root = await makePluginTemp("ocg-dsh-plugin-ondemand-");
+  try {
+    const bootstrap = join(root, "credential-handoff");
+    await writeFile(bootstrap, "ocg-test-key");
+    const plugin = await writeRenderedPlugin(root, bootstrap);
+    await writePluginRuntime(root);
+    const chatA = {
+      id: "model-a",
+      ocg: {
+        schemaVersion: 2,
+        status: "declared",
+        contextWindow: 8000,
+        protocols: { preferred: "chat_completions", supported: ["chat_completions"] },
+      },
+    };
+    const invalidA = {
+      id: "malformed-protocol",
+      ocg: {
+        schemaVersion: 2,
+        protocols: { preferred: "responses", supported: ["chat_completions"] },
+      },
+    };
+    const modelB = {
+      id: "model-b",
+      ocg: {
+        schemaVersion: 2,
+        protocols: { preferred: "chat_completions", supported: ["chat_completions"] },
+      },
+    };
+    const responsesA = {
+      id: "model-a",
+      ocg: {
+        schemaVersion: 2,
+        status: "declared",
+        contextWindow: 16000,
+        protocols: { preferred: "responses", supported: ["responses"] },
+      },
+    };
+    const result = await runEntry(
+      root,
+      `
+        const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const outcome = async (fn) => {
+          try {
+            return { ok: true, value: await fn() };
+          } catch (error) {
+            return {
+              ok: false,
+              name: error?.name ?? null,
+              code: error?.code ?? null,
+              message: error instanceof Error ? error.message : String(error),
+            };
+          }
+        };
+        let stored;
+        let adapter;
+        let now = Date.now();
+        Date.now = () => now;
+        const fetches = [];
+        const timeoutSignals = [];
+        AbortSignal.timeout = (ms) => {
+          const controller = new AbortController();
+          const timer = setTimeout(() => {
+            const error = new Error("The operation was aborted due to timeout");
+            error.name = "TimeoutError";
+            controller.abort(error);
+          }, ms);
+          timer.unref?.();
+          timeoutSignals.push({ controller, timer });
+          return controller.signal;
+        };
+        globalThis.__ocgSent = [];
+        globalThis.__ocgProviders = [];
+        globalThis.__ocgPiModelInfo = {};
+        let hangResolve;
+        let hang = new Promise((resolve) => { hangResolve = resolve; });
+        let mode = "hang";
+        let payload = { object: "list", data: [${JSON.stringify(chatA)}, ${JSON.stringify(invalidA)}] };
+        let missingCredential = false;
+        globalThis.fetch = async () => {
+          fetches.push({ at: now, mode });
+          if (mode === "hang") await hang;
+          if (mode === "timeout") {
+            const error = new Error("The operation was aborted due to timeout");
+            error.name = "TimeoutError";
+            throw error;
+          }
+          if (mode === "transport") throw new TypeError("fetch failed");
+          if (mode === "body-timeout") {
+            return {
+              ok: true,
+              status: 200,
+              async json() {
+                const active = timeoutSignals.at(-1);
+                clearTimeout(active.timer);
+                const timeout = new Error("The operation was aborted due to timeout");
+                timeout.name = "TimeoutError";
+                active.controller.abort(timeout);
+                const error = new Error("This operation was aborted");
+                error.name = "AbortError";
+                throw error;
+              },
+            };
+          }
+          if (mode === "body-transport") {
+            return { ok: true, status: 200, async json() { throw new TypeError("fetch failed"); } };
+          }
+          if (mode === "server") return { ok: false, status: 503, async json() { return {}; } };
+          if (mode === "rate-limit") return { ok: false, status: 429, async json() { return {}; } };
+          if (mode === "auth") return { ok: false, status: 401, async json() { return {}; } };
+          if (mode === "malformed") {
+            return { ok: true, status: 200, async json() { throw new SyntaxError("Unexpected end of JSON input"); } };
+          }
+          return { ok: true, status: 200, async json() { return payload; } };
+        };
+        const credentials = {
+          async set(ref, value) { stored = { ref, value }; },
+          async resolve(ref) {
+            if (missingCredential) return undefined;
+            return ref === stored?.ref ? { value: stored.value } : undefined;
+          },
+        };
+        const ctx = {
+          get(name) { return name === "credentials" ? credentials : undefined; },
+          llm: { registerAdapter(_providers, value) { adapter = value; } },
+        };
+        const plugin = await import(${JSON.stringify(fileUrl(plugin))});
+        await plugin.apply(ctx);
+
+        const first = new AbortController();
+        const second = new AbortController();
+        const concurrentOne = adapter.prepareCall("ocg", "model-a", first.signal);
+        const concurrentTwo = adapter.prepareCall("ocg", "model-a", second.signal);
+        await delay(40);
+        const overlappingFetches = fetches.length;
+        first.abort();
+        const cancelledConsumer = await outcome(() => concurrentOne);
+        mode = "payload";
+        hangResolve();
+        const survivingConsumer = await outcome(() => concurrentTwo);
+        const fetchesAfterCold = fetches.length;
+
+        now += 180_000;
+        const latePrepare = await outcome(() => adapter.prepareCall("ocg", "model-a"));
+        const lateResolve = await outcome(() => adapter.resolveModel("ocg", "model-a"));
+        const fetchesAfterClock = fetches.length;
+
+        const raced = new AbortController();
+        const racedPrepare = adapter.prepareCall("ocg", "model-a", raced.signal);
+        raced.abort();
+        const immediateCacheAbort = await outcome(() => racedPrepare);
+        const siblingAfterCacheAbort = await outcome(() => adapter.prepareCall("ocg", "model-a"));
+
+        let releasePrepare;
+        globalThis.__ocgPrepareHold = new Promise((resolve) => { releasePrepare = resolve; });
+        const duringBase = new AbortController();
+        const duringBasePrepare = adapter.prepareCall("ocg", "model-a", duringBase.signal);
+        await delay(20);
+        duringBase.abort();
+        releasePrepare();
+        globalThis.__ocgPrepareHold = undefined;
+        const abortDuringBasePrepare = await outcome(() => duringBasePrepare);
+
+        const invalidKnown = await outcome(() => adapter.prepareCall("ocg", "malformed-protocol"));
+        const fetchesAfterInvalidKnown = fetches.length;
+
+        const unknownMissing = await outcome(() => adapter.prepareCall("ocg", "model-b"));
+        const fetchesAfterUnknownMiss = fetches.length;
+        const knownAfterUnknownMiss = await outcome(() => adapter.prepareCall("ocg", "model-a"));
+
+        payload = { object: "list", data: [${JSON.stringify(chatA)}, ${JSON.stringify(invalidA)}, ${JSON.stringify(modelB)}] };
+        const discovered = await outcome(() => adapter.prepareCall("ocg", "model-b"));
+        const fetchesAfterDiscover = fetches.length;
+        const knownAfterDiscover = await outcome(() => adapter.prepareCall("ocg", "model-a"));
+        const fetchesAfterKnown = fetches.length;
+
+        const explicitList = await outcome(async () => (await adapter.listModels("ocg")).map((model) => model.id));
+        const fetchesAfterExplicitList = fetches.length;
+
+        let releaseFreeze;
+        globalThis.__ocgPrepareHold = new Promise((resolve) => { releaseFreeze = resolve; });
+        const freezePrepare = adapter.prepareCall("ocg", "model-a");
+        await delay(20);
+        payload = { object: "list", data: [${JSON.stringify(responsesA)}, ${JSON.stringify(invalidA)}, ${JSON.stringify(modelB)}] };
+        const refreshedIds = (await adapter.listModels("ocg")).map((model) => model.id);
+        releaseFreeze();
+        globalThis.__ocgPrepareHold = undefined;
+        const frozen = await freezePrepare;
+        const nextPrepared = await adapter.prepareCall("ocg", "model-a");
+
+        mode = "timeout";
+        const headerTimeoutList = await outcome(() => adapter.listModels("ocg"));
+        const afterHeaderTimeout = await outcome(() => adapter.prepareCall("ocg", "model-a"));
+        const fetchesAfterHeaderTimeout = fetches.length;
+
+        mode = "body-timeout";
+        const bodyTimeoutList = await outcome(() => adapter.listModels("ocg"));
+        const afterBodyTimeout = await outcome(() => adapter.prepareCall("ocg", "model-a"));
+
+        mode = "body-transport";
+        const bodyTransportList = await outcome(() => adapter.listModels("ocg"));
+        const afterBodyTransport = await outcome(() => adapter.prepareCall("ocg", "model-a"));
+
+        mode = "transport";
+        const transportList = await outcome(() => adapter.listModels("ocg"));
+        const afterTransport = await outcome(() => adapter.prepareCall("ocg", "model-a"));
+
+        mode = "server";
+        const serverList = await outcome(() => adapter.listModels("ocg"));
+        const afterServer = await outcome(() => adapter.prepareCall("ocg", "model-a"));
+
+        mode = "rate-limit";
+        const rateList = await outcome(() => adapter.listModels("ocg"));
+        const afterRateLimit = await outcome(() => adapter.prepareCall("ocg", "model-a"));
+        const fetchesAfterTransient = fetches.length;
+
+        mode = "malformed";
+        const malformedList = await outcome(() => adapter.listModels("ocg"));
+        const afterMalformedKnown = await outcome(() => adapter.prepareCall("ocg", "model-a"));
+
+        mode = "payload";
+        const afterMalformedRecovery = await outcome(() => adapter.prepareCall("ocg", "model-a"));
+
+        mode = "auth";
+        const authList = await outcome(() => adapter.listModels("ocg"));
+        const afterAuth = await outcome(() => adapter.prepareCall("ocg", "model-a"));
+
+        mode = "payload";
+        const afterAuthRecovery = await outcome(() => adapter.prepareCall("ocg", "model-a"));
+
+        missingCredential = true;
+        const missing = await outcome(() => adapter.listModels("ocg"));
+        const afterMissing = await outcome(() => adapter.prepareCall("ocg", "model-a"));
+        for (const item of timeoutSignals) clearTimeout(item.timer);
+
+        process.stdout.write(JSON.stringify({
+          overlappingFetches,
+          cancelledConsumer,
+          survivingConsumer,
+          fetchesAfterCold,
+          latePrepare,
+          lateResolve,
+          fetchesAfterClock,
+          immediateCacheAbort,
+          siblingAfterCacheAbort,
+          abortDuringBasePrepare,
+          invalidKnown,
+          fetchesAfterInvalidKnown,
+          unknownMissing,
+          fetchesAfterUnknownMiss,
+          knownAfterUnknownMiss,
+          discovered,
+          fetchesAfterDiscover,
+          knownAfterDiscover,
+          fetchesAfterKnown,
+          explicitList,
+          fetchesAfterExplicitList,
+          refreshedIds,
+          frozenPreferred: frozen.model?.ocg?.protocols?.preferred ?? null,
+          frozenContext: frozen.model?.ocg?.contextWindow ?? null,
+          nextPreferred: nextPrepared.model?.ocg?.protocols?.preferred ?? null,
+          nextContext: nextPrepared.model?.ocg?.contextWindow ?? null,
+          headerTimeoutList,
+          afterHeaderTimeout,
+          fetchesAfterHeaderTimeout,
+          bodyTimeoutList,
+          afterBodyTimeout,
+          bodyTransportList,
+          afterBodyTransport,
+          transportList,
+          afterTransport,
+          serverList,
+          afterServer,
+          rateList,
+          afterRateLimit,
+          fetchesAfterTransient,
+          malformedList,
+          afterMalformedKnown,
+          afterMalformedRecovery,
+          authList,
+          afterAuth,
+          afterAuthRecovery,
+          missing,
+          afterMissing,
+        }));
+      `,
+    );
+    assert.equal(result.overlappingFetches, 1);
+    assert.equal(result.cancelledConsumer.ok, false);
+    assert.equal(result.cancelledConsumer.name, "AbortError");
+    assert.equal(result.survivingConsumer.ok, true);
+    assert.equal(result.survivingConsumer.value.model.id, "model-a");
+    assert.equal(result.fetchesAfterCold, 1);
+    assert.equal(result.latePrepare.ok, true);
+    assert.equal(result.lateResolve.ok, true);
+    assert.equal(result.fetchesAfterClock, 1);
+    assert.equal(result.immediateCacheAbort.ok, false);
+    assert.equal(result.immediateCacheAbort.name, "AbortError");
+    assert.equal(result.siblingAfterCacheAbort.ok, true);
+    assert.equal(result.abortDuringBasePrepare.ok, false);
+    assert.equal(result.abortDuringBasePrepare.name, "AbortError");
+    assert.equal(result.invalidKnown.ok, false);
+    assert.equal(result.invalidKnown.code, "INVALID_CONFIG");
+    assert.equal(result.fetchesAfterInvalidKnown, 1);
+    assert.equal(result.unknownMissing.ok, false);
+    assert.equal(result.unknownMissing.code, "INVALID_CONFIG");
+    assert.equal(result.fetchesAfterUnknownMiss, 2);
+    assert.equal(result.knownAfterUnknownMiss.ok, true);
+    assert.equal(result.discovered.ok, true);
+    assert.equal(result.discovered.value.model.id, "model-b");
+    assert.equal(result.fetchesAfterDiscover, 3);
+    assert.equal(result.knownAfterDiscover.ok, true);
+    assert.equal(result.fetchesAfterKnown, 3);
+    assert.deepEqual(result.explicitList.value, ["model-a", "model-b"]);
+    assert.equal(result.fetchesAfterExplicitList, 4);
+    assert.deepEqual(result.refreshedIds, ["model-a", "model-b"]);
+    assert.equal(result.frozenPreferred, "chat_completions");
+    assert.equal(result.frozenContext, 8000);
+    assert.equal(result.nextPreferred, "responses");
+    assert.equal(result.nextContext, 16000);
+    assert.equal(result.headerTimeoutList.ok, false);
+    assert.equal(result.headerTimeoutList.code, "TIMEOUT");
+    assert.equal(result.afterHeaderTimeout.ok, true);
+    assert.equal(result.bodyTimeoutList.ok, false);
+    assert.equal(result.bodyTimeoutList.code, "TIMEOUT");
+    assert.equal(result.afterBodyTimeout.ok, true);
+    assert.equal(result.bodyTransportList.ok, false);
+    assert.equal(result.bodyTransportList.code, "TRANSPORT");
+    assert.equal(result.afterBodyTransport.ok, true);
+    assert.equal(result.transportList.ok, false);
+    assert.equal(result.transportList.code, "TRANSPORT");
+    assert.equal(result.afterTransport.ok, true);
+    assert.equal(result.serverList.ok, false);
+    assert.equal(result.serverList.code, "SERVER");
+    assert.equal(result.afterServer.ok, true);
+    assert.equal(result.rateList.ok, false);
+    assert.equal(result.rateList.code, "RATE_LIMIT");
+    assert.equal(result.afterRateLimit.ok, true);
+    assert.equal(result.malformedList.ok, false);
+    assert.equal(result.malformedList.code, "INVALID_CONFIG");
+    assert.equal(result.afterMalformedKnown.ok, false);
+    assert.equal(result.afterMalformedKnown.code, "INVALID_CONFIG");
+    assert.equal(result.afterMalformedRecovery.ok, true);
+    assert.equal(result.authList.ok, false);
+    assert.equal(result.authList.code, "AUTH");
+    assert.equal(result.afterAuth.ok, false);
+    assert.equal(result.afterAuth.code, "AUTH");
+    assert.equal(result.afterAuthRecovery.ok, true);
+    assert.equal(result.missing.ok, false);
+    assert.equal(result.missing.code, "MISSING_CREDENTIAL");
+    assert.equal(result.afterMissing.ok, false);
+    assert.equal(result.afterMissing.code, "MISSING_CREDENTIAL");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

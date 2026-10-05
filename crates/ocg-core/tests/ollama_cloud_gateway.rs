@@ -462,6 +462,10 @@ async fn ollama_catalog_does_not_add_v1_models_entries() {
     let (base_url, calls, stop_mock) = start_fake_upstream(replies).await;
     let (state, dir) = build_state(base_url.clone());
     persist_ollama_catalog(&state, &["deepseek-v4-flash:0731", "gpt-oss:120b"]);
+    refreshed_go_catalog::persist_refreshed_go_catalog(&state);
+    let mut go = base_account(&state, "go-1", GO_KEY);
+    go.provider_id = ocg_core::provider::OPENCODE_PROVIDER_ID.into();
+    state.db.lock().create_account(&go).unwrap();
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
     let response = loopback_client()

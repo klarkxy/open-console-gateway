@@ -653,18 +653,29 @@ struct QualifiedMapping<'a> {
     choice: Protocol,
 }
 
-pub(crate) fn enrich(
-    db: &Database,
+/// Directory records captured under the same DB lock as routing, then applied
+/// after that lock is released.
+pub(crate) struct CapturedModelMetadata {
+    records: Vec<Record>,
+}
+
+impl CapturedModelMetadata {
+    pub(crate) fn load(db: &Database) -> anyhow::Result<Self> {
+        Ok(Self { records: load(db)? })
+    }
+}
+
+pub(crate) fn enrich_captured(
+    captured: &CapturedModelMetadata,
     modelsdev: &crate::modelsdev::ModelsDevCatalog,
     snapshot: &crate::gateway::handler::RuntimeCatalogSnapshot,
     rows: &mut [Value],
 ) -> anyhow::Result<()> {
-    let records = load(db)?;
     for row in rows {
         let Some(id) = row.get("id").and_then(Value::as_str) else {
             continue;
         };
-        let Some(facts) = published_model_facts(&records, modelsdev, snapshot, id) else {
+        let Some(facts) = published_model_facts(&captured.records, modelsdev, snapshot, id) else {
             continue;
         };
         if let Some(n) = facts.metadata.context_window {

@@ -17,6 +17,7 @@ use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use std::sync::OnceLock;
 
 pub async fn request_trace_middleware(
     State(state): State<CoreState>,
@@ -224,16 +225,11 @@ pub async fn models(
 }
 
 fn published_alias_models_response(state: &CoreState) -> axum::response::Response {
-    // Every fact in the body needs settings_update, db, and the models.dev
-    // catalog, so they are captured into owned rows under the lock. The
-    // envelope and the JSON encoding run only after the guard is dropped:
-    // serialization of a large catalog must never hold the global
-    // control-plane gate that also serializes gateway traffic and dashboard
-    // writes.
-    let data = {
-        let _settings_update = state.settings_update.lock();
-        published_models_data_locked(state)
-    };
+    // Auth already ran against the credential snapshot. Capture routing,
+    // publication, models.dev, and metadata under the existing
+    // `settings_update` + DB locks, then release before registry construction,
+    // per-row enrichment, and JSON encoding.
+    let data = published_models_data(state);
     match data {
         Ok(data) => axum::Json(serde_json::json!({"object": "list", "data": data})).into_response(),
         Err(error) => protocol_error_response(
@@ -245,17 +241,47 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
     }
 }
 
-/// Caller holds settings_update, sharing exactly the authenticated client inventory.
-pub(crate) fn published_models_data_locked(
+struct PublishedModelsInputs {
+    routing: crate::routing_snapshot::RoutingSnapshot,
+    wall: chrono::DateTime<chrono::Utc>,
+    unpublished: std::sync::Arc<std::collections::HashSet<String>>,
+    modelsdev: std::sync::Arc<crate::modelsdev::ModelsDevCatalog>,
+    metadata: crate::model_metadata::CapturedModelMetadata,
+}
+
+/// Caller already holds `settings_update`. Load DB facts without taking that
+/// gate again so BYOK can reuse the same builder.
+fn capture_published_models_inputs(state: &CoreState) -> Result<PublishedModelsInputs, String> {
+    let (mut routing, metadata) = {
+        let db = state.db.lock();
+        let routing = crate::routing_snapshot::RoutingSnapshot::load(&db)
+            .map_err(|error| format!("failed to load routing configuration: {error}"))?;
+        let metadata = crate::model_metadata::CapturedModelMetadata::load(&db)
+            .map_err(|error| format!("failed to load model metadata: {error}"))?;
+        (routing, metadata)
+    };
+    {
+        let probes = state.quota_probes.lock();
+        routing.apply_quota_probes(&probes);
+    }
+    Ok(PublishedModelsInputs {
+        routing,
+        wall: state.sample_gateway_clock().0,
+        unpublished: state.unpublished_public_models(),
+        modelsdev: state.modelsdev_catalog(),
+        metadata,
+    })
+}
+
+fn build_published_models(
     state: &CoreState,
+    inputs: PublishedModelsInputs,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let snapshot = runtime_catalog_snapshot(state)
-        .map_err(|error| format!("failed to load routing configuration: {error}"))?;
-    let catalogs = snapshot.catalogs();
+    let snapshot = RuntimeCatalogSnapshot::from_routing(inputs.routing, inputs.wall);
+    let unpublished = inputs.unpublished;
     let custom_ids = &snapshot.custom;
     let cpa_ids = &snapshot.cpa;
-    let unpublished = state.unpublished_public_models();
-    let published = crate::alias::published_routeable_models_with_runtime_catalogs(catalogs);
+    let published = snapshot.published_routeable_models();
     let mut data: Vec<serde_json::Value> = published
         .iter()
         .filter(|item| {
@@ -339,11 +365,14 @@ pub(crate) fn published_models_data_locked(
             }));
         }
     }
-    // Kick the lazy models.dev refresh; this response still uses the cache.
     crate::modelsdev::ensure_fresh(state);
-    let modelsdev = state.modelsdev_catalog();
-    crate::model_metadata::enrich(&state.db.lock(), &modelsdev, &snapshot, &mut data)
-        .map_err(|_| "failed to load model metadata".to_string())?;
+    crate::model_metadata::enrich_captured(
+        &inputs.metadata,
+        &inputs.modelsdev,
+        &snapshot,
+        &mut data,
+    )
+    .map_err(|_| "failed to load model metadata".to_string())?;
     data.retain(|row| {
         crate::model_metadata::read_published_protocol_profile(
             row.get("ocg").and_then(|value| value.get("protocols")),
@@ -351,6 +380,56 @@ pub(crate) fn published_models_data_locked(
         .is_ok()
     });
     Ok(data)
+}
+
+/// Authenticated client inventory from captured DB routing facts.
+///
+/// BYOK callers already hold `settings_update`. This path must not take that
+/// gate again; GET `/v1/models` captures under the gate, then builds after
+/// release.
+pub(crate) fn published_models_data_locked(
+    state: &CoreState,
+) -> Result<Vec<serde_json::Value>, String> {
+    build_published_models(state, capture_published_models_inputs(state)?)
+}
+
+fn published_models_data(state: &CoreState) -> Result<Vec<serde_json::Value>, String> {
+    let inputs = {
+        let _settings_update = state.settings_update.lock();
+        capture_published_models_inputs(state)?
+    };
+    #[cfg(test)]
+    notify_after_published_models_capture();
+    build_published_models(state, inputs)
+}
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_PUBLISHED_MODELS_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) fn set_after_published_models_capture(hook: Box<dyn FnOnce()>) {
+    AFTER_PUBLISHED_MODELS_CAPTURE.with(|slot| {
+        *slot.borrow_mut() = Some(hook);
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn clear_after_published_models_capture() {
+    AFTER_PUBLISHED_MODELS_CAPTURE.with(|slot| {
+        slot.borrow_mut().take();
+    });
+}
+
+#[cfg(test)]
+fn notify_after_published_models_capture() {
+    AFTER_PUBLISHED_MODELS_CAPTURE.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
 }
 
 fn published_model_ids_contain(data: &[serde_json::Value], id: &str) -> bool {
@@ -376,6 +455,7 @@ pub(crate) struct RuntimeCatalogSnapshot {
     pub ollama_pinned: Vec<String>,
     pub extra: Vec<crate::alias::ExtraProviderCatalog>,
     pub builtin_aliases: Vec<crate::alias::ExtraProviderCatalog>,
+    index: OnceLock<crate::alias::RuntimeCatalogIndex>,
 }
 
 impl RuntimeCatalogSnapshot {
@@ -393,6 +473,15 @@ impl RuntimeCatalogSnapshot {
             extra: &self.extra,
             builtin_aliases: &self.builtin_aliases,
         }
+    }
+
+    fn index(&self) -> &crate::alias::RuntimeCatalogIndex {
+        self.index
+            .get_or_init(|| crate::alias::RuntimeCatalogIndex::from_catalogs(self.catalogs()))
+    }
+
+    fn published_routeable_models(&self) -> Vec<crate::alias::PublishedAlias> {
+        self.index().published_models()
     }
 }
 
@@ -429,6 +518,7 @@ impl RuntimeCatalogSnapshot {
             extra: vec![],
             builtin_aliases: vec![],
             routing,
+            index: OnceLock::new(),
         };
         for d in &result.routing.projection.destinations {
             let active = d.enabled
@@ -518,7 +608,7 @@ impl RuntimeCatalogSnapshot {
         &self,
         requested: &str,
     ) -> Result<crate::alias::ResolvedModel, crate::alias::ResolveError> {
-        let resolved = crate::alias::resolve_with_runtime_catalogs(requested, self.catalogs())?;
+        let resolved = self.index().resolve(requested)?;
         let crate::alias::ResolvedModel::PinnedRaw { mapping, .. } = &resolved else {
             return Ok(resolved);
         };

@@ -85,8 +85,9 @@ DSH 加载插件后，插件会把该值导入 DSH 自己的凭据服务，并�
 对于 Editor 托管的 profile，OCG 还会把插件登记到 Editor 的用户插件状态，使其在 profile 重建后保留；
 安装前先退出 Editor，安装后重新启动。
 
-插件以 `ocg` 注册 **Open Console Gateway**。当 DSH 读取模型或准备调用时，
-插件会刷新带鉴权的 `GET /v1/models`。选择器使用的是这份可执行公布目录，
+插件以 `ocg` 注册 **Open Console Gateway**。首次使用、读取模型列表，或请求
+已加载目录中没有的模型时，会刷新带鉴权的 `GET /v1/models`。已知模型复用现有
+快照，不按时间自动刷新；详见[模型元数据](model-metadata.zh-CN.md)。选择器使用的是这份可执行公布目录，
 包含符合条件的 Custom ID，而不是范围更窄的 Dashboard `application-models` 列表。
 内部 `ocg-rejected` 占位不会出现在可选列表里，以便精确 resolve 与 prepare 仍能失败关闭。
 混合无效行会被排除；全无效目录是空列表，不会回退成 Chat。插件解析器对畸形行仍然严格。

@@ -2284,3 +2284,100 @@ fn renaming_go_keeps_other_providers_on_its_previous_shared_alias() {
             .any(|item| item.alias == "glm-5.2" && item.owned_by == OPENCODE_ZEN_FREE_PROVIDER_ID)
     );
 }
+
+#[test]
+fn publishing_many_go_catalog_ids_builds_the_runtime_registry_once() {
+    let _ = take_runtime_registry_build_count();
+    let go: Vec<String> = (0..256).map(|i| format!("unique-go-catalog-{i}")).collect();
+    let extras = [
+        ExtraProviderCatalog {
+            provider_id: "11111111-1111-4111-8111-111111111111".into(),
+            mappings: vec![("lab-public".into(), "vendor/lab".into())],
+        },
+        ExtraProviderCatalog {
+            provider_id: "22222222-2222-4222-8222-222222222222".into(),
+            mappings: vec![("lab-public".into(), "other/lab".into())],
+        },
+        ExtraProviderCatalog {
+            provider_id: "33333333-3333-4333-8333-333333333333".into(),
+            mappings: vec![("solo-public".into(), "vendor/solo".into())],
+        },
+        ExtraProviderCatalog {
+            provider_id: "44444444-4444-4444-8444-444444444444".into(),
+            mappings: vec![("shared/raw".into(), "shared/raw".into())],
+        },
+        ExtraProviderCatalog {
+            provider_id: "55555555-5555-4555-8555-555555555555".into(),
+            mappings: vec![("shared/raw".into(), "shared/raw".into())],
+        },
+    ];
+    let catalogs = RuntimeCatalogs {
+        go: &go,
+        extra: &extras,
+        ..RuntimeCatalogs::default()
+    };
+    let index = RuntimeCatalogIndex::from_catalogs(catalogs);
+    assert_eq!(
+        take_runtime_registry_build_count(),
+        1,
+        "one publication pass must not rebuild the alias table per catalog id"
+    );
+    let published = index.published_models();
+    for id in &go {
+        assert!(
+            published.iter().any(|item| item.alias == *id),
+            "{id} must stay a unique Go raw pin"
+        );
+        match index.resolve(id).expect(id) {
+            ResolvedModel::PinnedRaw { mapping, .. } => {
+                assert_eq!(mapping.provider_id, OPENCODE_PROVIDER_ID);
+                assert_eq!(mapping.upstream_model, *id);
+                assert!(mapping.routeable);
+            }
+            other => panic!("expected unique Go raw pin for {id}, got {other:?}"),
+        }
+    }
+    match index.resolve("glm-5.2").expect("glm-5.2") {
+        ResolvedModel::Alias { alias, .. } => assert_eq!(alias, "glm-5.2"),
+        other => panic!("glm-5.2 must stay a code-owned alias, got {other:?}"),
+    }
+    match index.resolve("solo-public").expect("solo-public") {
+        ResolvedModel::Alias { mappings, .. } => {
+            assert_eq!(mappings.len(), 1);
+            assert_eq!(mappings[0].provider_id, extras[2].provider_id);
+            assert_eq!(mappings[0].upstream_model, "vendor/solo");
+        }
+        other => panic!("expected an independent public-name alias, got {other:?}"),
+    }
+    match index.resolve("lab-public").expect("lab-public") {
+        ResolvedModel::Alias { mappings, .. } => {
+            assert_eq!(mappings.len(), 2);
+            assert!(
+                mappings
+                    .iter()
+                    .any(|mapping| mapping.provider_id == extras[0].provider_id)
+            );
+            assert!(
+                mappings
+                    .iter()
+                    .any(|mapping| mapping.provider_id == extras[1].provider_id)
+            );
+        }
+        other => panic!("shared public names must aggregate, got {other:?}"),
+    }
+    let ambiguous = index.resolve("shared/raw").expect_err("shared/raw");
+    assert_eq!(ambiguous.code(), Some(AMBIGUOUS_MODEL_ID));
+    match ambiguous {
+        ResolveError::Ambiguous { mappings, .. } => {
+            assert!(
+                mappings.len() >= 2,
+                "raw public collisions must not pick a single extra, got {mappings:?}"
+            );
+        }
+        other => panic!("expected Ambiguous, got {other:?}"),
+    }
+    assert!(
+        !published.iter().any(|item| item.alias == "shared/raw"),
+        "ambiguous raw public names stay unpublished"
+    );
+}

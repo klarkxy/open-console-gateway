@@ -4574,19 +4574,32 @@ fn insert_field(value: &mut Value, field: &str, raw: String) {
     }
 }
 
+/// `native_scope` is false under the same ordinary-data keys as
+/// [`reject_responses_tree`]. Those subtrees are not native opaque carriers.
 fn bind_responses_tree(value: &mut Value, domain: ReplayDomain) -> Result<(), ProtocolError> {
+    bind_responses_tree_in(value, domain, true)
+}
+
+fn bind_responses_tree_in(
+    value: &mut Value,
+    domain: ReplayDomain,
+    native_scope: bool,
+) -> Result<(), ProtocolError> {
+    if !native_scope {
+        return Ok(());
+    }
     match value {
         Value::Array(items) => {
             for item in items {
-                bind_responses_tree(item, domain)?;
+                bind_responses_tree_in(item, domain, true)?;
             }
         }
         Value::Object(map) => {
             if map.get("type").and_then(Value::as_str) == Some("reasoning") {
                 bind_reasoning_encrypted_field(map, domain)?;
             }
-            for child in map.values_mut() {
-                bind_responses_tree(child, domain)?;
+            for (key, child) in map.iter_mut() {
+                bind_responses_tree_in(child, domain, !ordinary_data_key(key))?;
             }
         }
         _ => {}
@@ -4779,15 +4792,29 @@ fn push_reasoning_lane(
 }
 
 fn contains_nonempty_reasoning_encrypted(value: &Value) -> bool {
+    contains_nonempty_reasoning_encrypted_in(value, true)
+}
+
+/// Same ordinary-data boundary as [`reject_responses_tree`]: `metadata` and
+/// tool payload keys are not native encrypted reasoning.
+fn contains_nonempty_reasoning_encrypted_in(value: &Value, native_scope: bool) -> bool {
+    if !native_scope {
+        return false;
+    }
     match value {
-        Value::Array(items) => items.iter().any(contains_nonempty_reasoning_encrypted),
+        Value::Array(items) => items
+            .iter()
+            .any(|item| contains_nonempty_reasoning_encrypted_in(item, true)),
         Value::Object(map) => {
             let encrypted = map.get("type").and_then(Value::as_str) == Some("reasoning")
                 && map
                     .get("encrypted_content")
                     .and_then(Value::as_str)
                     .is_some_and(|text| !text.is_empty());
-            encrypted || map.values().any(contains_nonempty_reasoning_encrypted)
+            encrypted
+                || map.iter().any(|(key, child)| {
+                    contains_nonempty_reasoning_encrypted_in(child, !ordinary_data_key(key))
+                })
         }
         _ => false,
     }

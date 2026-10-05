@@ -118,9 +118,11 @@ Editor-owned profiles also register the package in Editor's user-plugin state
 so it survives Editor profile rebuilds; close Editor before installing, then
 restart it.
 
-The plugin registers **Open Console Gateway** as `ocg` and refreshes the
-authenticated `GET /v1/models` list when DSH asks for models or prepares a
-call. The advertised picker is that executable catalog, including eligible
+The plugin registers **Open Console Gateway** as `ocg`. It loads authenticated
+`GET /v1/models` on first use, when the model list is read, or when a requested
+model is absent from the loaded directory. Calls to known models reuse that
+snapshot without timed refresh; see [model metadata](model-metadata.md).
+The advertised picker is that executable catalog, including eligible
 Custom IDs; it is not the narrower dashboard `application-models` list.
 Internal `ocg-rejected` placeholders stay off the selectable list so exact
 resolve and prepare can still fail closed. Mixed invalid rows are excluded; an
