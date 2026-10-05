@@ -115,7 +115,8 @@ supported protocol matrix lives in
 - Zen Free routing uses the card's enable switch and list position.
 - Unknown model names return `400` on every supported client format. Clients
   should send published aliases or eligible Custom IDs from authenticated
-  `GET /v1/models` that currently have an effective enabled protocol.
+  `GET /v1/models` that currently carry a validated derived protocol profile
+  from the same qualified snapshot.
   Protected `GET /dashboard/api/v4/application-models` lists Go names that
   resolve in the saved catalog and have an enabled protocol. It does not
   consult a price snapshot, and it is not that full client list.

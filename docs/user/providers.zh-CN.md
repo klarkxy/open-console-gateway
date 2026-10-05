@@ -66,7 +66,7 @@
 
 本地目录会进入解析，请求时不会再访问上游。内置 Alias 权威是静态且由代码持有：最早 OpenCode Go 表提供 Go 名称，密封 MiniMax CN、Kimi CN 与选定 GOAT 长名称映射表提供供应商 Alias，但不会据此新增 Go 路由。Command 会先去掉 Provider 命名空间并复用已有代码持有的 Alias；只有短名已获授权时才去掉已知套餐后缀。例如 `nvidia/nemotron-3-ultra-550b-a55b` 使用 Alias `nemotron-3-ultra`。保存的 CN 行只激活其精确密封映射。含 `/` 的 Command id 会公布唯一的最后一节小写 kebab Alias（例如 `google/gemini-3.5-flash` → `gemini-3.5-flash`）。不含 `/` 且无法匹配的 Command 行，以及无法匹配的 MiniMax/Kimi 模型，保留为精确 raw ID，不会作为新 Alias 公布；CN 映射仍保留上游 ID 的准确拼写。Zen Free 按官方 `-free` 后缀公布去掉后缀后的 Alias，原始 `-free` ID 始终可作为精确 raw pin 使用，见 [Zen Free 模型](routing.zh-CN.md#zen-free-模型)。
 
-当某个供应商的全部模型都关闭时，该供应商不再产生路由。带鉴权的下游 `GET /v1/models` 只公布可路由的公开名称；raw-only 身份和 raw 名称冲突都会排除。歧义 raw 身份以 `ambiguous_model_id` 失败，绝不请求上游。
+当某个供应商的全部模型都关闭时，该供应商不再产生路由。带鉴权的下游 `GET /v1/models` 只公布合格的公开名称，且每行都带与 enrich 同一快照推导并校验过的协议配置；raw-only 身份和 raw 名称冲突都会排除。歧义 raw 身份以 `ambiguous_model_id` 失败，绝不请求上游。
 
 每个支持测试的模型行都有 **测试** 操作。它只用一条精确保存的路由和一把已经授权的就绪 Key，不会回退到其他路由或账号。模型必须属于当前目录；真实最小请求可能消耗额度。回执显示成功、失败或跳过状态，以及范围、Key、配置、协议和上游安全详情。测试绝不改变启停、首选、授权或路由配置。
 
@@ -80,7 +80,7 @@
 - MiniMax CN 与 Kimi Code CN 在 OCG 内不为请求定价，但账号卡可手工读取官方订阅窗口（`/token_plan/remains` 与 `/usages`）。这些快照只用于展示，不影响推理资格。
 - Custom API 与用户定义 Provider 账号，若保存的 Endpoint 主机恰好是 `api.deepseek.com`、`api.moonshot.cn` 或 `api.moonshot.ai`，可手工读取官方当前余额。其他 Custom 主机不会被探测。
 
-每次尝试的请求流程：别名 → 账号资格 → 适配器上限 → 已保存合约 → 按模型/按协议 effective 状态 → 发送前的一次本地协议选择。该选择依次是已保存首选、客户端协议，然后是其余已授权协议。这次选择不取代凭据或供应商重试，HTTP 400 也不换协议。带鉴权的 `GET /v1/models` 与受保护的 `GET /dashboard/api/v4/application-models` 只公布当前可路由且 effective 协议已启用的公开名称。`application-models` 列出已保存目录中可解析且协议已启用的 Go 名称。它不查阅价格快照，也不含 Custom。
+每次尝试的请求流程：别名 → 账号资格 → 适配器上限 → 已保存合约 → 按模型/按协议 effective 状态 → 发送前的一次本地协议选择。该选择依次是已保存首选、客户端协议，然后是其余已授权协议。这次选择不取代凭据或供应商重试，HTTP 400 也不换协议。带鉴权的 `GET /v1/models` 公布当前合格的公开名称，每行都带已校验的推导协议配置：目的地和模型已启用，名称解析到该映射，并且有一把已启用、ready、绑定已启用、范围允许该模型、在路由需要时持有 Key、并持有端点授权的凭据。仅目录启用不够。冷却、探测标记和鉴权错误历史不会拿掉已有可用配置的行。受保护的 `GET /dashboard/api/v4/application-models` 列出已保存目录中可解析且协议已启用的 Go 名称。它不查阅价格快照，也不含 Custom。
 
 ---
 

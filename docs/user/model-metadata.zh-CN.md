@@ -6,9 +6,9 @@
 
 ## 传递哪些信息
 
-鉴权后的 `GET /v1/models` 保留 OpenAI 兼容结构和公开模型 ID，已知容量增加为 `contextWindow` 与 `maxTokens`。版本化的 `ocg` 对象使用 `schemaVersion` 2。它包含名称、上下文、最大输出、输入与输出模态、推理支持、显式 `reasoningEfforts`、工具调用事实、来源和状态。有合格路由能承载该模型时，还会包含 `protocols`。能力字段缺失表示未知，不等于不支持。这个 GET 不访问上游。
+鉴权后的 `GET /v1/models` 保留 OpenAI 兼容结构和公开模型 ID，已知容量增加为 `contextWindow` 与 `maxTokens`。版本化的 `ocg` 对象使用 `schemaVersion` 2。它包含名称、上下文、最大输出、输入与输出模态、推理支持、显式 `reasoningEfforts`、工具调用事实、来源和状态。每一行还包含与 enrich 同一组合格快照推导并校验过的 `protocols`。没有该配置的名称不会出现在这份列表里。能力字段缺失表示未知，不等于不支持。`status` 为 `unknown` 但 `protocols` 可用时仍会列出。这个 GET 不访问上游。
 
-`protocols` 只在这次响应里推导，不写入元数据记录。`preferred` 取 `chat_completions`、`responses` 或 `messages`。`supported` 按这个固定顺序列出已授权的上游协议。一条协议出现在列表中，表示有合格路由可以发送它：目的地和模型已启用，名称解析到该映射，并且有一把已启用、ready、绑定已启用、范围允许该模型、在路由需要时持有 Key、并持有端点授权的凭据。多条映射按 routing rank、目的地 id、上游模型排序。`preferred` 是第一条映射里已授权的已保存首选；该首选未授权时，是第一条已保存且已授权的协议。冷却、探测标记、鉴权错误和上次胜出的凭据不改变这个对象。`supported` 只命名这些上游协议。它不表示每种协议都保留全部能力，也不指定调用方使用哪一个客户端 URL。`protocols` 缺失，或者 `preferred` 缺失、非法、或不在 `supported` 中时，结果是未知或无效。这两种结果都不是 Chat Completions。
+`protocols` 只在这次响应里推导，不写入元数据记录。`preferred` 取 `chat_completions`、`responses` 或 `messages`。`supported` 按这个固定顺序列出已授权的上游协议。一条协议出现在列表中，表示有合格路由可以发送它：目的地和模型已启用，名称解析到该映射，并且有一把已启用、ready、绑定已启用、范围允许该模型、在路由需要时持有 Key、并持有端点授权的凭据。多条映射按 routing rank、目的地 id、上游模型排序。`preferred` 是第一条映射里已授权的已保存首选；该首选未授权时，是第一条已保存且已授权的协议。冷却、探测标记、鉴权错误和上次胜出的凭据不改变这个对象，也不会把已有可用配置的行从列表里拿掉。`supported` 只命名这些上游协议。它不表示每种协议都保留全部能力，也不指定调用方使用哪一个客户端 URL。推导出的 `protocols` 缺失，或者 `preferred` 缺失、非法、或不在 `supported` 中时，该名称不会出现在这份列表里。这个结果不是 Chat Completions。
 
 `reasoning` 与 `reasoningEfforts` 彼此独立。`reasoning` 记录是否支持推理。`reasoningEfforts` 把选择器档位映射到精确的分类 `reasoning_effort` 拼写。同一映射可以原样出现在 Chat Completions 和 Responses 上。它不会变成 Messages 的思考预算或自适应强度。某个 Responses 供应商是否接受历史 Chat 拼写，仍以该后端合约为准。
 
@@ -36,9 +36,9 @@
 }
 ```
 
-上面的数字和 Messages 首选只说明形状，不是某个真实模型的规格。能力记录里有事实时 `status` 为 `declared`，能力记录为空时为 `unknown`。没有合格路由能承载该模型时省略 `protocols`。
+上面的数字和 Messages 首选只说明形状，不是某个真实模型的规格。能力记录里有事实时 `status` 为 `declared`，能力记录为空时为 `unknown`。没有合格承载路由的名称不会进入列表，而不是无 `protocols` 地公布。
 
-DSH 插件要求 `ocg.schemaVersion` 为 2，并且 `protocols.preferred` 出现在 `protocols.supported` 中。它从当前 DSH 运行时加载 `openai-completions`、`openai-responses` 和 `anthropic-messages` 三种 API，并按该模型的首选协议各选一种。DSH 0.2.0-rc.2 与 pi-ai 0.87.1 提供这三种 API。插件包不自带这些库，安装也不按版本允许列表拦截。Chat Completions 与 Responses 保留公布的 `/v1` 基址。Messages 去掉末尾的 `/v1`，并保留部署子路径。Messages 客户端把 Gateway Key 放在 `x-api-key` 中，并带上 `anthropic-version`；插件不改写这些请求头。准备好的调用会在 `prepare` 的等待返回之前，冻结当时为该模型采集的目录元数据。配置缺失或无效的行保留为 `ocg-rejected` 占位，并记入该模型的错误。它不会被注册成可执行的 Chat 模型。
+DSH 插件要求 `ocg.schemaVersion` 为 2，并且 `protocols.preferred` 出现在 `protocols.supported` 中。它从当前 DSH 运行时加载 `openai-completions`、`openai-responses` 和 `anthropic-messages` 三种 API，并按该模型的首选协议各选一种。DSH 0.2.0-rc.2 与 pi-ai 0.87.1 提供这三种 API。插件包不自带这些库，安装也不按版本允许列表拦截。Chat Completions 与 Responses 保留公布的 `/v1` 基址。Messages 去掉末尾的 `/v1`，并保留部署子路径。Messages 客户端把 Gateway Key 放在 `x-api-key` 中，并带上 `anthropic-version`；插件不改写这些请求头。准备好的调用会在 `prepare` 的等待返回之前，冻结当时为该模型采集的目录元数据。配置缺失或无效的行保留为内部 `ocg-rejected` 占位，并记入该模型的错误，以便精确 resolve 与 prepare 仍返回 `INVALID_CONFIG`。它不是可选目录行，也不会被注册成 Chat。混合无效行不会出现在公布列表里；全无效目录是空列表，不会回退成 Chat。
 
 `reasoningEfforts` 把这些精确的分类拼写带到 Chat Completions 和 Responses。`reasoning` 为 true 时，Messages 仍保留原生推理能力。OCG 不从该标志写入 Messages 档位菜单或思考预算：这些拼写不会变成 Messages 的预算或自适应强度。原生 SDK 可以套用自己的预设或默认控件。省去 OCG 菜单并不描述该控件，也不表示供应商接受 SDK 的默认值。在 DSH 插件中，选择目录未声明的 Messages 推理档位是明确的不兼容。`supported` 里列出一种协议，并不因此增加菜单或保证某项能力。某个 Responses 供应商是否接受历史 Chat 拼写，仍以该后端合约为准。例如 `{"low":"low","high":"high","xhigh":"max"}` 只提供 Low、High、Xhigh，并在 Chat Completions 和 Responses 上发送这些分类拼写。未声明档位保持禁用，包括 Off。只有 `reasoning: true` 不会凭空生成可选档位。`off: "none"` 是明确的协议声明，不是自动默认值。
 
@@ -46,7 +46,7 @@ DSH 插件要求 `ocg.schemaVersion` 为 2，并且 `protocols.preferred` 出现
 
 DSH 现有原生接口并不使用所有能力。额外事实保留在 Adapter 模型描述的 `ocg` 字段中，不代表新增了音视频传输、托管工具或任意能力展示页面。最大输出能力不会被写入 `configuredMaxTokens`，因此不会悄悄变成每次请求的默认输出额度。
 
-目录没有已知上下文容量时，插件仍使用有界的内部兼容默认值，但会省略整个公开的 `context` 描述，`ocg.fallbacks` 会标明使用兜底的字段。DSH 要求存在 `context` 时必须包含正整数 `contextWindow`；空对象会导致模型加载失败。已声明的上下文容量继续正常显示。错误元数据仅阻止对应模型解析，不影响其他有效模型。
+目录没有已知上下文容量时，插件仍使用有界的内部兼容默认值，但会省略整个公开的 `context` 描述，`ocg.fallbacks` 会标明使用兜底的字段。DSH 要求存在 `context` 时必须包含正整数 `contextWindow`；空对象会导致模型加载失败。已声明的上下文容量继续正常显示。错误元数据仅阻止对应模型的精确解析，不影响其他有效模型。这些行不会出现在可选列表里。
 
 ## 目录刷新与人工声明
 

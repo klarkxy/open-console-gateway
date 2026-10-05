@@ -8,7 +8,7 @@ These tabs add an **Open Console Gateway** model provider to an existing local c
 
 1. Run the OCG desktop app or native CLI on the same computer and under the same user as the client. Select the client tab and inspect the exact configuration path. The path belongs to the OCG host, which may differ from the computer displaying the dashboard.
 2. For Codex and Kimi, close the client CLI and desktop app before you confirm. These clients do not cooperate with an OCG file lock; do not edit the same file during the operation.
-3. Review the target paths and confirm **Configure**. OCG creates or reuses an enabled ordinary **Key** named `codex`, `kimi-code`, `minimax-code`, or `zcode`, and exports every model returned by authenticated `/v1/models`. There is no separate model selection or capability filter. The Key is written to the client's local configuration with restricted file permissions; the result does not show its value.
+3. Review the target paths and confirm **Configure**. OCG creates or reuses an enabled ordinary **Key** named `codex`, `kimi-code`, `minimax-code`, or `zcode`, and exports every model returned by authenticated `/v1/models`. That response is already the executable published catalog: each row has schemaVersion 2 and a validated derived protocol profile. There is no separate model selection or capability filter. The same strict parser still rejects externally malformed catalog input; this export does not loosen parsing. The Key is written to the client's local configuration with restricted file permissions; the result does not show its value.
 4. Start the client or open a new session, select an OCG model, and send a request. Confirm it in OCG **Logs**. A saved configuration does not prove that the client loaded it or that tools, attachments, and multi-turn conversations work.
 
 The gateway route marker protects opaque native history only when that client forwards it. Codex, Kimi Code, MiniMax Code, and ZCode own their conversation serialization. Their SDK can turn a native opaque field into plain text, or drop it, when the provider, API, or model identity changes. OCG cannot recover a field that never arrives, and it cannot detect that drop. Switching a protocol group or rewriting the client configuration does not migrate an old conversation. Start a new conversation, or send history that has already been resolved, when that identity changes. When marked history does arrive, the same configured route is the bound of the guarantee: a direct change of upstream model, endpoint, or credential version is rejected before HTTP. The DSH plugin is the client that checks a present signed envelope before its base adapter can rewrite it.
@@ -120,9 +120,12 @@ restart it.
 
 The plugin registers **Open Console Gateway** as `ocg` and refreshes the
 authenticated `GET /v1/models` list when DSH asks for models or prepares a
-call. That is the full set of public names currently offered to clients,
-including eligible Custom IDs; it is not the narrower dashboard
-`application-models` list. Model visibility changes therefore do not require
+call. The advertised picker is that executable catalog, including eligible
+Custom IDs; it is not the narrower dashboard `application-models` list.
+Internal `ocg-rejected` placeholders stay off the selectable list so exact
+resolve and prepare can still fail closed. Mixed invalid rows are excluded; an
+all-invalid catalog is empty and does not fall back to Chat. The plugin parser
+stays strict on malformed rows. Model visibility changes therefore do not require
 reinstalling the plugin. Whether a model accepts image attachments in DSH is
 decided entirely by [model metadata](model-metadata.md): only models whose
 catalog discovery or manual declaration lists the `image` input modality are

@@ -163,7 +163,7 @@ the original `-free` ID remains an exact raw pin,
 as described under
 [Zen Free models](routing.md#zen-free-models).
 
-If every model's enable switch is off, that Provider contributes no route. Authenticated downstream `GET /v1/models` publishes only routeable public names. It omits raw-only identities and raw-name conflicts; an ambiguous raw identity fails as `ambiguous_model_id` without an upstream request.
+If every model's enable switch is off, that Provider contributes no route. Authenticated downstream `GET /v1/models` publishes only qualified public names that carry a validated derived protocol profile from the same snapshot used to enrich the row. It omits raw-only identities and raw-name conflicts; an ambiguous raw identity fails as `ambiguous_model_id` without an upstream request.
 
 Each supported model row has a **Test** action. It probes the exact selected saved route with one already authorized ready Key; it does not fall back to another route or account. Models must belong to the current provider catalog, including newly fetched models not yet in a static table. A confirmation warns that the minimal real request may consume quota. The receipt shows success, failure, or skipped state together with its scope, Key, configuration, protocol, and safe upstream detail when supplied. A probe never changes enablement, preference, grants, or route configuration.
 
@@ -182,9 +182,15 @@ ceiling → saved contract → per-model/per-protocol effective state → one lo
 protocol choice before send. That choice is the saved preferred protocol,
 then the client protocol, then the remaining granted protocols. The choice
 does not replace credential or provider retry, and an HTTP 400 does not
-switch protocol. Authenticated `GET /v1/models` and
-protected `GET /dashboard/api/v4/application-models` publish only currently
-routable public names that have an effective enabled protocol. `application-models` lists Go names that resolve in the saved catalog and have an enabled protocol. It does not consult a price snapshot and excludes Custom.
+switch protocol. Authenticated `GET /v1/models` publishes currently qualified
+public names that carry a validated derived protocol profile: the destination
+and model are enabled, the name resolves to that mapping, and a credential is
+enabled, ready, and binding-enabled, allows the model, has a Key when the
+route requires one, and holds the endpoint grant. Catalog enablement alone is
+not enough. Cooldown, a probe flag, and auth-error history do not omit a
+usable profile. Protected `GET /dashboard/api/v4/application-models` lists Go
+names that resolve in the saved catalog and have an enabled protocol. It does
+not consult a price snapshot and excludes Custom.
 
 ---
 
