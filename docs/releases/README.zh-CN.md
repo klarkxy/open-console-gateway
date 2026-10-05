@@ -4,13 +4,11 @@
 
 按版本记录的升级、变更与验证说明。每条都会写明该版本是否需要数据库迁移、改了什么，以及实际验证过什么。升级、备份与回退的步骤统一写在[升级与备份指南](../user/upgrade-backup.zh-CN.md)，不在每个版本里重复。
 
-已发布版本是 **2.8.0**。安装包与镜像发布在 [GitHub Releases 页面](https://github.com/klarkxy/open-console-gateway/releases/latest)。
-
-**2.9.0** 是发布候选，本地验收已完成；等待 main Quality 及发布。
+当前版本是 **2.9.0**。安装包与镜像发布在 [GitHub Releases 页面](https://github.com/klarkxy/open-console-gateway/releases/latest)。
 
 | 版本 | 说明 | Schema |
 | --- | --- | --- |
-| 2.9.0 | [English](v2.9.0.md) · [简体中文](v2.9.0.zh-CN.md) | 无迁移（保持 v66）；发布候选，本地验收已完成 |
+| 2.9.0 | [English](v2.9.0.md) · [简体中文](v2.9.0.zh-CN.md) | 无迁移（保持 v66） |
 | 2.8.0 | [English](v2.8.0.md) · [简体中文](v2.8.0.zh-CN.md) | 由 v64 迁移到 v66 |
 | 2.7.0 | [English](v2.7.0.md) · [简体中文](v2.7.0.zh-CN.md) | 无迁移（保持 v64） |
 | 2.6.4 | [English](v2.6.4.md) · [简体中文](v2.6.4.zh-CN.md) | 迁移到 v64 |

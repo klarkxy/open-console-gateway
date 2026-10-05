@@ -4,13 +4,11 @@
 
 Per-version upgrade, change, and verification notes. Each entry states whether the release needs a database migration, what changed, and what was actually verified. Upgrading, backing up, and rolling back are covered once in the [upgrade and backup guide](../user/upgrade-backup.md) rather than repeated per version.
 
-The published version is **2.8.0**. Installers and images are published on the [GitHub Releases page](https://github.com/klarkxy/open-console-gateway/releases/latest).
-
-**2.9.0** is a release candidate. Local acceptance is complete; main Quality and publication remain.
+The current version is **2.9.0**. Installers and images are published on the [GitHub Releases page](https://github.com/klarkxy/open-console-gateway/releases/latest).
 
 | Version | Notes | Schema |
 | --- | --- | --- |
-| 2.9.0 | [English](v2.9.0.md) · [简体中文](v2.9.0.zh-CN.md) | No migration (stays v66); candidate, local acceptance done |
+| 2.9.0 | [English](v2.9.0.md) · [简体中文](v2.9.0.zh-CN.md) | No migration (stays v66) |
 | 2.8.0 | [English](v2.8.0.md) · [简体中文](v2.8.0.zh-CN.md) | Migrates v64 → v66 |
 | 2.7.0 | [English](v2.7.0.md) · [简体中文](v2.7.0.zh-CN.md) | No migration (stays v64) |
 | 2.6.4 | [English](v2.6.4.md) · [简体中文](v2.6.4.zh-CN.md) | Migrates to v64 |
