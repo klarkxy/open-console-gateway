@@ -4,7 +4,6 @@ import type {
   CpaModel,
   CpaOAuthProvider,
   CpaRuntime,
-  CpaRuntimeCheck,
   CpaRuntimeKey,
   CpaRuntimePhase,
 } from "../api/generated/dashboard-v3.ts";
@@ -13,8 +12,8 @@ import type { MessageKey } from "../i18n/index.ts";
 /**
  * Pure state helpers for the CPA page. The external connection and the managed
  * installation are mutually exclusive modes derived from the integration flag
- * plus the runtime snapshot; every lifecycle control decision is a pure
- * function of (runtime, busy, last update check) so the view stays declarative.
+ * plus the runtime snapshot. Lifecycle eligibility comes from the server;
+ * this module applies local request gating and presentation only.
  */
 
 export type CpaRuntimeMode = "external" | "managed" | "unsupported";
@@ -55,18 +54,11 @@ export function cpaRuntimeMode(
   return managedSupported ? "managed" : "external";
 }
 
-/** A fresh supported host may install; an installed runtime must be OCG-owned. */
-function cpaRuntimeLifecycleEditable(
-  runtime: Pick<CpaRuntime, "supported" | "owned" | "installed"> | null,
-): boolean {
-  return !!runtime && runtime.supported && (!runtime.installed || runtime.owned);
-}
-
 /** The Client Keys section exists only for an owned, installed managed runtime. */
 export function cpaClientKeysAvailable(
-  runtime: Pick<CpaRuntime, "supported" | "owned" | "installed"> | null,
+  runtime: Pick<CpaRuntime, "clientKeysAvailable"> | null,
 ): boolean {
-  return !!runtime && runtime.supported && runtime.owned && runtime.installed;
+  return runtime?.clientKeysAvailable === true;
 }
 
 /** Non-terminal phases reported while a lifecycle operation is in flight. */
@@ -185,8 +177,6 @@ export type CpaRuntimeControlState = {
   runtime: CpaRuntime | null;
   /** A lifecycle request is in flight from this client. */
   busy: boolean;
-  /** Result of the last explicit check-update, if any. */
-  updateCheck: CpaRuntimeCheck | null;
 };
 
 const ALL_DISABLED: Record<CpaRuntimeAction, boolean> = {
@@ -200,31 +190,19 @@ const ALL_DISABLED: Record<CpaRuntimeAction, boolean> = {
 };
 
 /**
- * Control-availability matrix. Everything is disabled while any operation is
- * in flight (local request or a busy backend phase), on unsupported runtimes,
- * and on runtimes OCG does not own. `update` additionally requires a fresh check that
- * reported an available version, because its `expectedVersion` comes from it.
+ * Server eligibility with local request gating. A stale local update-check
+ * result never overrides the current runtime's actions.
  */
 export function cpaRuntimeControls(state: CpaRuntimeControlState): Record<CpaRuntimeAction, boolean> {
-  const { runtime, busy, updateCheck } = state;
-  if (!runtime || busy || isCpaPhaseBusy(runtime.phase)) return { ...ALL_DISABLED };
-  if (!cpaRuntimeLifecycleEditable(runtime)) return { ...ALL_DISABLED };
-  return {
-    install: !runtime.installed,
-    start: runtime.installed && !runtime.running,
-    stop: runtime.installed && (runtime.running || runtime.desiredRunning),
-    checkUpdate: true,
-    update: runtime.installed && updateCheck?.updateAvailable === true,
-    rollback: runtime.installed && !!runtime.previousVersion,
-    remove: runtime.installed,
-  };
+  const { runtime, busy } = state;
+  return !runtime || busy ? { ...ALL_DISABLED } : { ...runtime.actions };
 }
 
 /** Owned install with persisted run intent will restore on the next OCG process start. */
 export function cpaStartupRestorePending(
-  runtime: Pick<CpaRuntime, "installed" | "owned" | "desiredRunning"> | null,
+  runtime: Pick<CpaRuntime, "startupRestorePending"> | null,
 ): boolean {
-  return !!runtime && runtime.installed && runtime.owned && runtime.desiredRunning;
+  return runtime?.startupRestorePending === true;
 }
 
 /** Client-side bound for the rendered log tail; the backend tail is bounded too. */

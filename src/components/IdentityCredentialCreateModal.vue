@@ -121,7 +121,6 @@ import type { Connection } from "../api/connections.ts";
 import type { IdentityCredentialCreateInput } from "../api/identities.ts";
 import {
   buildCreatePayload,
-  connectionAllowsIdentityCredentialCreate,
   createPayloadSignature,
   credentialEditorIssueKey,
   emptyCreateDraft,
@@ -161,7 +160,7 @@ const creditPresets = computed(() => supportedConnections.value.find(row => row.
 watch(() => draft.value.connectionId, () => { creditSetup.value = { input: null, valid: !creditPresets.value?.length }; }, { flush: "sync" });
 
 const supportedConnections = computed(() => (
-  props.connections.filter(connectionAllowsIdentityCredentialCreate)
+  props.connections
 ));
 
 const connectionOptions = computed(() => {

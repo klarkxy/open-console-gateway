@@ -122,6 +122,10 @@ function integration(overrides: Record<string, unknown> = {}) {
 
 function runtime(overrides: Record<string, unknown> = {}) {
   return {
+    actions: { install: false, start: true, stop: false, checkUpdate: true, update: false, rollback: false, remove: true },
+    clientKeysAvailable: true,
+    codexDeviceLoginAvailable: overrides.running === true,
+    startupRestorePending: false,
     assetSha256: null, baseUrl: "http://127.0.0.1:8317", currentOperation: null, currentVersion: "1.0.0",
     error: null, installed: true, latestVersion: null, owned: true, phase: "idle", port: 8317,
     previousVersion: null, processGeneration: 1, revision: 1, running: false, desiredRunning: false, supported: true,
@@ -459,6 +463,20 @@ function managedRunningApi(overrides: CpaApi): CpaApi {
 function copiedCode(): { target: string; value: string } | undefined {
   return (globalThis as { __cpaCopied?: { target: string; value: string } }).__cpaCopied;
 }
+
+test("the server can deny device login while managed process facts remain running", async () => {
+  let starts = 0;
+  const mounted = await mount(managedRunningApi({
+    getCpaRuntime: async () => runtime({ running: true, codexDeviceLoginAvailable: false }),
+    startCpaOAuth: async () => { starts += 1; return {}; },
+  }));
+  try {
+    const device = button(mounted.root, "Codex 设备码登录");
+    assert.equal(device.props.disabled, true);
+    await (device.props.onClick as () => Promise<void>)();
+    assert.equal(starts, 0);
+  } finally { mounted.app.unmount(); }
+});
 
 test("Codex browser and device buttons send the matching startCpaOAuth payload", async () => {
   const starts: unknown[] = [];

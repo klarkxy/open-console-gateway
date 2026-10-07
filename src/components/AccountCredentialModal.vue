@@ -154,8 +154,6 @@ import {
   buildRotatePayload,
   credentialEditorIssueKey,
   emptyRotateDraft,
-  staleSavedEndpointIds,
-  staleSavedOrigins,
   type BindingDestinationOption,
   type CredentialBindingDraft,
   type CredentialEditorMode,
@@ -169,6 +167,9 @@ const props = defineProps<{
   mode: CredentialEditorMode;
   binding: IdentityBinding | null;
   connection: Connection | null;
+  grantedEndpointIds: readonly string[];
+  staleEndpointIds: readonly string[];
+  staleOrigins: readonly string[];
   unsupportedReason: MessageKey | null;
   busy: boolean;
 }>();
@@ -190,8 +191,8 @@ const title = computed(() => (
 
 const endpoints = computed(() => props.connection?.endpoints ?? []);
 const destinationOptions = computed(() => bindingDestinationOptions(endpoints.value));
-const staleOrigins = computed(() => staleSavedOrigins(props.binding, endpoints.value));
-const staleEndpointIds = computed(() => staleSavedEndpointIds(props.binding, endpoints.value));
+const staleOrigins = computed(() => props.staleOrigins);
+const staleEndpointIds = computed(() => props.staleEndpointIds);
 
 const canSubmit = computed(() => {
   if (props.mode === "rotate") return rotateDraft.value.secret.trim().length > 0;
@@ -214,7 +215,7 @@ function clearSecrets(): void {
 function hydrate(): void {
   formError.value = "";
   rotateDraft.value = emptyRotateDraft();
-  bindingDraft.value = bindingDraftFrom(props.binding, endpoints.value);
+  bindingDraft.value = bindingDraftFrom(props.binding, props.grantedEndpointIds);
 }
 
 function setVisible(show: boolean): void {

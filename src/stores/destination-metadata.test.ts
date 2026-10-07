@@ -61,6 +61,7 @@ test("model metadata: only the latest load commits per destination", async () =>
   const store = useDestinationsStore();
 
   const first = store.loadModelMetadata("dest-a");
+  store.invalidateReads();
   const second = store.loadModelMetadata("dest-a");
   await waitForCalls(calls, 2);
   assert.ok(calls.every((call) => call.url.endsWith("/destinations/dest-a/model-metadata") && call.method === "GET"));
@@ -181,6 +182,7 @@ test("model metadata: only the latest aggregate load commits", async () => {
   const store = useDestinationsStore();
 
   const first = store.loadAllModelMetadata();
+  store.invalidateReads();
   const second = store.loadAllModelMetadata();
   await waitForCalls(calls, 2);
 
@@ -197,4 +199,92 @@ test("model metadata: only the latest aggregate load commits", async () => {
   });
   await first;
   assert.deepEqual(Object.keys(store.modelMetadata), ["dest-b"]);
+});
+
+test("model metadata: aggregate singleflight seeds individual freshness and removes departed entries", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore();
+  const calls = installDeferredFetch();
+  const store = useDestinationsStore();
+  const first = store.loadAllModelMetadata();
+  const joined = store.loadAllModelMetadata();
+  await waitForCalls(calls, 1);
+  calls[0]!.resolve({
+    destinations: [metadataBody("dest-a", 7, { contextWindow: 32000 }, "operator")],
+    revision: { revision: 7, processGeneration: 99 },
+  });
+  await Promise.all([first, joined]);
+  const cached = await store.loadModelMetadata("dest-a", { maxAgeMs: 15_000 });
+  assert.equal(cached.destination_id, "dest-a");
+  assert.equal(calls.length, 1);
+  const reload = store.loadAllModelMetadata();
+  await waitForCalls(calls, 2);
+  calls[1]!.resolve({ destinations: [], revision: { revision: 8, processGeneration: 99 } });
+  await reload;
+  const departed = store.loadModelMetadata("dest-a", { maxAgeMs: 15_000 });
+  await waitForCalls(calls, 3);
+  calls[2]!.resolve(metadataBody("dest-a", 8, { contextWindow: 64000 }, "operator"));
+  assert.equal((await departed).models[0]?.metadata.context_window, 64000);
+  store.clear();
+});
+
+test("model metadata: an older aggregate cannot overwrite a newer individual snapshot", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore();
+  const calls = installDeferredFetch();
+  const store = useDestinationsStore();
+  const aggregate = store.loadAllModelMetadata();
+  const individual = store.loadModelMetadata("dest-a");
+  await waitForCalls(calls, 2);
+  calls[1]!.resolve(metadataBody("dest-a", 8, { contextWindow: 64000 }, "operator"));
+  await individual;
+  calls[0]!.resolve({
+    destinations: [metadataBody("dest-a", 7, { contextWindow: 32000 }, "operator")],
+    revision: { revision: 7, processGeneration: 99 },
+  });
+  await aggregate;
+  assert.equal(store.modelMetadata["dest-a"]?.models[0]?.metadata.context_window, 64000);
+  store.clear();
+});
+
+test("model metadata: an aggregate supersedes older individual reads and their freshness", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore();
+  const calls = installDeferredFetch();
+  const store = useDestinationsStore();
+  const individual = store.loadModelMetadata("dest-a");
+  const aggregate = store.loadAllModelMetadata();
+  await waitForCalls(calls, 2);
+  calls[1]!.resolve({
+    destinations: [metadataBody("dest-a", 8, { contextWindow: 64000 }, "operator")],
+    revision: { revision: 8, processGeneration: 99 },
+  });
+  await aggregate;
+  calls[0]!.resolve(metadataBody("dest-a", 7, { contextWindow: 32000 }, "operator"));
+  await individual;
+  assert.equal(store.modelMetadata["dest-a"]?.models[0]?.metadata.context_window, 64000);
+  assert.equal(store.modelMetadataLoading["dest-a"], undefined);
+  await store.loadModelMetadata("dest-a", { maxAgeMs: 15_000 });
+  assert.equal(calls.length, 2);
+  store.clear();
+});
+
+test("model metadata: a declaration receipt invalidates reads started while the write was pending", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore();
+  const calls = installDeferredFetch();
+  const store = useDestinationsStore();
+  const write = store.declareModelMetadata("dest-a", "model-a", { contextWindow: 64000 }, { expectedRevision: 7, processGeneration: 99 });
+  const read = store.loadModelMetadata("dest-a");
+  await waitForCalls(calls, 2);
+  calls[0]!.resolve(metadataBody("dest-a", 8, { contextWindow: 64000 }, "operator"));
+  await write;
+  calls[1]!.resolve(metadataBody("dest-a", 7, { contextWindow: 32000 }, "operator"));
+  await read;
+  assert.equal(store.modelMetadata["dest-a"]?.models[0]?.metadata.context_window, 64000);
+  const recovery = store.loadModelMetadata("dest-a", { maxAgeMs: 15_000 });
+  await waitForCalls(calls, 3);
+  calls[2]!.resolve(metadataBody("dest-a", 8, { contextWindow: 64000 }, "operator"));
+  await recovery;
+  store.clear();
 });

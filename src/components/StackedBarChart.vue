@@ -137,14 +137,16 @@
 
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onBeforeUnmount, useId } from "vue";
-import type { DailyModelTokens } from "../api/dashboard";
+import type { DashboardChartDay, DashboardModelTotal } from "../api/pages.ts";
 import { CHART_PALETTE } from "../theme";
 import { locale, t } from "../i18n/index.ts";
 import { formatTokens } from "../utils/format.ts";
 
 const props = withDefaults(defineProps<{
-  data: DailyModelTokens[];
-  days?: number; // 实际展示的天数(用于补零)
+  series: DashboardChartDay[];
+  modelTotals: DashboardModelTotal[];
+  totalTokens: number;
+  days?: number;
 }>(), {
   days: 30,
 });
@@ -207,49 +209,21 @@ function formatChartDate(value: string, short = false): string {
   return chartDateFormatter(locale.value, short).format(date);
 }
 
-// --- 数据处理:按日期补零,得到连续的日期序列 ---
-function padZeroDates(rows: DailyModelTokens[], days: number) {
-  const map = new Map<string, Map<string, number>>();
-  for (const r of rows) {
-    if (!map.has(r.date)) map.set(r.date, new Map());
-    const m = map.get(r.date)!;
-    m.set(r.model, (m.get(r.model) ?? 0) + r.tokens);
-  }
-  // 生成最近 `days` 天的日期(UTC),缺失的天用空 map 填充
-  const today = new Date();
-  const dates: { date: string; models: Map<string, number>; total: number }[] = [];
-  for (let i = days - 1; i >= 0; i--) {
-    const d = new Date(today);
-    d.setUTCDate(today.getUTCDate() - i);
-    const ds = d.toISOString().slice(0, 10);
-    const models = map.get(ds) ?? new Map<string, number>();
-    let total = 0;
-    models.forEach((v) => (total += v));
-    dates.push({ date: ds, models, total });
-  }
-  return dates;
-}
-
-// 模型稳定排序(按总量 desc),保证图例顺序稳定
-const sortedModels = computed(() => {
-  const totals = new Map<string, number>();
-  for (const r of props.data) {
-    totals.set(r.model, (totals.get(r.model) ?? 0) + r.tokens);
-  }
-  return [...totals.keys()].sort((a, b) => (totals.get(b)! - totals.get(a)!));
-});
+// The backend owns UTC reporting dates, totals, and series order.
+const sortedModels = computed(() => props.modelTotals.map(row => row.model));
 
 // Palette index per model. The previous `models.indexOf(model)` lookups ran
 // inside the per-bar and per-tooltip-row loops, so a recompute driven by the
 // ResizeObserver width was O(models²) per bar instead of O(models).
 const modelIndex = computed(() => new Map(sortedModels.value.map((model, i) => [model, i])));
 
-const dates = computed(() => padZeroDates(props.data, props.days));
+const dates = computed(() => props.series.map(day => ({ date: day.date,
+  total: day.totalTokens, rows: day.models, models: new Map(day.models.map(row => [row.model, row.tokens])),
+})));
 
-const totalTokens = computed(() => dates.value.reduce((sum, date) => sum + date.total, 0));
 const chartDescription = computed(() => [
   t("模型：{count}", { count: sortedModels.value.length }),
-  `${t("{days} 天合计", { days: props.days })} ${formatTokens(totalTokens.value)}`,
+  `${t("{days} 天合计", { days: props.days })} ${formatTokens(props.totalTokens)}`,
 ].join(t("；")));
 
 const chartW = computed(() => Math.max(0, width.value - padL - padR));
@@ -350,11 +324,8 @@ const xLabels = computed(() => {
 function tooltipRows(bi: number) {
   const d = dates.value[bi];
   if (!d) return [];
-  const models = sortedModels.value;
-  return models
-    .map((model) => ({ model, tokens: d.models.get(model) ?? 0 }))
+  return d.rows
     .filter((row) => row.tokens > 0)
-    .sort((a, b) => b.tokens - a.tokens)
     .map((row) => ({ ...row, color: modelColor(row.model) }));
 }
 

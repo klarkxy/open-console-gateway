@@ -59,6 +59,7 @@ async function waitForCalls(calls: DeferredCall[], count: number): Promise<void>
 
 function destinationDto(id: string, name = id): DestinationDto {
   return {
+    presentation: null,
     accountControls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false },
     adapter: "http",
     authScheme: "bearer",
@@ -536,6 +537,7 @@ test("explain caches per model+protocol and only the latest request commits", as
   assert.equal(key, "chat_completions lab-opus");
 
   const first = store.explainRouting("Lab-Opus", "chat_completions");
+  store.invalidateReads();
   const second = store.explainRouting("lab-opus", "chat_completions");
   await waitForCalls(calls, 3);
   assert.ok(calls[1]!.url.includes("/routing/explain?"));

@@ -8,7 +8,7 @@
     </p>
     <template v-for="limit in limits" :key="limit.key">
       <div
-        v-if="!isUsageLimitReached(account, limit.key, now)"
+        v-if="limit.editable"
         class="usage-editor-row"
       >
         <div class="usage-editor-label">
@@ -124,7 +124,6 @@
 import { NInputNumber, NSlider } from "naive-ui";
 import type { Account, UsageWindow } from "../api/dashboard";
 import {
-  isUsageLimitReached,
   resetsFirstFieldMax,
   resetsFirstFieldValue,
   resetsSecondFieldMax,

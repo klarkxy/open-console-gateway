@@ -4,9 +4,9 @@
       <div class="connection-content">
         <div class="connection-head">
           <h2 id="connection-title">{{ t("接入中心") }}</h2>
-          <span class="ready-mark" :class="{ 'not-ready': summaryLoaded && !summary.gateway_running, pending: !summaryLoaded }" role="status">
+          <span class="ready-mark" :class="{ 'not-ready': summaryLoaded && !summary.gatewayRunning, pending: !summaryLoaded }" role="status">
             <span aria-hidden="true" />
-            {{ !summaryLoaded ? t("加载中…") : summary.gateway_running ? t("就绪") : t("服务未就绪") }}
+            {{ !summaryLoaded ? t("加载中…") : summary.gatewayRunning ? t("就绪") : t("服务未就绪") }}
           </span>
         </div>
         <div class="connection-rows">
@@ -100,7 +100,7 @@
     <n-alert v-if="dashboardError" type="error" :title="t('仪表盘数据加载失败')"><n-button size="small" secondary :loading="loading" :disabled="refreshingKey" @click="loadDashboard">{{ t("重试") }}</n-button></n-alert>
     <section class="card attention-card" :aria-label="t('需要关注')" :aria-busy="!accountsLoaded">
       <div class="card-head">
-        <div><h3 class="card-title">{{ t("需要关注") }}</h3><span v-if="accountsLoaded && attentionItems.length === 0" class="card-desc">{{ t("所有账号状态正常") }}</span><span v-else-if="accountsLoaded" class="card-desc">{{ attentionDesc }}</span></div>
+        <div><h3 class="card-title">{{ t("需要关注") }}</h3><span v-if="accountsLoaded && attentionReadComplete && attentionItems.length === 0" class="card-desc">{{ t("所有账号状态正常") }}</span><span v-else-if="accountsLoaded && attentionItems.length > 0" class="card-desc">{{ attentionDesc }}</span></div>
         <n-button v-if="accountsLoaded && attentionItems.length > 0" size="small" @click="goToAccounts">{{ t("去处理") }}</n-button>
       </div>
       <div v-if="!accountsLoaded" class="section-state">{{ loading ? t("加载中…") : t("仪表盘数据加载失败") }}</div>
@@ -115,77 +115,66 @@
         <div><h3 class="card-title">{{ t("每日 Token 消耗") }}</h3></div>
         <div v-if="tokensLoaded" class="chart-stats" role="group" :aria-label="t('图表摘要')">
           <span>{{ t("模型：{count}", { count: formatNumber(legendModels.length) }) }}</span>
-          <span><b>{{ formatTokens(totalChartTokens) }}</b> {{ t("{days} 天合计", { days: 30 }) }}</span>
-          <span><b>{{ formatTokens(Math.round(totalChartTokens / 30)) }}</b> {{ t("日均") }}</span>
+          <span><b>{{ formatTokens(totalChartTokens) }}</b> {{ t("{days} 天合计", { days: chartDays }) }}</span>
+          <span><b>{{ formatTokens(dailyAverageTokens) }}</b> {{ t("日均") }}</span>
         </div>
       </div>
       <div v-if="tokensLoaded" class="legend" role="list" :aria-label="t('模型图例')"><span v-for="model in legendModels" :key="model.model" class="legend-item" role="listitem"><span class="legend-dot" :style="{ background: model.color }" aria-hidden="true" />{{ model.model }}</span></div>
       <n-spin :show="loading && !tokensLoaded">
         <div v-if="!tokensLoaded" class="section-state">{{ loading ? t("加载中…") : t("仪表盘数据加载失败") }}</div>
         <n-empty v-else-if="totalChartTokens === 0" :description="t('暂无 Token 消耗数据')" />
-        <StackedBarChart v-else :data="dailyTokens" :days="30" />
+        <StackedBarChart v-else :series="chartSeries" :model-totals="modelTotals" :total-tokens="totalChartTokens" :days="chartDays" />
       </n-spin>
     </section>
   </div>
 </template>
 
 <script setup lang="ts">
-import { useDestinationsStore } from "../stores/destinations.ts";
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
 import { NAlert, NButton, NEmpty, NIcon, NPopconfirm, NSpin, NTag, useMessage } from "naive-ui";
 import { ApiOutlined, CheckOutlined, CopyOutlined, DownOutlined, KeyOutlined, ReloadOutlined, UnorderedListOutlined } from "@vicons/antd";
 import StackedBarChart from "../components/StackedBarChart.vue";
 import OcgPopover from "../components/ocg/OcgPopover.vue";
 import OcgTooltip from "../components/ocg/OcgTooltip.vue";
-import { PRIMARY_KEY_ID, dashboardApi } from "../api/dashboard";
-import { useAccountsStore } from "../stores/accounts.ts";
+import { PRIMARY_KEY_ID } from "../api/dashboard";
+import { useDashboardPageStore } from "../stores/dashboardPage.ts";
 import { useConnectionStore } from "../stores/connection.ts";
-import { useProvidersStore } from "../stores/providers.ts";
 import { useSessionStore } from "../stores/session.ts";
-import type { Account, ConnectionInfo, DailyModelTokens, DashboardSummary } from "../api/dashboard";
+import type { ConnectionInfo } from "../api/dashboard";
 import { CHART_PALETTE } from "../theme";
 import { t } from "../i18n/index.ts";
 import { formatNumber, formatTokens, useClipboard } from "../utils/format.ts";
-import { accountExpiry } from "../domain/account-display.ts";
-import { accountExpiryText } from "./account-status-text.ts";
 import { maskConnectionKey, resolveConnectionUrls } from "./dashboard-connection";
-import { buildNeedsAttention } from "./dashboard-attention.ts";
-import type { AttentionItem, AttentionReason } from "./dashboard-attention.ts";
+import { ATTENTION_REASON_KEYS, attentionTagType, type AttentionItem } from "./dashboard-attention.ts";
 
 type ConnectionTarget = "api" | "key" | "upstream";
 interface SwitcherKey { id: string; name: string; value: string }
 const emit = defineEmits<{ navigate: [view: string] }>();
 const message = useMessage();
-const accountsStore = useAccountsStore();
+const dashboardStore = useDashboardPageStore();
 const connectionStore = useConnectionStore();
-const providersStore = useProvidersStore();
-const destinationsStore = useDestinationsStore();
 const sessionStore = useSessionStore();
-watch(() => sessionStore.authenticated, (ok) => { if (!ok) dashboardLoadedAt = 0; });
 const { copiedTarget, copy, cleanup } = useClipboard();
 const characterImage = new URL("../../assets/opencode-mascot-sm.webp", import.meta.url).href;
-const accounts = computed(() => accountsStore.accounts);
-const dailyTokens = ref<DailyModelTokens[]>([]);
-const loading = ref(true);
-const accountsLoaded = computed(() => accountsStore.loaded);
+const chartSeries = computed(() => dashboardStore.page?.chartSeries ?? []);
+const modelTotals = computed(() => dashboardStore.page?.modelTotals ?? []);
+const loading = computed(() => dashboardStore.loading);
+const accountsLoaded = computed(() => dashboardStore.page !== null);
 // Once loaded, revalidations keep the existing content rendered.
-const summaryLoaded = ref(false);
-const tokensLoaded = ref(false);
-const dashboardError = ref(false);
+const summaryLoaded = accountsLoaded;
+const tokensLoaded = accountsLoaded;
+const dashboardError = computed(() => Boolean(dashboardStore.error) || Boolean(dashboardStore.page?.errors.length));
 const refreshingKey = ref(false);
 const connectionReadLoading = ref(false);
 let connectionReadGeneration = 0;
-const lifecycleNow = ref(Date.now());
 const EMPTY_CONNECTION: ConnectionInfo = { gateway_port: 9042, client_root_url: "", primary_key: "", sub_keys: [], revision: 0 };
 const serviceConfig = computed(() => connectionStore.info ?? EMPTY_CONNECTION);
 const selectedKeyId = ref("");
-const summary = ref<DashboardSummary>({ total_accounts: 0, available_accounts: 0, today_cost: 0, week_cost: 0, month_cost: 0, gateway_running: false });
-const legendModels = computed(() => {
-  const totals = new Map<string, number>();
-  for (const row of dailyTokens.value) totals.set(row.model, (totals.get(row.model) ?? 0) + row.tokens);
-  return [...totals.keys()].sort((a, b) => totals.get(b)! - totals.get(a)!).map((model, index) => ({ model, color: CHART_PALETTE[index % CHART_PALETTE.length] }));
-});
-const totalChartTokens = computed(() => dailyTokens.value.reduce((sum, row) => sum + row.tokens, 0));
+const summary = computed(() => dashboardStore.page?.summary ?? { gatewayRunning: false });
+const legendModels = computed(() => modelTotals.value.map((row, index) => ({ model: row.model, color: CHART_PALETTE[index % CHART_PALETTE.length] })));
+const totalChartTokens = computed(() => dashboardStore.page?.totalTokens ?? 0);
+const dailyAverageTokens = computed(() => dashboardStore.page?.dailyAverageTokens ?? 0);
+const chartDays = computed(() => dashboardStore.page?.chartDays ?? 30);
 /** A loaded key with no cached secret is unknown plaintext, not an unconfigured key. */
 function presentConnectionKey(value: string): string {
   if (!value && connectionStore.info) return t("未知");
@@ -212,26 +201,16 @@ const connectionUrls = computed(() => {
   catch { return resolveConnectionUrls("", window.location.origin, serviceConfig.value.gateway_port, import.meta.env.DEV); }
 });
 const serviceApiUrl = computed(() => connectionUrls.value.apiBaseUrl);
-const attentionItems = computed<AttentionItem[]>(() => {
-  if (!accountsLoaded.value) return [];
-  return buildNeedsAttention(accounts.value, lifecycleNow.value, providersStore.catalog, destinationsStore.destinationForAccount);
-});
+const attentionItems = computed(() => dashboardStore.page?.attentionItems ?? []);
+const attentionReadComplete = computed(() => !dashboardStore.page?.errors.some(issue => issue.resource === "account"));
 const attentionDesc = computed(() => {
   if (!accountsLoaded.value) return t("加载中…");
-  const count = attentionItems.value.length;
+  const count = dashboardStore.page?.attentionTotal ?? 0;
+  if (count > attentionItems.value.length) return t("已显示 {shown} 个，共 {total} 个账号", { shown: formatNumber(attentionItems.value.length), total: formatNumber(count) });
   return count > 0 ? t("账号数：{count}", { count: formatNumber(count) }) : t("所有账号状态正常");
 });
-function attentionAccount(item: AttentionItem): Account | undefined { return accounts.value.find((account) => account.id === item.accountId); }
 function attentionLabel(item: AttentionItem): string {
-  switch (item.reason) {
-    case "auth-error": return t("不可用");
-    case "expired": { const account = attentionAccount(item); return account ? accountExpiryText(accountExpiry(account, lifecycleNow.value)) : t("已到期 {days} 天", { days: 0 }); }
-    case "cooling": return t("冷却中");
-    case "setup-incomplete": return t("注册中");
-  }
-}
-function attentionTagType(reason: AttentionReason): "error" | "warning" | "info" | "default" {
-  switch (reason) { case "auth-error": case "expired": return "error"; case "cooling": return "warning"; case "setup-incomplete": return "info"; }
+  return t(ATTENTION_REASON_KEYS[item.reason], { days: item.expiredDays ?? 0 });
 }
 function attentionItemAriaLabel(item: AttentionItem): string { return `${item.accountName} · ${attentionLabel(item)}`; }
 async function copyConnection(target: ConnectionTarget, value: string, label: string) {
@@ -249,7 +228,7 @@ function dashboardKeyCurrent(flow: number, connectionEpoch: number | null, shell
 }
 async function regenerateKey() {
   const target = selectedKey.value;
-  if (refreshingKey.value || dashboardRequestActive || !target) return;
+  if (refreshingKey.value || loading.value || !target) return;
   const flow = ++keyFlow;
   const connectionEpoch = typeof connectionStore.currentSession === "function" ? connectionStore.currentSession() : null;
   const shellEpoch = typeof sessionStore.sessionEpoch === "number" ? sessionStore.sessionEpoch : undefined;
@@ -283,55 +262,48 @@ async function reloadConnection(): Promise<void> {
 }
 function goToAccounts() { emit("navigate", "accounts"); }
 function goToKeys() { emit("navigate", "keys"); }
-let dashboardRequestActive = false;
-let dashboardLoadedAt = 0;
-// Activation refreshes skip data loaded recently; a failed load never updates
-// the timestamp, so the next activation retries.
-const ACTIVATED_REFRESH_FRESHNESS_MS = 30_000;
-async function loadDashboard() {
-  if (dashboardRequestActive || refreshingKey.value) return;
-  dashboardRequestActive = true;
-  loading.value = true;
-  dashboardError.value = false;
-  const loadedAccounts = accountsStore.loadPresented();
-  const connection = connectionStore.load();
-  const loadedSummary = dashboardApi.getDashboardSummary().then((value) => {
-    summary.value = value;
-    summaryLoaded.value = true;
-    return value;
-  });
-  const tokens = dashboardApi.getDailyTokensByModel(30).then((value) => {
-    dailyTokens.value = value;
-    tokensLoaded.value = true;
-    return value;
-  });
-  const catalog = providersStore.loadCatalog();
-  const destinations = destinationsStore.load();
-  const results = await Promise.allSettled([loadedAccounts, connection, loadedSummary, tokens, catalog, destinations]);
-  dashboardError.value = results.some((result) => result.status === "rejected");
-  if (!dashboardError.value) dashboardLoadedAt = Date.now();
-  if (dashboardError.value) message.error(t("部分仪表盘数据加载失败"));
-  loading.value = false;
-  dashboardRequestActive = false;
+const ACTIVATED_REFRESH_FRESHNESS_MS = 15_000;
+let active = false;
+let refreshTimer: number | undefined;
+function stopRefreshTimer(): void {
+  if (refreshTimer !== undefined) { window.clearTimeout(refreshTimer); refreshTimer = undefined; }
 }
-function refreshWhenVisible() { if (document.visibilityState === "visible") void loadDashboard(); }
-let lifecycleClock: number | undefined;
-let activatedOnce = false;
-function startLifecycleClock() { if (lifecycleClock === undefined) lifecycleClock = window.setInterval(() => { lifecycleNow.value = Date.now(); }, 60_000); }
-function stopLifecycleClock() { if (lifecycleClock !== undefined) { window.clearInterval(lifecycleClock); lifecycleClock = undefined; } }
-function bindVisibilityRefresh() { document.addEventListener("visibilitychange", refreshWhenVisible); }
-function unbindVisibilityRefresh() { document.removeEventListener("visibilitychange", refreshWhenVisible); }
-onMounted(() => { bindVisibilityRefresh(); void loadDashboard(); });
-onActivated(() => {
-  bindVisibilityRefresh(); startLifecycleClock();
-  if (activatedOnce) {
-    if (Date.now() - dashboardLoadedAt >= ACTIVATED_REFRESH_FRESHNESS_MS) void loadDashboard();
-  } else {
-    activatedOnce = true;
-  }
-});
-onDeactivated(() => { stopLifecycleClock(); unbindVisibilityRefresh(); });
-onUnmounted(() => { cleanup(); stopLifecycleClock(); unbindVisibilityRefresh(); });
+function scheduleRefresh(): void {
+  stopRefreshTimer();
+  if (!active || document.visibilityState !== "visible" || !sessionStore.authenticated) return;
+  const remaining = dashboardStore.page ? Date.parse(dashboardStore.page.validUntil) - Date.now() : 0;
+  const delay = remaining > 0 && !dashboardStore.error ? remaining : ACTIVATED_REFRESH_FRESHNESS_MS;
+  refreshTimer = window.setTimeout(() => { void loadPage(); }, Math.max(250, delay));
+}
+async function loadPage(maxAgeMs = 0): Promise<void> {
+  if (!sessionStore.authenticated) return;
+  if (refreshingKey.value) { scheduleRefresh(); return; }
+  try { await dashboardStore.load({ utcOffsetMinutes: -new Date().getTimezoneOffset() }, { maxAgeMs }); }
+  catch { /* The store retains the snapshot and exposes the read failure. */ }
+  finally { scheduleRefresh(); }
+}
+async function loadDashboard(): Promise<void> {
+  await Promise.allSettled([loadPage(), connectionStore.load()]);
+}
+function refreshWhenVisible(): void {
+  if (document.visibilityState === "visible") void loadPage(ACTIVATED_REFRESH_FRESHNESS_MS);
+  else stopRefreshTimer();
+}
+function activate(): void {
+  active = true;
+  document.addEventListener("visibilitychange", refreshWhenVisible);
+  void loadPage(ACTIVATED_REFRESH_FRESHNESS_MS);
+}
+function deactivate(): void {
+  active = false;
+  stopRefreshTimer();
+  document.removeEventListener("visibilitychange", refreshWhenVisible);
+}
+watch(() => sessionStore.authenticated, (ok) => { if (!ok) stopRefreshTimer(); });
+onMounted(() => { activate(); void reloadConnection(); });
+onActivated(activate);
+onDeactivated(deactivate);
+onUnmounted(() => { cleanup(); deactivate(); });
 </script>
 
 <style scoped src="../styles/dashboard.css"></style>

@@ -2,6 +2,10 @@
 
 # Manage Individual Supplier Models
 
+The model table is paged. Search and **Enabled only** apply to the complete
+catalog, and selecting all matching models includes matches on other pages.
+Editors load complete configuration and credential grants before saving.
+
 On **Providers**, select a built-in provider or a configurable HTTP supplier, including preset-derived HTTP suppliers and legacy Custom API connections. All provider model tables use the same toolbar: **Add model**, one model/alias search field, and **Enabled only**. Use the pencil in the row’s **Actions** column to edit that model. **Add model** remains available before the first catalog refresh, including an empty catalog. The existing table still supports single-model and selected-model deletion.
 
 ## Built-in Providers

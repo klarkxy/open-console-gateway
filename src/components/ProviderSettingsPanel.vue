@@ -82,7 +82,7 @@ import { protocolDisplayName } from "../domain/provider-contracts.ts";
 import OpenCodeInviteUrlField from "./OpenCodeInviteUrlField.vue";
 
 defineProps<{
-  entry: ProviderCatalogEntry;
+  entry: Omit<ProviderCatalogEntry, "model_aliases">;
   definition: ProviderDefinitionView | null;
   definitionLoading?: boolean;
   actionLocked?: boolean;

@@ -166,6 +166,8 @@ function cashStatus(): BillingStatus {
   return {
     revision: 1,
     processGeneration: 1,
+    surfaceKind: "cash",
+    quotaManualCalibration: false,
     model: "cash",
     cash: { balance: 12_000_000 },
   } as unknown as BillingStatus;
@@ -441,6 +443,8 @@ test("canonical cash and credit meters render without a fake zero quota window",
     status: {
       revision: 4,
       processGeneration: 2,
+      surfaceKind: "credits_meter",
+      quotaManualCalibration: false,
       model: "credits",
       credits: { remaining: 12 },
       cash: null,

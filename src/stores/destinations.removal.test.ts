@@ -5,9 +5,11 @@ import { dashboardApi, type Account } from "../api/dashboard.ts";
 import { routingCardsApi, type DestinationCredential, type RoutingCardListSnapshot } from "../api/destinations.ts";
 import { useAccountsStore } from "./accounts.ts";
 import { useDestinationsStore } from "./destinations.ts";
+import { useControlPlaneStore } from "./controlPlane.ts";
 
 function fixture() {
   setActivePinia(createPinia());
+  useControlPlaneStore().sync({ revision: 1, processGeneration: 1 });
   const accounts = useAccountsStore();
   const destinations = useDestinationsStore();
   const snapshot: RoutingCardListSnapshot = {
@@ -37,7 +39,7 @@ test("deletion removes projected Key rows even if the projection reload fails", 
 test("a new authoritative account list can restore a deliberately reimported row", async t => {
   const f = fixture();
   f.accounts.removeAccount("a");
-  t.mock.method(dashboardApi, "getAccounts", async () => [{ id: "a" } as Account]);
+  t.mock.method(dashboardApi, "getAccountsSnapshot", async () => ({ accounts: [{ id: "a" } as Account], expectation: { expectedRevision: 1, processGeneration: 1 } }));
   await f.accounts.loadPresented();
   assert.deepEqual(f.destinations.credentials.map(row => row.id), ["ca", "cb"]);
   assert.deepEqual(f.destinations.cards[0]?.credential_ids, ["ca", "cb"]);

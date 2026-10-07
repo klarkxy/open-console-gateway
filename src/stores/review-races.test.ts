@@ -146,6 +146,7 @@ test("accounts store: an older load resolving last does not clobber newer state"
   const store = useAccountsStore();
 
   const first = store.loadPresented();
+  store.setAccounts([]);
   const second = store.loadPresented();
   await waitForCalls(calls, 2);
 
@@ -169,6 +170,7 @@ test("accounts store: a stale load failure does not overwrite a fresh success", 
   const store = useAccountsStore();
 
   const first = store.loadPresented();
+  store.setAccounts([]);
   const second = store.loadPresented();
   await waitForCalls(calls, 2);
 
@@ -201,7 +203,7 @@ test("accounts store: a pending load cannot clobber an in-place mutation", async
 
   store.removeAccount("m1");
   assert.deepEqual(store.accounts, []);
-  assert.equal(store.loaded, true);
+  assert.equal(store.loaded, false, "row mutations do not establish complete inventory");
 });
 
 test("connection store: a pending load cannot clobber post-mutation state", async () => {
@@ -489,6 +491,7 @@ test("providers store: an older catalog load resolving last does not clobber new
   const store = useProvidersStore();
 
   const first = store.loadCatalog();
+  store.invalidateReads();
   const second = store.loadCatalog();
   await waitForCalls(calls, 2);
 

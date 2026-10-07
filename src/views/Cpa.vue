@@ -592,7 +592,7 @@ import {
   isCpaOAuthTerminalStatus,
   isCpaPhaseBusy,
 } from "../domain/cpa-runtime.ts";
-import type { CpaRuntimeModePreference } from "../domain/cpa-runtime.ts";
+import type { CpaRuntimeAction, CpaRuntimeModePreference } from "../domain/cpa-runtime.ts";
 import CpaKeyRow from "../components/CpaKeyRow.vue";
 
 const dialog = useDialog();
@@ -727,8 +727,7 @@ const showClientKeys = computed(() => cpaClientKeysAvailable(runtime.value));
 // CPA stays browser-only.
 const codexDeviceLoginAvailable = computed(() => (
   mode.value === "managed"
-  && integration.value?.runtimeOwned === true
-  && integration.value.runtimeRunning === true
+  && runtime.value?.codexDeviceLoginAvailable === true
 ));
 const deviceCodeExpiryMinutes = computed(() => {
   const seconds = oauth.value?.flow === "device" ? oauth.value.expiresIn : null;
@@ -737,7 +736,6 @@ const deviceCodeExpiryMinutes = computed(() => {
 const controls = computed(() => cpaRuntimeControls({
   runtime: runtime.value,
   busy: runtimeAction.value !== "",
-  updateCheck: runtimeCheck.value,
 }));
 const startupRestoreHint = computed(() => cpaStartupRestorePending(runtime.value));
 const keyPartition = computed(() => partitionCpaRuntimeKeys(runtimeKeys.value));
@@ -1450,10 +1448,10 @@ function retryRuntimePoll(): Promise<void> {
 }
 
 async function runRuntimeAction(
-  name: string,
+  name: CpaRuntimeAction,
   run: (expectation: MutationExpectation) => Promise<CpaRuntime>,
 ): Promise<void> {
-  if (runtimeAction.value) return;
+  if (runtimeAction.value || !controls.value[name]) return;
   bumpRuntimePollGeneration();
   const generation = runtimePollGeneration;
   const session = cpaStore.currentSession();
@@ -1513,16 +1511,16 @@ function stopRuntime(): Promise<void> {
 }
 
 async function checkUpdate(): Promise<void> {
-  if (runtimeAction.value) return;
+  if (runtimeAction.value || !controls.value.checkUpdate) return;
   bumpRuntimePollGeneration();
   const generation = runtimePollGeneration;
   const session = cpaStore.currentSession();
   runtimeAction.value = "checkUpdate";
   try {
-    runtimeCheck.value = await runMutation((expectation) => dashboardV3.checkCpaRuntimeUpdate(expectation));
+    const check = await runMutation((expectation) => dashboardV3.checkCpaRuntimeUpdate(expectation));
     if (generation !== runtimePollGeneration || session !== cpaStore.currentSession()) return;
-    const next = await cpaStore.refreshRuntime();
-    if (generation !== runtimePollGeneration || next === null) return;
+    runtimeCheck.value = check;
+    cpaStore.commitRuntimeSnapshot(check.runtime);
     syncRuntimePolling();
   } catch (error) {
     if (generation !== runtimePollGeneration) return;
@@ -1533,10 +1531,10 @@ async function checkUpdate(): Promise<void> {
 }
 
 function updateRuntime(): Promise<void> {
-  const check = runtimeCheck.value;
-  if (!check?.updateAvailable) return Promise.resolve();
+  const snapshot = runtime.value;
+  if (!snapshot?.actions.update || !snapshot.latestVersion) return Promise.resolve();
   return runRuntimeAction("update", (expectation) => dashboardV3.updateCpaRuntime({
-    expectedVersion: check.latestVersion,
+    expectedVersion: snapshot.latestVersion,
   }, expectation));
 }
 

@@ -141,6 +141,10 @@ function integration(overrides: Record<string, unknown> = {}) {
 
 function runtime(overrides: Record<string, unknown> = {}) {
   return {
+    actions: { install: false, start: true, stop: false, checkUpdate: true, update: false, rollback: false, remove: true },
+    clientKeysAvailable: true,
+    codexDeviceLoginAvailable: overrides.running === true,
+    startupRestorePending: overrides.desiredRunning === true,
     assetSha256: null, baseUrl: "http://127.0.0.1:8317", currentOperation: null, currentVersion: "1.0.0",
     error: null, installed: true, latestVersion: null, owned: true, phase: "idle", port: 8317,
     previousVersion: null, processGeneration: 1, revision: 1, running: false, desiredRunning: false, supported: true,
@@ -333,7 +337,7 @@ function externalIntegration(overrides: Record<string, unknown> = {}) {
 }
 
 function externalRuntime(overrides: Record<string, unknown> = {}) {
-  return runtime({ owned: false, running: false, supported: true, ...overrides });
+  return runtime({ owned: false, running: false, supported: true, clientKeysAvailable: false, ...overrides });
 }
 
 function clearedIntegration(overrides: Record<string, unknown> = {}) {
@@ -445,6 +449,55 @@ test("a synchronous lifecycle success immediately refreshes integration, account
     !typesBeforeStart.includes("success") && typesAfterStart.includes("success"),
     "starting the runtime flips the status tag to the running state",
   );
+  mounted.app.unmount();
+});
+
+test("runtime actions consume server eligibility and block denied dispatch", async () => {
+  let starts = 0;
+  let keys = 0;
+  const denied = { install: false, start: false, stop: false, checkUpdate: false, update: false, rollback: false, remove: false };
+  const mounted = await mount({
+    getCpaIntegration: async () => integration(),
+    getCpaRuntime: async () => runtime({ actions: denied, clientKeysAvailable: false }),
+    getCpaAccounts: async () => ({ accounts: [] }),
+    getCpaRuntimeKeys: async () => { keys += 1; return { keys: [] }; },
+    startCpaRuntime: async () => { starts += 1; return runtime(); },
+  });
+  const controls = byClass(mounted.root, "cpa-runtime-actions")[0];
+  assert.ok(controls);
+  const buttons = walkHostNodes(controls).filter((node) => node.type === "button");
+  assert.equal(buttons.length, 7);
+  assert.ok(buttons.every((node) => node.props.disabled === true));
+  await (buttons[1]!.props.onClick as () => Promise<void>)();
+  assert.equal(starts, 0);
+  assert.equal(keys, 0, "server capability hides the client-key read despite installed/owned facts");
+  mounted.app.unmount();
+});
+
+test("check-update commits its runtime receipt and update uses the current server version", async () => {
+  let reads = 0;
+  let expectedVersion: unknown;
+  const actions = { install: false, start: true, stop: false, checkUpdate: true, update: true, rollback: false, remove: true };
+  const receipt = runtime({ actions, latestVersion: "1.2.0", updateAvailable: true });
+  const mounted = await mount({
+    getCpaIntegration: async () => integration(),
+    getCpaRuntime: async () => { reads += 1; return runtime(); },
+    getCpaAccounts: async () => ({ accounts: [] }),
+    getCpaRuntimeKeys: async () => ({ keys: [] }),
+    checkCpaRuntimeUpdate: async () => ({
+      currentVersion: "1.0.0", latestVersion: "stale-check-version", updateAvailable: true,
+      releaseUrl: "https://example.com/release", revision: 1, processGeneration: 1, runtime: receipt,
+    }),
+    updateCpaRuntime: async (input) => { expectedVersion = (input as { expectedVersion: unknown }).expectedVersion; return runtime(); },
+  });
+  const controls = () => walkHostNodes(byClass(mounted.root, "cpa-runtime-actions")[0]!).filter((node) => node.type === "button");
+  await (controls()[3]!.props.onClick as () => Promise<void>)();
+  await settle();
+  assert.equal(reads, 1, "check receipt supplies current runtime without a follow-up GET");
+  assert.equal(controls()[4]!.props.disabled, false);
+  await (controls()[4]!.props.onClick as () => Promise<void>)();
+  await settle();
+  assert.equal(expectedVersion, "1.2.0");
   mounted.app.unmount();
 });
 

@@ -8,6 +8,8 @@ Ollama Cloud is a routable sealed fixed-origin Plan (`https://ollama.com`): Chat
 
 ## Endpoints
 
+The Dashboard receives account attention and token-chart summaries from the local gateway. Its 30-day chart uses UTC dates; account expiry reminders follow the browser's calendar. Refreshing these summaries does not contact providers. If an account read fails, the Dashboard does not report all accounts as normal.
+
 The gateway listens on `http://<bind>:<port>` and exposes these endpoints:
 
 | Method | Path | Purpose |
@@ -37,6 +39,13 @@ Dashboard auth depends on the listener bind. The current SPA uses `/dashboard/ap
 - **Non-loopback binds.** A single administrator account, stored as an Argon2 password hash in SQLite, governs the dashboard. Sign-in returns an HttpOnly session cookie. Standard reverse-proxy forwarding headers on a non-loopback bind still require the cookie. In Docker, the first administrator can be bootstrapped with `OCG_ADMIN_USERNAME` and `OCG_ADMIN_PASSWORD`; otherwise the first registration wins.
 
 ## Aliases
+
+The **Aliases** management page loads saved mappings in pages from the local
+Rust core. Search covers all mappings. A public-name group may span pages;
+its mapping count, overlap warning, publication state and configured routing
+ranks remain complete facts. Expanding capabilities or following a model
+link loads the corresponding details on demand. The management list can
+include saved mappings that are not currently eligible for `/v1/models`.
 
 Clients send **aliases**: stable lowercase kebab-case names from the local registry. Built-in Alias authority is code-owned: the static OpenCode Go protocol table plus sealed exact MiniMax CN, Kimi CN, and selected GOAT long-name maps. Case-folded Alias spellings such as `GLM-5.2` are accepted.
 

@@ -75,17 +75,11 @@ function configuration(): CreditConfiguration {
 function meter(pendingRequests = 0): CreditMeterView {
   return {
     activeGranted: 80,
-    buckets: [
-      {
-        id: "manual",
-        kind: "manual",
-        label: "manual-balance",
-        granted: 100,
-        remaining: 40,
-        startsAt: "2026-09-01T00:00:00.000Z",
-        expiresAt: null,
-      },
-      {
+    buckets: [{ id: "manual", kind: "manual", label: "manual-balance", granted: 100, remaining: 40, startsAt: "2026-09-01T00:00:00.000Z", expiresAt: null }],
+    scheduledBuckets: [],
+    calibrationBlock: pendingRequests > 0 ? "pending" : null,
+    canCalibrate: pendingRequests === 0,
+    expiredBuckets: [{
         id: "old-grant",
         kind: "top_up",
         label: "grant-archive",
@@ -116,6 +110,10 @@ function billing(pendingRequests = 0): BillingStatus {
     configurableCredits: true,
     credits: meter(pendingRequests),
     manualCalibration: false,
+    surfaceKind: "credits_meter",
+    quotaManualCalibration: false,
+    providerWindows: true,
+    quotaEditorLimits: [],
     model: "credits",
     officialRefresh: false,
     presets: [],

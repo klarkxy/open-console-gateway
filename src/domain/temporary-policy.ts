@@ -2,6 +2,8 @@ import type { MessageKey } from "../i18n/index.ts";
 import type {
   TemporaryPolicyBackoff,
   TemporaryPolicyBuiltin,
+  TemporaryPolicyConfiguration,
+  TemporaryPolicyEffectiveView,
   TemporaryPolicyMatch,
   TemporaryPolicyRestriction,
   TemporaryPolicyRule,
@@ -411,23 +413,12 @@ export function upsertBuiltinOverride(
   });
 }
 
-export function localOverride(
-  rules: readonly PolicyRule[],
+/** Persisted inheritance and applicability are supplied by the control plane. */
+export function persistedEffectiveView(
+  configuration: TemporaryPolicyConfiguration | null,
   destinationId: string | null,
-  id: string,
-): PolicyRule | null {
-  return rules.find((rule) => rule.destinationId === destinationId && rule.id === id) ?? null;
-}
-
-export function effectiveBuiltinEnabled(
-  rules: readonly PolicyRule[],
-  builtins: readonly PolicyBuiltin[],
-  destinationId: string | null,
-  id: string,
-): boolean {
-  const effective = effectiveRules(rules, builtins, destinationId)
-    .find((rule) => rule.id === id);
-  return effective?.enabled ?? true;
+): TemporaryPolicyEffectiveView | null {
+  return configuration?.effectiveViews.find((view) => view.destinationId === destinationId) ?? null;
 }
 
 export interface VisibleCustomRule {
@@ -436,25 +427,11 @@ export interface VisibleCustomRule {
 }
 
 export function visibleCustomRules(
-  rules: readonly PolicyRule[],
-  destinationId: string | null,
+  view: TemporaryPolicyEffectiveView | null,
 ): VisibleCustomRule[] {
-  const local = rulesForDestination(rules, destinationId).filter(
-    (rule): rule is PolicyCustomRule => rule.kind === "custom",
-  );
-  if (destinationId === null) {
-    return local.map((rule) => ({ rule, origin: "local" as const }));
-  }
-  const replaced = new Set(local.map((rule) => rule.id));
-  const inherited = rulesForDestination(rules, null).filter(
-    (rule): rule is PolicyCustomRule => (
-      rule.kind === "custom" && !replaced.has(rule.id)
-    ),
-  );
-  return [
-    ...inherited.map((rule) => ({ rule, origin: "inherited" as const })),
-    ...local.map((rule) => ({ rule, origin: "local" as const })),
-  ];
+  return (view?.rules ?? []).flatMap((row) => row.rule.kind === "custom"
+    ? [{ rule: row.rule, origin: row.origin }]
+    : []);
 }
 
 export function maskInheritedCustomRule(

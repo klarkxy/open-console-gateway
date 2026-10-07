@@ -1689,6 +1689,12 @@ export const enUSMessages = {
   "停止 CPA 运行时": "Stop CPA runtime",
   "更新 CPA 运行时": "Update CPA runtime",
   "检查应用更新": "Check application updates",
+  "搜索账号": "Search accounts",
+  "上一页": "Previous page",
+  "下一页": "Next page",
+  "已显示 {shown} 条映射，共 {total} 条": "Showing {shown} of {total} mappings",
+  "已显示 {shown} 个，共 {total} 个账号": "Showing {shown} of {total} accounts",
+  "本页 {shown} / {total} 条映射": "This page: {shown} of {total} mappings",
 } as const;
 
 export type MessageKey = keyof typeof enUSMessages;

@@ -2,10 +2,8 @@ import type { AccountCapabilitySource } from "../domain/account-capabilities.ts"
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Account } from "../api/dashboard.ts";
-import { buildNeedsAttention } from "./dashboard-attention.ts";
 import { accountPlanKey, accountStatusKey, filterAccounts, plansInUse } from "./account-filters.ts";
 import { providerSurfaces } from "../domain/plans.ts";
-import type { ProviderCatalogEntry } from "../api/providers.ts";
 
 const NOW = Date.parse("2026-08-21T12:00:00Z");
 
@@ -46,117 +44,6 @@ function account(overrides: Partial<Account>): Account {
     ...overrides,
   };
 }
-
-test("needs attention orders auth errors, expiry, cooling, drafts", () => {
-  const accounts = [
-    account({ id: "ok", name: "Fine" }),
-    account({ id: "auth", name: "Broken", auth_error: "401" }),
-    account({ id: "cool", name: "Cooling", cooldown_until: "2026-08-21T13:00:00Z" }),
-    account({ id: "draft", name: "Draft", setup_step: "key_verification" }),
-    account({ id: "gone", name: "Expired", expires_on: "2026-08-01" }),
-    account({ id: "off", name: "Disabled", enabled: false }),
-  ];
-  const items = buildNeedsAttention(accounts, NOW);
-  assert.deepEqual(
-    items.map((item) => [item.accountId, item.reason]),
-    [
-      ["auth", "auth-error"],
-      ["gone", "expired"],
-      ["cool", "cooling"],
-      ["draft", "setup-incomplete"],
-    ],
-  );
-});
-
-test("disabled accounts and expired cooldowns never need attention", () => {
-  const accounts = [
-    account({ id: "off", name: "Off", enabled: false, cooldown_until: "2026-08-21T13:00:00Z" }),
-    account({ id: "past", name: "Past", cooldown_until: "2026-08-21T11:00:00Z" }),
-    account({ id: "offdraft", name: "OffDraft", enabled: false, setup_step: "payment" }),
-  ];
-  const items = buildNeedsAttention(accounts, NOW);
-  assert.deepEqual(items.map((item) => item.accountId), ["offdraft"]);
-});
-
-test("disabled ready accounts with retained auth errors stay out of attention, incomplete drafts stay in", () => {
-  const accounts = [
-    account({
-      id: "off-auth",
-      name: "OffAuth",
-      enabled: false,
-      setup_step: "ready",
-      auth_error: "401",
-    }),
-    account({
-      id: "on-auth",
-      name: "OnAuth",
-      enabled: true,
-      setup_step: "ready",
-      auth_error: "401",
-    }),
-    account({
-      id: "off-draft",
-      name: "OffDraft",
-      enabled: false,
-      setup_step: "key_verification",
-    }),
-    account({
-      id: "off-pay",
-      name: "OffPay",
-      enabled: false,
-      setup_step: "payment",
-    }),
-  ];
-  assert.deepEqual(
-    buildNeedsAttention(accounts, NOW).map((item) => [item.accountId, item.reason]),
-    [
-      ["on-auth", "auth-error"],
-      ["off-draft", "setup-incomplete"],
-      ["off-pay", "setup-incomplete"],
-    ],
-  );
-});
-
-test("Custom API ignores legacy lifecycle dates", () => {
-  const custom = account({
-    id: "custom",
-    name: "Custom",
-    provider_id: "custom",
-
-    purchase_date: "2026-07-01",
-    expires_on: "2026-08-01",
-  });
-  assert.deepEqual(buildNeedsAttention([custom], NOW), []);
-});
-
-test("user-defined (dynamic) Provider accounts never raise expiry attention", () => {
-  // No built-in plan owns this provider id and no billing cadence is modeled
-  // for user-defined Providers; even a synthetic stored date is ignored.
-  const dynamic = account({
-    id: "dyn",
-    name: "Lab",
-    provider_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    purchase_date: "2026-07-01",
-    expires_on: "2026-08-01",
-  });
-  assert.deepEqual(buildNeedsAttention([dynamic], NOW), []);
-});
-
-test("zen free cooling is reported through the shared free lane", () => {
-  const zen = account({
-    id: "zen",
-    name: "Zen",
-    provider_id: "opencode-zen-free",
-
-    credential_kind: "none",
-    quota_scope: "egress-ip",
-    expires_on: "2026-08-01",
-    cooldown_free_until: "2026-08-21T13:00:00Z",
-  });
-  assert.deepEqual(buildNeedsAttention([zen], NOW), [
-    { accountId: "zen", accountName: "Zen", reason: "cooling" },
-  ]);
-});
 
 test("status buckets mirror the card status labels", () => {
   assert.equal(accountStatusKey(account({}), NOW), "available");
@@ -236,111 +123,13 @@ test("plansInUse follows catalog projection order, not account order", () => {
   );
 });
 
-function catalogRow(provider_id: string, extra: Partial<ProviderCatalogEntry> = {}): ProviderCatalogEntry {
-  return {
-    provider_id,
-    origin: "builtin",
-    editable: false,
-    deletable: false,
-    offering: "plan",
-    display_name: provider_id,
-    display_family: provider_id,
-    credential_kind: "api_key",
-    quota_scope: "key",
-    singleton: false,
-    creation_availability: "available",
-    verification_policy: "required",
-    verification_runtime_availability: "available",
-    routable: true,
-    managed_registration: false,
-    usage_availability: "available",
-    manual_usage_calibration: false,
-    quota_unit: "tokens",
-    model_source: "invented_catalog",
-    key_prefix: null,
-    auth_schemes: ["bearer"],
-    upstream_protocols: ["chat_completions"],
-    form_fields: [{ id: "key", kind: "secret", required: true, immutable_after_create: false }],
-    model_aliases: [],
-    ...extra,
-  };
-}
-
-test("expired built-in billed accounts raise attention only from catalog facts", () => {
-  // The catalog is the authority on built-in billed families; with its rows
-  // present, GOAT, MiniMax, Kimi, and Ollama expiry surfaces.
-  const catalog = [
-    catalogRow("command-code"),
-    catalogRow("minimax"),
-    catalogRow("kimi"),
-    catalogRow("ollama"),
-  ];
-  const expired = { purchase_date: "2026-07-01", expires_on: "2026-08-01" };
-  const accounts = [
-    account({ id: "goat", name: "GOAT", provider_id: "command-code", ...expired }),
-    account({ id: "kimi", name: "Kimi", provider_id: "kimi", ...expired }),
-    account({ id: "mm", name: "MiniMax", provider_id: "minimax", ...expired }),
-    account({ id: "ol", name: "Ollama", provider_id: "ollama", ...expired }),
-  ];
-  assert.deepEqual(
-    buildNeedsAttention(accounts, NOW, catalog).map((item) => [item.accountId, item.reason]),
-    [
-      ["goat", "expired"],
-      ["kimi", "expired"],
-      ["mm", "expired"],
-      ["ol", "expired"],
-    ],
-  );
-  // A successful but empty catalog is authoritative: nothing is invented.
-  assert.deepEqual(buildNeedsAttention(accounts, NOW, []), []);
-});
-
-test("null catalog keeps only the narrow offline Go/Zen fallback", () => {
-  const expired = { purchase_date: "2026-07-01", expires_on: "2026-08-01" };
-  const accounts = [
-    account({ id: "go", name: "Go", provider_id: "opencode", ...expired }),
-    account({ id: "goat", name: "GOAT", provider_id: "command-code", ...expired }),
-  ];
-  assert.deepEqual(
-    buildNeedsAttention(accounts, NOW, null).map((item) => item.accountId),
-    ["go"],
-  );
-});
-
-test("custom, dynamic, CPA, and Zen accounts stay excluded with catalog facts", () => {
-  const catalog = [
-    catalogRow("custom"),
-    catalogRow("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
-      origin: "custom",
-      model_source: "dynamic_provider",
-    }),
-    catalogRow("opencode-zen-free", {
-      credential_kind: "none",
-      quota_scope: "egress-ip",
-      usage_availability: "unavailable",
-    }),
-  ];
-  const expired = { purchase_date: "2026-07-01", expires_on: "2026-08-01" };
-  const accounts = [
-    account({ id: "custom", name: "Custom", provider_id: "custom", ...expired }),
-    account({ id: "dyn", name: "Lab", provider_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", ...expired }),
-    account({ id: "cpa", name: "CPA", provider_id: "cpa", ...expired }),
-    account({ id: "zen", name: "Zen", provider_id: "opencode-zen-free", ...expired }),
-  ];
-  assert.deepEqual(buildNeedsAttention(accounts, NOW, catalog), []);
-});
-
-test("loaded destination cadence and cooldown facts drive attention and filters", () => {
+test("loaded destination cooldown facts drive account filters", () => {
   const destination: AccountCapabilitySource = {
     account_controls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false },
     auth_scheme: "bearer", max_credentials: null,
     capabilities: { testable: true, managed_signup: false, external_integration: false, billing_tier_required: false },
     plan: { expiry_cadence: "monthly", manual_calibration: false, usage_source: "none", windows: [{ kind: "month" }] },
   };
-  const row = account({ id: "new", provider_id: "unknown", purchase_date: "2026-07-01", expires_on: "2026-08-01" });
-  assert.deepEqual(buildNeedsAttention([row], NOW, [], () => destination).map((item) => item.reason), ["expired"]);
-  const noCadence = { ...destination, plan: null };
-  assert.deepEqual(buildNeedsAttention([row], NOW, null, () => noCadence), []);
   const freeOnly = { ...destination, plan: { ...destination.plan!, expiry_cadence: null, windows: [{ kind: "free" as const }] } };
   const cooling = account({ provider_id: "unknown", cooldown_free_until: new Date(NOW + 60_000).toISOString() });
   assert.equal(accountStatusKey(cooling, NOW, [], freeOnly), "cooling");

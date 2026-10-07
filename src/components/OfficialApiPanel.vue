@@ -72,7 +72,7 @@ function timestamp(value: string): string {
 }
 
 const meterCaption = computed(() => {
-  const observedAt = account.value?.balances[0]?.observedAt;
+  const observedAt = account.value?.meter.remaining[0]?.observedAt;
   return observedAt ? timestamp(observedAt) : "";
 });
 

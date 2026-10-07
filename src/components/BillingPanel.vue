@@ -124,15 +124,14 @@ const kind = computed(() => status.value ? billingSurfaceKind(status.value) : "e
 const presented = computed(() => presentedUsageOf(status.value));
 const creditBalances = computed(() => presented.value?.credit_balances ?? []);
 const receiptUsage = computed(() => {
-  if (status.value?.usage) return null;
-  return manualReceiptQuotaView(matched.value?.manualReceipt, props.account.id);
+  return manualReceiptQuotaView(matched.value?.manualReceipt, props.account.id, presented.value);
 });
 const quotaKind = computed(() => kind.value === "quota" || kind.value === "credits_usd_month");
 const showsCanonicalQuota = computed(() => (
-  quotaKind.value && (presented.value !== null || receiptUsage.value === null)
+  quotaKind.value && receiptUsage.value === null
 ));
 const showReceiptQuota = computed(() => (
-  receiptUsage.value !== null && !(mode.value === "ready" && showsCanonicalQuota.value)
+  receiptUsage.value !== null
 ));
 
 function reload(): void {

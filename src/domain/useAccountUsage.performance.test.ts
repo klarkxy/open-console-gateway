@@ -20,7 +20,8 @@ import { useAccountUsage } from "./useAccountUsage.ts";
 
 function status(accountId: string, used: number): BillingStatus {
   return {
-    accountId, model: "quota", source: "local_estimate", unit: "USD",
+    accountId, model: "quota", surfaceKind: "quota", providerWindows: true, quotaManualCalibration: true,
+    quotaEditorLimits: [{ windowKind: "five_hours", limit: 100, editable: true, editableAt: null }], source: "local_estimate", unit: "USD",
     configurableCredits: false, manualCalibration: true, officialRefresh: true,
     cash: null, credits: null, presets: [], revision: 3, processGeneration: 1,
     usage: {
@@ -366,6 +367,10 @@ test("a first-hand draft does not reload billing or invalidate the other account
   const empty = (accountId: string, providerId: string, manual: boolean): BillingStatus => ({
     accountId,
     model: "quota",
+    surfaceKind: "quota",
+    providerWindows: true,
+    quotaManualCalibration: manual,
+    quotaEditorLimits: manual ? [{ windowKind: "five_hours", limit: 100, editable: true, editableAt: null }, { windowKind: "week", limit: 100, editable: true, editableAt: null }, { windowKind: "month", limit: 100, editable: true, editableAt: null }] : [],
     source: "unavailable",
     unit: "percent",
     configurableCredits: false,

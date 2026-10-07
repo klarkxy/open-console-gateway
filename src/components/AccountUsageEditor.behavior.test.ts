@@ -88,6 +88,7 @@ function edit(draft: number | null): UsageEditState {
 }
 
 function mountEditor(props: {
+  account?: Account;
   usage: UsageWindow;
   limits: UsageLimitView[];
   edits: AccountUsageEdits;
@@ -95,7 +96,7 @@ function mountEditor(props: {
   const root: HostNode = { children: [], props: {}, type: "root" };
   const wrapper = defineComponent({
     setup: () => () => h(bundle.AccountUsageEditor as Component, {
-      account: account(),
+      account: props.account ?? account(),
       usage: props.usage,
       limits: props.limits,
       edits: props.edits,
@@ -143,7 +144,7 @@ test("a valid zero observation accepts 42.5 and a 30 minute reset field", async 
   const events: Array<{ name: string; args: unknown[] }> = [];
   const mounted = mountEditor({
     usage: observed(0),
-    limits: [{ key: "window_5h", label: "window_5h", limit: 100 }],
+    limits: [{ key: "window_5h", label: "window_5h", limit: 100, editable: true }],
     edits: { window_5h: edit(0) } as AccountUsageEdits,
   }, events);
   try {
@@ -170,7 +171,7 @@ test("a valid zero observation accepts 42.5 and a 30 minute reset field", async 
 test("a null observation renders unavailable without money or 0%", async () => {
   const mounted = mountEditor({
     usage: observed(null),
-    limits: [{ key: "window_5h", label: "window_5h", limit: 100 }],
+    limits: [{ key: "window_5h", label: "window_5h", limit: 100, editable: true }],
     edits: { window_5h: edit(null) } as AccountUsageEdits,
   }, []);
   try {
@@ -186,13 +187,33 @@ test("a null, zero, or missing limit renders unavailable without money or 0%", a
   for (const limit of [null, 0, Number.NaN, undefined]) {
     const mounted = mountEditor({
       usage: observed(null),
-      limits: [{ key: "window_5h", label: "window_5h", limit: limit as number }],
+      limits: [{ key: "window_5h", label: "window_5h", limit: limit as number, editable: true }],
       edits: { window_5h: edit(null) } as AccountUsageEdits,
     }, []);
     try {
       await settle();
       assert.equal(unavailable(mounted.root), null, String(limit));
       assert.equal(numberInputs(mounted.root)[0]?.props["data-value"], "");
+    } finally {
+      mounted.app.unmount();
+    }
+  }
+});
+
+test("editor rows follow server eligibility even when account cooldown fields disagree", async () => {
+  for (const editable of [false, true]) {
+    const current = account();
+    current.cooldown_5h_until = editable ? "2099-01-01T00:00:00Z" : null;
+    const events: Array<{ name: string; args: unknown[] }> = [];
+    const mounted = mountEditor({
+      account: current, usage: observed(0),
+      limits: [{ key: "window_5h", label: "window_5h", limit: 100, editable }],
+      edits: { window_5h: edit(0) } as AccountUsageEdits,
+    }, events);
+    try {
+      await settle();
+      assert.equal(numberInputs(mounted.root).length, editable ? 3 : 0);
+      assert.deepEqual(events, []);
     } finally {
       mounted.app.unmount();
     }

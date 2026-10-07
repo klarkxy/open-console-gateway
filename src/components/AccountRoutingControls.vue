@@ -21,7 +21,7 @@
       </n-tooltip>
       <n-select
         class="routing-select"
-        :value="settingsStore.settings?.routing_mode ?? null"
+        :value="presentedMode"
         :options="routingOptions"
         :aria-label="t('账号路由')"
         :placeholder="t('加载中…')"
@@ -50,7 +50,7 @@
         </div>
       </n-tooltip>
       <n-switch
-        :value="settingsStore.settings?.conversation_sticky ?? false"
+        :value="presentedSticky"
         :aria-label="t('对话粘性')"
         :disabled="disabled"
         size="small"
@@ -78,13 +78,22 @@ import { dashboardErrorDetail } from "../utils/errors.ts";
 import { ROUTING_MODE_KEYS, ROUTING_MODE_DESCRIPTION_KEYS } from "../domain/routing-explain.ts";
 import { t } from "../i18n/index.ts";
 import { useSettingsStore } from "../stores/settings.ts";
+import { invalidateManagementPages } from "../stores/managementPages.ts";
+import { useControlPlaneStore } from "../stores/controlPlane.ts";
+import { accountRoutingSource, type AccountRoutingPresentation } from "../domain/account-page.ts";
 
 const settingsStore = useSettingsStore();
+const props = defineProps<{ presentation?: AccountRoutingPresentation | null }>();
+const emit = defineEmits<{ changed: [] }>();
+const control = useControlPlaneStore();
+const source = computed(() => accountRoutingSource(props.presentation, settingsStore.settings, control.processGeneration));
+const presentedMode = computed(() => source.value === "settings" ? settingsStore.settings?.routing_mode ?? null : props.presentation?.routingMode ?? null);
+const presentedSticky = computed(() => source.value === "settings" ? settingsStore.settings?.conversation_sticky ?? false : props.presentation?.conversationSticky ?? false);
 const message = useMessage();
 const saving = ref(false);
 const routingHelpFocused = ref(false);
 const stickyHelpFocused = ref(false);
-const disabled = computed(() => saving.value || !settingsStore.settings);
+const disabled = computed(() => saving.value || (!settingsStore.settings && !props.presentation));
 const routingOptions = computed(() => (Object.keys(ROUTING_MODE_KEYS) as RoutingMode[]).map((value) => ({
   value, label: t(ROUTING_MODE_KEYS[value]),
 })));
@@ -94,12 +103,14 @@ async function reload() {
 }
 
 async function save(update: Partial<Pick<AppConfig, "routing_mode" | "conversation_sticky">>) {
-  const current = settingsStore.settings;
-  if (disabled.value || !current) return;
-  if (Object.entries(update).every(([key, value]) => current[key as keyof AppConfig] === value)) return;
+  if (saving.value) return;
   saving.value = true;
   try {
+    const current = source.value === "settings" && settingsStore.settings ? settingsStore.settings : await settingsStore.loadPresented();
+    if (Object.entries(update).every(([key, value]) => current[key as keyof AppConfig] === value)) return;
     await settingsStore.patchPresented(update);
+    invalidateManagementPages();
+    emit("changed");
     message.success(t("设置已保存；运行时路由状态已重置"));
   } catch (error) {
     if (isRevisionConflict(error)) {

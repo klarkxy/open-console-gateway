@@ -103,6 +103,7 @@ function cash(total: number, revision: number): OfficialApiStatus {
   return {
     accountId: "acc-1",
     balanceAvailable: true,
+    meter: { remainingEmpty: null, remaining: [{ currency: "CNY", total, gift: null, observedAt: "2026-09-21T08:00:00.000Z" }] },
     balances: [{
       currency: "CNY",
       granted: 0,
@@ -128,6 +129,10 @@ function billing(snapshot: OfficialApiStatus): BillingStatus {
     configurableCredits: false,
     credits: null,
     manualCalibration: false,
+    surfaceKind: "cash",
+    quotaManualCalibration: false,
+    providerWindows: false,
+    quotaEditorLimits: [],
     model: "cash",
     officialRefresh: true,
     presets: [],
@@ -143,6 +148,7 @@ function emptyCash(): OfficialApiStatus {
   return {
     ...cash(0, 5),
     balanceAvailable: false,
+    meter: { remainingEmpty: "unavailable", remaining: [] },
     balances: [],
   };
 }
@@ -196,12 +202,14 @@ test("account balance renders and refresh posts the status CAS", () => serial(as
   const control = bundle.useControlPlaneStore();
   const store = bundle.useBillingStore();
   control.sync({ revision: 9, processGeneration: 100 });
+  let latest = cash(12.5, 5);
   const calls = installRecordingFetch((call) => {
     if (call.method === "GET" && call.url.endsWith("/accounts/acc-1/billing")) {
-      return jsonResponse(billing(cash(12.5, 5)));
+      return jsonResponse(billing(latest));
     }
     if (call.method === "POST" && call.url.endsWith("/accounts/acc-1/official-api/balance")) {
-      return jsonResponse(cash(18, 6));
+      latest = cash(18, 6);
+      return jsonResponse(latest);
     }
     throw new Error(`unexpected ${call.method} ${call.url}`);
   });

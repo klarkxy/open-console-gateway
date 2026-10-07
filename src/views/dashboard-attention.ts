@@ -1,89 +1,21 @@
-import type { AccountCapabilitySource } from "../domain/account-capabilities.ts";
-import type { Account } from "../api/dashboard.ts";
-import type { ProviderCatalogEntry } from "../api/providers.ts";
-import { isCooling, isFreeCooling } from "../domain/accounts-usage.ts";
-import { daysUntilDate } from "../domain/account-lifecycle.ts";
-import { accountCapabilities } from "../domain/account-capabilities.ts";
-import { planForAccount } from "../domain/plans.ts";
+import type { DashboardAttentionItem, DashboardAttentionReason } from "../api/pages.ts";
+import type { MessageKey } from "../i18n/index.ts";
 
-/**
- * The Dashboard "needs attention" area: a single honest list of accounts that
- * need the operator, derived from the same state the Accounts page shows.
- * Disabled accounts are a deliberate choice, not a problem, so they never
- * appear here.
- */
+export type AttentionItem = DashboardAttentionItem;
+export type AttentionReason = DashboardAttentionReason;
 
-export type AttentionReason =
-  | "auth-error"
-  | "expired"
-  | "cooling"
-  | "setup-incomplete";
-
-export interface AttentionItem {
-  accountId: string;
-  accountName: string;
-  reason: AttentionReason;
-}
-
-const REASON_PRIORITY: Record<AttentionReason, number> = {
-  "auth-error": 0,
-  expired: 1,
-  cooling: 2,
-  "setup-incomplete": 3,
+/** Business priority and dates belong to the backend; this table owns copy. */
+export const ATTENTION_REASON_KEYS: Record<AttentionReason, MessageKey> = {
+  "auth-error": "不可用",
+  expired: "已到期 {days} 天",
+  cooling: "冷却中",
+  "setup-incomplete": "注册中",
 };
 
-function accountCooling(
-  account: Account,
-  now: number,
-  catalog?: readonly ProviderCatalogEntry[] | null,
-  destination?: AccountCapabilitySource | null,
-): boolean {
-  return accountCapabilities(account, catalog, destination).freeCooldownOnly
-    ? isFreeCooling(account, now)
-    : isCooling(account, now);
-}
-
-export function buildNeedsAttention(
-  accounts: readonly Account[],
-  now: number = Date.now(),
-  catalog?: readonly ProviderCatalogEntry[] | null,
-  destinationForAccount?: (accountId: string) => AccountCapabilitySource | null,
-): AttentionItem[] {
-  const items: AttentionItem[] = [];
-  for (const account of accounts) {
-    const destination = destinationForAccount?.(account.id);
-    const ready = account.setup_step === "ready";
-    // Disabling a ready account is a deliberate choice and does not clear a
-    // retained auth_error, so only an enabled account raises auth attention.
-    if (ready && account.enabled && account.auth_error) {
-      items.push({ accountId: account.id, accountName: account.name, reason: "auth-error" });
-      continue;
-    }
-    if (ready && account.enabled) {
-      // A loaded destination owns cadence. Before that projection is available,
-      // retain the catalog's existing scope for offline expiry attention.
-      const plan = planForAccount(account, catalog);
-      const caps = accountCapabilities(account, catalog, destination);
-      const expiryDays = (destination != null || (plan && !plan.dynamic))
-        && caps.hasExpiry
-        && account.expires_on
-        ? daysUntilDate(account.expires_on, now)
-        : Number.POSITIVE_INFINITY;
-      if (Number.isFinite(expiryDays) && expiryDays < 0) {
-        items.push({ accountId: account.id, accountName: account.name, reason: "expired" });
-        continue;
-      }
-      if (accountCooling(account, now, catalog, destination)) {
-        items.push({ accountId: account.id, accountName: account.name, reason: "cooling" });
-        continue;
-      }
-    }
-    if (!ready) {
-      items.push({ accountId: account.id, accountName: account.name, reason: "setup-incomplete" });
-    }
+export function attentionTagType(reason: AttentionReason): "error" | "warning" | "info" {
+  switch (reason) {
+    case "auth-error": case "expired": return "error";
+    case "cooling": return "warning";
+    case "setup-incomplete": return "info";
   }
-  return items.sort(
-    (left, right) => REASON_PRIORITY[left.reason] - REASON_PRIORITY[right.reason]
-      || left.accountName.localeCompare(right.accountName),
-  );
 }

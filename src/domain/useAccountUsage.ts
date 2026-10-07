@@ -6,15 +6,11 @@ import type { Account } from "../api/dashboard";
 import type { BillingStatus, ProviderUsage } from "../api/billing.ts";
 import type {
   ProviderCatalogEntry,
-  ProviderQuotaWindow,
   ProviderUsageResponse,
 } from "../api/providers.ts";
 import { useBillingStore, type BillingSlot } from "../stores/billing.ts";
 import {
   defaultResetsInMinutes,
-  isUsageLimitReached,
-  manualEditorWindowKeys,
-  manualUsageEditorEnabled,
   mergeUsageEdit,
   normalizeUsagePercent,
   resetsFieldsToMinutes,
@@ -34,19 +30,17 @@ import { accountIsReady } from "./account-display.ts";
 import {
   BILLING_ERROR_KEYS,
   billingBinding,
-  billingManualCalibration,
   presentedUsageOf,
   usageWindowFromManualReceipt,
   usageWindowFromProviderUsage,
   type ManualQuotaReceipt,
 } from "./billing.ts";
-import { findPlanDefinition } from "./plans.ts";
 import { t } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
 import { ACCOUNT_AUTO_REFRESH_MS, billingObservedAt, timestampMs, type AccountRefreshTarget } from "./accounts-auto-refresh.ts";
 
-const USAGE_LIMIT_ORDER = ["window_5h", "window_week", "window_month"] as const satisfies readonly UsageKey[];
+const USAGE_KIND_KEYS = { five_hours: "window_5h", week: "window_week", month: "window_month" } as const;
 
 const USAGE_LIMIT_LABELS = {
   window_5h: "5 小时",
@@ -56,7 +50,7 @@ const USAGE_LIMIT_LABELS = {
 
 export type AccountUsageEdits = Partial<Record<UsageKey, UsageEditState>>;
 
-export type UsageLimitView = { key: UsageKey; label: string; limit: number };
+export type UsageLimitView = { key: UsageKey; label: string; limit: number; editable: boolean };
 
 /**
  * Account-list usage editors. Server snapshots live in useBillingStore;
@@ -70,7 +64,7 @@ export type UsageLimitView = { key: UsageKey; label: string; limit: number };
 export function useAccountUsage(
   accounts: Ref<Account[]>,
   now: Ref<number>,
-  catalog: Ref<ProviderCatalogEntry[] | null>,
+  _catalog: Ref<ProviderCatalogEntry[] | null>,
   options?: {
     message?: Pick<ReturnType<typeof useMessage>, "success" | "warning" | "error">;
     endpointUrlFor?: (account: Account) => string | null;
@@ -156,10 +150,22 @@ export function useAccountUsage(
   }
 
   function observedUsageFor(accountId: string, slot: BillingSlot | undefined): ObservedUsageWindow {
-    const source = slot?.status?.usage ?? null;
-    if (source) return usageProjectionFor(accountId, source);
     const receipt = slot?.manualReceipt ?? null;
-    if (receipt && receipt.windows.length > 0) return receiptProjectionFor(accountId, receipt);
+    const source = slot?.status?.usage ?? null;
+    if (receipt && receipt.windows.length > 0) {
+      const acknowledged = receiptProjectionFor(accountId, receipt);
+      if (!source) return acknowledged;
+      const merged = { ...usageProjectionFor(accountId, source) };
+      for (const window of receipt.windows) {
+        const key = USAGE_KIND_KEYS[window.windowKind as keyof typeof USAGE_KIND_KEYS];
+        if (!key) continue;
+        merged[key] = acknowledged[key];
+        const resetKey = key === "window_5h" ? "resets_in_5h" : key === "window_week" ? "resets_in_week" : "resets_in_month";
+        merged[resetKey] = acknowledged[resetKey];
+      }
+      return merged;
+    }
+    if (source) return usageProjectionFor(accountId, source);
     return usageProjectionFor(accountId, null);
   }
 
@@ -238,22 +244,12 @@ export function useAccountUsage(
     return selector;
   }
 
-  function calibrationPlan(account: Account): ManualCalibrationPlan | null {
-    return options?.calibrationPlanFor?.(account.id) ?? null;
-  }
-
   function usageLimitsFor(account: Account): UsageLimitView[] {
-    const presented = providerUsageFor(account.id).value;
-    const observed = presented ? limitsFromProviderWindows(presented.quota_windows) : [];
-    if (!usageCapabilities(account).manual) return observed;
-    const byKey = new Map(observed.map((limit) => [limit.key, limit]));
-    for (const key of manualEditorWindowKeys(account.provider_id, calibrationPlan(account))) {
-      if (byKey.has(key)) continue;
-      byKey.set(key, { key, label: t(USAGE_LIMIT_LABELS[key]), limit: 100 });
-    }
-    return USAGE_LIMIT_ORDER.flatMap((key) => {
-      const limit = byKey.get(key);
-      return limit ? [limit] : [];
+    const slot = billing.slotFor(account.id).value;
+    const status = slot?.boundVersion === bindingFor(account) ? slot.status : null;
+    return (status?.quotaEditorLimits ?? []).map(({ windowKind, limit, editable }) => {
+      const key = USAGE_KIND_KEYS[windowKind];
+      return { key, label: t(USAGE_LIMIT_LABELS[key]), limit, editable };
     });
   }
 
@@ -281,51 +277,11 @@ export function useAccountUsage(
   } {
     const slot = billing.slotFor(account.id).value;
     const status = slot?.boundVersion === bindingFor(account) ? slot.status : null;
-    const plan = calibrationPlan(account);
-    if (status) {
-      return {
-        providerWindows: Boolean(status.usage) || status.model === "quota",
-        refresh: status.officialRefresh,
-        manual: manualUsageEditorEnabled({
-          providerId: account.provider_id,
-          plan,
-          reportedManual: billingManualCalibration(status),
-          hasCreditMeter: Boolean(status.credits),
-        }),
-      };
-    }
-    const surface = findPlanDefinition(account.provider_id, catalog.value);
-    const refresh = surface?.usage_availability === "available";
-    const creditBalance = options?.officialBalanceFor?.(account) === true;
-    const manual = manualUsageEditorEnabled({
-      providerId: account.provider_id,
-      plan,
-      reportedManual: surface?.manual_usage_calibration === true || plan?.manual_calibration === true,
-      hasCreditMeter: false,
-    });
     return {
-      providerWindows: refresh || manual || creditBalance,
-      refresh: refresh || creditBalance,
-      manual,
+      providerWindows: status?.providerWindows ?? false,
+      refresh: status?.officialRefresh ?? false,
+      manual: status?.quotaManualCalibration ?? false,
     };
-  }
-
-  function limitsFromProviderWindows(windows: ProviderQuotaWindow[]): UsageLimitView[] {
-    const byKind = new Map(windows.map((window) => [window.window_kind, window]));
-    const definitions: Array<[UsageKey, string]> = [
-      ["window_5h", "five_hours"],
-      ["window_week", "week"],
-      ["window_month", "month"],
-    ];
-    return definitions.flatMap(([key, kind]) => {
-      const window = kind === "month"
-        ? byKind.get("month") ?? byKind.get("monthly")
-        : byKind.get(kind);
-      if (!window || !Number.isFinite(window.used)) return [];
-      const stored = window.limit_value;
-      const limit = typeof stored === "number" && Number.isFinite(stored) && stored > 0 ? stored : 100;
-      return [{ key, label: t(USAGE_LIMIT_LABELS[key]), limit }];
-    });
   }
 
   const usageEdits = ref<Record<string, AccountUsageEdits>>({});
@@ -340,11 +296,11 @@ export function useAccountUsage(
   }
 
   function accountUsageLimitReached(account: Account, key: UsageKey): boolean {
-    return isUsageLimitReached(account, key, now.value);
+    return usageLimitsFor(account).find(limit => limit.key === key)?.editable !== true;
   }
 
   function hasAvailableUsageEditor(account: Account): boolean {
-    return usageLimitsFor(account).some(({ key }) => !accountUsageLimitReached(account, key));
+    return usageCapabilities(account).manual && usageLimitsFor(account).some(({ editable }) => editable);
   }
 
   async function focusUsageEditor(accountId: string) {
@@ -415,7 +371,7 @@ export function useAccountUsage(
         }
         continue;
       }
-      const wasActuallyReset = account && isUsageLimitReached(account, key, now.value);
+      const wasActuallyReset = account && accountUsageLimitReached(account, key);
       if (!edit) {
         const created = mergeUsageEdit(undefined, saved, Boolean(wasActuallyReset));
         created.resets_in_minutes_draft = defaultResetsInMinutes(usage, key, now.value);
@@ -434,7 +390,7 @@ export function useAccountUsage(
 
   function updateUsageDraft(accountId: string, key: UsageKey, value: number | null) {
     const account = accounts.value.find(({ id }) => id === accountId);
-    const allowed = Boolean(account) && usageLimitsFor(account!).some((limit) => limit.key === key);
+    const allowed = Boolean(account) && usageCapabilities(account!).manual && usageLimitsFor(account!).some((limit) => limit.key === key && limit.editable);
     let edit = usageEdits.value[accountId]?.[key];
     if (edit?.saving || (!edit && !allowed)) return;
     if (!edit) {
@@ -471,6 +427,7 @@ export function useAccountUsage(
     const account = accounts.value.find(({ id }) => id === accountId);
     const edit = usageEdits.value[accountId]?.[key];
     if (!account || !edit || edit.saving || edit.draft === null) return;
+    if (!usageCapabilities(account).manual || accountUsageLimitReached(account, key)) return;
     const currentRequest = requestStillCurrent(account);
     const isCurrent = () => currentRequest() && usageEdits.value[accountId]?.[key] === edit;
     const binding = bindingFor(account);
@@ -489,7 +446,7 @@ export function useAccountUsage(
         resetsInMin,
       );
       if (!isCurrent()) return;
-      const observedAt = new Date().toISOString();
+      const observedAt = usage.observed_at;
       billing.applyCalibratedUsage(
         accountId,
         binding,
@@ -532,6 +489,11 @@ export function useAccountUsage(
   async function refreshAccountUsage(accountId: string, automatic = false): Promise<void> {
     const account = accounts.value.find((item) => item.id === accountId);
     if (!account) return;
+    if (!billing.slotFor(accountId).value?.status) {
+      const isCurrent = requestStillCurrent(account);
+      await loadAccountUsage(accountId);
+      if (!isCurrent() || !billing.slotFor(accountId).value?.status) return;
+    }
     const canRefreshUsage = usageCapabilities(account).refresh;
     if (!canRefreshUsage && (automatic || !options?.afterUsageRefresh)) return;
     if (usageRefreshLoadingFor(accountId).value || usageLoadingFor(accountId).value) return;

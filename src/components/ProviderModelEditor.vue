@@ -86,6 +86,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onDeactivated, ref, shallowRef, watch } from "vue";
 import { NAlert, NButton, NCheckbox, NCheckboxGroup, NForm, NFormItem, NInput, NModal, NSelect, NSpace, NSwitch, useMessage } from "naive-ui";
+import type { ProviderContractsResponse } from "../api/providers.ts";
 import type { Destination, ProtocolDto } from "../api/destinations.ts";
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
 import { isRevisionConflict } from "../api/dashboard.ts";
@@ -108,8 +109,11 @@ import { useSessionStore } from "../stores/session.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
 
-const props = defineProps<{ scope: ProviderScopeView; disabled?: boolean }>();
-const emit = defineEmits<{ (event: "update:busy", value: boolean): void }>();
+const props = defineProps<{ scope: ProviderScopeView; disabled?: boolean; deferRevalidation?: boolean }>();
+const emit = defineEmits<{
+  (event: "update:busy", value: boolean): void;
+  (event: "committed", receipt: { kind: "destination"; destination: Destination } | { kind: "provider"; contracts: ProviderContractsResponse }): void;
+}>();
 const destinationsStore = useDestinationsStore();
 const providersStore = useProvidersStore();
 const sessionStore = useSessionStore();
@@ -259,19 +263,18 @@ async function save(): Promise<void> {
   const attempt = generation;
   saving.value = true;
   try {
-    if ("models" in plan.input) {
-      await destinationsStore.patchDestination(source.id, plan.input, expectation);
-    } else {
-      await providersStore.editContractCatalogModel(source.legacy.id, plan.input, expectation);
-    }
+    const receipt = "models" in plan.input
+      ? { kind: "destination" as const, destination: await destinationsStore.patchDestination(source.id, plan.input, expectation) }
+      : { kind: "provider" as const, contracts: await providersStore.editContractCatalogModel(source.legacy.id, plan.input, expectation) };
     if (!isCurrent(attempt)) return;
+    emit("committed", receipt);
     // The write receipt is the completion point: end editing and release
     // saving here. Deferred projections below are independent reads whose
     // failure is a warning, never a save failure — and never a model
     // discovery, probe, or Key authorization.
     message.success(t("连接已保存"));
     resetEditor();
-    revalidateAfterModelSave(source, builtin);
+    if (!props.deferRevalidation) revalidateAfterModelSave(source, builtin);
   } catch (error) {
     if (!isCurrent(attempt)) return;
     if (isRevisionConflict(error)) {

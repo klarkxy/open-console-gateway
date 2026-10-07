@@ -13,11 +13,10 @@ import {
   TEMPORARY_POLICY_SCOPE_KEYS,
   allocateCustomRuleId,
   customRuleDraftFrom,
-  effectiveBuiltinEnabled,
   emptyCustomRuleDraft,
-  localOverride,
   maskInheritedCustomRule,
   parseCustomRuleDraft,
+  persistedEffectiveView,
   removeRule,
   restrictionSnapshotEmptyCode,
   upsertBuiltinOverride,
@@ -63,13 +62,11 @@ const ticker = createLocalWaitTicker((now) => {
 const destinationId = computed(() => selectedDestinationId.value === "" ? null : selectedDestinationId.value);
 const rules = computed(() => policyStore.configuration?.rules ?? []);
 const builtins = computed(() => policyStore.configuration?.builtins ?? []);
-const customRows = computed(() => visibleCustomRules(rules.value, destinationId.value));
-const builtinEnabled = computed(() =>
-  effectiveBuiltinEnabled(rules.value, builtins.value, destinationId.value, BUILTIN_GOAT_ID),
-);
-const builtinOverridden = computed(() =>
-  localOverride(rules.value, destinationId.value, BUILTIN_GOAT_ID) !== null,
-);
+const effectiveView = computed(() => persistedEffectiveView(policyStore.configuration, destinationId.value));
+const customRows = computed(() => visibleCustomRules(effectiveView.value));
+const builtin = computed(() => effectiveView.value?.rules.find((row) => row.rule.id === BUILTIN_GOAT_ID));
+const builtinEnabled = computed(() => builtin.value?.rule.enabled ?? false);
+const builtinOverridden = computed(() => builtin.value?.overridden ?? false);
 const restrictionRows = computed(() => policyStore.restrictions?.restrictions ?? []);
 const emptyRestrictions = computed(() =>
   restrictionSnapshotEmptyCode(policyStore.restrictionsLoaded, restrictionRows.value.length),
@@ -303,7 +300,8 @@ onUnmounted(() => {
               type="checkbox"
               data-action="toggle-builtin"
               :checked="builtinEnabled"
-              :disabled="policyStore.mutating"
+              :disabled="policyStore.mutating || !builtin?.applicable"
+              :data-applicable="builtin?.applicable ? 'true' : 'false'"
               @change="toggleBuiltin(($event.target as HTMLInputElement).checked)"
             >
             {{ goatLabel.kind === "key" ? t(goatLabel.key) : goatLabel.id }}

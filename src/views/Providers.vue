@@ -11,7 +11,7 @@
     </div>
 
     <n-alert
-      v-else-if="loadError && !destinationsStore.loaded"
+      v-else-if="loadError && !pageStore.rail"
       type="error"
       :title="t('加载供应商失败：{error}', { error: loadError })"
     >
@@ -51,6 +51,15 @@
             {{ t("暂无已接入的供应商") }}
           </p>
         </div>
+        <n-pagination simple :page="Math.floor(railOffset / PAGE_SIZE) + 1" :page-size="PAGE_SIZE"
+          :item-count="pageStore.rail?.filteredTotal ?? 0" :disabled="pageStore.loading.rail" @update:page="onRailPage">
+          <template #prev>
+            <n-button size="small" quaternary :disabled="pageStore.loading.rail || railOffset === 0">{{ t('上一页') }}</n-button>
+          </template>
+          <template #next>
+            <n-button size="small" quaternary :disabled="pageStore.loading.rail || !pageStore.rail?.hasMore">{{ t('下一页') }}</n-button>
+          </template>
+        </n-pagination>
         <div class="providers-rail-footer">
           <n-button
             secondary
@@ -75,7 +84,8 @@
           <n-select
             :value="selectedRailKey"
             :options="mobileSelectOptions"
-            filterable
+            filterable remote
+            @search="railQuery = $event"
             :aria-label="t('选择供应商范围')"
             :disabled="actionLocked || addKeyBusy"
             :consistent-menu-width="false"
@@ -84,7 +94,7 @@
         </div>
 
         <n-alert
-          v-if="loadError && destinationsStore.loaded"
+          v-if="loadError && pageStore.rail"
           type="warning"
           :title="t('加载供应商失败：{error}', { error: loadError })"
         >
@@ -93,6 +103,12 @@
           </n-button>
         </n-alert>
 
+        <n-alert v-for="issue in pageStore.rail?.errors ?? []" :key="`${issue.resource}:${issue.id}`" type="warning"
+          :title="t('加载供应商失败：{error}', { error: issue.code })" />
+        <n-alert v-if="pageStore.errors.models" type="warning" :title="t('加载供应商失败：{error}', { error: pageStore.errors.models })">
+          <n-button size="small" secondary @click="loadModels()">{{ t('重试') }}</n-button>
+        </n-alert>
+        <n-spin v-if="pendingSelection" size="small" />
         <section
           v-if="selectedConnection && isCustomAccountConnection"
           class="providers-section"
@@ -188,6 +204,12 @@
               ref="modelMatrix"
               :key="activeScope.key"
               :scope="activeScope"
+              :model-rows="modelsPage?.models ?? []" :total="modelsPage?.total ?? activeScope.totalModels"
+              :filtered-total="modelsPage?.filteredTotal ?? 0" :offset="modelsPage?.offset ?? 0" :limit="PAGE_SIZE"
+              :loading="pageStore.loading.models" :all-disabled="modelsPage?.allDisabled"
+              :model-editable="providerPageAction(pageDetail, 'modelEditable')"
+              :metadata-editable="providerPageAction(pageDetail, 'metadataEditable')" :prepare-operation="prepareModelOperation" :operation-scope="operationProjection?.scope"
+              @query="onModelQuery" @committed="onModelCommitted" @metadata-committed="onMetadataCommitted"
               :target-model="targetModel"
               :optimistic-overrides="optimisticOverrides"
               :pending-override-keys="pendingOverrideKeys"
@@ -218,12 +240,12 @@
             >
               {{ t("在账号页编辑") }}
             </n-button>
-            <DestinationDeleteButton
+            <ProviderPageDeleteButton
               v-if="selectedEditableDestination"
-              :destination="selectedEditableDestination"
+              :deletable="destinationDeletable" :remove="deletePageDestination"
               size="small"
               :disabled="actionLocked"
-              @deleted="onDestinationDeleted"
+
             />
           </n-space>
         </section>
@@ -248,7 +270,7 @@
               <n-button
                 v-if="isDraftConnection"
                 type="primary"
-                :disabled="actionLocked || definitionLoading || !selectedDefinition"
+                :disabled="actionLocked || definitionLoading"
                 @click="openContinueSetup"
               >
                 {{ t("继续设置") }}
@@ -264,16 +286,16 @@
               <n-button
                 v-else-if="selectedEntry.editable"
                 secondary
-                :disabled="actionLocked || definitionLoading || !selectedDefinition"
+                :disabled="actionLocked || definitionLoading"
                 @click="openEdit"
               >
                 {{ t("编辑供应商") }}
               </n-button>
-              <DestinationDeleteButton
+              <ProviderPageDeleteButton
                 v-if="selectedEditableDestination"
-                :destination="selectedEditableDestination"
+                :deletable="destinationDeletable" :remove="deletePageDestination"
                 :disabled="actionLocked"
-                @deleted="onDestinationDeleted"
+
               />
               <n-popconfirm
                 v-else-if="selectedEntry.deletable"
@@ -300,7 +322,7 @@
               <n-button
                 size="small"
                 type="primary"
-                :disabled="actionLocked || definitionLoading || !selectedDefinition"
+                :disabled="actionLocked || definitionLoading"
                 @click="openContinueSetup"
               >
                 {{ t("继续设置") }}
@@ -422,6 +444,12 @@
                   ref="modelMatrix"
                   :key="activeScope.key"
                   :scope="activeScope"
+              :model-rows="modelsPage?.models ?? []" :total="modelsPage?.total ?? activeScope.totalModels"
+              :filtered-total="modelsPage?.filteredTotal ?? 0" :offset="modelsPage?.offset ?? 0" :limit="PAGE_SIZE"
+              :loading="pageStore.loading.models" :all-disabled="modelsPage?.allDisabled"
+              :model-editable="providerPageAction(pageDetail, 'modelEditable')"
+              :metadata-editable="providerPageAction(pageDetail, 'metadataEditable')" :prepare-operation="prepareModelOperation" :operation-scope="operationProjection?.scope"
+              @query="onModelQuery" @committed="onModelCommitted" @metadata-committed="onMetadataCommitted"
                   :target-model="targetModel"
                   :optimistic-overrides="optimisticOverrides"
                   :pending-override-keys="pendingOverrideKeys"
@@ -516,11 +544,11 @@
               <n-button secondary size="small" :disabled="actionLocked" @click="openDestinationEditor">
                 {{ t("编辑连接") }}
               </n-button>
-              <DestinationDeleteButton
-                :destination="selectedEditableDestination"
+              <ProviderPageDeleteButton
+                :deletable="destinationDeletable" :remove="deletePageDestination"
                 size="small"
                 :disabled="actionLocked"
-                @deleted="onDestinationDeleted"
+
               />
             </n-space>
           </div>
@@ -571,7 +599,7 @@
       :show="showDestinationEditModal"
       :destination="editingDestination"
       :credentials="destinationsStore.credentials"
-      :endpoints="selectedConnection?.endpoints ?? []"
+      :endpoints="operationConnection?.endpoints ?? []"
       :preset-id="selectedDefinition?.preset_id ?? null"
       @update:show="onDestinationEditShow"
       @saved="onDestinationSaved"
@@ -637,7 +665,7 @@
 </template>
 
 <script setup lang="ts">
-import { PROVIDER_SORT_KEYS, sortProvidersByName, type ProviderSort } from "../domain/provider-sort.ts";
+import { PROVIDER_SORT_KEYS, type ProviderSort } from "../domain/provider-sort.ts";
 import { providerDetailTabs } from "../domain/provider-detail-tabs.ts";
 import { computed, defineAsyncComponent, h, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
@@ -652,6 +680,7 @@ import {
   NMenu,
   NModal,
   NPopconfirm,
+  NPagination,
   NSelect,
   NSpace,
   NSpin,
@@ -661,7 +690,6 @@ import {
   useMessage,
 } from "naive-ui";
 import type { MenuOption, SelectOption } from "naive-ui";
-import type { Connection } from "../api/connections.ts";
 import { DashboardRequestError, dashboardApi, type AccountInput } from "../api/dashboard";
 import { isRevisionConflict, providerApi } from "../api/providers.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
@@ -670,6 +698,7 @@ import { useProvidersStore } from "../stores/providers.ts";
 import { useSessionStore } from "../stores/session.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import type {
+  ProviderContractsResponse,
   ProviderDefinitionView,
   ModelProtocolOverrideUpdate,
   ProviderCatalogEntry,
@@ -678,25 +707,30 @@ import type {
 } from "../api/providers.ts";
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
 // Detail panes and modals load on demand instead of inflating the view chunk.
-const ProviderModelMatrix = defineAsyncComponent(() => import("../components/ProviderModelMatrix.vue"));
+const ProviderModelMatrix = defineAsyncComponent(() => import("../components/ProviderPageModelMatrix.vue"));
 const ProviderSettingsPanel = defineAsyncComponent(() => import("../components/ProviderSettingsPanel.vue"));
 const DynamicProviderModal = defineAsyncComponent(() => import("../components/DynamicProviderModal.vue"));
 const DestinationEditModal = defineAsyncComponent(() => import("../components/DestinationEditModal.vue"));
 const AccountFormModal = defineAsyncComponent(() => import("../components/AccountFormModal.vue"));
 import type { AccountFormPayload } from "../components/AccountFormModal.vue";
-import DestinationDeleteButton from "../components/DestinationDeleteButton.vue";
+import ProviderPageDeleteButton from "../components/ProviderPageDeleteButton.vue";
 import ProviderBrandMark from "../components/ProviderBrandMark.vue";
 import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { formatDateTime } from "../utils/format.ts";
-import { isDestinationCatalogRefreshable, isDestinationDeletable, isDestinationEditable, destinationEditDraft, withAuthorizedCredentials } from "../domain/destination-edit.ts";
+import { isDestinationEditable, destinationEditDraft, withAuthorizedCredentials } from "../domain/destination-edit.ts";
 import { planDestinationSave } from "../domain/destination-edit-save.ts";
 import { planPresetProtocolMigration } from "../domain/destination-protocol-migration.ts";
-import type { Destination } from "../api/destinations.ts";
+import { presentDestinationCredential, presentDestinationProperties, type Destination, type DestinationModelMetadataSnapshot } from "../api/destinations.ts";
+import { presentAccount } from "../api/dashboard-presenters.ts";
+import { presentCatalogEntryProperties } from "../api/providers.ts";
+import { invalidateManagementPages } from "../stores/managementPages.ts";
+import { useProviderPageStore } from "../stores/providerPage.ts";
+import { PAGE_READ_MAX_AGE_MS } from "../stores/readLifecycle.ts";
+import { providerPageQueryKey, providerPageItemStatus, providerPageBrand, providerPageConnection, providerPageScope, providerPageEditProjection, providerPageAction } from "../domain/provider-page.ts";
 import {
   catalogUpdatesFromOverrides,
   destinationProbeIdentity,
-  projectDestinationCatalog,
 } from "../domain/destination-catalog.ts";
 import {
   accountAddDeepLinkFromProviderAdd,
@@ -708,39 +742,13 @@ import {
 } from "./app-navigation.ts";
 import {
   catalogRefreshSupported,
-  effectiveModelTestProtocol,
-  flattenProviderScopes,
   isSafeSourceUrl,
   modelProtocolOverrideKey,
-  normalizeProviderContractsResponse,
   protocolDisplayName,
 } from "../domain/provider-contracts.ts";
-import {
-  catalogEntryForConnection,
-  connectionBrandFamily,
-  connectionStatus,
-  filterConnections,
-  isOnboardingDraftConnection,
-} from "../domain/connections.ts";
-import { destinationBrandFamily } from "../domain/account-brand.ts";
+import { isOnboardingDraftConnection } from "../domain/connections.ts";
 import { destinationTypeLabel } from "../domain/account-display.ts";
 import { accountTypeLabelText } from "./account-status-text.ts";
-import {
-  connectionForDestination,
-  filterDestinations,
-  isProvidersRailDestination,
-  providersDestinationProjectionState,
-  providersPageLoadOutcome,
-  providersQueryAction,
-  providersRailItemName,
-  providersRailItems,
-  providersSelectionProjectionReady,
-  railKeyForDestination,
-  railKeyForDraftConnection,
-  resolveProvidersSelection,
-} from "../domain/destination-providers.ts";
-
-import { catalogEntryFamily } from "../domain/provider-catalog.ts";
 import { accountCreateRequestInput } from "../domain/account-create-payload.ts";
 import type { OnboardingIntent } from "../domain/onboarding-draft.ts";
 import { providerSurfaceFromCatalog } from "../domain/plans.ts";
@@ -770,15 +778,23 @@ const router = useRouter();
 let providerViewSession = 0;
 let loadAllGeneration = 0;
 watch(() => sessionStore.authenticated, (ok) => {
-  if (!ok) { providerViewSession += 1; loadAllGeneration += 1; lastLoadAllSucceededAt = 0; loading.value = false; }
+  if (!ok) { providerViewSession += 1; loadAllGeneration += 1; loading.value = false; }
 }, { flush: "sync" });
 const controlPlane = useControlPlaneStore();
-const contracts = computed(() => {
-  const value = providersStore.contracts;
-  return value ? normalizeProviderContractsResponse(value) : null;
-});
-const catalog = computed(() => providersStore.catalog);
-const connections = computed(() => providersStore.connections ?? []);
+const pageStore = useProviderPageStore();
+const pageDetail = computed(() => pageStore.detail);
+const selectedItem = computed(() => pageDetail.value?.item ?? null);
+const selectedEntry = computed(() => pageDetail.value?.catalogEntry ? presentCatalogEntryProperties(pageDetail.value.catalogEntry) : null);
+const catalog = computed(() => operationProjection.value?.catalogEntry ? [operationProjection.value.catalogEntry] : []);
+const selectedKey = ref<string | null>(null);
+const railOffset = ref(0);
+const PAGE_SIZE = 50;
+const modelQuery = ref({ search: "", enabledOnly: false, offset: 0 });
+const modelQueryTouched = ref(false);
+const modelsPage = computed(() => pageStore.models);
+const operationProjection = computed(() => pageStore.editDetail && pageStore.editDetail.item.railKey === selectedItem.value?.railKey ? providerPageEditProjection(pageStore.editDetail!) : null);
+const operationDestination = computed(() => selectedDestinationId.value ? destinationsStore.byId.get(selectedDestinationId.value) ?? null : null);
+const operationConnection = computed(() => operationProjection.value?.connection ?? null);
 const showEditModal = ref(false);
 const editingDefinition = ref<ProviderDefinitionView | null>(null);
 const resumeConnectionId = ref<string | null>(null);
@@ -801,25 +817,8 @@ const loadError = ref("");
 /** Writable only for unmatched draft connections; otherwise derived from destination. */
 const selectedConnectionId = ref<string | null>(null);
 const selectedDestinationId = ref<string | null>(null);
-const destinations = computed(() => destinationsStore.destinations);
-const railDestinations = computed(() => (
-  sortProvidersByName(destinations.value.filter(isProvidersRailDestination), (item) => item.name, providerSort.value)
-));
-const selectedRailKey = computed(() => selectedDestinationId.value ?? selectedConnectionId.value);
-const destinationProjectionState = computed(() => providersDestinationProjectionState({
-  loaded: destinationsStore.loaded,
-  loadFailed: Boolean(loadError.value) && !destinationsStore.loaded,
-  railCount: railDestinations.value.length,
-}));
-const railItemRows = computed(() => {
-  if (
-    destinationProjectionState.value === "not_loaded"
-    || destinationProjectionState.value === "failure"
-  ) {
-    return [];
-  }
-  return providersRailItems(destinations.value, providersStore.connections);
-});
+const selectedRailKey = computed(() => selectedKey.value);
+const railItems = computed(() => pageStore.rail?.items ?? []);
 const requestedTab = ref<ProviderDetailTab>("models");
 const detailTabs = computed(() => providerDetailTabs(selectedEntry.value));
 const activeTab = computed<ProviderDetailTab>({
@@ -855,12 +854,6 @@ const protocolGrantSelectedIds = ref<string[]>([]);
 const protocolGrantSaving = ref(false);
 const actionLive = ref("");
 let activatedOnce = false;
-/** A successful necessary-resource load for the current Providers route. Reset on route query changes. */
-let freshRequiredLoadSucceeded = false;
-// Activation refreshes skip data loaded recently; popstate and user actions
-// call loadAll directly and stay immediate.
-const ACTIVATED_REFRESH_FRESHNESS_MS = 30_000;
-let lastLoadAllSucceededAt = 0;
 let overrideSequence = 0;
 let probeSequence = 0;
 let overrideQueue: Promise<void> = Promise.resolve();
@@ -869,124 +862,32 @@ const latestOverrideSequence = new Map<string, number>();
 const RAIL_BRAND_SIZE = 18;
 const ADD_SELECT_VALUE = "__add__";
 
-const allCatalogEntries = computed(() => catalog.value ?? []);
-const scopes = computed(() => (
-  contracts.value
-    ? flattenProviderScopes(contracts.value, catalog.value)
-      .filter((scope) => scope.scope_kind === "provider")
-    : []
-));
-const selectedDestination = computed(() => {
-  if (!selectedDestinationId.value) return null;
-  const match = destinations.value.find((row) => row.id === selectedDestinationId.value) ?? null;
-  if (match && !isProvidersRailDestination(match)) return null;
-  return match;
-});
-const selectedConnection = computed(() => {
-  if (selectedDestination.value) {
-    return connectionForDestination(connections.value, selectedDestination.value) ?? null;
-  }
-  if (!selectedConnectionId.value) return null;
-  return connections.value.find((item) => item.id === selectedConnectionId.value) ?? null;
-});
-const selectedDestinationTypeLabel = computed(() => (
-  selectedDestination.value
-    ? accountTypeLabelText(destinationTypeLabel(selectedDestination.value))
-    : ""
-));
-const selectedDestinationCredentialCount = computed(() => (
-  selectedDestination.value
-    ? destinationsStore.credentials.filter((row) => row.destination_id === selectedDestination.value?.id).length
-    : 0
-));
-/** Configurable HTTP rows (dynamic providers, legacy Custom API) edit via the V4 PATCH. */
-const selectedEditableDestination = computed(() => (
-  selectedDestination.value && isDestinationEditable(selectedDestination.value)
-    ? selectedDestination.value
-    : null
-));
-const selectedEntry = computed(() => {
-  const connection = selectedConnection.value;
-  if (!connection) return null;
-  return catalogEntryForConnection(connection, allCatalogEntries.value);
-});
-const isCustomAccountConnection = computed(() => (
-  selectedConnection.value?.legacy.kind === "custom_account"
-));
-const selectedStatus = computed(() => (
-  selectedConnection.value
-    ? connectionStatus(selectedConnection.value)
-    : { kind: "ok" as const, label: null }
-));
-const selectedConnectionFamily = computed(() => {
-  if (selectedConnection.value) {
-    return connectionBrandFamily(selectedConnection.value, allCatalogEntries.value, providersStore.presetIds);
-  }
-  if (selectedDestination.value) {
-    return destinationBrandFamily(selectedDestination.value, null, allCatalogEntries.value, providersStore.presetIds);
-  }
-  return catalogEntryFamily({ provider_id: "", display_family: "", display_name: "" });
-});
-const customAccountEndpoint = computed(() => (
-  selectedConnection.value?.endpoints.find((endpoint) => endpoint.url)?.url ?? ""
-));
-const customAccountProtocol = computed(() => {
-  const protocol = selectedConnection.value?.endpoints[0]?.wire_protocol;
-  return protocol ? protocolDisplayName(protocol) : t("未设置");
-});
-const addKeyPlan = computed(() => {
-  const entry = selectedEntry.value;
-  if (!entry) return null;
-  return providerSurfaceFromCatalog(entry);
-});
-const isDraftConnection = computed(() => (
-  selectedConnection.value ? isOnboardingDraftConnection(selectedConnection.value) : false
-));
-const canAddKey = computed(() => {
-  const entry = selectedEntry.value;
-  return Boolean(
-    entry
-    && !isDraftConnection.value
-    && entry.credential_kind !== "none"
-    && entry.creation_availability === "available"
-    && addKeyPlan.value
-  );
-});
-const selectedDefinition = computed(() => {
-  const providerId = selectedEntry.value?.provider_id
-    ?? (selectedConnection.value?.legacy.kind === "dynamic_provider" ? selectedConnection.value.legacy.id : null);
-  return providerId ? providersStore.definitions.get(providerId) ?? null : null;
-});
-const httpScope = computed(() => {
-  const dest = selectedDestination.value;
-  if (!dest || !isDestinationEditable(dest)) return null;
-  const presetId = selectedDefinition.value?.preset_id;
-  const preset = presetId ? PROVIDER_PRESETS.find((entry) => entry.id === presetId) ?? null : null;
-  return projectDestinationCatalog(dest, {
-    source: preset ? "preset" : "static",
-    source_url: preset?.docsUrl ?? "",
-    revision: destinationsStore.expectation?.expectedRevision ?? 0,
-  });
-});
-const builtinScope = computed(() => {
-  const entry = selectedEntry.value;
-  if (!entry || entry.origin !== "builtin" || entry.provider_id === "custom") return null;
-  return scopes.value.find((scope) => scope.provider_id === entry.provider_id) ?? null;
-});
-const activeScope = computed(() => builtinScope.value ?? httpScope.value);
-const httpCatalogRefreshVisible = computed(() => (
-  Boolean(selectedDestination.value && isDestinationCatalogRefreshable(selectedDestination.value))
-  && !isDraftConnection.value
-));
-const initialLoading = computed(() => (
-  loading.value
-  && !destinationsStore.loaded
-  && !selectedDestination.value
-  && !selectedConnection.value
-  && !loadError.value
-));
+const selectedDestination = computed(() => pageDetail.value?.destination
+  ? presentDestinationProperties(pageDetail.value.destination) : null);
+const selectedConnection = computed(() => pageDetail.value ? providerPageConnection(pageDetail.value) : null);
+const selectedDestinationTypeLabel = computed(() => selectedDestination.value ? accountTypeLabelText(destinationTypeLabel(selectedDestination.value)) : "");
+const selectedDestinationCredentialCount = computed(() => selectedItem.value?.credentialCount ?? null);
+const selectedEditableDestination = computed(() => providerPageAction(pageDetail.value, "edit") && selectedDestination.value?.adapter === "http" ? selectedDestination.value : null);
+const destinationDeletable = computed(() => providerPageAction(pageDetail.value, "delete"));
+const isCustomAccountConnection = computed(() => selectedItem.value?.legacy.kind === "custom_account");
+const selectedStatus = computed(() => selectedItem.value ? providerPageItemStatus(selectedItem.value) : { kind: "ok" as const, label: null });
+const selectedConnectionFamily = computed(() => providerPageBrand(selectedItem.value, selectedEntry.value));
+const customAccountEndpoint = computed(() => selectedConnection.value?.endpoints.find(endpoint => endpoint.url)?.url ?? "");
+const customAccountProtocol = computed(() => selectedConnection.value?.endpoints[0]?.wire_protocol ? protocolDisplayName(selectedConnection.value.endpoints[0].wire_protocol) : t("未设置"));
+const addKeyPlan = computed(() => operationProjection.value?.catalogEntry ? providerSurfaceFromCatalog(operationProjection.value.catalogEntry) : null);
+const isDraftConnection = computed(() => selectedItem.value?.lifecycle === "draft");
+const canAddKey = computed(() => Boolean(selectedEntry.value && !isDraftConnection.value
+  && selectedItem.value?.credentialCreate.allowed && selectedEntry.value.credential_kind !== "none" && selectedEntry.value.creation_availability === "available"));
+const selectedDefinition = computed(() => operationProjection.value?.definition ?? null);
+const activeScope = computed(() => providerPageScope(pageDetail.value, modelsPage.value));
+const httpScope = computed(() => activeScope.value?.scope_kind === "custom_endpoint" ? activeScope.value : null);
+const builtinScope = computed(() => activeScope.value?.scope_kind === "provider" ? activeScope.value : null);
+const httpCatalogRefreshVisible = computed(() => providerPageAction(pageDetail.value, "refreshCatalog") && Boolean(httpScope.value) && !isDraftConnection.value);
+const initialLoading = computed(() => loading.value && !pageStore.rail && !pageDetail.value && !loadError.value);
+const pendingSelection = computed(() => selectedKey.value !== null && selectedItem.value?.railKey !== selectedKey.value);
 const actionLocked = computed(() => (
-  catalogRefreshing.value
+  pendingSelection.value || definitionLoading.value
+  || catalogRefreshing.value
   || catalogRemoving.value
   || probingModels.value.size > 0
   || pendingOverrideKeys.value.size > 0
@@ -994,7 +895,9 @@ const actionLocked = computed(() => (
   || protocolGrantSaving.value
 ));
 const matrixActionLocked = computed(() => (
-  catalogRefreshing.value
+  pendingSelection.value || pageStore.loading.models || definitionLoading.value
+  || Boolean(modelsPage.value && pageDetail.value && modelsPage.value.readVersion !== pageDetail.value.readVersion)
+  || catalogRefreshing.value
   || catalogRemoving.value
   || probingModels.value.size > 0
   || protocolGrantDialog.value !== null
@@ -1009,98 +912,18 @@ function statusLabelText(label: string | null): string {
   return label ? t(label as MessageKey) : "";
 }
 
-function railStatusExtra(connection: Connection) {
-  const label = connectionStatus(connection).label;
-  if (!label) return undefined;
-  return () => h("span", {
-    style: {
-      fontSize: "var(--ocg-font-xs)",
-      color: "var(--ocg-muted)",
-      fontWeight: "400",
-    },
-  }, t(label as MessageKey));
-}
-
-const sortedRailItems = computed(() => {
-  const destinationsForRail = railItemRows.value.flatMap((item) => (
-    item.kind === "destination" ? [item.destination] : []
-  ));
-  const draftsForRail = railItemRows.value.flatMap((item) => (
-    item.kind === "draft_connection" ? [item.connection] : []
-  ));
-  const mixed = [
-    ...filterDestinations(destinationsForRail, railQuery.value).map((destination) => ({
-      kind: "destination" as const,
-      destination,
-    })),
-    ...filterConnections(draftsForRail, railQuery.value).map((connection) => ({
-      kind: "draft_connection" as const,
-      connection,
-    })),
-  ];
-  return sortProvidersByName(mixed, providersRailItemName, providerSort.value);
-});
-
-function railOptionForDestination(item: typeof railDestinations.value[number]): MenuOption {
-  const joined = connectionForDestination(connections.value, item);
-  return {
-    key: railKeyForDestination(item),
-    label: item.name,
-    icon: () => h(ProviderBrandMark, {
-      family: joined
-        ? connectionBrandFamily(joined, allCatalogEntries.value, providersStore.presetIds)
-        : destinationBrandFamily(item, null, allCatalogEntries.value, providersStore.presetIds),
-      size: RAIL_BRAND_SIZE,
-    }),
-    extra: joined ? railStatusExtra(joined) : undefined,
-  };
-}
-
-function railOptionForDraft(item: Connection): MenuOption {
-  return {
-    key: railKeyForDraftConnection(item),
-    label: item.name,
-    icon: () => h(ProviderBrandMark, {
-      family: connectionBrandFamily(item, allCatalogEntries.value, providersStore.presetIds),
-      size: RAIL_BRAND_SIZE,
-    }),
-    extra: railStatusExtra(item),
-  };
-}
-
-const railOptions = computed<MenuOption[]>(() => (
-  sortedRailItems.value.map((item) => (
-    item.kind === "destination"
-      ? railOptionForDestination(item.destination)
-      : railOptionForDraft(item.connection)
-  ))
-));
-const railFilteredOut = computed(() => (
-  Boolean(railQuery.value.trim()) && railOptions.value.length === 0
-));
-const mobileSelectOptions = computed<SelectOption[]>(() => {
-  // The mobile selector has its own built-in filter; the rail search query
-  // must not shrink these options when the rail itself is hidden.
-  const unfiltered = sortProvidersByName(
-    railItemRows.value,
-    providersRailItemName,
-    providerSort.value,
-  );
-  const labelForDraft = (item: Connection): string => {
-    const status = connectionStatus(item);
-    return status.label
-      ? `${item.name} · ${t(status.label as MessageKey)}`
-      : item.name;
-  };
-  return [
-    ...unfiltered.map((item) => (
-      item.kind === "destination"
-        ? { value: railKeyForDestination(item.destination), label: item.destination.name }
-        : { value: railKeyForDraftConnection(item.connection), label: labelForDraft(item.connection) }
-    )),
-    { value: ADD_SELECT_VALUE, label: t("添加供应商") },
-  ];
-});
+const railOptions = computed<MenuOption[]>(() => railItems.value.map(item => ({
+  key: item.railKey, label: item.name,
+  icon: () => h(ProviderBrandMark, { family: providerPageBrand(item, null), size: RAIL_BRAND_SIZE }),
+  extra: providerPageItemStatus(item).label ? () => h("span", { style: { fontSize: "var(--ocg-font-xs)", color: "var(--ocg-muted)" } }, statusLabelText(providerPageItemStatus(item).label)) : undefined,
+})));
+const railFilteredOut = computed(() => Boolean(railQuery.value.trim()) && railOptions.value.length === 0);
+const mobileSelectOptions = computed<SelectOption[]>(() => [
+  ...(selectedItem.value && !railItems.value.some(item => item.railKey === selectedItem.value?.railKey)
+    ? [{ value: selectedItem.value.railKey, label: selectedItem.value.name }] : []),
+  ...railItems.value.map(item => ({ value: item.railKey, label: item.name })),
+  { value: ADD_SELECT_VALUE, label: t("添加供应商") },
+]);
 const catalogRefreshVisible = computed(() => {
   const scope = activeScope.value;
   if (!scope || isDraftConnection.value) return false;
@@ -1138,119 +961,48 @@ const modelMatrix = ref<InstanceType<typeof ProviderModelMatrix> | null>(null);
 /** One-shot deep-link target: open the capabilities editor for this model. */
 const pendingCapabilitiesOpen = ref<string | null>(null);
 
-function selectionProjectionReady(): boolean {
-  return providersSelectionProjectionReady({
-    destinationsLoaded: destinationsStore.loaded,
-    connectionsLoaded: providersStore.connections !== null,
-    catalogLoaded: providersStore.catalog !== null,
-    contractsLoaded: providersStore.contracts !== null,
-  });
-}
-
-function providersPageCommit(
-  prefer?: { connectionId?: string; providerId?: string },
-  userSelection = false,
-) {
-  const query = readProviderPageQuery(routeQuerySearch("providers", route.query));
-  const resolved = resolveProvidersSelection({
-    query: {
-      connection: query.connection,
-      provider: query.provider,
-      destination: query.destination,
-    },
-    prefer,
-    cached: {
-      destinationId: selectedDestinationId.value,
-      connectionId: selectedConnectionId.value,
-    },
-    destinations: destinations.value,
-    connections: providersStore.connections,
-  });
-  return {
-    query,
-    resolved,
-    action: providersQueryAction({
-      add: query.add,
-      projectionReady: selectionProjectionReady(),
-      unresolvedExplicitTarget: resolved.fellBack,
-      freshLoadSucceeded: freshRequiredLoadSucceeded,
-      userSelection,
-    }),
-  };
-}
-
 function writeUrl(userSelection = false) {
-  // An in-flight load finishing after navigation must not rewrite the URL
-  // (e.g. strip the one-shot Accounts `add` deep link) for another view.
-  if (!currentUrlIsProvidersView()) return;
-  // Hold while an explicit target is still missing from last-success data,
-  // unless this write is a direct rail/mobile pick that supersedes it.
-  if (providersPageCommit(undefined, userSelection).action !== "apply-selection") return;
+  if (!currentUrlIsProvidersView() || pendingSelection.value || !selectedItem.value) return;
   void router.replace(appViewRoute("providers", {
-    ...(selectedDestinationId.value ? { destination: selectedDestinationId.value } : {}),
-    ...(!selectedDestinationId.value && selectedConnectionId.value
-      ? { connection: selectedConnectionId.value }
-      : {}),
+    ...(selectedItem.value.destinationId ? { destination: selectedItem.value.destinationId }
+      : selectedItem.value.connectionId ? { connection: selectedItem.value.connectionId }
+      : selectedItem.value.providerId ? { provider: selectedItem.value.providerId } : {}),
     ...(activeTab.value !== "models" ? { tab: activeTab.value } : {}),
     ...(!userSelection && targetModel.value ? { model: targetModel.value } : {}),
   }));
 }
-
-function applySelection(resolved: ReturnType<typeof resolveProvidersSelection>, fellBackNotice: boolean) {
-  selectedDestinationId.value = resolved.destinationId;
-  selectedConnectionId.value = resolved.destinationId ? null : resolved.connectionId;
-  if (fellBackNotice && resolved.fellBack) {
-    actionLive.value = t("所选范围已失效，切换到第一个供应商");
-  }
+function applyDetailSelection(): void {
+  const item = pageStore.detail?.item;
+  if (!item) return;
+  selectedKey.value = item.railKey;
+  selectedDestinationId.value = item.destinationId;
+  selectedConnectionId.value = item.destinationId ? null : item.connectionId;
 }
-
 function redirectProviderAdd(preset: string | null): void {
-  void router.replace(appViewRoute("accounts", undefined, {
-    add: accountAddQueryValue(accountAddDeepLinkFromProviderAdd(preset)),
-    from: "providers",
-  }));
+  void router.replace(appViewRoute("accounts", undefined, { add: accountAddQueryValue(accountAddDeepLinkFromProviderAdd(preset)), from: "providers" }));
 }
-
-function applyFromQuery(
-  fellBackNotice = false,
-  prefer?: { connectionId?: string; providerId?: string },
-): ReturnType<typeof providersQueryAction> {
-  const { action, query, resolved } = providersPageCommit(prefer);
-  if (action === "redirect-add") {
-    redirectProviderAdd(query.preset);
-    return action;
-  }
-  if (action === "defer") return action;
-  applySelection(resolved, fellBackNotice);
-  // Capture the one-shot capabilities target before writeUrl strips it.
-  if (query.capabilities) pendingCapabilitiesOpen.value = query.capabilities;
+function applyFromQuery(): "redirect-add" | "apply-selection" | "defer" {
+  const query = readProviderPageQuery(routeQuerySearch("providers", route.query));
+  if (query.add) { redirectProviderAdd(query.preset); return "redirect-add"; }
+  const key = providerPageQueryKey(query);
   const candidate = query.model ? "models" : query.tab ?? activeTab.value;
   activeTab.value = candidate;
-  writeUrl();
-  return action;
+  if (query.capabilities) pendingCapabilitiesOpen.value = query.capabilities;
+  if (key && selectedKey.value !== key) { selectedKey.value = key; return "defer"; }
+  return "apply-selection";
 }
-
 function selectConnection(key: string | number) {
   if (addKeyBusy.value) return;
-  const railKey = String(key);
-  const dest = destinations.value.find((row) => (
-    isProvidersRailDestination(row) && railKeyForDestination(row) === railKey
-  ));
-  if (dest) {
-    selectedDestinationId.value = dest.id;
-    selectedConnectionId.value = null;
-    writeUrl(true);
-    return;
-  }
-  const draft = (providersStore.connections ?? []).find((item) => (
-    item.id === railKey && isOnboardingDraftConnection(item)
-  ));
-  if (!draft) return;
-  selectedDestinationId.value = null;
-  selectedConnectionId.value = draft.id;
-  writeUrl(true);
+  const item = railItems.value.find(row => row.railKey === String(key));
+  if (!item) return;
+  selectedKey.value = item.railKey;
+  selectedDestinationId.value = item.destinationId;
+  selectedConnectionId.value = item.destinationId ? null : item.connectionId;
+  resetScopeActions();
+  void router.replace(appViewRoute("providers", item.destinationId ? { destination: item.destinationId }
+    : item.connectionId ? { connection: item.connectionId } : { provider: item.providerId! }));
+  void loadSelected({ maxAgeMs: PAGE_READ_MAX_AGE_MS }).catch(cause => { loadError.value = dashboardErrorDetail(cause); });
 }
-
 function onMobileSelect(key: string | number) {
   const value = String(key);
   if (value === ADD_SELECT_VALUE) {
@@ -1302,87 +1054,110 @@ function resetScopeActions() {
   probeReceipt.value = null;
 }
 
+async function ensureOperationDetail(requireVisibleVersion = false): Promise<NonNullable<ReturnType<typeof providerPageEditProjection>>> {
+  if (!selectedKey.value) throw new Error(t("状态已变化，请刷新后重试。"));
+  const key = selectedKey.value;
+  const session = providerViewSession;
+  const visibleVersion = pageDetail.value?.readVersion;
+  definitionLoading.value = true;
+  definitionError.value = "";
+  try {
+    const value = await pageStore.loadEditDetail(key);
+    if (session !== providerViewSession || selectedKey.value !== key || !currentUrlIsProvidersView()
+      || pageStore.editDetail !== value) throw new Error(t("状态已变化，请刷新后重试。"));
+    if (requireVisibleVersion && value.readVersion !== visibleVersion) {
+      void loadAll({ retain: true });
+      throw new Error(t("状态已变化，请刷新后重试。"));
+    }
+    const projection = providerPageEditProjection(value);
+    destinationsStore.upsertDetailProjection({
+      destinations: projection.destination ? [projection.destination] : [],
+      credentials: value.credentials.map(presentDestinationCredential),
+      expectation: { expectedRevision: value.revision.revision, processGeneration: value.revision.processGeneration },
+    });
+    for (const account of value.accounts) accountsStore.upsertAccount(presentAccount(account));
+    // A selected contract subset never replaces the complete legacy contract cache.
+    return projection;
+  } catch (cause) { definitionError.value = dashboardErrorDetail(cause); throw cause; }
+  finally { if (session === providerViewSession) definitionLoading.value = false; }
+}
+async function prepareModelOperation() {
+  const projection = await ensureOperationDetail(true);
+  if (!projection.scope) throw new Error(t("状态已变化，请刷新后重试。"));
+  return projection.scope;
+}
 async function loadDefinition(providerId: string): Promise<ProviderDefinitionView | null> {
-  definitionLoading.value = true;
-  definitionError.value = "";
+  try { const projection = await ensureOperationDetail(); return projection.definition ?? await providersStore.loadDefinition(providerId, true); }
+  catch { return null; }
+}
+function retryDefinition() { void ensureOperationDetail().catch(() => {}); }
+async function loadModels(options: { maxAgeMs?: number } = {}): Promise<void> {
+  if (!selectedKey.value || activeTab.value !== "models" || !pageDetail.value?.scope) return;
+  const key = selectedKey.value;
+  const session = providerViewSession;
   try {
-    return await providersStore.loadDefinition(providerId, true);
-  } catch (error) {
-    definitionError.value = dashboardErrorDetail(error);
-    return null;
-  } finally {
-    definitionLoading.value = false;
-  }
+    const query = { ...modelQuery.value, limit: PAGE_SIZE, ...(!modelQueryTouched.value && targetModel.value ? { model: targetModel.value } : {}) };
+    const result = await pageStore.loadModels(key, query, options);
+    if (session !== providerViewSession || selectedKey.value !== key || !currentUrlIsProvidersView()
+      || pageStore.models !== result) return;
+    if (selectedKey.value === key && pageStore.detail && result.readVersion !== pageStore.detail.readVersion) {
+      // Reads may straddle an external write. Reconcile once, with actions locked until versions agree.
+      const detail = await pageStore.loadDetail(key);
+      if (session === providerViewSession && selectedKey.value === key && currentUrlIsProvidersView()
+        && pageStore.detail === detail && pageStore.hasIdentity("models", JSON.stringify([key, query]))) await pageStore.loadModels(key, query);
+    }
+  } catch { /* Last successful rows remain visible with a separate error. */ }
 }
-
-async function ensureDefinition(providerId: string) {
-  if (providersStore.definitions.has(providerId)) return;
-  definitionLoading.value = true;
-  definitionError.value = "";
-  try {
-    await providersStore.loadDefinition(providerId);
-  } catch (error) {
-    definitionError.value = dashboardErrorDetail(error);
-  } finally {
-    definitionLoading.value = false;
-  }
+function onModelQuery(query: { search: string; enabledOnly: boolean; offset: number }): void {
+  modelQueryTouched.value = true;
+  modelQuery.value = query;
+  void loadModels();
 }
-
-function retryDefinition() {
-  const entry = selectedEntry.value;
-  if (!entry || entry.origin === "builtin") return;
-  void ensureDefinition(entry.provider_id);
+async function loadSelected(options: { maxAgeMs?: number } = {}): Promise<void> {
+  if (!selectedKey.value) return;
+  const key = selectedKey.value;
+  const session = providerViewSession;
+  const detail = await pageStore.loadDetail(key, options);
+  if (session !== providerViewSession || selectedKey.value !== key || !currentUrlIsProvidersView()
+    || pageStore.detail !== detail) return;
+  applyDetailSelection();
+  if (activeTab.value === "models") await loadModels(options);
+  else if (activeTab.value === "settings" && selectedEntry.value?.origin !== "builtin") await ensureOperationDetail();
+  if (session !== providerViewSession || pageStore.detail !== detail || !currentUrlIsProvidersView()) return;
+  writeUrl();
 }
-
-async function loadAll(options: {
-  retain?: boolean;
-  preferConnectionId?: string;
-  preferProviderId?: string;
-} = {}): Promise<{ ok: boolean; error: string }> {
-  if (loading.value) {
-    return { ok: false, error: loadError.value };
-  }
+async function loadAll(options: { retain?: boolean; preferConnectionId?: string; preferProviderId?: string; maxAgeMs?: number } = {}): Promise<{ ok: boolean; error: string }> {
   const generation = ++loadAllGeneration;
   loading.value = true;
-  if (!options.retain) loadError.value = "";
   try {
-    const [contractsResult, catalogResult, connectionsResult, accountsResult, destinationsResult] = await Promise.allSettled([
-      providersStore.loadContracts(),
-      providersStore.loadCatalog(),
-      providersStore.loadConnections(),
-      accountsStore.loadPresented(),
-      destinationsStore.load(),
-    ]);
-    if (generation !== loadAllGeneration) return { ok: true, error: "" };
-    const outcome = providersPageLoadOutcome({
-      destinations: destinationsResult,
-      catalog: catalogResult,
-      connections: connectionsResult,
-      contracts: contractsResult,
-      accounts: accountsResult,
-    });
-    if (outcome.ok) {
-      freshRequiredLoadSucceeded = true;
-      lastLoadAllSucceededAt = Date.now();
+    const rail = await pageStore.loadRail({ search: railQuery.value.trim(), sort: providerSort.value, offset: railOffset.value, limit: PAGE_SIZE }, options);
+    if (generation !== loadAllGeneration || !currentUrlIsProvidersView() || pageStore.rail !== rail) return { ok: true, error: "" };
+    const query = readProviderPageQuery(routeQuerySearch("providers", route.query));
+    if (query.add) { redirectProviderAdd(query.preset); return { ok: true, error: "" }; }
+    activeTab.value = query.model ? "models" : query.tab ?? activeTab.value;
+    if (query.capabilities) pendingCapabilitiesOpen.value = query.capabilities;
+    const requested = providerPageQueryKey(query);
+    selectedKey.value = requested ?? (options.preferConnectionId ? `c:${options.preferConnectionId}`
+      : options.preferProviderId ? `p:${options.preferProviderId}` : selectedKey.value ?? rail.items[0]?.railKey ?? null);
+    if (selectedKey.value) {
+      try { await loadSelected(options); }
+      catch (cause) {
+        if (generation !== loadAllGeneration || !currentUrlIsProvidersView() || pageStore.rail !== rail) return { ok: true, error: "" };
+        // Only a conclusive selected 404 plus a successful complete rail read permits fallback.
+        if (!(cause instanceof DashboardRequestError) || cause.status !== 404 || rail.errors.length || !rail.items[0]) throw cause;
+        selectedKey.value = rail.items[0].railKey;
+        actionLive.value = t("所选范围已失效，切换到第一个供应商");
+        await loadSelected(options);
+      }
     }
-    if (outcome.applySelection && currentUrlIsProvidersView()) {
-      applyFromQuery(true, {
-        connectionId: options.preferConnectionId,
-        providerId: options.preferProviderId,
-      });
-    }
-    if (!outcome.ok) {
-      const error = dashboardErrorDetail(outcome.reason);
-      loadError.value = error;
-      return { ok: false, error };
-    }
-    loadError.value = "";
+    if (generation === loadAllGeneration) { loadError.value = ""; }
     return { ok: true, error: "" };
-  } finally {
-    if (generation === loadAllGeneration) loading.value = false;
-  }
+  } catch (cause) {
+    const error = dashboardErrorDetail(cause);
+    if (generation === loadAllGeneration) loadError.value = error;
+    return { ok: false, error };
+  } finally { if (generation === loadAllGeneration) loading.value = false; }
 }
-
 function openDefinitionEditor(): void {
   if (isDraftConnection.value) {
     void openContinueSetup();
@@ -1406,8 +1181,9 @@ async function openEdit(): Promise<void> {
   showEditModal.value = true;
 }
 
-function openDestinationEditor(): void {
-  const destination = selectedEditableDestination.value;
+async function openDestinationEditor(): Promise<void> {
+  const projection = await ensureOperationDetail().catch(() => null);
+  const destination = projection?.destination;
   if (!destination || actionLocked.value) return;
   destinationEditId.value = destination.id;
   showDestinationEditModal.value = true;
@@ -1418,59 +1194,47 @@ function onDestinationEditShow(visible: boolean): void {
   if (!visible) destinationEditId.value = null;
 }
 
-function onDestinationSaved(): void {
-  actionLive.value = t("连接已保存");
-  const providerId = selectedDestination.value?.legacy.kind === "dynamic"
-    ? selectedDestination.value.legacy.id
-    : null;
-  if (providerId) providersStore.invalidateDefinition(providerId);
-  // Destination edits change connection facts, provider catalog mappings, and
-  // effective contracts. Revalidate all three projections together.
-  void Promise.all([
-    providersStore.loadConnections(),
-    providersStore.loadCatalog(),
-    providersStore.loadContracts(),
-    ...(providerId ? [providersStore.loadDefinition(providerId, true)] : []),
-  ]).catch(() => {});
+function onModelCommitted(receipt: { kind: "destination"; destination: Destination } | { kind: "provider"; contracts: ProviderContractsResponse }): void {
+  if (receipt.kind === "destination") pageStore.commitDestination(receipt.destination);
+  else pageStore.commitContracts(receipt.contracts);
+  pageStore.invalidate();
+  invalidateManagementPages("providerPage");
+  void revalidateAfterEditor();
 }
-
-/** Fall back from a destination known to have left the committed store. */
+function onMetadataCommitted(receipt: { destinationId: string; publicModel: string; snapshot: DestinationModelMetadataSnapshot }): void {
+  pageStore.commitMetadata(receipt.snapshot);
+  pageStore.invalidate();
+  invalidateManagementPages("providerPage");
+  void revalidateAfterEditor();
+}
+async function revalidateAfterEditor(): Promise<void> {
+  const session = providerViewSession;
+  const result = await loadAll({ retain: true });
+  if (session === providerViewSession && !result.ok) message.warning(t("已保存，但列表刷新失败。手动刷新，不要再次提交。"));
+}
+function onDestinationSaved(): void {
+  const destination = operationDestination.value;
+  if (destination) pageStore.commitDestination(destination);
+  const contracts = providersStore.contracts;
+  if (contracts && contracts.process_generation === controlPlane.processGeneration
+    && contracts.revision === controlPlane.revision) pageStore.commitContracts(contracts);
+  actionLive.value = t("连接已保存");
+  pageStore.invalidate();
+  invalidateManagementPages("providerPage");
+  void loadAll({ retain: true });
+}
 function fallbackFromRemovedDestination(id: string): void {
   if (selectedDestinationId.value !== id) return;
-  selectedDestinationId.value = null;
-  selectedConnectionId.value = null;
-  // A successful local delete makes the URL target conclusively stale even
-  // if other Providers resources are still loading. Clear that target and
-  // select from the destination snapshot that already committed the delete.
-  if (!currentUrlIsProvidersView()) return;
-  void router.replace(appViewRoute("providers", null));
-  applySelection(resolveProvidersSelection({
-    query: { connection: null, provider: null, destination: null },
-    cached: { destinationId: null, connectionId: null },
-    destinations: destinations.value,
-    connections: providersStore.connections,
-  }), false);
-  writeUrl(true);
+  selectedKey.value = null;
+  selectedDestinationId.value = selectedConnectionId.value = null;
+  pageStore.invalidate();
+  invalidateManagementPages("providerPage");
+  if (currentUrlIsProvidersView()) void router.replace(appViewRoute("providers", null)).then(() => loadAll({ retain: true }));
 }
-
-function onDestinationDeleted(id: string): void {
-  void providersStore.loadConnections().catch(() => {});
-  fallbackFromRemovedDestination(id);
-}
-
-// The delete button lives inside the selected detail and may unmount before
-// its async completion emits. Observe the store commit itself, while requiring
-// that the selected row was present in the previous snapshot so an unresolved
-// deep link is never cleared by an unrelated load.
-watch(destinations, (next, previous) => {
-  const id = selectedDestinationId.value;
-  if (id && previous.some((row) => row.id === id) && !next.some((row) => row.id === id)) {
-    fallbackFromRemovedDestination(id);
-  }
-}, { flush: "sync" });
-
+function onDestinationDeleted(id: string): void { fallbackFromRemovedDestination(id); }
 async function deleteDestinationById(id: string): Promise<void> {
   try {
+    await ensureOperationDetail();
     await destinationsStore.deleteDestination(id);
     message.success(t("连接已删除"));
     onDestinationDeleted(id);
@@ -1481,20 +1245,13 @@ async function deleteDestinationById(id: string): Promise<void> {
 
 /** ProviderSettingsPanel confirmed already; route V4-editable rows to the new DELETE. */
 function onSettingsDelete(): void {
-  const destination = selectedEditableDestination.value;
-  if (!destination) {
-    void deleteSelected();
-    return;
-  }
-  if (!isDestinationDeletable(destination, destinationsStore.credentials)) {
-    message.warning(t("仍有 Key 使用此连接，无法删除"));
-    return;
-  }
-  void deleteDestinationById(destination.id);
+  if (selectedEditableDestination.value) { void deleteDestinationById(selectedEditableDestination.value.id); return; }
+  void deleteSelected();
 }
-
+async function deletePageDestination(): Promise<void> { if (selectedDestinationId.value) await deleteDestinationById(selectedDestinationId.value); }
 async function openContinueSetup(): Promise<void> {
-  const connection = selectedConnection.value;
+  const projection = await ensureOperationDetail().catch(() => null);
+  const connection = projection?.connection;
   if (!connection || !isOnboardingDraftConnection(connection)) return;
   const definition = await loadDefinition(connection.legacy.id);
   if (!definition) return;
@@ -1541,6 +1298,7 @@ function onDynamicCommitted(result: {
       ? t("草稿已保存")
       : wasResume ? t("供应商已更新") : t("供应商已创建"),
   );
+  selectedKey.value = `c:${connectionId}`;
   selectedDestinationId.value = null;
   selectedConnectionId.value = connectionId;
   writeUrl(true);
@@ -1577,9 +1335,10 @@ function onAddKeyShow(visible: boolean): void {
   showAddKeyModal.value = visible;
 }
 
-function openAddKey(): void {
+async function openAddKey(): Promise<void> {
   if (actionLocked.value || addKeyBusy.value || !canAddKey.value) return;
-  showAddKeyModal.value = true;
+  try { await ensureOperationDetail(); if (addKeyPlan.value) showAddKeyModal.value = true; }
+  catch { /* The explicit detail failure is rendered next to the action. */ }
 }
 
 async function revalidateAfterAddKey(): Promise<void> {
@@ -1635,8 +1394,12 @@ async function deleteSelected(): Promise<void> {
     await providerApi.deleteProviderDefinition(providerId);
     message.success(t("供应商已删除"));
     providersStore.invalidateDefinition(providerId);
+    selectedKey.value = null;
     selectedDestinationId.value = null;
     selectedConnectionId.value = null;
+    void router.replace(appViewRoute("providers", null));
+    pageStore.invalidate();
+    invalidateManagementPages("providerPage");
     await loadAll({ retain: true });
   } catch (error) {
     if (isRevisionConflict(error) || (error instanceof DashboardRequestError && error.status === 409)) {
@@ -1655,19 +1418,20 @@ async function removeCatalogModels(payload: { modelIds: string[] }) {
   catalogRemoving.value = true;
   matrixError.value = "";
   try {
+    await ensureOperationDetail(true);
+    if (session !== providerViewSession || activeScope.value?.key !== scope.key) return;
     if (scope.scope_kind === "custom_endpoint") {
-      await destinationsStore.updateCatalog(scope.scope_id, {
-        updates: [],
-        removeModels: payload.modelIds,
-      });
+      const receipt = await destinationsStore.updateCatalog(scope.scope_id, { updates: [], removeModels: payload.modelIds });
+      pageStore.commitRemoval(scope.scope_id, payload.modelIds, receipt.catalog.map(row => row.public_model));
     } else {
       // The store commits the V4 removal receipt in place; the confirmed
       // delete is complete here even if the revalidation below fails.
-      await providersStore.removeContractCatalogModels(
+      const receipt = await providersStore.removeContractCatalogModels(
         scope.scope_kind,
         scope.scope_id,
         payload.modelIds,
       );
+      pageStore.commitRemoval(scope.scope_id, receipt.removed_ids, receipt.catalog_models);
     }
     if (session !== providerViewSession) return;
     actionLive.value = t("已从目录删除模型");
@@ -1698,25 +1462,16 @@ async function removeCatalogModels(payload: { modelIds: string[] }) {
 }
 
 async function revalidateAfterCatalogRemoval(session: number): Promise<void> {
-  // Deferred read-only revalidation: the receipt's in-place commit is already
-  // rendered, these reads only refine the contracts and destination/catalog
-  // projections. A failure is a standalone warning and never replays the
-  // removal.
-  const results = await Promise.allSettled([
-    providersStore.loadContracts(),
-    providersStore.loadCatalog(),
-    destinationsStore.load(),
-  ]);
-  if (session !== providerViewSession) return;
-  const failed = results.find((result) => result.status === "rejected");
-  if (failed?.status === "rejected") {
-    message.warning(t("已删除，但列表刷新失败：{error}", { error: dashboardErrorDetail(failed.reason) }));
-  }
+  pageStore.invalidate();
+  invalidateManagementPages("providerPage");
+  const result = await loadAll({ retain: true });
+  if (session === providerViewSession && !result.ok) message.warning(t("已删除，但列表刷新失败：{error}", { error: result.error }));
 }
-
 async function refreshCatalog() {
+  const session = providerViewSession;
   if (httpScope.value) {
     await refreshHttpCatalog();
+    if (session !== providerViewSession) return;
     return;
   }
   const scope = builtinScope.value;
@@ -1724,43 +1479,58 @@ async function refreshCatalog() {
   catalogRefreshing.value = true;
   catalogRefreshError.value = "";
   try {
-    await providersStore.refreshContractCatalog(scope.scope_kind, scope.scope_id);
-    applyFromQuery();
+    const receipt = await providersStore.refreshContractCatalog(scope.scope_kind, scope.scope_id);
+    if (session !== providerViewSession) return;
+    pageStore.commitContracts(receipt);
+    pageStore.invalidate();
+    invalidateManagementPages("providerPage");
+    void loadAll({ retain: true });
     actionLive.value = t("已刷新模型目录");
     message.success(t("已刷新模型目录"));
   } catch (error) {
+    if (session !== providerViewSession) return;
     catalogRefreshError.value = dashboardErrorDetail(error);
     message.error(t("刷新模型目录失败：{error}", { error: catalogRefreshError.value }));
   } finally {
-    catalogRefreshing.value = false;
+    if (session === providerViewSession) catalogRefreshing.value = false;
   }
 }
 
 async function refreshHttpCatalog() {
-  const destination = selectedDestination.value;
-  if (!destination || !httpCatalogRefreshVisible.value || catalogRefreshing.value) return;
+  const session = providerViewSession;
+  if (!httpCatalogRefreshVisible.value || catalogRefreshing.value) return;
+  const projection = await ensureOperationDetail().catch(() => null);
+  if (session !== providerViewSession) return;
+  const destination = projection?.destination;
+  if (!destination) return;
   const id = destination.id;
   catalogRefreshing.value = true;
   catalogRefreshError.value = "";
   try {
     const migrationNotice = await migrateMissingPresetProtocols(destination);
+    if (session !== providerViewSession) return;
     const result = await destinationsStore.refreshCatalog(id);
+    if (session !== providerViewSession) return;
+    pageStore.commitDestination(result.destination);
     // A cleared session must not start new loads or resurrect provider caches.
     if (!destinationsStore.byId.has(id)) return;
     if (destination.legacy.kind === "dynamic") providersStore.invalidateDefinition(destination.legacy.id);
     // The model table already renders the mutation receipt from the destination store.
-    void Promise.all([providersStore.loadConnections(), providersStore.loadCatalog()]).catch(() => {});
+    pageStore.invalidate();
+    invalidateManagementPages("providerPage");
+    void loadAll({ retain: true });
     if (selectedDestination.value?.id !== id) return;
     const refreshText = t("已刷新模型目录，新增 {count} 个模型（默认启用）。", { count: result.addedCount });
     actionLive.value = migrationNotice ? `${migrationNotice} ${refreshText}` : refreshText;
     if (result.truncated) message.warning(t("模型目录仅返回部分结果，已有模型已保留。"));
     else message.success(refreshText);
   } catch (error) {
+    if (session !== providerViewSession) return;
     if (selectedDestination.value?.id !== id) return;
     catalogRefreshError.value = dashboardErrorDetail(error);
     message.error(t("刷新模型目录失败：{error}", { error: catalogRefreshError.value }));
   } finally {
-    catalogRefreshing.value = false;
+    if (session === providerViewSession) catalogRefreshing.value = false;
   }
 }
 
@@ -1773,6 +1543,7 @@ async function refreshHttpCatalog() {
  * failure (including a CAS conflict) only warns; the refresh still runs.
  */
 async function migrateMissingPresetProtocols(destination: Destination): Promise<string | null> {
+  const session = providerViewSession;
   const presetId = selectedDefinition.value?.preset_id;
   const preset = presetId ? PROVIDER_PRESETS.find((entry) => entry.id === presetId) ?? null : null;
   if (!preset) return null;
@@ -1795,6 +1566,7 @@ async function migrateMissingPresetProtocols(destination: Destination): Promise<
       withAuthorizedCredentials(savePlan.input, []),
       destinationsStore.expectation ?? undefined,
     );
+    if (session !== providerViewSession) return null;
     const notice = t("已为该连接补齐 {count} 条上游协议：{names}", {
       count: plan.added.length,
       names: plan.added.map((route) => protocolDisplayName(route.protocol)).join(", "),
@@ -1802,6 +1574,7 @@ async function migrateMissingPresetProtocols(destination: Destination): Promise<
     message.success(notice);
     return notice;
   } catch (error) {
+    if (session !== providerViewSession) return null;
     message.warning(t("补齐上游协议失败：{error}", { error: dashboardErrorDetail(error) }));
     return null;
   }
@@ -1863,8 +1636,8 @@ function sameExpectation(
 
 function currentProviderProtocolGrantCapture(): ProviderProtocolGrantCapture | null {
   const scope = activeScope.value;
-  const destination = selectedDestination.value;
-  const connection = selectedConnection.value;
+  const destination = operationDestination.value;
+  const connection = operationConnection.value;
   const destinationExpectation = destinationsStore.expectation;
   if (!scope || scope.scope_kind !== "provider" || !destination || !connection || !destinationExpectation) {
     return null;
@@ -1898,8 +1671,8 @@ function cloneOverridePayload(payload: OverridePayload): OverridePayload {
 function openProviderProtocolGrantDialog(payload: OverridePayload): boolean {
   if (payload.scopeKind !== "provider") return false;
   const scope = activeScope.value;
-  const destination = selectedDestination.value;
-  const connection = selectedConnection.value;
+  const destination = operationDestination.value;
+  const connection = operationConnection.value;
   if (
     !scope
     || scope.key !== `${payload.scopeKind}:${payload.scopeId}`
@@ -1958,6 +1731,7 @@ async function saveProtocolGrantDialog(authorizeSelected: boolean): Promise<void
   const authorizeCredentialIds = authorizeSelected
     ? protocolGrantSelectedIds.value.filter((id) => allowedIds.has(id))
     : [];
+  const operationSession = providerViewSession;
   protocolGrantSaving.value = true;
   const sequence = ++overrideSequence;
   showOptimisticOverrides(dialog.payload, sequence);
@@ -1968,6 +1742,7 @@ async function saveProtocolGrantDialog(authorizeSelected: boolean): Promise<void
       sequence,
       authorizeCredentialIds,
       dialog.capture.expectation,
+      operationSession,
     )));
     protocolGrantDialog.value = null;
     protocolGrantSelectedIds.value = [];
@@ -1976,12 +1751,14 @@ async function saveProtocolGrantDialog(authorizeSelected: boolean): Promise<void
   }
 }
 
-function updateOverrides(payload: OverridePayload) {
+async function updateOverrides(payload: OverridePayload) {
+  const operationSession = providerViewSession;
+  try { await ensureOperationDetail(true); } catch (cause) { matrixError.value = dashboardErrorDetail(cause); return; }
   if (openProviderProtocolGrantDialog(payload)) return;
   const sequence = ++overrideSequence;
   showOptimisticOverrides(payload, sequence);
   matrixError.value = "";
-  overrideQueue = overrideQueue.then(() => persistOverrides(payload, sequence));
+  overrideQueue = overrideQueue.then(() => persistOverrides(payload, sequence, [], undefined, operationSession));
 }
 
 async function persistOverrides(
@@ -1989,31 +1766,41 @@ async function persistOverrides(
   sequence: number,
   authorizeCredentialIds: string[] = [],
   capturedExpectation?: MutationExpectation,
+  operationSession = providerViewSession,
 ) {
   try {
+    if (operationSession !== providerViewSession) return;
     if (payload.scopeKind === "custom_endpoint") {
       const dest = destinationsStore.byId.get(payload.scopeId);
       if (!dest || !isDestinationEditable(dest)) return;
       const input = catalogUpdatesFromOverrides(dest, payload.overrides);
       if (input.updates.length === 0) return;
-      await destinationsStore.updateCatalog(dest.id, input);
+      const receipt = await destinationsStore.updateCatalog(dest.id, input);
+      if (operationSession !== providerViewSession) return;
+      pageStore.commitDestination(receipt);
     } else {
-      await providersStore.putModelProtocolOverrides(
+      const receipt = await providersStore.putModelProtocolOverrides(
         payload.scopeKind,
         payload.scopeId,
         payload.overrides,
         authorizeCredentialIds.length > 0 ? authorizeCredentialIds : undefined,
         capturedExpectation,
       );
+      if (operationSession !== providerViewSession) return;
+      pageStore.commitContracts(receipt);
       // The provider receipt commits the matrix. Reload the destination
       // projection only after an explicit Key authorization so the Key cards
       // reflect grants without clearing their current content first.
       if (authorizeCredentialIds.length > 0) {
-        await destinationsStore.load().catch(() => {});
+        await ensureOperationDetail().catch(() => null);
       }
     }
+    pageStore.invalidate();
+    invalidateManagementPages("providerPage");
+    void loadAll({ retain: true });
     actionLive.value = t("协议覆盖已保存");
   } catch (error) {
+    if (operationSession !== providerViewSession) return;
     if (error instanceof DashboardRequestError && error.status === 409) {
       await loadAll({ retain: true });
       actionLive.value = t("供应商设置已在其他位置更新并重新加载，重试");
@@ -2037,13 +1824,13 @@ function httpProbeIdentity(destinationId: string, modelId: string, protocol: str
 async function runModelProbe(payload: { modelId: string }) {
   const scope = activeScope.value;
   if (!scope || actionLocked.value || probingModels.value.has(payload.modelId)) return;
-  const model = scope.models.find((item) => item.model_id === payload.modelId);
-  const protocol = effectiveModelTestProtocol(model);
+  const protocol = modelsPage.value?.models.find(row => row.contract.modelId === payload.modelId)?.testProtocol ?? null;
   if (!protocol) {
     probeError.value = t("该模型没有已启用的协议；先在矩阵中启用后再测试");
     message.warning(probeError.value);
     return;
   }
+  try { await ensureOperationDetail(true); } catch (cause) { probeError.value = dashboardErrorDetail(cause); return; }
   const sequence = ++probeSequence;
   const processGeneration = controlPlane.processGeneration;
   const identity = scope.scope_kind === "custom_endpoint" ? httpProbeIdentity(scope.scope_id, payload.modelId, protocol) : null;
@@ -2076,6 +1863,7 @@ async function runModelProbe(payload: { modelId: string }) {
       }
       actionLive.value = t("连接测试成功");
       message.success(t("连接测试成功"));
+      void revalidateAfterProbe(sequence);
       return;
     }
     const response = await providerApi.runProtocolProbes(scope.provider_id, {
@@ -2097,6 +1885,7 @@ async function runModelProbe(payload: { modelId: string }) {
         scope_kind: scope.scope_kind,
         scope_id: scope.scope_id,
       }, response.contract);
+      pageStore.invalidate();
     }
     // The probe receipt alone decides the reported outcome. The projection
     // revalidation is independent: a failed page read never rewrites a
@@ -2138,6 +1927,8 @@ async function revalidateAfterProbe(sequence: number): Promise<void> {
   // early return from loadAll is not a failure and earns no warning, and a
   // failed read never touches probeError or the probe receipt.
   const alreadyLoading = loading.value;
+  pageStore.invalidate();
+  invalidateManagementPages("providerPage");
   const loaded = await loadAll({ retain: true });
   if (sequence !== probeSequence) return;
   if (!loaded.ok && !alreadyLoading) {
@@ -2157,8 +1948,7 @@ const probeSummary = computed(() => {
   ) {
     return null;
   }
-  const model = scope.models.find((item) => item.model_id === receipt.modelId);
-  if (effectiveModelTestProtocol(model) !== receipt.protocol) return null;
+  if (modelsPage.value?.models.find(row => row.contract.modelId === receipt.modelId)?.testProtocol !== receipt.protocol) return null;
   return receipt;
 });
 
@@ -2229,71 +2019,38 @@ function probeResultUrl(error: string | null): string {
 // the Accounts add deep link) is not ours to apply. Same-view query changes
 // (history back/forward) arrive here instead of onActivated.
 watch(() => route.query, () => {
-  if (!currentUrlIsProvidersView()) {
-    // A pending one-shot target dies with its route instead of firing on a
-    // later unrelated visit.
-    pendingCapabilitiesOpen.value = null;
-    return;
-  }
-  freshRequiredLoadSucceeded = false;
+  if (!currentUrlIsProvidersView()) { pendingCapabilitiesOpen.value = null; return; }
   const action = applyFromQuery();
-  // Same-view history to an unresolved target has no onActivated; refresh so
-  // fallback cannot run against the previous last-success snapshot.
-  if (action === "defer" && selectionProjectionReady()) {
-    void loadAll({ retain: true });
-  }
+  if (action === "redirect-add") return;
+  if (action === "defer") void loadAll({ retain: true, maxAgeMs: PAGE_READ_MAX_AGE_MS });
+  else if (targetModel.value) { modelQueryTouched.value = false; void loadModels({ maxAgeMs: PAGE_READ_MAX_AGE_MS }); }
 });
-
-watch([selectedConnectionId, selectedDestinationId], () => {
-  catalogRefreshError.value = "";
-  if (!addKeyBusy.value) showAddKeyModal.value = false;
-});
-
-// The capabilities deep link opens the editor once the selected scope's
-// matrix has mounted; applyFromQuery captured the one-shot parameter and
-// writeUrl has since stripped it from the URL.
+watch([selectedConnectionId, selectedDestinationId], () => { catalogRefreshError.value = ""; if (!addKeyBusy.value) showAddKeyModal.value = false; });
 watch([pendingCapabilitiesOpen, () => activeScope.value?.key, modelMatrix], ([model]) => {
-  if (!model || !activeScope.value || !modelMatrix.value) return;
+  if (!model || !activeScope.value || !modelMatrix.value || pendingSelection.value) return;
   pendingCapabilitiesOpen.value = null;
-  modelMatrix.value.openMetadataEditor(model);
+  void modelMatrix.value.openMetadataEditor(model);
 });
-
-watch(selectedConnection, (connection) => {
-  if (connection?.legacy.kind === "dynamic_provider" && connection.lifecycle === "draft") {
-    void ensureDefinition(connection.legacy.id);
-  }
-});
-
-watch(selectedEntry, (entry, previous) => {
-  if (entry?.provider_id === previous?.provider_id) return;
-  resetScopeActions();
-  definitionError.value = "";
-  if (entry && entry.origin !== "builtin") void ensureDefinition(entry.provider_id);
-});
-
-watch(selectedDestinationId, (id, previous) => {
-  if (id === previous) return;
-  resetScopeActions();
-});
-
-watch([selectedConnectionId, selectedDestinationId, activeTab], () => {
+watch(selectedKey, () => { resetScopeActions(); modelQueryTouched.value = false; modelQuery.value = { search: "", enabledOnly: false, offset: 0 }; });
+watch(activeTab, () => {
+  if (!currentUrlIsProvidersView() || pendingSelection.value) return;
+  if (activeTab.value === "models") void loadModels({ maxAgeMs: PAGE_READ_MAX_AGE_MS });
+  else if (selectedEntry.value?.origin !== "builtin") void ensureOperationDetail().catch(() => {});
   writeUrl();
 });
-
-onMounted(() => {
-  void loadAll();
+let railTimer: ReturnType<typeof setTimeout> | undefined;
+watch([railQuery, providerSort], () => {
+  railOffset.value = 0;
+  pageStore.invalidate("rail");
+  clearTimeout(railTimer);
+  railTimer = setTimeout(() => void loadAll({ retain: true, maxAgeMs: PAGE_READ_MAX_AGE_MS }), 180);
 });
-onActivated(() => {
-  if (activatedOnce) {
-    if (Date.now() - lastLoadAllSucceededAt >= ACTIVATED_REFRESH_FRESHNESS_MS) void loadAll({ retain: true });
-  } else {
-    activatedOnce = true;
-  }
-});
+function onRailPage(page: number): void { railOffset.value = (page - 1) * PAGE_SIZE; void loadAll({ retain: true, maxAgeMs: PAGE_READ_MAX_AGE_MS }); }
+function onForeground(): void { if (currentUrlIsProvidersView()) void loadAll({ retain: true }); }
+onMounted(() => { void loadAll(); window.addEventListener("focus", onForeground); });
+onActivated(() => { if (activatedOnce) void loadAll({ retain: true, maxAgeMs: PAGE_READ_MAX_AGE_MS }); activatedOnce = true; });
 onDeactivated(resetScopeActions);
-onUnmounted(() => {
-  resetScopeActions();
-});
+onUnmounted(() => { window.removeEventListener("focus", onForeground); clearTimeout(railTimer); resetScopeActions(); });
 </script>
 
 <style scoped>

@@ -10,6 +10,8 @@ import { ssrContextKey, type App, type Component } from "vue";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import { useConnectionStore } from "../stores/connection.ts";
 import { useSessionStore } from "../stores/session.ts";
+import { useDashboardPageStore } from "../stores/dashboardPage.ts";
+import { formatTokens } from "../utils/format.ts";
 import { maskConnectionKey } from "./dashboard-connection.ts";
 import {
   createTestWindow,
@@ -23,10 +25,8 @@ import {
 } from "../test-helpers/vue-host-runtime.ts";
 
 // The host renders the real Dashboard SFC, connection store, and /connection
-// transport. Accounts, provider catalog, destinations, and the token chart are
-// inert stand-ins so the key panel can settle without those payloads. Summary
-// and token GETs return empty envelopes for the same reason. Assertions stay
-// on the connection key panel.
+// transport and Dashboard page store. The chart stub captures the page facts;
+// separate chart tests verify geometry against those facts.
 
 const READ_FAILURE = "connection-read-failed";
 const OLD_PRIMARY = "ocg-old-primary-1111";
@@ -47,6 +47,8 @@ let Dashboard: Component;
 const renderer = createVueHostRenderer();
 const heldCalls: HeldCall[] = [];
 const copiedValues: string[] = [];
+const requestedPaths: string[] = [];
+let dashboardOverrides: Record<string, unknown> = {};
 let restoreFetch: (() => void) | null = null;
 let restoreClipboard: (() => void) | null = null;
 
@@ -125,7 +127,11 @@ function harnessPlugin() {
   `;
   const empty = `
     import { defineComponent, h } from "vue";
-    export default defineComponent({ setup() { return () => h("div"); } });
+    export default defineComponent({
+      props: ["series", "modelTotals", "totalTokens", "days"],
+      setup(props) { return () => h("div", { "data-chart": true, series: props.series,
+        modelTotals: props.modelTotals, totalTokens: props.totalTokens, days: props.days }); }
+    });
   `;
   const accounts = `
     export function useAccountsStore() {
@@ -191,21 +197,19 @@ function connectionWire(primary: string, revision = 7) {
 }
 
 function ancillary(pathname: string): unknown | null {
-  if (pathname.endsWith("/dashboard/summary")) {
+  if (pathname.endsWith("/pages/dashboard")) {
     return {
-      availableAccounts: 0,
-      gatewayRunning: true,
-      monthCost: null,
-      pricingRevision: "p",
-      processGeneration: 3,
-      revision: 1,
-      todayCost: null,
-      totalAccounts: 0,
-      weekCost: null,
+      revision: { revision: 7, processGeneration: 3 }, readVersion: "local-dashboard",
+      asOf: "2000-01-02T23:59:00Z", validUntil: new Date(Date.now() + 15_000).toISOString(),
+      summary: { totalAccounts: 100, availableAccounts: 4, gatewayRunning: true, todayCost: null, weekCost: null, monthCost: null },
+      attentionItems: [{ accountId: "expired", accountName: "Backend Account", reason: "expired", expiredDays: 9 }],
+      attentionTotal: 73, attentionLimit: 50, modelTotals: [{ model: "backend-b", tokens: 100 }, { model: "backend-a", tokens: 10 }],
+      totalTokens: 901, dailyAverageTokens: 42, chartDays: 2,
+      chartSeries: [{ date: "2000-01-01", totalTokens: 0, models: [] },
+        { date: "2000-01-02", totalTokens: 110, models: [{ model: "backend-b", tokens: 100 }, { model: "backend-a", tokens: 10 }] }],
+      errors: [],
+      ...dashboardOverrides,
     };
-  }
-  if (pathname.includes("/dashboard/daily-tokens-by-model")) {
-    return { items: [], pricingRevision: "p", processGeneration: 3, revision: 1 };
   }
   return null;
 }
@@ -214,9 +218,12 @@ function installTransport(): void {
   heldCalls.splice(0, heldCalls.length);
   pageMessages().splice(0, pageMessages().length);
   copiedValues.splice(0, copiedValues.length);
+  requestedPaths.splice(0, requestedPaths.length);
+  dashboardOverrides = {};
   const previousFetch = globalThis.fetch;
   const fetchMock: typeof fetch = async (input, init) => {
     const url = requestTarget(input);
+    requestedPaths.push(url.pathname);
     const method = (init?.method ?? "GET").toUpperCase();
     const quiet = ancillary(url.pathname);
     if (quiet) return jsonResponse(200, quiet);
@@ -402,12 +409,13 @@ function authenticate(): void {
   useControlPlaneStore().sync({ processGeneration: 3, revision: 7 });
 }
 
-async function mountDashboard(): Promise<{ app: App; root: HostNode }> {
+async function mountDashboard(overrides: Record<string, unknown> = {}): Promise<{ app: App; root: HostNode }> {
   const view = createTestWindow();
   Object.assign(view.location, { origin: "http://127.0.0.1" });
   installTestWindow(view);
   installDocument(view);
   installTransport();
+  dashboardOverrides = overrides;
   const pinia = createPinia();
   setActivePinia(pinia);
   authenticate();
@@ -467,6 +475,43 @@ before(async () => {
 after(async () => {
   restoreTransport();
   if (buildDir) await rm(buildDir, { force: true, recursive: true });
+});
+
+test("dashboard consumes bounded backend attention and chart facts with only page and connection reads", async () => {
+  const mounted = await mountDashboard();
+  try {
+    await settle();
+    const store = useDashboardPageStore();
+    assert.equal(store.page?.attentionTotal, 73);
+    assert.equal(store.page?.attentionItems[0]?.expiredDays, 9);
+    const entries = walkHostNodes(mounted.root).filter(node => hasClass(node, "attention-item"));
+    assert.equal(entries.length, 1); assert.equal(text(entries[0]!).includes("Backend Account"), true);
+    const legend = walkHostNodes(mounted.root).filter(node => hasClass(node, "legend-item"));
+    assert.deepEqual(legend.map(text), ["backend-b", "backend-a"]);
+    const stats = walkHostNodes(mounted.root).find(node => hasClass(node, "chart-stats"));
+    assert.ok(stats); assert.equal(text(stats).includes(formatTokens(901)), true); assert.equal(text(stats).includes(formatTokens(42)), true);
+    const chart = walkHostNodes(mounted.root).find(node => node.props["data-chart"] === true);
+    assert.ok(chart); assert.equal(chart.props.totalTokens, 901); assert.equal(chart.props.days, 2);
+    assert.deepEqual(chart.props.series, store.page?.chartSeries);
+    assert.deepEqual(chart.props.modelTotals, store.page?.modelTotals);
+    assert.deepEqual([...new Set(requestedPaths)].sort(), ["/dashboard/api/v4/connection", "/dashboard/api/v4/pages/dashboard"]);
+  } finally { mounted.app.unmount(); restoreTransport(); }
+});
+
+test("incomplete account reads suppress the empty attention health claim while exposing the read error", async () => {
+  const healthy = await mountDashboard({ attentionItems: [], attentionTotal: 0 });
+  const attentionDescriptions = (root: HostNode) => {
+    const card = walkHostNodes(root).find(node => hasClass(node, "attention-card"));
+    assert.ok(card); return walkHostNodes(card).filter(node => hasClass(node, "card-desc"));
+  };
+  try { await settle(); assert.equal(attentionDescriptions(healthy.root).length, 1); }
+  finally { healthy.app.unmount(); restoreTransport(); }
+  const incomplete = await mountDashboard({ attentionItems: [], attentionTotal: 0, errors: [{ resource: "account", id: "unread", code: "read_failed" }] });
+  try {
+    await settle(); assert.equal(attentionDescriptions(incomplete.root).length, 0);
+    assert.equal(walkHostNodes(incomplete.root).some(node => node.props.role === "alert" && node.props["data-alert-type"] === "error"), true);
+    assert.equal(useDashboardPageStore().page?.errors[0]?.resource, "account");
+  } finally { incomplete.app.unmount(); restoreTransport(); }
 });
 
 test("a confirmed dashboard rotate releases at ack and its read retry is one connection GET", async () => {

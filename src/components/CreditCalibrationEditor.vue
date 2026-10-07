@@ -8,14 +8,14 @@
     </n-form-item>
     <p v-if="errorKey" role="alert">{{ t(errorKey) }}</p>
     <p v-if="blocked" role="status">{{ t("{count} 条待结算", { count: status.credits?.pendingRequests ?? 0 }) }}</p>
-    <n-button type="primary" size="small" :loading="mutating" :disabled="blocked || drafts.length === 0" @click="save">{{ t("保存") }}</n-button>
+    <n-button type="primary" size="small" :loading="mutating" :disabled="!status.credits?.canCalibrate || drafts.length === 0" @click="save">{{ t("保存") }}</n-button>
   </n-form>
 </template>
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { NButton, NForm, NFormItem, NInputNumber } from "naive-ui";
 import type { BillingStatus } from "../api/billing.ts";
-import { BILLING_ERROR_KEYS, CREDIT_AMOUNT_ISSUE_KEYS, calibrationBalances, creditCalibrationBlock, creditDisplayFactor, creditsToScaled, partitionCreditBuckets } from "../domain/billing.ts";
+import { BILLING_ERROR_KEYS, CREDIT_AMOUNT_ISSUE_KEYS, calibrationBalances, creditCalibrationBlock, creditDisplayFactor, creditsToScaled } from "../domain/billing.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
 import { useBillingStore } from "../stores/billing.ts";
 const props = defineProps<{ accountId: string; binding: string; status: BillingStatus; now: number }>();
@@ -29,10 +29,10 @@ const validationError = ref<MessageKey | null>(null);
 const errorKey = computed(() => validationError.value ?? (store.byId[props.accountId]?.error ? BILLING_ERROR_KEYS[store.byId[props.accountId]!.error!] : null));
 watch(() => [props.accountId, props.binding, store.sessionEpoch], () => {
   validationError.value = null;
-  drafts.value = partitionCreditBuckets(props.status.credits?.buckets ?? [], props.now).active.map(bucket => ({ bucketId: bucket.id, label: bucket.label, remainingScaled: creditsToScaled(bucket.remaining, factor.value) }));
+  drafts.value = (props.status.credits?.buckets ?? []).map(bucket => ({ bucketId: bucket.id, label: bucket.label, remainingScaled: creditsToScaled(bucket.remaining, factor.value) }));
 }, { immediate: true });
 async function save(): Promise<void> {
-  if (blocked.value || mutating.value) return;
+  if (!props.status.credits?.canCalibrate || mutating.value) return;
   const balances = calibrationBalances(drafts.value, factor.value);
   if (!balances || !balances.length) { validationError.value = CREDIT_AMOUNT_ISSUE_KEYS.invalid; return; }
   const epoch = store.sessionEpoch;

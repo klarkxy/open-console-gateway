@@ -13,7 +13,8 @@ function test(name: string, body: (t: TestContext) => Promise<void> | void): Pro
 }
 import { createPinia, setActivePinia } from "pinia";
 import { effectScope, nextTick, ref } from "vue";
-import { dashboardApi, type Account, type UsageWindow } from "../api/dashboard.ts";
+import { dashboardApi, type Account } from "../api/dashboard.ts";
+type UsageWindow = Awaited<ReturnType<typeof dashboardApi.updateAccountUsage>>;
 import { billingApi, type BillingStatus } from "../api/billing.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import type { ManualCalibrationPlan, UsageEditState, UsageKey } from "./accounts-usage.ts";
@@ -25,7 +26,8 @@ import { createAccountsAutoRefresh } from "./accounts-auto-refresh.ts";
 
 function status(used: number): BillingStatus {
   return {
-    accountId: "a", model: "quota", source: "local_estimate", unit: "USD",
+    accountId: "a", model: "quota", surfaceKind: "quota", providerWindows: true, quotaManualCalibration: true,
+    quotaEditorLimits: [{ windowKind: "five_hours", limit: 100, editable: true, editableAt: null }], source: "local_estimate", unit: "USD",
     configurableCredits: false, manualCalibration: true, officialRefresh: true,
     cash: null, credits: null, presets: [], revision: 3, processGeneration: 1,
     usage: {
@@ -59,6 +61,7 @@ function requireUsageEdit(
 }
 
 const savedUsage: UsageWindow = {
+  observed_at: "2026-10-01T00:00:00.000Z",
   account_id: "a", window_5h: 80, window_week: 0, window_month: 0,
   resets_in_5h: null, resets_in_week: null, resets_in_month: null,
 };
@@ -72,8 +75,8 @@ async function fixture(
   const originalStatus = billingApi.status;
   const originalSave = dashboardApi.updateAccountUsage;
   const request = deferred();
-  dashboardApi.updateAccountUsage = () => request.promise;
   let used = 10;
+  dashboardApi.updateAccountUsage = async () => { const ack = await request.promise; used = ack.window_5h ?? used; return ack; };
   billingApi.status = async () => status(used);
   const accounts = ref([{ id: "a", provider_id: "opencode-go", updated_at: "v1" } as Account]);
   let notifications = 0;
@@ -282,10 +285,12 @@ test("declared support retries a missing billing snapshot before any upstream re
   let refreshes = 0;
   f.store.refreshUsage = async () => { refreshes++; return status(10); };
   billingApi.status = async () => { throw new Error("temporary local read failure"); };
-  await f.usage.automaticRefreshTarget(f.accounts.value[0]!)!.refresh(() => true);
+  assert.equal(f.usage.automaticRefreshTarget(f.accounts.value[0]!), null);
+  assert.equal(f.usage.hasAvailableUsageEditor(f.accounts.value[0]!), false);
+  await f.usage.refreshAccountUsage("a", true);
   assert.equal(refreshes, 0);
   billingApi.status = async () => status(10);
-  await f.usage.automaticRefreshTarget(f.accounts.value[0]!)!.refresh(() => true);
+  await f.usage.refreshAccountUsage("a", true);
   assert.equal(refreshes, 1);
   assert.equal(f.notifications(), 0);
 });
@@ -368,6 +373,10 @@ function calibrationStatus(
   return {
     accountId,
     model,
+    surfaceKind: model === "credits" ? "credits_usd_month" : "quota",
+    providerWindows: true,
+    quotaManualCalibration: manual,
+    quotaEditorLimits: (manual ? (providerId === "ollama" ? ["month" as const] : ["five_hours" as const, "week" as const, "month" as const]) : []).map(windowKind => ({ windowKind, limit: 100, editable: true, editableAt: null })),
     source: windows.length === 0 ? "unavailable" : "official",
     unit: "percent",
     configurableCredits: false,
@@ -419,6 +428,7 @@ async function calibrationFixture(
   dashboardApi.updateAccountUsage = async (id, window, percent, resets) => {
     posts.push({ id, window, percent, resets });
     const response: UsageWindow = {
+      observed_at: "2026-10-01T00:00:00.000Z",
       account_id: id,
       window_5h: window === "window_5h" ? percent : null,
       window_week: window === "window_week" ? percent : null,
@@ -427,6 +437,11 @@ async function calibrationFixture(
       resets_in_week: window === "window_week" ? "2026-10-01T00:30:00.000Z" : null,
       resets_in_month: null,
     };
+    if (snapshot.usage) {
+      const kind = window === "window_5h" ? "five_hours" : window === "window_week" ? "week" : "month";
+      const row = { ...percentWindow(id, kind, percent), resetsAt: window === "window_5h" ? response.resets_in_5h : window === "window_week" ? response.resets_in_week : response.resets_in_month };
+      snapshot = { ...snapshot, usage: { ...snapshot.usage, quotaWindows: [...snapshot.usage.quotaWindows.filter(old => old.windowKind !== kind), row] } };
+    }
     return response;
   };
   const accounts = ref([account]);
@@ -552,7 +567,7 @@ async function assertCalibrationDenied(
   const f = await calibrationFixture(
     t,
     account,
-    calibrationStatus(providerId, providerId, manual, model),
+    { ...calibrationStatus(providerId, providerId, manual, model), quotaManualCalibration: false, quotaEditorLimits: [] },
     {
       catalog: [catalogRow(providerId, manual, availability)],
       plan,
@@ -571,7 +586,7 @@ async function assertCalibrationDenied(
   assert.equal(f.reads.length, 1);
 }
 
-test("an explicit false loaded plan denies calibration for every provider including OpenCode Go", async (t) => {
+test("canonical denial overrides local plan and catalog claims for every provider including OpenCode Go", async (t) => {
   const plan: ManualCalibrationPlan = {
     manual_calibration: false,
     windows: [{ kind: "five_hours" }, { kind: "week" }, { kind: "month" }],
@@ -587,12 +602,12 @@ test("no loaded plan and false billing and catalog flags deny calibration includ
   }
 });
 
-test("a true plan authorizes only its listed known windows as a blank draft", async (t) => {
+test("the canonical response authorizes only its listed window as a blank draft", async (t) => {
   const account = calibrationAccount("opencode", "opencode");
   const f = await calibrationFixture(
     t,
     account,
-    calibrationStatus("opencode", "opencode", false, "quota"),
+    { ...calibrationStatus("opencode", "opencode", false, "quota"), quotaManualCalibration: true, quotaEditorLimits: [{ windowKind: "week", limit: 100, editable: true, editableAt: null }] },
     {
       catalog: [catalogRow("opencode", false, "available")],
       plan: { manual_calibration: true, windows: [{ kind: "week" }, { kind: "free" }] },
@@ -668,6 +683,7 @@ test("a stale session cannot apply a first calibration response", async (t) => {
   f.store.clear();
   await nextTick();
   release({
+    observed_at: "2026-10-01T00:00:00.000Z",
     account_id: "goat",
     window_5h: 42.5,
     window_week: null,
@@ -701,6 +717,7 @@ test("a changed binding drops a first calibration response", async (t) => {
   await nextTick();
   await f.usage.loadAccountUsage("goat");
   release({
+    observed_at: "2026-10-01T00:00:00.000Z",
     account_id: "goat",
     window_5h: 42.5,
     window_week: null,

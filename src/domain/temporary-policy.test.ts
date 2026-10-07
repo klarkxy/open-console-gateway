@@ -22,16 +22,15 @@ import {
   connectionDisplayName,
   credentialDisplayName,
   customRuleDraftFrom,
-  effectiveBuiltinEnabled,
   effectiveRules,
   emptyCustomRuleDraft,
   enabledEffectiveCount,
   knownBuiltinIds,
-  localOverride,
   maskInheritedCustomRule,
   overlayRules,
   parseCustomRuleDraft,
   parseDelimitedList,
+  persistedEffectiveView,
   remainingProbeSeconds,
   removeRule,
   restrictionSnapshotEmptyCode,
@@ -45,6 +44,7 @@ import {
   type PolicyDraftIssue,
   type PolicyRule,
 } from "./temporary-policy.ts";
+import type { TemporaryPolicyConfiguration, TemporaryPolicyEffectiveView } from "../api/generated/dashboard-v4.ts";
 
 const goat: PolicyBuiltin = {
   id: BUILTIN_GOAT_ID,
@@ -213,20 +213,33 @@ test("same-id destination rules replace globals, and disabled entries mask inher
   if (shared?.kind !== "custom") return;
   assert.equal(shared.enabled, false);
   assert.deepEqual(shared.match, { errorCodes: ["x"] });
-  assert.equal(effectiveBuiltinEnabled([
+  assert.equal(effectiveRules([
     { kind: "builtin_override", id: BUILTIN_GOAT_ID, destinationId: null, enabled: true },
     { kind: "builtin_override", id: BUILTIN_GOAT_ID, destinationId: "dest-1", enabled: false },
-  ], [goat], "dest-1", BUILTIN_GOAT_ID), false);
-  assert.equal(effectiveBuiltinEnabled([
+  ], [goat], "dest-1").find((rule) => rule.id === BUILTIN_GOAT_ID)?.enabled, false);
+  assert.equal(effectiveRules([
     { kind: "builtin_override", id: BUILTIN_GOAT_ID, destinationId: null, enabled: false },
-  ], [goat], "dest-2", BUILTIN_GOAT_ID), false);
-  assert.equal(effectiveBuiltinEnabled([], [goat], null, BUILTIN_GOAT_ID), true);
+  ], [goat], "dest-2").find((rule) => rule.id === BUILTIN_GOAT_ID)?.enabled, false);
 });
 
-test("visible custom rules keep inherited rows until a local same-id replacement exists", () => {
+test("persisted views select server facts and retain projected masks without rebuilding raw inheritance", () => {
   const globalRule = custom({ id: "shared" });
   const other = custom({ id: "local-only", destinationId: "dest-1" });
-  const rows = visibleCustomRules([globalRule, other], "dest-1");
+  const view: TemporaryPolicyEffectiveView = {
+    destinationId: "dest-1",
+    rules: [
+      { rule: globalRule, origin: "inherited", source: "global", overridden: false, applicable: true, scope: globalRule.scope, backoff: globalRule.backoff },
+      { rule: other, origin: "local", source: "connection", overridden: true, applicable: true, scope: other.scope, backoff: other.backoff },
+    ],
+  };
+  const configuration: TemporaryPolicyConfiguration = {
+    revision: { revision: 3, processGeneration: 99, pricingRevision: "p" },
+    rules: [], builtins: [goat], effectiveViews: [view],
+  };
+  assert.equal(persistedEffectiveView(configuration, "dest-1"), view);
+  assert.equal(persistedEffectiveView(configuration, "missing"), null);
+  assert.equal(persistedEffectiveView(null, null), null);
+  const rows = visibleCustomRules(persistedEffectiveView(configuration, "dest-1"));
   assert.deepEqual(rows.map((row) => [row.origin, row.rule.id]), [
     ["inherited", "shared"],
     ["local", "local-only"],
@@ -234,7 +247,9 @@ test("visible custom rules keep inherited rows until a local same-id replacement
   const masked = maskInheritedCustomRule(globalRule, "dest-1");
   assert.equal(masked.destinationId, "dest-1");
   assert.equal(masked.enabled, false);
-  const afterMask = visibleCustomRules([globalRule, masked], "dest-1");
+  const afterMask = visibleCustomRules({ destinationId: "dest-1", rules: [
+    { ...view.rules[1]!, rule: masked },
+  ] });
   assert.deepEqual(afterMask.map((row) => [row.origin, row.rule.id, row.rule.enabled]), [
     ["local", "shared", false],
   ]);
@@ -280,7 +295,7 @@ test("upsert/remove keep other destination rules and restore inheritance by dele
   const destRule = custom({ id: "shared", destinationId: "dest-1", enabled: false });
   const next = upsertRule([globalRule], destRule);
   assert.equal(next.length, 2);
-  assert.equal(localOverride(next, "dest-1", "shared")?.enabled, false);
+  assert.equal(next.find((rule) => rule.destinationId === "dest-1" && rule.id === "shared")?.enabled, false);
   assert.deepEqual(removeRule(next, "dest-1", "shared"), [globalRule]);
   const overridden = upsertBuiltinOverride([], null, BUILTIN_GOAT_ID, { enabled: false });
   assert.equal(overridden[0]?.kind, "builtin_override");

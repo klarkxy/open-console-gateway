@@ -209,7 +209,6 @@ import {
   nextCalendarMonthStart,
   offsetMinutesOrDefault,
   parseCreditAmount,
-  partitionCreditBuckets,
   toDatetimeLocalValue,
   topupExpiryIso,
 } from "../domain/billing.ts";
@@ -245,8 +244,7 @@ const mutating = computed(() => slot.value?.mutating ?? false);
 const loading = computed(() => slot.value?.loading ?? false);
 const meter = computed(() => props.status.credits);
 const offsetMinutes = computed(() => meterOffsetMinutes(meter.value));
-const partitioned = computed(() => partitionCreditBuckets(meter.value?.buckets ?? [], props.now));
-const expiredBuckets = computed(() => partitioned.value.expired);
+const expiredBuckets = computed(() => meter.value?.expiredBuckets ?? []);
 const cells = computed<ApiPriceMeterCell[]>(() => {
   const view = meter.value;
   if (!view) return [];

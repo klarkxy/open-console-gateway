@@ -381,7 +381,7 @@ function assertEditorExpose(value: unknown): asserts value is EditorExpose {
   }
 }
 
-async function openEditor(gate: Gate): Promise<{ app: App; root: HostNode; requests: Recorded[]; busy: { current: boolean | null } }> {
+async function openEditor(gate: Gate, deferRevalidation = false): Promise<{ app: App; root: HostNode; requests: Recorded[]; busy: { current: boolean | null }; receipts: unknown[] }> {
   dropAllSnapshots();
   storage.clear();
   prepareWindow();
@@ -398,12 +398,13 @@ async function openEditor(gate: Gate): Promise<{ app: App; root: HostNode; reque
   await destinations.load();
   await providers.loadContracts();
   const busy = { current: null as boolean | null };
+  const receipts: unknown[] = [];
   let exposed: unknown = null;
   const scope = editorScope();
   const Shell = defineComponent({
     setup() {
       return () => h(Editor, {
-        scope,
+        scope, deferRevalidation, onCommitted: (receipt: unknown) => { receipts.push(receipt); },
         "onUpdate:busy": (value: boolean) => { busy.current = value; },
         ref: (value: unknown) => { exposed = value; },
       });
@@ -421,7 +422,7 @@ async function openEditor(gate: Gate): Promise<{ app: App; root: HostNode; reque
   if (dialogs(root).length === 0) {
     throw new Error(`editor did not open; messages=${JSON.stringify(messages())}; requests=${requests.map((request) => `${request.method} ${pathnameOf(request.url)}`).join(",")}`);
   }
-  return { app, root, requests, busy };
+  return { app, root, requests, busy, receipts };
 }
 
 before(async () => {
@@ -453,6 +454,20 @@ after(async () => {
 });
 
 describe("builtin model editor save receipt", { concurrency: false }, () => {
+  test("a page-owned editor emits its confirmed receipt without starting legacy inventory revalidation", async () => {
+    const gate: Gate = { holdGets: false, failGets: false, pending: [] };
+    const mounted = await openEditor(gate, true);
+    try {
+      const before = mounted.requests.length;
+      const save = saveButton(mounted.root).props.onClick as () => Promise<void>; await save(); await settle();
+      assert.equal(dialogs(mounted.root).length, 0); assert.equal(mounted.busy.current, false);
+      assert.equal(mounted.receipts.length, 1);
+      const receipt = mounted.receipts[0] as { kind: string; contracts: { providers: { scope_id: string }[] } };
+      assert.equal(receipt.kind, "provider"); assert.equal(receipt.contracts.providers[0]?.scope_id, "opencode");
+      assert.equal(mounted.requests.slice(before).filter(request => request.method === "GET").length, 0);
+      assert.equal(puts(mounted.requests), 1);
+    } finally { mounted.app.unmount(); }
+  });
   test("a confirmed builtin model edit closes when the write is acknowledged while follow-up reads are still pending", async () => {
     const gate: Gate = { holdGets: false, failGets: false, pending: [] };
     const mounted = await openEditor(gate);

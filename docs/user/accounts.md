@@ -2,6 +2,18 @@
 
 # Accounts
 
+The list loads a page of saved account summaries from the local Rust core.
+Search and filters cover the complete inventory; totals and card availability
+also cover every Key, including rows on other pages. Use the paging controls
+to see more rows. Editors, billing details, platform models and arrangement
+load their complete data when opened. Changing pages does not change routing
+order. Revisiting keeps visible content while revalidating it.
+
+Available credential operations, model-test choices and quota editing windows
+come from the local gateway. A confirmed manual quota edit stays visible if
+the following refresh fails. Wallet totals and monthly usage with different
+units are not displayed under one currency label; a missing value stays unknown.
+
 Edit Custom API endpoints, protocols, and model mappings on the account, even
 when it has multiple Keys. For a user-defined HTTP Provider, edit these in
 **Providers**, even if it has only one Key. Only Plans with a modeled

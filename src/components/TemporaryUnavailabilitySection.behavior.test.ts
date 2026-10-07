@@ -68,6 +68,13 @@ function config(overrides: Record<string, unknown> = {}) {
       scope: "credential_model",
       backoff: { initialSeconds: 30, maxSeconds: 300 },
     }],
+    effectiveViews: [{
+      destinationId: null,
+      rules: [
+        { rule: sampleRule, origin: "local", source: "global", overridden: true, applicable: true, scope: sampleRule.scope, backoff: sampleRule.backoff },
+        { rule: { kind: "builtin_override", id: BUILTIN_GOAT_ID, destinationId: null, enabled: true }, origin: "local", source: "builtin", overridden: false, applicable: true, scope: "credential_model", backoff: sampleRule.backoff },
+      ],
+    }],
     ...overrides,
   };
 }
@@ -435,6 +442,32 @@ test("builtin disable saves an override and does not call a probe helper", async
     assert.equal(mounted.store.probes, 0);
     const saved = mounted.store.saves[0] as Array<{ kind: string; enabled: boolean }>;
     assert.equal(saved.some((rule) => rule.kind === "builtin_override" && rule.enabled === false), true);
+  } finally {
+    mounted.app.unmount();
+  }
+});
+
+test("saved rows and builtin controls consume backend projection despite different raw configuration", async () => {
+  const masked = { ...sampleRule, destinationId: "dest-1", enabled: false };
+  const mounted = await mount({ configuration: config({ effectiveViews: [
+    { destinationId: null, rules: [] },
+    { destinationId: "dest-1", rules: [
+      { rule: masked, origin: "local", source: "connection", overridden: true, applicable: true, scope: masked.scope, backoff: masked.backoff },
+      { rule: { kind: "builtin_override", id: BUILTIN_GOAT_ID, destinationId: null, enabled: false }, origin: "inherited", source: "builtin", overridden: false, applicable: false, scope: "credential_model", backoff: sampleRule.backoff },
+    ] },
+  ] }) });
+  try {
+    assert.equal(attr(mounted.root, "data-custom-count"), undefined);
+    const selector = walkHostNodes(mounted.root).find((node) => node.props.id === "temporary-policy-scope")!;
+    (selector.props.onChange as (event: unknown) => void)({ target: { value: "dest-1" } });
+    await settle();
+    assert.equal(attr(mounted.root, "data-custom-count"), 1);
+    assert.equal(action(mounted.root, "toggle-builtin").props.checked, false);
+    assert.equal(action(mounted.root, "toggle-builtin").props.disabled, true);
+    assert.equal(action(mounted.root, "toggle-builtin").props["data-applicable"], "false");
+    assert.equal(walkHostNodes(mounted.root).some((node) => node.props["data-action"] === "restore-inheritance"), false);
+    assert.equal(action(mounted.root, "edit-custom-rule").type, "button");
+    assert.equal(walkHostNodes(mounted.root).some((node) => node.props["data-action"] === "disable-inheritance"), false);
   } finally {
     mounted.app.unmount();
   }

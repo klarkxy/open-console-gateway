@@ -20,7 +20,6 @@ import {
   CREDIT_DISPLAY_SCALE,
   creditDisplayFactor,
   creditsToScaled,
-  distinctExpiryIso,
   formatOffsetDateTime,
   formatScaledCredits,
   fromDatetimeLocalValue,
@@ -28,13 +27,12 @@ import {
   meterNextResetAt,
   meterOffsetMinutes,
   monthlyWithReset,
+  manualReceiptQuotaView,
   nextCalendarMonthStart,
   parseCreditAmount,
-  partitionCreditBuckets,
   scaledToCredits,
   toDatetimeLocalValue,
   usageWindowFromProviderUsage,
-  usdCreditMonthWindow,
 } from "./billing.ts";
 
 function usage(overrides: Partial<ProviderUsage> = {}): ProviderUsage {
@@ -91,6 +89,10 @@ function meter(overrides: Partial<CreditMeterView> = {}): CreditMeterView {
       sourceUrl: "https://platform.stepfun.com/docs/zh/step-plan/overview",
     },
     buckets: [bucket()],
+    expiredBuckets: [],
+    scheduledBuckets: [],
+    calibrationBlock: null,
+    canCalibrate: true,
     remaining: 250_000_000,
     activeGranted: 400_000_000,
     spentSinceCalibration: 10_000_000,
@@ -107,6 +109,10 @@ function meter(overrides: Partial<CreditMeterView> = {}): CreditMeterView {
 function status(overrides: Partial<BillingStatus> = {}): BillingStatus {
   return {
     accountId: "acc-1",
+    surfaceKind: "credits_setup",
+    quotaManualCalibration: false,
+    providerWindows: true,
+    quotaEditorLimits: [],
     model: "credits",
     source: "local_estimate",
     unit: "credits",
@@ -209,36 +215,6 @@ test("timezone offset 0 is UTC and is not replaced with China", () => {
   );
 });
 
-test("expired buckets are listed separately and excluded from remaining totals", () => {
-  const now = Date.parse("2026-09-21T00:00:00.000Z");
-  const { active, expired } = partitionCreditBuckets([
-    bucket({ id: "monthly", remaining: 100, granted: 400 }),
-    bucket({
-      id: "topup-1",
-      kind: "top_up",
-      remaining: 50,
-      granted: 400,
-      expiresAt: "2026-09-20T00:00:00.000Z",
-    }),
-    bucket({
-      id: "topup-2",
-      kind: "top_up",
-      remaining: 80,
-      granted: 400,
-      expiresAt: "2026-10-01T00:00:00.000Z",
-    }),
-  ], now);
-  assert.deepEqual(active.map((row) => row.id), ["monthly", "topup-2"]);
-  assert.deepEqual(expired.map((row) => row.id), ["topup-1"]);
-  const remaining = active.reduce((sum, row) => sum + row.remaining, 0);
-  assert.equal(remaining, 180);
-  assert.deepEqual(new Set(distinctExpiryIso([...active, ...expired])), new Set([
-    "2026-09-20T00:00:00.000Z",
-    "2026-10-01T00:00:00.000Z",
-  ]));
-  assert.equal(distinctExpiryIso([...active, ...expired]).length, 2);
-});
-
 test("calibration drafts convert through the display multiplier", () => {
   assert.deepEqual(
     calibrationBalances([
@@ -256,6 +232,7 @@ function officialCash(): OfficialApiStatus {
   return {
     accountId: "acc-1",
     balanceAvailable: true,
+    meter: { remainingEmpty: "not_queried", remaining: [] },
     balances: [],
     kind: "deepseek",
     lifetimeSpend: [],
@@ -268,51 +245,11 @@ function officialCash(): OfficialApiStatus {
   };
 }
 
-test("billing surfaces follow the server model rather than a provider URL", () => {
-  assert.equal(billingSurfaceKind(status({
-    model: "cash",
-    cash: null,
-    usage: usage({ creditBalances: [] }),
-  })), "cash_balances");
-  assert.equal(cashRefreshKind(status({ model: "cash", cash: null })), "provider_usage");
-  assert.equal(billingSurfaceKind(status({ model: "cash", cash: officialCash() })), "cash");
-  assert.equal(cashRefreshKind(status({ model: "cash", cash: officialCash() })), "official_balance");
-  assert.equal(billingSurfaceKind(status({ model: "quota" })), "quota");
-  assert.equal(billingSurfaceKind(status({ credits: meter() })), "credits_meter");
-  assert.equal(billingSurfaceKind(status({
-    usage: usage({
-      quotaWindows: [{
-        accountId: "acc-1",
-        calibrationOffset: 0,
-        limitValue: 60,
-        observedAt: null,
-        resetsAt: null,
-        source: "local",
-        startedAt: null,
-        unit: "usd_credits",
-        updatedAt: "2026-09-21T00:00:00.000Z",
-        used: 12,
-        windowKind: "month",
-      }],
-    }),
-  })), "credits_usd_month");
-  assert.equal(billingSurfaceKind(status({ configurableCredits: true })), "credits_setup");
-  assert.equal(billingSurfaceKind(status({ configurableCredits: false })), "empty");
-  assert.equal(usdCreditMonthWindow(usage({
-    quotaWindows: [{
-      accountId: "acc-1",
-      calibrationOffset: 0,
-      limitValue: 60,
-      observedAt: null,
-      resetsAt: null,
-      source: "local",
-      startedAt: null,
-      unit: "usd_credits",
-      updatedAt: "2026-09-21T00:00:00.000Z",
-      used: 12,
-      windowKind: "month",
-    }],
-  })), true);
+test("billing surface consumes the canonical server choice even when raw fields differ", () => {
+  assert.equal(billingSurfaceKind(status({ surfaceKind: "credits_usd_month", usage: null })), "credits_usd_month");
+  assert.equal(billingSurfaceKind(status({ surfaceKind: "empty", credits: meter() })), "empty");
+  assert.equal(cashRefreshKind(status({ surfaceKind: "cash", cash: officialCash() })), "official_balance");
+  assert.equal(cashRefreshKind(status({ surfaceKind: "cash_balances", cash: null })), "provider_usage");
 });
 
 test("generic setup can omit monthly grant and keep remaining on a manual bucket", () => {
@@ -552,45 +489,15 @@ test("revalidation errors overlay a last snapshot; first failure replaces conten
   }), null);
 });
 
-test("pending credit requests block calibration until they complete", () => {
-  assert.equal(creditCalibrationBlock({ pendingRequests: 0 }), null);
-  assert.equal(creditCalibrationBlock({ pendingRequests: 2 }), "pending");
-  assert.equal(creditCalibrationBlock(meter({ pendingRequests: 1 })), "pending");
-  assert.equal(creditCalibrationBlock(meter({ pendingRequests: 0 })), null);
+test("calibration consumes the server block rather than reinterpreting request counters", () => {
+  assert.equal(creditCalibrationBlock({ calibrationBlock: null }), null);
+  assert.equal(creditCalibrationBlock({ calibrationBlock: "pending" }), "pending");
+  assert.equal(creditCalibrationBlock(meter({ pendingRequests: 2, calibrationBlock: null })), null);
 });
 
-test("legacy credit-month calibration stays available when credits is null", () => {
-  const ollama = status({
-    model: "credits",
-    credits: null,
-    manualCalibration: true,
-    usage: usage({
-      quotaWindows: [{
-        accountId: "acc-1",
-        calibrationOffset: 0,
-        limitValue: 60,
-        observedAt: null,
-        resetsAt: null,
-        source: "local",
-        startedAt: null,
-        unit: "usd_credits",
-        updatedAt: "2026-09-21T00:00:00.000Z",
-        used: 12,
-        windowKind: "month",
-      }],
-    }),
-  });
-  assert.equal(billingManualCalibration(ollama), true);
-  assert.equal(billingManualCalibration(status({
-    model: "quota",
-    manualCalibration: true,
-    credits: null,
-  })), true);
-  assert.equal(billingManualCalibration(status({
-    model: "credits",
-    manualCalibration: true,
-    credits: meter(),
-  })), false);
+test("quota calibration consumes canonical eligibility", () => {
+  assert.equal(billingManualCalibration(status({ quotaManualCalibration: true, manualCalibration: false })), true);
+  assert.equal(billingManualCalibration(status({ quotaManualCalibration: false, manualCalibration: true })), false);
 });
 
 test("binding identity includes account version and endpoint", () => {
@@ -606,4 +513,18 @@ test("binding identity includes account version and endpoint", () => {
     billingBinding("v1", "https://api.stepfun.com/step_plan"),
     billingBinding("v1", "https://api.stepfun.com/v1"),
   );
+});
+
+test("a manual receipt replaces its acknowledged kind and preserves known sibling rows", () => {
+  const canonical = presentProviderUsage(usage({ quotaWindows: [
+    { accountId: "acc-1", windowKind: "monthly", used: 12, limitValue: 60, unit: "usd_credits", source: "local", startedAt: null, resetsAt: null, calibrationOffset: 0, observedAt: null, updatedAt: "2026-10-07T00:00:00Z" },
+    { accountId: "acc-1", windowKind: "week", used: 22, limitValue: 100, unit: "percent", source: "official", startedAt: null, resetsAt: null, calibrationOffset: 0, observedAt: "2026-10-07T00:00:00Z", updatedAt: "2026-10-07T00:00:00Z" },
+  ] }));
+  const receipt = { windows: [{ windowKind: "month", used: 0, limitValue: 100 as const, unit: "percent" as const, source: "manual" as const, observedAt: "2026-10-07T01:00:00Z", resetsAt: null, updatedAt: "2026-10-07T01:00:00Z" }] };
+  const rows = manualReceiptQuotaView(receipt, "acc-1", canonical)!.quota_windows;
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0]?.used, 0);
+  assert.equal(rows[0]?.unit, "percent");
+  assert.equal(rows[1], canonical.quota_windows[1]);
+  assert.deepEqual(manualReceiptQuotaView(receipt, "acc-1")!.quota_windows.map(row => row.window_kind), ["month"]);
 });

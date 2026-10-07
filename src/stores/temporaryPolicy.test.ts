@@ -53,6 +53,7 @@ function configBody(overrides: Record<string, unknown> = {}) {
       scope: "credential_model",
       backoff: { initialSeconds: 30, maxSeconds: 300 },
     }],
+    effectiveViews: [],
     ...overrides,
   };
 }
@@ -74,6 +75,40 @@ const sampleRule: PolicyRule = {
   match: { statusCodes: [429] },
   backoff: { initialSeconds: 30, maxSeconds: 300 },
 };
+
+test("configuration loads, writes and conflict recovery commit effective facts with their receipt", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore();
+  const store = useTemporaryPolicyStore();
+  const calls = installDeferredFetch();
+  const facts = (enabled: boolean) => [{ destinationId: "dest-1", rules: [{
+    rule: { ...sampleRule, destinationId: "dest-1", enabled },
+    origin: "local", source: "connection", overridden: true, applicable: true,
+    scope: sampleRule.scope, backoff: sampleRule.backoff,
+  }] }];
+  const load = store.loadConfiguration();
+  await waitForCalls(calls, 1);
+  calls[0]!.resolve(configBody({ effectiveViews: facts(true) }));
+  await load;
+  assert.deepEqual(store.configuration?.effectiveViews, facts(true));
+  const save = store.saveRules([{ ...sampleRule, enabled: false }]);
+  await waitForCalls(calls, 2);
+  calls[1]!.resolve(configBody({ effectiveViews: facts(false), revision: { revision: 4, processGeneration: 99 } }));
+  await save;
+  assert.deepEqual(store.configuration?.effectiveViews, facts(false));
+  const conflict = store.saveRules([sampleRule]).catch(() => undefined);
+  await waitForCalls(calls, 3);
+  calls[2]!.resolve({ message: "conflict", code: "revisionConflict", currentRevision: 5, processGeneration: 99 }, 409);
+  await waitForCalls(calls, 4);
+  calls[3]!.resolve({ revision: 5, processGeneration: 99, pricingRevision: "p" });
+  await waitForCalls(calls, 5);
+  calls[4]!.resolve(configBody({ effectiveViews: facts(true), revision: { revision: 5, processGeneration: 99 } }));
+  await conflict;
+  assert.deepEqual(store.configuration?.effectiveViews, facts(true));
+  assert.equal(store.configuration?.revision.revision, 5);
+  store.clear();
+  assert.equal(store.configuration, null);
+});
 
 test("policy writes retain snapshot tokens after unrelated responses advance the control plane", async () => {
   setActivePinia(createPinia());

@@ -8,6 +8,8 @@ Ollama Cloud 是可路由的密封固定源 Plan（`https://ollama.com`）：只
 
 ## 端点
 
+仪表盘从本地 Gateway 读取账号提醒和 token 图表摘要。30 天图表使用 UTC 日期，账号到期提醒遵循浏览器日历。刷新这些摘要不会联系供应商；账号读取失败时，不会显示所有账号正常。
+
 Gateway 监听 `http://<bind>:<port>`，暴露以下端点：
 
 | 方法 | 路径 | 用途 |
@@ -37,6 +39,8 @@ Gateway API 必须携带 **Key**，支持 `Authorization: Bearer <key>`、`x-api
 - **非回环监听**：管理面板由唯一的 **管理员账号** 管控，密码以 Argon2 哈希存在 SQLite 中，登录后下发 HttpOnly 会话 Cookie。携带标准反向代理转发头但没有 Cookie 的请求仍需要登录。Docker 可以用 `OCG_ADMIN_USERNAME` 与 `OCG_ADMIN_PASSWORD` 引导首个管理员；不提供时由首位注册者创建。
 
 ## 别名
+
+**别名**管理页从本地 Rust 核心分页读取已保存映射，搜索覆盖全部映射。同一公开名称的分组可能跨页，但映射总数、重叠提示、发布状态和已配置路由顺序始终按完整数据计算。展开能力或打开模型链接时按需读取对应明细。管理列表可以包含当前不符合 `/v1/models` 公布条件的已保存映射。
 
 客户端发送 **别名**：本地注册表中的稳定小写 kebab-case 名称。内置 Alias 权威由代码持有：OpenCode Go 静态协议表加上精确密封的 MiniMax CN、Kimi CN 与选定 GOAT 长名称映射。Alias 拼写仍可大小写折叠，例如 `GLM-5.2`。
 

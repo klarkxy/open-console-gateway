@@ -29,6 +29,10 @@ import type { CpaIntegration, CpaRuntime, CpaRuntimeKey } from "../api/generated
 
 function runtime(overrides: Partial<CpaRuntime> = {}): CpaRuntime {
   return {
+    actions: { install: false, start: false, stop: true, checkUpdate: true, update: false, rollback: false, remove: true },
+    clientKeysAvailable: true,
+    codexDeviceLoginAvailable: true,
+    startupRestorePending: false,
     assetSha256: null,
     baseUrl: "http://127.0.0.1:8317",
     currentOperation: null,
@@ -124,12 +128,10 @@ test("CPA catalog groups by source and keeps unknown sources last", () => {
   );
 });
 
-test("client keys exist only for an owned, installed, supported managed runtime", () => {
-  assert.ok(cpaClientKeysAvailable(runtime()));
+test("client keys use the server capability even when raw facts disagree", () => {
+  assert.ok(cpaClientKeysAvailable(runtime({ installed: false, clientKeysAvailable: true })));
   assert.ok(!cpaClientKeysAvailable(null));
-  assert.ok(!cpaClientKeysAvailable(runtime({ supported: false })));
-  assert.ok(!cpaClientKeysAvailable(runtime({ owned: false })));
-  assert.ok(!cpaClientKeysAvailable(runtime({ installed: false })));
+  assert.ok(!cpaClientKeysAvailable(runtime({ clientKeysAvailable: false })));
 });
 
 test("busy phases are exactly the lifecycle phases that block controls", () => {
@@ -141,125 +143,21 @@ test("busy phases are exactly the lifecycle phases that block controls", () => {
   assert.ok(!isCpaPhaseBusy("failed"));
 });
 
-test("control availability follows install/run/version state", () => {
-  const updateCheck = {
-    currentVersion: "1.0.0",
-    latestVersion: "1.1.0",
-    processGeneration: 1,
-    releaseUrl: "https://example.com/release",
-    revision: 1,
-    updateAvailable: true,
-  };
+test("controls consume server eligibility with only local busy gating", () => {
   const allOff = { install: false, start: false, stop: false, checkUpdate: false, update: false, rollback: false, remove: false };
-  const blocked = [
-    { label: "busy flag", args: { runtime: runtime(), busy: true, updateCheck } },
-    { label: "downloading phase", args: { runtime: runtime({ phase: "downloading" }), busy: false, updateCheck } },
-    { label: "unsupported", args: { runtime: runtime({ supported: false }), busy: false, updateCheck } },
-    { label: "unowned installed", args: { runtime: runtime({ owned: false }), busy: false, updateCheck } },
-    { label: "missing runtime", args: { runtime: null, busy: false, updateCheck } },
-  ];
-  for (const { label, args } of blocked) {
-    assert.deepEqual(cpaRuntimeControls(args), allOff, label);
-  }
+  assert.deepEqual(cpaRuntimeControls({ runtime: null, busy: false }), allOff);
+  assert.deepEqual(cpaRuntimeControls({ runtime: runtime(), busy: true }), allOff);
+  const actions = { ...allOff, update: true, remove: true };
+  const server = runtime({ supported: false, installed: false, actions });
+  assert.deepEqual(cpaRuntimeControls({ runtime: server, busy: false }), actions);
+  assert.deepEqual(cpaRuntimeControls({ runtime: runtime({ actions: allOff }), busy: false }), allOff);
+  assert.deepEqual(server.actions, actions, "local gating leaves the server snapshot intact");
+});
 
-  const noUpdate = { updateCheck: null, busy: false };
-  const installedRunning = cpaRuntimeControls({ runtime: runtime(), ...noUpdate });
-  assert.deepEqual(installedRunning, {
-    install: false,
-    start: false,
-    stop: true,
-    checkUpdate: true,
-    update: false,
-    rollback: false,
-    remove: true,
-  });
-
-  const fresh = cpaRuntimeControls({ runtime: runtime({ installed: false, running: false }), ...noUpdate });
-  assert.ok(fresh.install && !fresh.start && !fresh.stop && !fresh.remove);
-
-  const freshChecked = cpaRuntimeControls({
-    runtime: runtime({ installed: false, running: false }),
-    busy: false,
-    updateCheck: {
-      currentVersion: null,
-      latestVersion: "1.1.0",
-      processGeneration: 1,
-      releaseUrl: "https://example.com/release",
-      revision: 1,
-      updateAvailable: true,
-    },
-  });
-  assert.ok(!freshChecked.update);
-
-  const installedStopped = cpaRuntimeControls({
-    runtime: runtime({ running: false, previousVersion: "0.9.0" }),
-    ...noUpdate,
-  });
-  assert.ok(installedStopped.start && !installedStopped.stop && installedStopped.rollback);
-
-  const failedRestore = cpaRuntimeControls({
-    runtime: runtime({
-      running: false,
-      desiredRunning: true,
-      phase: "failed",
-      error: "owned CPA child refused to start",
-    }),
-    ...noUpdate,
-  });
-  assert.ok(failedRestore.stop && failedRestore.start && !failedRestore.install);
-
-  const externalInactive = cpaRuntimeControls({
-    runtime: runtime({ owned: false, running: false, desiredRunning: true }),
-    ...noUpdate,
-  });
-  assert.deepEqual(externalInactive, allOff);
-
-  const stoppedNoIntent = cpaRuntimeControls({
-    runtime: runtime({ running: false, desiredRunning: false }),
-    ...noUpdate,
-  });
-  assert.ok(stoppedNoIntent.start && !stoppedNoIntent.stop);
-
-  const busyRestoreIntent = cpaRuntimeControls({
-    runtime: runtime({ running: false, desiredRunning: true, phase: "starting" }),
-    busy: false,
-    updateCheck: null,
-  });
-  assert.deepEqual(busyRestoreIntent, allOff);
-
-  assert.ok(cpaStartupRestorePending(runtime({ desiredRunning: true, running: false })));
-  assert.ok(cpaStartupRestorePending(runtime({ desiredRunning: true, running: true })));
-  assert.ok(!cpaStartupRestorePending(runtime({ desiredRunning: false })));
-  assert.ok(!cpaStartupRestorePending(runtime({ desiredRunning: true, owned: false })));
+test("startup restore hint consumes the server fact", () => {
+  assert.ok(cpaStartupRestorePending(runtime({ installed: false, startupRestorePending: true })));
+  assert.ok(!cpaStartupRestorePending(runtime({ desiredRunning: true, startupRestorePending: false })));
   assert.ok(!cpaStartupRestorePending(null));
-
-  const withUpdate = cpaRuntimeControls({
-    runtime: runtime(),
-    busy: false,
-    updateCheck: {
-      currentVersion: "1.0.0",
-      latestVersion: "1.1.0",
-      processGeneration: 1,
-      releaseUrl: "https://example.com/release",
-      revision: 1,
-      updateAvailable: true,
-    },
-  });
-  assert.ok(withUpdate.update);
-
-  const checkedCurrent = cpaRuntimeControls({
-    runtime: runtime(),
-    busy: false,
-    updateCheck: {
-      currentVersion: "1.1.0",
-      latestVersion: "1.1.0",
-      processGeneration: 1,
-      releaseUrl: "https://example.com/release",
-      revision: 1,
-      updateAvailable: false,
-    },
-  });
-  assert.ok(!checkedCurrent.update);
 });
 
 test("log tail is bounded, trailing blank lines are stripped, CRLF is normalized", () => {

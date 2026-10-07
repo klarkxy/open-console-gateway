@@ -67,6 +67,10 @@ function integrationBody(overrides: Record<string, unknown> = {}): object {
 
 function runtimeBody(overrides: Record<string, unknown> = {}): object {
   return {
+    actions: { install: false, start: true, stop: false, checkUpdate: true, update: false, rollback: false, remove: true },
+    clientKeysAvailable: true,
+    codexDeviceLoginAvailable: overrides.running === true,
+    startupRestorePending: overrides.desiredRunning === true,
     assetSha256: null,
     baseUrl: "http://127.0.0.1:8317",
     currentOperation: null,
@@ -98,6 +102,33 @@ function resolveCpa(calls: DeferredCall[], integration: object, runtime: object)
     else if (call.url.includes("/external-integrations/cpa")) call.resolve(integration);
   }
 }
+
+test("a runtime receipt commits server eligibility and fences an older runtime read", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore();
+  const store = useCpaStore();
+  const calls = installDeferredFetch();
+  const load = store.load();
+  await waitForCalls(calls, 2);
+  resolveCpa(calls, integrationBody(), runtimeBody());
+  await load;
+  assert.ok(store.runtime);
+  const oldRead = store.refreshRuntime();
+  await waitForCalls(calls, 3);
+  const denied = { install: false, start: false, stop: false, checkUpdate: false, update: false, rollback: false, remove: false };
+  store.commitRuntimeSnapshot({
+    ...store.runtime,
+    actions: denied,
+    clientKeysAvailable: false,
+    codexDeviceLoginAvailable: false,
+    startupRestorePending: false,
+  });
+  calls[2]!.resolve(runtimeBody({ clientKeysAvailable: true }));
+  assert.equal(await oldRead, null);
+  assert.deepEqual(store.runtime?.actions, denied);
+  assert.equal(store.runtime?.clientKeysAvailable, false);
+  assert.equal(store.runtime?.codexDeviceLoginAvailable, false);
+});
 
 test("CPA store: a stale load cannot overwrite a newer snapshot or a cleared session", async () => {
   setActivePinia(createPinia());

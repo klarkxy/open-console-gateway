@@ -92,6 +92,7 @@ function listBody(
 
 function parentDestination(name: string): DestinationDto {
   return {
+    presentation: null,
     accountControls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false },
     adapter: "http",
     authScheme: "bearer",

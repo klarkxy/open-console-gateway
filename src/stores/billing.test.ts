@@ -78,6 +78,10 @@ function credits(overrides: Partial<CreditMeterView> = {}): CreditMeterView {
       },
       sourceUrl: null,
     },
+    expiredBuckets: [],
+    scheduledBuckets: [],
+    calibrationBlock: null,
+    canCalibrate: false,
     buckets: [],
     remaining: 400_000_000,
     activeGranted: 400_000_000,
@@ -95,6 +99,10 @@ function credits(overrides: Partial<CreditMeterView> = {}): CreditMeterView {
 function billingStatus(overrides: Partial<BillingStatus> = {}): BillingStatus {
   return {
     accountId: "acc-1",
+    surfaceKind: "credits_meter",
+    quotaManualCalibration: false,
+    providerWindows: true,
+    quotaEditorLimits: [],
     model: "credits",
     source: "local_estimate",
     unit: "credits",
@@ -436,6 +444,7 @@ function officialCash(overrides: Partial<OfficialApiStatus> = {}): OfficialApiSt
   return {
     accountId: "acc-1",
     balanceAvailable: true,
+    meter: { remainingEmpty: "not_queried", remaining: [] },
     balances: [{ currency: "CNY", granted: 0, observedAt: "2026-09-21T00:00:00Z", toppedUp: 0, total: 20 }],
     kind: "deepseek",
     lifetimeSpend: [],
@@ -457,6 +466,10 @@ test("cash with null OfficialApiStatus refreshes provider-usage and keeps last b
   const pendingLoad = store.load("acc-1", "v1");
   await waitForCalls(calls, 1);
   calls[0]!.resolve(billingStatus({
+    surfaceKind: "cash_balances",
+    quotaManualCalibration: false,
+    providerWindows: true,
+    quotaEditorLimits: [],
     model: "cash",
     officialRefresh: true,
     cash: null,
@@ -487,6 +500,10 @@ test("cash with OfficialApiStatus refreshes the official balance endpoint", asyn
   const pendingLoad = store.load("acc-1", "v1");
   await waitForCalls(calls, 1);
   calls[0]!.resolve(billingStatus({
+    surfaceKind: "cash",
+    quotaManualCalibration: false,
+    providerWindows: true,
+    quotaEditorLimits: [],
     model: "cash",
     officialRefresh: true,
     cash: officialCash(),
@@ -505,7 +522,11 @@ test("cash with OfficialApiStatus refreshes the official balance endpoint", asyn
     toppedUp: 0,
     total: 18,
   }] }));
+  await waitForCalls(calls, 3);
+  assert.match(calls[2]!.url, /\/billing$/);
+  calls[2]!.resolve(billingStatus({ surfaceKind: "cash", model: "cash", cash: officialCash({ revision: 6, balances: [{ currency: "CNY", granted: 0, observedAt: "2026-09-21T01:00:00Z", toppedUp: 0, total: 18 }] }), revision: 6 }));
   await pendingRefresh;
+  assert.equal(store.byId["acc-1"]?.status?.surfaceKind, "cash");
   assert.equal(store.byId["acc-1"]?.status?.cash?.revision, 6);
   assert.equal(store.byId["acc-1"]?.status?.cash?.balances[0]?.total, 18);
   assertNoRetiredPriceRoute(calls);
@@ -528,6 +549,36 @@ test("the billing store does not expose active price reads or multiplier edits",
   }
 });
 
+test("a refresh replaces all billing facts and retains the prior snapshot when its canonical read fails", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore().sync({ revision: 3, processGeneration: 99 });
+  const store = useBillingStore();
+  const calls = installDeferredFetch();
+  const loaded = store.load("acc-1", "v1");
+  await waitForCalls(calls, 1);
+  const original = billingStatus({ surfaceKind: "credits_usd_month", revision: 3 });
+  calls[0]!.resolve(original);
+  await loaded;
+  const refreshed = store.refreshUsage("acc-1", "v1");
+  await waitForCalls(calls, 2);
+  calls[1]!.resolve(providerUsage({ revision: 4 }));
+  await waitForCalls(calls, 3);
+  assert.equal(store.byId["acc-1"]?.status?.surfaceKind, "credits_usd_month");
+  const canonical = billingStatus({ surfaceKind: "quota", source: "official", quotaManualCalibration: true, revision: 4 });
+  calls[2]!.resolve(canonical);
+  await refreshed;
+  assert.deepEqual(store.byId["acc-1"]?.status, canonical);
+  const failed = store.refreshUsage("acc-1", "v1").catch(error => error);
+  await waitForCalls(calls, 4);
+  calls[3]!.resolve(providerUsage({ revision: 5 }));
+  await waitForCalls(calls, 5);
+  calls[4]!.reject(new Error("canonical read unavailable"));
+  await failed;
+  assert.deepEqual(store.byId["acc-1"]?.status, canonical);
+  assert.equal(store.byId["acc-1"]?.resyncBeforeMutate, true);
+  assert.equal(store.byId["acc-1"]?.error, "load_failed");
+});
+
 test("generic credit configure uses the credits PUT path", async () => {
   setActivePinia(createPinia());
   useControlPlaneStore().sync({ revision: 3, processGeneration: 99 });
@@ -536,6 +587,10 @@ test("generic credit configure uses the credits PUT path", async () => {
   const pendingLoad = store.load("acc-1", "v1");
   await waitForCalls(calls, 1);
   calls[0]!.resolve(billingStatus({
+    surfaceKind: "cash_balances",
+    quotaManualCalibration: false,
+    providerWindows: true,
+    quotaEditorLimits: [],
     model: "cash",
     configurableCredits: true,
     cash: null,
@@ -550,6 +605,10 @@ test("generic credit configure uses the credits PUT path", async () => {
   assert.equal(calls[1]!.method, "PUT");
   assert.match(calls[1]!.url, /\/accounts\/acc-1\/billing\/credits$/);
   calls[1]!.resolve(billingStatus({
+    surfaceKind: "credits_meter",
+    quotaManualCalibration: false,
+    providerWindows: true,
+    quotaEditorLimits: [],
     model: "credits",
     credits: credits(),
     revision: 4,
@@ -653,6 +712,10 @@ function quotaBilling(
 ): BillingStatus {
   return billingStatus({
     accountId,
+    surfaceKind: "quota",
+    quotaManualCalibration: true,
+    providerWindows: true,
+    quotaEditorLimits: [],
     model: "quota",
     source: windows.length === 0 ? "unavailable" : "official",
     unit: "percent",
@@ -695,6 +758,10 @@ function quotaBilling(
 
 function moneyPoison(accountId: string, windows: ReadonlyArray<{ kind: string; used: number }>): BillingStatus {
   return quotaBilling(accountId, windows, {
+    surfaceKind: "credits_meter",
+    quotaManualCalibration: false,
+    providerWindows: true,
+    quotaEditorLimits: [],
     model: "credits",
     unit: "credits",
     configurableCredits: true,
@@ -729,9 +796,13 @@ function moneyPoison(accountId: string, windows: ReadonlyArray<{ kind: string; u
 function calibrationView(store: ReturnType<typeof useBillingStore>, accountId: string) {
   const slot = store.slotFor(accountId).value;
   const status = slot?.status ?? null;
-  const rows = status?.usage?.quotaWindows ?? [];
+  const rows = slot?.manualReceipt?.windows ?? status?.usage?.quotaWindows ?? [];
   return {
     loading: slot?.loading ?? null,
+    surfaceKind: status?.surfaceKind ?? null,
+    quotaManualCalibration: status?.quotaManualCalibration ?? false,
+    providerWindows: status?.providerWindows ?? false,
+    quotaEditorLimits: status?.quotaEditorLimits ?? [],
     model: status?.model ?? null,
     cash: status?.cash ?? null,
     credits: status?.credits ?? null,
@@ -745,6 +816,10 @@ function calibrationView(store: ReturnType<typeof useBillingStore>, accountId: s
 function manualReceiptView() {
   return {
     loading: false,
+    surfaceKind: "quota",
+    quotaManualCalibration: true,
+    providerWindows: true,
+    quotaEditorLimits: [],
     model: "quota",
     cash: null,
     credits: null,
@@ -774,11 +849,11 @@ test("a calibration receipt stays visible when an older billing read returns no 
   assert.equal(store.slotFor("acc-1").value?.loading, true);
   store.applyCalibratedUsage("acc-1", "v1", "window_5h", calibratedWindow("acc-1", 42.5), "2026-10-01T00:00:01.000Z");
   assert.deepEqual(calibrationView(store, "acc-1"), manualReceiptView());
-  assert.equal(second.length, 1);
+  assert.equal(second.length, 2);
   second[0]!.resolve(moneyPoison("acc-1", []));
   await pendingSecond;
   assert.deepEqual(calibrationView(store, "acc-1"), manualReceiptView());
-  assert.equal(second.length, 1);
+  assert.equal(second.length, 2);
 });
 
 test("a calibration receipt stays visible when an older billing read returns a lower percent", { timeout: 5_000 }, async () => {
@@ -817,7 +892,7 @@ test("a calibration receipt stays visible when an older billing read returns a l
     assert.deepEqual(calibrationView(store, "acc-1"), manualReceiptView());
     assert.equal(acc2Runs, 0);
     assert.equal(store.slotFor("acc-2").value, before);
-    assert.equal(second.length, 1);
+    assert.equal(second.length, 2);
   } finally {
     scope.stop();
   }
@@ -919,14 +994,14 @@ async function startPendingRead(accountId = "acc-1", binding = "v1") {
 test("a calibration receipt is presented while the first billing read is still pending", { timeout: 5_000 }, async () => {
   const { store, calls, pending } = await startPendingRead();
   store.applyCalibratedUsage("acc-1", "v1", "window_5h", calibratedWindow("acc-1", 42.5), ACK_AT);
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
   assert.deepEqual(coldFragmentView(store, "acc-1"), coldQuotaFragment(42.5));
   calls[0]!.resolve(moneyPoison("acc-1", [
     { kind: "five_hours", used: 1 },
     { kind: "week", used: 0 },
   ]));
   await pending;
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
   assert.deepEqual(coldFragmentView(store, "acc-1"), coldQuotaFragment(42.5));
   const fresh = installDeferredFetch();
   const pendingFresh = store.load("acc-1", "v1");
@@ -940,6 +1015,10 @@ test("a calibration receipt is presented while the first billing read is still p
   assert.equal(store.slotFor("acc-1").value?.loaded, true);
   assert.deepEqual(calibrationView(store, "acc-1"), {
     loading: false,
+    surfaceKind: "quota",
+    quotaManualCalibration: true,
+    providerWindows: true,
+    quotaEditorLimits: [],
     model: "quota",
     cash: null,
     credits: null,
@@ -960,7 +1039,7 @@ test("an older billing read error and its finally leave the quota fragment in pl
   store.applyCalibratedUsage("acc-1", "v1", "window_5h", calibratedWindow("acc-1", 42.5), ACK_AT);
   calls[0]!.reject(new Error("offline"));
   await pending;
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
   assert.deepEqual(coldFragmentView(store, "acc-1"), coldQuotaFragment(42.5));
 });
 
@@ -974,7 +1053,7 @@ test("a later failed billing read keeps the known quota fragment", { timeout: 5_
   await waitForCalls(fresh, 1);
   fresh[0]!.reject(new Error("offline"));
   await pendingFresh;
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
   assert.equal(fresh.length, 1);
   assert.deepEqual(coldFragmentView(store, "acc-1"), {
     ...coldQuotaFragment(42.5),
@@ -989,7 +1068,7 @@ test("two acknowledged windows coexist while the first billing read is pending",
     window_week: 18,
     resets_in_week: "2026-10-08T00:00:00.000Z",
   }), ACK_AT);
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 3);
   assert.equal(store.slotFor("acc-1").value?.status, null);
   assert.equal(store.slotFor("acc-1").value?.loaded, false);
   const fragment = coldFragmentView(store, "acc-1");
@@ -1007,7 +1086,7 @@ test("two acknowledged windows coexist while the first billing read is pending",
     { kind: "week", used: 0 },
   ]));
   await pending;
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 3);
   assert.deepEqual(
     coldFragmentView(store, "acc-1").windows.map((row) => `${row.kind}:${row.used}`),
     ["five_hours:42.5", "week:18"],
@@ -1025,7 +1104,7 @@ test("an explicit zero on a cold slot stays zero without inventing sibling windo
     { kind: "week", used: 0 },
   ]));
   await pending;
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
   assert.deepEqual(coldFragmentView(store, "acc-1"), coldQuotaFragment(0));
 });
 
@@ -1036,7 +1115,7 @@ test("logout, remove, and a binding change drop a cold quota fragment", { timeou
   loggedOut.calls[0]!.resolve(moneyPoison("acc-1", [{ kind: "five_hours", used: 42.5 }]));
   await loggedOut.pending;
   assert.equal(loggedOut.store.slotFor("acc-1").value, undefined);
-  assert.equal(loggedOut.calls.length, 1);
+  assert.equal(loggedOut.calls.length, 2);
 
   const removed = await startPendingRead();
   removed.store.applyCalibratedUsage("acc-1", "v1", "window_5h", calibratedWindow("acc-1", 42.5), ACK_AT);
@@ -1044,7 +1123,7 @@ test("logout, remove, and a binding change drop a cold quota fragment", { timeou
   removed.calls[0]!.resolve(moneyPoison("acc-1", [{ kind: "five_hours", used: 42.5 }]));
   await removed.pending;
   assert.equal(removed.store.slotFor("acc-1").value, undefined);
-  assert.equal(removed.calls.length, 1);
+  assert.equal(removed.calls.length, 2);
 
   const rebound = await startPendingRead();
   rebound.store.applyCalibratedUsage("acc-1", "v1", "window_5h", calibratedWindow("acc-1", 42.5), ACK_AT);
@@ -1057,7 +1136,7 @@ test("logout, remove, and a binding change drop a cold quota fragment", { timeou
   assert.equal(rebound.store.slotFor("acc-1").value?.loaded, false);
   rebound.calls[0]!.resolve(moneyPoison("acc-1", [{ kind: "five_hours", used: 42.5 }]));
   await rebound.pending;
-  assert.equal(rebound.calls.length, 1);
+  assert.equal(rebound.calls.length, 2);
   assert.equal(next.length, 1);
   assert.equal(rebound.store.slotFor("acc-1").value?.manualReceipt, null);
   assert.equal(rebound.store.slotFor("acc-1").value?.status, null);

@@ -2,6 +2,37 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { installFetchMock, setupControlPlane, type RecordedRequest } from "../test-helpers/dashboard-v3-fetch.ts";
 import { useProvidersStore } from "./providers.ts";
+import { useControlPlaneStore } from "./controlPlane.ts";
+
+test("complete connection snapshots retain their own revision, including an empty inventory", async () => {
+  setupControlPlane(7, 99);
+  installFetchMock(() => ({ connections: [], revision: { revision: 8, processGeneration: 99 } }));
+  const store = useProvidersStore();
+  await store.loadConnections();
+  assert.deepEqual(store.connections, []);
+  assert.deepEqual(store.connectionsExpectation, { expectedRevision: 8, processGeneration: 99 });
+
+  store.commitReadProjection({ connections: [], expectation: { expectedRevision: 9, processGeneration: 99 } });
+  assert.deepEqual(store.connectionsExpectation, { expectedRevision: 9, processGeneration: 99 });
+  store.commitReadProjection({ connections: [] });
+  assert.equal(store.connectionsExpectation, null);
+  store.clear();
+  assert.equal(store.connections, null);
+  assert.equal(store.connectionsExpectation, null);
+});
+
+test("a rejected late connection read cannot replace the accepted snapshot revision", async () => {
+  setupControlPlane(7, 99);
+  const gate = deferred<object>();
+  installFetchMock(() => gate.promise);
+  const store = useProvidersStore();
+  store.commitReadProjection({ connections: [], expectation: { expectedRevision: 8, processGeneration: 99 } });
+  const pending = store.loadConnections();
+  useControlPlaneStore().sync({ revision: 9, processGeneration: 99 });
+  gate.resolve({ connections: [], revision: { revision: 7, processGeneration: 99 } });
+  await pending;
+  assert.deepEqual(store.connectionsExpectation, { expectedRevision: 8, processGeneration: 99 });
+});
 
 test("CPA catalog retains a good snapshot on error and drops late session results", async () => {
   setupControlPlane(7, 99);
@@ -22,18 +53,17 @@ test("CPA catalog retains a good snapshot on error and drops late session result
   assert.equal(store.cpaModels, null);
 });
 
-test("a late earlier CPA catalog read cannot overwrite the newer snapshot", async () => {
+test("CPA catalog concurrent reads share one flight", async () => {
   setupControlPlane(7, 99);
-  const gates = [deferred<object>(), deferred<object>()];
+  const gates = [deferred<object>()];
   let index = 0;
   installFetchMock(() => gates[index++]!.promise);
   const store = useProvidersStore();
   const first = store.loadCpaModels();
   const second = store.loadCpaModels();
-  gates[1]!.resolve({ models: [{ id: "new", enabled: true }] });
-  await second;
-  gates[0]!.resolve({ models: [{ id: "old", enabled: true }] });
-  await first;
+  assert.equal(index, 1);
+  gates[0]!.resolve({ models: [{ id: "new", enabled: true }] });
+  await Promise.all([first, second]);
   assert.equal(store.cpaModels?.[0]?.id, "new");
 });
 
@@ -378,7 +408,7 @@ test("clearing the session drops a late catalog-removal receipt", async () => {
   assert.deepEqual(modelIds(store, "opencode"), []);
 });
 
-test("an in-flight catalog read still commits while a model removal is applied", async () => {
+test("an in-flight catalog read at the confirmed revision still commits while a model removal is applied", async () => {
   setupControlPlane(12, 42);
   const catalogGate = deferred<object>();
   installFetchMock(({ url, method }) => {
@@ -424,7 +454,7 @@ test("an in-flight catalog read still commits while a model removal is applied",
       formFields: [],
       modelAliases: [],
     }],
-    revision: 12,
+    revision: 13,
     processGeneration: 42,
     pricingRevision: "p1",
   });

@@ -1,7 +1,6 @@
-import type { AccountCapabilitySource } from "./account-capabilities.ts";
 import type { Account } from "../api/dashboard.ts";
-import type { ProviderCatalogEntry } from "../api/providers.ts";
-import type { Connection, ConnectionEndpoint } from "../api/connections.ts";
+import type { AccountOperationDetail } from "../api/pages.ts";
+import type { ConnectionEndpoint } from "../api/connections.ts";
 import type {
   BindingPatchInput,
   Identity,
@@ -11,9 +10,6 @@ import type {
   QuotaSharing,
 } from "../api/identities.ts";
 import { DashboardAuthError, DashboardRequestError } from "../api/dashboard-v3.ts";
-import { accountCapabilities } from "./account-capabilities.ts";
-import { accountIsReady } from "./account-display.ts";
-import { credentialForAccount, inferenceCredentials } from "./account-identity.ts";
 import { protocolDisplayName } from "./provider-contracts.ts";
 import type { AccountMenuOption } from "./account-display.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
@@ -92,97 +88,43 @@ export type CredentialWriteSupport = {
   unsupportedReason: MessageKey | null;
 };
 
-function selectedInferenceCredential(
-  account: Pick<Account, "id">,
-  identity: Identity | null,
-): IdentityCredential | null {
-  const row = credentialForAccount(identity, account.id);
-  if (!row || row.credential.purpose !== "inference") return null;
-  return row;
-}
+export type CredentialWriteReason = "provider_settings" | "external_integration" | "no_authentication" | "setup_required" | "credential_missing" | "unsupported_material" | "dedicated_account_flow";
+export const CREDENTIAL_WRITE_REASON_KEYS: Record<CredentialWriteReason, MessageKey> = {
+  provider_settings: "Zen Free 使用供应商设置",
+  external_integration: "CPA 订阅池使用 CPA 页面",
+  no_authentication: "无鉴权账号不支持此操作",
+  setup_required: "完成注册后可轮换 Key 或编辑绑定",
+  credential_missing: "无法确定当前卡片的凭据",
+  unsupported_material: "该凭据不支持轮换 Key 或编辑绑定",
+  dedicated_account_flow: "Custom API 需到账号编辑中添加 Key",
+};
 
-/**
- * V4 rotate/binding are hidden for Zen, CPA, no-auth, and observer credentials.
- * Add Key consumes the selected connection's current server capability.
- * Missing connection projections remain unavailable until loaded.
- */
+/** Join the server's selected ids to editor records; eligibility is server-owned. */
 export function credentialWriteSupport(
-  account: Pick<Account, "id" | "provider_id" | "account_type" | "credential_kind" | "setup_step">,
+  operations: AccountOperationDetail | null | undefined,
   identity: Identity | null,
-  catalog: readonly ProviderCatalogEntry[] | null | undefined = null,
-  destination?: AccountCapabilitySource | null,
-  connections: readonly Connection[] = [],
 ): CredentialWriteSupport {
-  const hidden: CredentialWriteSupport = {
-    rotate: false,
-    binding: false,
-    create: false,
-    credential: null,
-    bindingRecord: null,
-    identityId: identity?.identity.id ?? null,
-    unsupportedReason: null,
-  };
-  const caps = accountCapabilities(account, catalog, destination);
-  if (caps.toggleWrite === "provider_settings") {
-    return { ...hidden, unsupportedReason: "Zen Free 使用供应商设置" };
-  }
-  if (caps.externalIntegration) {
-    return { ...hidden, unsupportedReason: "CPA 订阅池使用 CPA 页面" };
-  }
-  if (account.credential_kind === "none") {
-    return { ...hidden, unsupportedReason: "无鉴权账号不支持此操作" };
-  }
-  if (!accountIsReady(account)) {
-    return { ...hidden, unsupportedReason: "完成注册后可轮换 Key 或编辑绑定" };
-  }
-
-  const credential = selectedInferenceCredential(account, identity);
-  if (!credential) {
-    return { ...hidden, unsupportedReason: "无法确定当前卡片的凭据" };
-  }
-  if (credential.subject === "anonymous") {
-    return {
-      ...hidden,
-      credential,
-      unsupportedReason: "无鉴权账号不支持此操作",
-    };
-  }
-  if (credential.credential.material_kind !== "api_key") {
-    return {
-      ...hidden,
-      credential,
-      bindingRecord: credential.bindings[0] ?? null,
-      unsupportedReason: "该凭据不支持轮换 Key 或编辑绑定",
-    };
-  }
-
-  const bindingRecord = credential.bindings[0] ?? null;
-  const identityId = identity?.identity.id ?? null;
-  const rotate = true;
-  const binding = bindingRecord !== null;
-  const connection = connections.find((row) => row.id === bindingRecord?.connection_id);
-  const create = !!identityId && !!connection && connectionAllowsIdentityCredentialCreate(connection);
+  const credential = identity?.credentials.find(row => row.credential.id === operations?.credentialId) ?? null;
+  const bindingRecord = credential?.bindings.find(row => row.id === operations?.bindingId) ?? null;
   return {
-    rotate,
-    binding,
-    create,
+    rotate: operations?.rotate ?? false,
+    binding: operations?.binding ?? false,
+    create: operations?.create ?? false,
     credential,
     bindingRecord,
-    identityId,
-    unsupportedReason: connection?.credential_create?.reason === "dedicated_account_flow"
-      ? "Custom API 需到账号编辑中添加 Key"
-      : null,
+    identityId: operations?.identityId ?? null,
+    unsupportedReason: operations
+      ? operations.unsupportedReason ? CREDENTIAL_WRITE_REASON_KEYS[operations.unsupportedReason as CredentialWriteReason] ?? "无法确定当前卡片的凭据" : null
+      : "无法确定当前卡片的凭据",
   };
 }
 
 export function accountCredentialMenuOptions(
-  account: Pick<Account, "id" | "name" | "provider_id" | "account_type" | "credential_kind" | "setup_step">,
+  account: Pick<Account, "id" | "name">,
+  operations: AccountOperationDetail | null | undefined,
   identity: Identity | null,
-  catalog: readonly ProviderCatalogEntry[] | null | undefined = null,
-  destination?: AccountCapabilitySource | null,
-  connections: readonly Connection[] = [],
 ): AccountMenuOption[] {
-  const support = credentialWriteSupport(account, identity, catalog, destination, connections);
+  const support = credentialWriteSupport(operations, identity);
   const options: AccountMenuOption[] = [];
   if (support.rotate) {
     options.push({
@@ -209,30 +151,6 @@ export function accountCredentialMenuOptions(
     });
   }
   return options;
-}
-
-/**
- * Same-identity inference Keys that may be chosen as an explicit quota-share
- * target. Identity match alone never selects sharing.
- */
-export function shareableInferenceCredentials(
-  identity: Identity | null,
-): IdentityCredential[] {
-  return inferenceCredentials(identity).filter((row) => (
-    row.credential.material_kind === "api_key"
-    && row.subject !== "anonymous"
-  ));
-}
-
-/**
- * The server shares this projection with the credential mutation guard.
- * Do not infer creation rights from origin, owner, or provider names.
- */
-export function connectionAllowsIdentityCredentialCreate(
-  connection: Pick<Connection, "credential_create">,
-): boolean {
-  const capability = connection.credential_create;
-  return capability?.allowed === true && capability.materialKinds.includes("api_key");
 }
 
 export function emptyRotateDraft(): CredentialRotateDraft {
@@ -271,13 +189,9 @@ export function endpointMatchesSavedGrant(
 
 export function bindingDraftFrom(
   binding: IdentityBinding | null,
-  endpoints: readonly ConnectionEndpoint[] = [],
+  grantedEndpointIds: readonly string[] = [],
 ): CredentialBindingDraft {
-  const selectedEndpointIds = binding
-    ? endpoints
-      .filter((endpoint) => endpointMatchesSavedGrant(endpoint, binding))
-      .map((endpoint) => endpoint.id)
-    : [];
+  const selectedEndpointIds = [...grantedEndpointIds];
   const scope = binding?.model_scope;
   if (scope?.kind === "only") {
     return {
@@ -376,36 +290,6 @@ export function bindingDestinationOptions(
     url: endpoint.url,
     locked: endpoint.locked || endpoint.url === null,
   }));
-}
-
-export function staleSavedEndpointIds(
-  binding: IdentityBinding | null,
-  endpoints: readonly ConnectionEndpoint[],
-): string[] {
-  if (!binding) return [];
-  const configured = new Set(endpoints.map((endpoint) => endpoint.id));
-  return binding.allowed_endpoint_ids.filter((id) => !configured.has(id));
-}
-
-export function staleSavedOrigins(
-  binding: IdentityBinding | null,
-  endpoints: readonly ConnectionEndpoint[],
-): string[] {
-  if (!binding) return [];
-  const current = new Set(
-    endpoints
-      .map((endpoint) => (endpoint.url ? normalizeOrigin(endpoint.url) : null))
-      .filter((origin): origin is string => !!origin),
-  );
-  const stale: string[] = [];
-  const seen = new Set<string>();
-  for (const raw of binding.allowed_origins) {
-    const origin = normalizeOrigin(raw) ?? raw.trim();
-    if (!origin || seen.has(origin) || current.has(origin)) continue;
-    seen.add(origin);
-    stale.push(origin);
-  }
-  return stale;
 }
 
 export function buildBindingPayload(

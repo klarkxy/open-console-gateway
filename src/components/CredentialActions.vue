@@ -160,7 +160,6 @@ import { accountMenuLabelKey } from "../views/account-status-text.ts";
 import { accountCapabilities } from "../domain/account-capabilities.ts";
 import { findPlanDefinition } from "../domain/plans.ts";
 import type { AccountUsageEdits, UsageLimitView } from "../domain/useAccountUsage.ts";
-import { creditCalibrationBlock, partitionCreditBuckets } from "../domain/billing.ts";
 import { t } from "../i18n/index.ts";
 import { useBillingStore } from "../stores/billing.ts";
 import { accountInferenceEndpointUrl, officialBalanceSupported } from "../domain/upstream-balance.ts";
@@ -216,8 +215,7 @@ const billingStatus = computed(() => billingSlot.value?.status ?? null);
 const calibrationOpen = ref(false);
 const hasCreditMeter = computed(() => Boolean(billingStatus.value?.credits));
 const creditCalibrationDisabled = computed(() => Boolean(billingSlot.value?.mutating)
-  || Boolean(creditCalibrationBlock(billingStatus.value?.credits))
-  || partitionCreditBuckets(billingStatus.value?.credits?.buckets ?? [], props.now).active.length === 0);
+  || !billingStatus.value?.credits?.canCalibrate);
 function setCalibrationOpen(show: boolean): void {
   calibrationOpen.value = show;
   if (show && !hasCreditMeter.value) emit("usage-editor-open");

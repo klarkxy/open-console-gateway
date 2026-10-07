@@ -10,6 +10,7 @@ import { useDestinationsStore } from "./destinations.ts";
 import { useIdentitiesStore } from "./identities.ts";
 import { usePlatformAccountsStore } from "./platformAccounts.ts";
 import { useProvidersStore } from "./providers.ts";
+import { useControlPlaneStore } from "./controlPlane.ts";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -20,6 +21,7 @@ const flush = () => new Promise<void>(resolve => setImmediate(resolve));
 const account = (id: string): Account => ({ id, name: id, updated_at: "v1", provider_id: "custom" } as Account);
 function fixture(t: TestContext) {
   setActivePinia(createPinia());
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
   const accounts = useAccountsStore();
   const billing = useBillingStore();
   const platforms = usePlatformAccountsStore();
@@ -134,7 +136,7 @@ test("a pending refresh or mutation receipt cannot resurrect a locally deleted r
   const f = fixture(t);
   const old = [...f.accounts.accounts];
   const pending = deferred<Account[]>();
-  t.mock.method(dashboardApi, "getAccounts", () => pending.promise);
+  t.mock.method(dashboardApi, "getAccountsSnapshot", async () => ({ accounts: await pending.promise, expectation: { expectedRevision: 7, processGeneration: 99 } }));
   const loading = f.accounts.loadPresented();
   f.accounts.removeAccount("a");
   pending.resolve(old);
@@ -147,7 +149,7 @@ test("a pending refresh or mutation receipt cannot resurrect a locally deleted r
 test("a new authoritative list can confirm an intentionally restored account", async t => {
   const f = fixture(t);
   f.accounts.removeAccount("a");
-  t.mock.method(dashboardApi, "getAccounts", async () => [account("a"), account("b")]);
+  t.mock.method(dashboardApi, "getAccountsSnapshot", async () => ({ accounts: [account("a"), account("b")], expectation: { expectedRevision: 7, processGeneration: 99 } }));
   await f.accounts.loadPresented();
   f.accounts.upsertAccount({ ...account("a"), name: "restored" });
   assert.equal(f.accounts.byId.get("a")?.name, "restored");

@@ -2,6 +2,13 @@
 
 # Providers
 
+The connection list and selected connection's models load in pages from the
+local Rust core. Search covers the complete saved list or model catalog.
+Editing loads the selected connection's complete configuration and grants;
+bulk selection covers all matching models, including other pages. Alias
+links locate the exact model's page. Revisiting keeps visible content while
+revalidating it.
+
 Opening **Add Provider** from Providers keeps the origin: Cancel returns to that selection, and a successful setup selects the new connection on its Models tab. A saved draft continues on Providers. Alias rows link back to their provider with the exact public model selected in the model search; account-owned mappings open that account. New API/Sub2API platform parents are managed on Accounts and remain there after creation; they are not provider model rows.
 
 The rail lists saved V4 Destinations as canonical rows, plus unmatched

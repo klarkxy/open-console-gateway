@@ -180,7 +180,7 @@ import {
   NTag,
   useMessage,
 } from "naive-ui";
-import type { DestinationModelMetadataEntryView } from "../api/destinations.ts";
+import type { DestinationModelMetadataEntryView, DestinationModelMetadataSnapshot } from "../api/destinations.ts";
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
 import { isRevisionConflict } from "../api/dashboard.ts";
 import type { ProviderScopeView } from "../domain/provider-contracts.ts";
@@ -203,7 +203,10 @@ import { dashboardErrorDetail } from "../utils/errors.ts";
 import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
 
 const props = defineProps<{ scope: ProviderScopeView; disabled?: boolean }>();
-const emit = defineEmits<{ (event: "update:busy", value: boolean): void }>();
+const emit = defineEmits<{
+  (event: "update:busy", value: boolean): void;
+  (event: "committed", receipt: { destinationId: string; publicModel: string; snapshot: DestinationModelMetadataSnapshot }): void;
+}>();
 const destinationsStore = useDestinationsStore();
 const sessionStore = useSessionStore();
 const message = useMessage();
@@ -391,8 +394,9 @@ async function submit(metadata: Parameters<typeof destinationsStore.declareModel
   const attempt = generation;
   saving.value = true;
   try {
-    await destinationsStore.declareModelMetadata(source.id, publicModel, metadata, expectation);
+    const snapshot = await destinationsStore.declareModelMetadata(source.id, publicModel, metadata, expectation);
     if (!isCurrent(attempt)) return;
+    emit("committed", { destinationId: source.id, publicModel, snapshot });
     message.success(t(successKey));
     resetEditor();
   } catch (error) {

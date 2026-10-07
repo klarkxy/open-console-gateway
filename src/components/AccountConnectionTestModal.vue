@@ -139,9 +139,8 @@ import {
 import { ApiOutlined } from "@vicons/antd";
 
 import { dashboardApi, type Account, type AccountModelTestResponse } from "../api/dashboard.ts";
-import { providerApi, type ProviderCatalogEntry } from "../api/providers.ts";
+import { useAccountPageStore } from "../stores/accountPage.ts";
 import {
-  accountTestModels,
   filterAccountTestModels,
   type AccountTestModel,
 } from "../domain/account-model-test.ts";
@@ -159,7 +158,6 @@ type TestState = {
 const props = defineProps<{
   show: boolean;
   account: Account | null;
-  catalog: readonly ProviderCatalogEntry[] | null;
 }>();
 
 const emit = defineEmits<{
@@ -168,13 +166,20 @@ const emit = defineEmits<{
 
 useLocalizedModalCloseLabel(toRef(props, "show"), "account-test-modal");
 
-const models = ref<AccountTestModel[]>([]);
+const accountPage = useAccountPageStore();
+const detail = computed(() => props.account ? accountPage.details.get(props.account.id) : null);
+const models = computed(() => detail.value?.operations.testModels ?? []);
 const results = ref<Record<string, TestState>>({});
 const query = ref("");
 const page = ref(1);
 const pageSize = 30;
-const loadingModels = ref(false);
-const loadError = ref("");
+const loadError = computed(() => {
+  const error = props.account ? accountPage.detailErrors[props.account.id] : "";
+  return error ? t("加载测试模型失败：{error}", { error }) : "";
+});
+const loadingModels = computed(() => !!props.account && (
+  accountPage.detailLoading[props.account.id] || (!detail.value && !loadError.value)
+));
 const testingAll = ref(false);
 const testedCount = ref(0);
 let runGeneration = 0;
@@ -193,16 +198,15 @@ watch(query, () => {
 });
 
 watch(() => [props.show, props.account?.id] as const, ([show]) => {
+  runGeneration += 1;
+  testingAll.value = false;
+  testedCount.value = 0;
   if (!show) {
-    runGeneration += 1;
-    testingAll.value = false;
     return;
   }
   query.value = "";
   page.value = 1;
-  models.value = [];
   results.value = {};
-  loadError.value = "";
   void loadModels();
 }, { immediate: true });
 
@@ -214,19 +218,7 @@ function setVisible(value: boolean) {
 async function loadModels() {
   const account = props.account;
   if (!props.show || !account) return;
-  loadingModels.value = true;
-  loadError.value = "";
-  try {
-    const contracts = await providerApi.getProviderContracts();
-    if (!props.show || props.account?.id !== account.id) return;
-    models.value = accountTestModels(account, contracts, props.catalog);
-  } catch (error) {
-    if (!props.show || props.account?.id !== account.id) return;
-    models.value = [];
-    loadError.value = t("加载测试模型失败：{error}", { error: dashboardErrorDetail(error) });
-  } finally {
-    if (props.account?.id === account.id) loadingModels.value = false;
-  }
+  await accountPage.loadDetail(account.id).catch(() => undefined);
 }
 
 function resultFor(modelId: string): TestState {

@@ -1,4 +1,4 @@
-import { computed, ref, shallowRef } from "vue";
+import { computed, ref, shallowRef, watch } from "vue";
 import { defineStore } from "pinia";
 import { DashboardRequestError } from "../api/dashboard-v3.ts";
 import { isRevisionConflict } from "../api/dashboard.ts";
@@ -27,25 +27,11 @@ import type {
 } from "../api/generated/dashboard-v4.ts";
 import { useAccountsStore } from "./accounts.ts";
 import { hideRemovedAccountCredentials } from "../domain/confirmed-account-removal.ts";
-import { dropSnapshot, readSnapshot, writeSnapshot } from "./persistence.ts";
+import { dropSnapshot } from "./persistence.ts";
+import { useControlPlaneStore } from "./controlPlane.ts";
+import { createReadLifecycle, readSnapshotIsCurrent, type ReadOptions } from "./readLifecycle.ts";
 
 const SNAPSHOT_KEY = "destinations";
-
-interface DestinationsSnapshot {
-  destinations: Destination[];
-  credentials: DestinationCredential[];
-  cards: RoutingCardView[];
-  expectation: MutationExpectation | null;
-}
-
-function validateSnapshot(data: unknown): DestinationsSnapshot | null {
-  if (!data || typeof data !== "object") return null;
-  const candidate = data as Partial<DestinationsSnapshot>;
-  if (!Array.isArray(candidate.destinations)
-    || !Array.isArray(candidate.credentials)
-    || !Array.isArray(candidate.cards)) return null;
-  return candidate as DestinationsSnapshot;
-}
 
 export interface DestinationProjectionRefusal {
   kind: RefusedRowKindDto | string;
@@ -91,19 +77,14 @@ function refusalsFromError(error: DashboardRequestError): DestinationProjectionR
  * snapshot, and a 409 refusal keeps the last successful lists on screen.
  */
 export const useDestinationsStore = defineStore("destinations", () => {
-  // Every write path replaces these arrays wholesale (applySnapshot, map /
-  // filter commits), so shallow refs are sufficient and skip deep
-  // traversal of the largest lists in the projection. The projection is
-  // secret-free by the V4 contract, so it persists across restarts; a
-  // hydrated snapshot renders immediately and the mount revalidation
-  // replaces it. A stale expectation only costs one CAS conflict, which
-  // the existing recovery path already handles.
-  const hydrated = readSnapshot(SNAPSHOT_KEY, validateSnapshot);
-  const destinations = shallowRef<Destination[]>(hydrated?.destinations ?? []);
-  const credentials = shallowRef<DestinationCredential[]>(hydrated?.credentials ?? []);
-  const cards = shallowRef<RoutingCardView[]>(hydrated?.cards ?? []);
-  const expectation = ref<MutationExpectation | null>(hydrated?.expectation ?? null);
-  const loaded = ref(hydrated !== null);
+  // Complete and sparse projections stay in memory; Rust owns persisted inventory.
+  // Arrays are replaced wholesale, so shallow refs avoid deep reactive traversal.
+  dropSnapshot(SNAPSHOT_KEY);
+  const destinations = shallowRef<Destination[]>([]);
+  const credentials = shallowRef<DestinationCredential[]>([]);
+  const cards = shallowRef<RoutingCardView[]>([]);
+  const expectation = ref<MutationExpectation | null>(null);
+  const loaded = ref(false);
   const loading = ref(false);
   const error = ref("");
   const refusals = ref<DestinationProjectionRefusal[]>([]);
@@ -134,6 +115,25 @@ export const useDestinationsStore = defineStore("destinations", () => {
   // Bumped by `clear` so an explanation resolving after logout never commits.
   let sessionGeneration = 0;
   const explainRequests = new Map<string, number>();
+  const reads = createReadLifecycle();
+  const controlPlane = useControlPlaneStore();
+  let backendEpoch = 0;
+  watch(() => controlPlane.processGeneration, (_next, previous) => {
+    if (previous === null) return;
+    backendEpoch++;
+    reads.invalidate();
+  }, { flush: "sync" });
+
+  function invalidateReads(): void {
+    reads.invalidate();
+    loadGeneration++;
+    metadataCatalogRequestId++;
+    for (const [id, generation] of metadataRequests) metadataRequests.set(id, generation + 1);
+    for (const [key, generation] of explainRequests) explainRequests.set(key, generation + 1);
+    loading.value = false;
+    modelMetadataLoading.value = {};
+    explainLoading.value = {};
+  }
 
   interface DestinationMutationToken {
     session: number;
@@ -142,8 +142,7 @@ export const useDestinationsStore = defineStore("destinations", () => {
 
   /** Invalidate any load that started before this write. */
   function beginDestinationMutation(): DestinationMutationToken {
-    loadGeneration += 1;
-    loading.value = false;
+    invalidateReads();
     return {
       session: sessionGeneration,
       processGeneration: expectation.value?.processGeneration ?? null,
@@ -178,8 +177,7 @@ export const useDestinationsStore = defineStore("destinations", () => {
     if (!mutationSessionIsCurrent(token) || !mutationExpectationIsCurrent(token, next)) {
       return false;
     }
-    loadGeneration += 1;
-    loading.value = false;
+    invalidateReads();
     return true;
   }
 
@@ -200,15 +198,6 @@ export const useDestinationsStore = defineStore("destinations", () => {
     return credential ? destinationsById.value.get(credential.destination_id) ?? null : null;
   }
 
-  function persistProjection(): void {
-    writeSnapshot(SNAPSHOT_KEY, {
-      destinations: destinations.value,
-      credentials: credentials.value,
-      cards: cards.value,
-      expectation: expectation.value,
-    } satisfies DestinationsSnapshot);
-  }
-
   function applySnapshot(
     nextDestinations: Destination[],
     nextCredentials: DestinationCredential[],
@@ -222,25 +211,71 @@ export const useDestinationsStore = defineStore("destinations", () => {
     refusals.value = [];
     loaded.value = true;
     error.value = "";
-    persistProjection();
   }
 
   /** Commit a fresh snapshot and invalidate in-flight loads, like an in-place mutation. */
   function commitSnapshot(snapshot: RoutingCardListSnapshot): void {
-    loadGeneration += 1;
-    loading.value = false;
+    invalidateReads();
     applySnapshot(snapshot.destinations, snapshot.credentials, snapshot.cards, snapshot.expectation);
   }
 
-  async function load(): Promise<void> {
+  /** Complete authoritative projection read by another dashboard read model. */
+  function commitReadSnapshot(snapshot: RoutingCardListSnapshot): void {
+    commitSnapshot(snapshot);
+    reads.markSuccessful("destinations");
+  }
+
+  /** Complete per-entity detail DTOs; this never establishes inventory completeness. */
+  function upsertDetailProjection(projection: {
+    destinations?: Destination[];
+    credentials?: DestinationCredential[];
+    expectation?: MutationExpectation;
+  }): void {
+    const nextExpectation = projection.expectation;
+    const current = expectation.value;
+    if (nextExpectation) {
+      if (controlPlane.processGeneration !== null
+        && nextExpectation.processGeneration !== controlPlane.processGeneration) return;
+      if (current?.processGeneration === nextExpectation.processGeneration
+        && nextExpectation.expectedRevision < current.expectedRevision) return;
+    } else if (current && controlPlane.processGeneration !== null
+      && current.processGeneration !== controlPlane.processGeneration) {
+      // A detail without tokens cannot bridge a known backend restart.
+      return;
+    }
+    invalidateReads();
+    if (projection.destinations) {
+      const next = new Map(destinations.value.map(destination => [destination.id, destination]));
+      for (const destination of projection.destinations) next.set(destination.id, destination);
+      destinations.value = [...next.values()];
+    }
+    if (projection.credentials) {
+      const next = new Map(credentials.value.map(credential => [credential.id, credential]));
+      for (const credential of projection.credentials) {
+        if (!accounts.removedAccountIds.has(credential.legacy_account_id)) next.set(credential.id, credential);
+      }
+      credentials.value = [...next.values()];
+    }
+    if (nextExpectation) expectation.value = nextExpectation;
+  }
+
+  function load(options?: ReadOptions): Promise<void> {
+    return reads.run("destinations", options, () => undefined, readProjection);
+  }
+
+  async function readProjection(): Promise<void> {
     const generation = ++loadGeneration;
+    const backend = backendEpoch;
+    const origin = controlPlane.processGeneration;
     loading.value = true;
     try {
       const snapshot = await routingCardsApi.listSnapshot();
-      if (generation !== loadGeneration) return;
+      if (generation !== loadGeneration
+        || !readSnapshotIsCurrent(snapshot.expectation.processGeneration, snapshot.expectation.expectedRevision, controlPlane, origin)) return;
       applySnapshot(snapshot.destinations, snapshot.credentials, snapshot.cards, snapshot.expectation);
+      reads.markSuccessful("destinations");
     } catch (e) {
-      if (generation === loadGeneration) {
+      if (generation === loadGeneration && backend === backendEpoch) {
         if (isDestinationProjectionRefused(e)) {
           error.value = e instanceof Error ? e.message : String(e);
           refusals.value = refusalsFromError(e);
@@ -268,7 +303,6 @@ export const useDestinationsStore = defineStore("destinations", () => {
           destination.id === id ? result.destination : destination
         ));
         expectation.value = result.expectation;
-        persistProjection();
       }
       return result;
     } catch (cause) {
@@ -301,7 +335,6 @@ export const useDestinationsStore = defineStore("destinations", () => {
         ));
         credentials.value = result.credentials;
         expectation.value = result.expectation;
-        persistProjection();
       }
       return result.destination;
     } catch (cause) {
@@ -333,7 +366,6 @@ export const useDestinationsStore = defineStore("destinations", () => {
       );
       if (beginMutationCommit(token, result.expectation)) {
         expectation.value = result.expectation;
-        persistProjection();
       }
       return result;
     } catch (cause) {
@@ -367,7 +399,6 @@ export const useDestinationsStore = defineStore("destinations", () => {
         ));
         credentials.value = result.credentials;
         expectation.value = result.expectation;
-        persistProjection();
       }
       return result.destination;
     } catch (cause) {
@@ -398,7 +429,6 @@ export const useDestinationsStore = defineStore("destinations", () => {
           credential.id === id ? result.credential : credential
         ));
         expectation.value = result.expectation;
-        persistProjection();
       }
       return result.credential;
     } catch (cause) {
@@ -419,7 +449,6 @@ export const useDestinationsStore = defineStore("destinations", () => {
         credentials.value = credentials.value.filter((credential) => credential.destination_id !== id);
         cards.value = cards.value.filter((card) => card.destination_id !== id);
         expectation.value = nextExpectation;
-        persistProjection();
       }
     } catch (cause) {
       if (isRevisionConflict(cause) && mutationSessionIsCurrent(token)) {
@@ -462,10 +491,19 @@ export const useDestinationsStore = defineStore("destinations", () => {
   }
 
   /**
-   * On-demand `GET /routing/explain`. Repeating a key re-fetches; only the
-   * latest request per key commits, and nothing commits after `clear`.
+   * On-demand `GET /routing/explain`. Concurrent identical reads share a
+   * flight; completed reads re-fetch unless freshness is requested.
    */
-  async function explainRouting(
+  function explainRouting(
+    model: string,
+    clientProtocol: RoutingClientProtocol,
+    options?: ReadOptions,
+  ): Promise<RoutingExplanationView> {
+    const key = explainKey(model, clientProtocol);
+    return reads.run(`explain:${key}`, options, () => explanations.value[key]!, () => readRoutingExplanation(model, clientProtocol));
+  }
+
+  async function readRoutingExplanation(
     model: string,
     clientProtocol: RoutingClientProtocol,
   ): Promise<RoutingExplanationView> {
@@ -473,18 +511,20 @@ export const useDestinationsStore = defineStore("destinations", () => {
     const requestId = (explainRequests.get(key) ?? 0) + 1;
     explainRequests.set(key, requestId);
     const session = sessionGeneration;
+    const backend = backendEpoch;
     const owns = () => session === sessionGeneration && explainRequests.get(key) === requestId;
     explainLoading.value = { ...explainLoading.value, [key]: true };
     try {
       const result = await routingApi.explain(model, clientProtocol);
-      if (!owns()) return result;
+      if (!owns() || result.expectation.processGeneration !== controlPlane.processGeneration) return result;
       explanations.value = { ...explanations.value, [key]: result };
+      reads.markSuccessful(`explain:${key}`);
       const nextErrors = { ...explainErrors.value };
       delete nextErrors[key];
       explainErrors.value = nextErrors;
       return result;
     } catch (e) {
-      if (owns()) {
+      if (owns() && backend === backendEpoch) {
         explainErrors.value = {
           ...explainErrors.value,
           [key]: e instanceof Error ? e.message : String(e),
@@ -504,37 +544,59 @@ export const useDestinationsStore = defineStore("destinations", () => {
    * `GET /model-metadata`: one aggregate read covering every destination.
    * Only the latest call commits, and nothing commits after `clear`.
    */
-  async function loadAllModelMetadata(): Promise<void> {
+  function loadAllModelMetadata(options?: ReadOptions): Promise<void> {
+    return reads.run("metadata", options, () => undefined, readAllModelMetadata);
+  }
+
+  async function readAllModelMetadata(): Promise<void> {
     const requestId = ++metadataCatalogRequestId;
+    // An aggregate read supersedes earlier individual reads of its entries.
+    for (const id of new Set([...metadataRequests.keys(), ...Object.keys(modelMetadata.value)])) {
+      metadataRequests.set(id, (metadataRequests.get(id) ?? 0) + 1);
+      reads.invalidate(`metadata:${id}`);
+    }
+    modelMetadataLoading.value = {};
     const session = sessionGeneration;
     const catalog = await modelMetadataApi.list();
-    if (session !== sessionGeneration || metadataCatalogRequestId !== requestId) return;
+    if (session !== sessionGeneration || metadataCatalogRequestId !== requestId
+      || catalog.expectation.processGeneration !== controlPlane.processGeneration) return;
     const next: Record<string, DestinationModelMetadataSnapshot> = {};
     for (const snapshot of catalog.destinations) next[snapshot.destination_id] = snapshot;
     modelMetadata.value = next;
     modelMetadataErrors.value = {};
+    reads.markSuccessful("metadata");
+    for (const id of Object.keys(next)) reads.markSuccessful(`metadata:${id}`);
   }
 
   /**
    * On-demand `GET /destinations/{id}/model-metadata`. Only the latest
    * request per destination commits, and nothing commits after `clear`.
    */
-  async function loadModelMetadata(id: string): Promise<DestinationModelMetadataSnapshot> {
+  function loadModelMetadata(id: string, options?: ReadOptions): Promise<DestinationModelMetadataSnapshot> {
+    return reads.run(`metadata:${id}`, options, () => modelMetadata.value[id]!, () => readModelMetadata(id));
+  }
+
+  async function readModelMetadata(id: string): Promise<DestinationModelMetadataSnapshot> {
+    // A newer individual read must not be overwritten by an earlier aggregate.
+    metadataCatalogRequestId++;
+    reads.invalidate("metadata");
     const requestId = (metadataRequests.get(id) ?? 0) + 1;
     metadataRequests.set(id, requestId);
     const session = sessionGeneration;
+    const backend = backendEpoch;
     const owns = () => session === sessionGeneration && metadataRequests.get(id) === requestId;
     modelMetadataLoading.value = { ...modelMetadataLoading.value, [id]: true };
     try {
       const snapshot = await modelMetadataApi.get(id);
-      if (!owns()) return snapshot;
+      if (!owns() || snapshot.expectation.processGeneration !== controlPlane.processGeneration) return snapshot;
       modelMetadata.value = { ...modelMetadata.value, [id]: snapshot };
+      reads.markSuccessful(`metadata:${id}`);
       const nextErrors = { ...modelMetadataErrors.value };
       delete nextErrors[id];
       modelMetadataErrors.value = nextErrors;
       return snapshot;
     } catch (e) {
-      if (owns()) {
+      if (owns() && backend === backendEpoch) {
         modelMetadataErrors.value = {
           ...modelMetadataErrors.value,
           [id]: e instanceof Error ? e.message : String(e),
@@ -574,7 +636,6 @@ export const useDestinationsStore = defineStore("destinations", () => {
       if (beginMutationCommit(token, snapshot.expectation)) {
         expectation.value = snapshot.expectation;
         modelMetadata.value = { ...modelMetadata.value, [id]: snapshot };
-        persistProjection();
       }
       return snapshot;
     } catch (cause) {
@@ -587,6 +648,7 @@ export const useDestinationsStore = defineStore("destinations", () => {
 
   /** Drop the cached projection on 401 / logout so the next session reloads fresh. */
   function clear(): void {
+    reads.invalidate();
     loadGeneration++;
     sessionGeneration++;
     explainRequests.clear();
@@ -630,6 +692,9 @@ export const useDestinationsStore = defineStore("destinations", () => {
     load,
     refreshAfterMutation,
     commitSnapshot,
+    commitReadSnapshot,
+    upsertDetailProjection,
+    invalidateReads,
     patchDestination,
     refreshCatalog,
     updateCatalog,

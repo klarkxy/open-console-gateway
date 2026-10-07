@@ -50,14 +50,7 @@ export const BILLING_ERROR_KEYS = {
 
 export type BillingClientError = "conflict" | "load_failed";
 
-export type BillingSurfaceKind =
-  | "cash"
-  | "cash_balances"
-  | "quota"
-  | "credits_meter"
-  | "credits_setup"
-  | "credits_usd_month"
-  | "empty";
+export type BillingSurfaceKind = BillingStatus["surfaceKind"];
 
 export type BillingPanelMode = "initial_loading" | "initial_error" | "ready";
 export type CashRefreshKind = "official_balance" | "provider_usage";
@@ -212,53 +205,8 @@ export function offsetMinutesOrDefault(
   return value ?? fallback;
 }
 
-export function isBucketExpired(bucket: CreditBucket, nowMs: number): boolean {
-  if (!bucket.expiresAt) return false;
-  const expires = Date.parse(bucket.expiresAt);
-  return Number.isFinite(expires) && expires <= nowMs;
-}
-
-export function partitionCreditBuckets(
-  buckets: readonly CreditBucket[],
-  nowMs: number,
-): { active: CreditBucket[]; expired: CreditBucket[] } {
-  const active: CreditBucket[] = [];
-  const expired: CreditBucket[] = [];
-  for (const bucket of buckets) {
-    if (isBucketExpired(bucket, nowMs)) expired.push(bucket);
-    else active.push(bucket);
-  }
-  return { active, expired };
-}
-
-export function distinctExpiryIso(buckets: readonly CreditBucket[]): string[] {
-  const seen = new Set<string>();
-  const ordered: string[] = [];
-  for (const bucket of buckets) {
-    if (!bucket.expiresAt || seen.has(bucket.expiresAt)) continue;
-    seen.add(bucket.expiresAt);
-    ordered.push(bucket.expiresAt);
-  }
-  return ordered;
-}
-
-export function usdCreditMonthWindow(
-  usage: ProviderUsage | null | undefined,
-): boolean {
-  if (!usage) return false;
-  return usage.quotaWindows.some((window) => (
-    (window.windowKind === "month" || window.windowKind === "monthly")
-    && window.unit === "usd_credits"
-  ));
-}
-
 export function billingSurfaceKind(status: BillingStatus): BillingSurfaceKind {
-  if (status.model === "cash") return status.cash ? "cash" : "cash_balances";
-  if (status.model === "quota") return "quota";
-  if (status.credits) return "credits_meter";
-  if (usdCreditMonthWindow(status.usage)) return "credits_usd_month";
-  if (status.configurableCredits) return "credits_setup";
-  return "empty";
+  return status.surfaceKind;
 }
 
 export function billingPanelMode(slot: {
@@ -280,23 +228,19 @@ export function billingPanelOverlayError(slot: {
 }
 
 export function cashRefreshKind(status: BillingStatus): CashRefreshKind {
-  return status.cash ? "official_balance" : "provider_usage";
+  return status.surfaceKind === "cash" ? "official_balance" : "provider_usage";
 }
 
 export function billingManualCalibration(status: BillingStatus): boolean {
-  if (!status.manualCalibration) return false;
-  if (status.credits) return false;
-  return true;
+  return status.quotaManualCalibration;
 }
 
 export type CreditCalibrationBlock = "pending";
 
 export function creditCalibrationBlock(
-  meter: Pick<CreditMeterView, "pendingRequests"> | null | undefined,
+  meter: Pick<CreditMeterView, "calibrationBlock"> | null | undefined,
 ): CreditCalibrationBlock | null {
-  if (!meter) return null;
-  if (meter.pendingRequests > 0) return "pending";
-  return null;
+  return meter?.calibrationBlock ?? null;
 }
 
 export function presentedUsageOf(status: BillingStatus | null | undefined): ProviderUsageResponse | null {
@@ -403,10 +347,10 @@ export function usageWindowFromManualReceipt(
 export function manualReceiptQuotaView(
   receipt: ManualQuotaReceipt | null | undefined,
   accountId: string,
+  canonical?: QuotaWindowsView | null,
 ): QuotaWindowsView | null {
   if (!receipt || receipt.windows.length === 0) return null;
-  return {
-    quota_windows: receipt.windows.map((window) => ({
+  const acknowledged: ProviderQuotaWindow[] = receipt.windows.map((window) => ({
       account_id: accountId,
       window_kind: window.windowKind,
       used: window.used,
@@ -418,8 +362,16 @@ export function manualReceiptQuotaView(
       source: window.source,
       observed_at: window.observedAt,
       updated_at: window.updatedAt,
-    })),
-  };
+    }));
+  const rows = canonical?.quota_windows ?? [];
+  const quota_windows = rows.map((row) => acknowledged.find((window) =>
+    quotaKindMatches(row.window_kind, window.window_kind)
+    || quotaKindMatches(window.window_kind, row.window_kind)) ?? row);
+  for (const window of acknowledged) {
+    if (!rows.some((row) => quotaKindMatches(row.window_kind, window.window_kind)
+      || quotaKindMatches(window.window_kind, row.window_kind))) quota_windows.push(window);
+  }
+  return { quota_windows };
 }
 
 /**

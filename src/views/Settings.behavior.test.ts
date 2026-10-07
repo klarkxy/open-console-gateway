@@ -521,7 +521,7 @@ function ancillary(pathname: string): object | null {
     return { restrictions: [], revision: nestedRevision() };
   }
   if (pathname.endsWith("/routing/temporary-unavailability")) {
-    return { builtins: [], rules: [], revision: nestedRevision() };
+    return { builtins: [], rules: [], effectiveViews: [{ destinationId: null, rules: [] }], revision: nestedRevision() };
   }
   if (pathname.endsWith("/routing/cards")) {
     return { cards: [], credentials: [], destinations: [], revision: nestedRevision() };

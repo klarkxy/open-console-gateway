@@ -9,4 +9,4 @@ export { billingApi } from "../api/billing.ts";
 export { useSessionStore } from "../stores/session.ts";
 export { useAccountsStore } from "../stores/accounts.ts";
 export { useDestinationsStore } from "../stores/destinations.ts";
-export { dropAllSnapshots, flushSnapshots } from "../stores/persistence.ts";
+export { dropAllSnapshots } from "../stores/persistence.ts";

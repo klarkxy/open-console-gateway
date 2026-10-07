@@ -3,6 +3,12 @@ import test from "node:test";
 import { createPinia, setActivePinia } from "pinia";
 import { DashboardRequestError } from "../api/dashboard-v3.ts";
 import { dashboardApi } from "../api/dashboard.ts";
+import {
+  destinationsApi,
+  presentDestination,
+  presentDestinationCredential,
+  type RoutingCardListSnapshot,
+} from "../api/destinations.ts";
 import type {
   DestinationCredentialDto,
   DestinationDto,
@@ -10,6 +16,8 @@ import type {
 import { installWindowDashboard } from "../test-helpers/dashboard-v3-fetch.ts";
 import { useControlPlaneStore } from "./controlPlane.ts";
 import { useDestinationsStore } from "./destinations.ts";
+import { useAccountsStore } from "./accounts.ts";
+import { dropAllSnapshots } from "./persistence.ts";
 
 interface DeferredCall {
   url: string;
@@ -58,6 +66,7 @@ function destinationDto(
   } = {},
 ): DestinationDto {
   return {
+    presentation: null,
     accountControls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false },
     adapter: "http",
     authScheme: "bearer",
@@ -163,6 +172,7 @@ test("destinations store: a stale slower load does not clobber a newer one", asy
   const store = useDestinationsStore();
 
   const first = store.load();
+  store.invalidateReads();
   const second = store.load();
   await waitForCalls(calls, 2);
 
@@ -464,4 +474,164 @@ test("account toggle refreshes the projected Key and revision before a layout wr
     revision: { revision: 9, processGeneration: 99, pricingRevision: "p1" },
   });
   await save;
+});
+
+function detailFixture(): RoutingCardListSnapshot {
+  return {
+    destinations: ["a", "b"].map(id => presentDestination(destinationDto(`dest-${id}`, `acc-${id}`))),
+    credentials: ["a", "b"].map(id => presentDestinationCredential(credentialDto(`cred-${id}`, `dest-${id}`, `acc-${id}`, 0))),
+    cards: ["a", "b"].map(id => ({ id: `card-${id}`, destination_id: `dest-${id}`, credential_ids: [`cred-${id}`] })),
+    expectation: { expectedRevision: 7, processGeneration: 99 },
+  };
+}
+
+test("sparse destination detail merges siblings and preserves complete inventory and cards", () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
+  const store = useDestinationsStore();
+  store.commitReadSnapshot(detailFixture());
+  const cards = store.cards;
+  store.upsertDetailProjection({
+    destinations: [presentDestination(destinationDto("dest-a", "acc-a", { name: "edited" }))],
+    credentials: [presentDestinationCredential(credentialDto("cred-a", "dest-a", "acc-a", 0, "edited-key"))],
+    expectation: { expectedRevision: 8, processGeneration: 99 },
+  });
+  assert.equal(store.loaded, true);
+  assert.deepEqual(store.destinations.map(row => [row.id, row.name]), [["dest-a", "edited"], ["dest-b", "dest-b"]]);
+  assert.deepEqual(store.credentials.map(row => [row.id, row.name]), [["cred-a", "edited-key"], ["cred-b", "cred-b"]]);
+  assert.equal(store.cards, cards);
+  assert.deepEqual(store.expectation, { expectedRevision: 8, processGeneration: 99 });
+  store.clear();
+});
+
+test("sparse destination detail detaches pending inventory reads and remains incomplete until a full read", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
+  const calls = installDeferredFetch();
+  const store = useDestinationsStore();
+  const pending = store.load();
+  await waitForCalls(calls, 1);
+  store.upsertDetailProjection({
+    destinations: [presentDestination(destinationDto("dest-a", "acc-a"))],
+    expectation: { expectedRevision: 8, processGeneration: 99 },
+  });
+  assert.equal(store.loaded, false);
+  assert.equal(store.loading, false);
+  resolvePair(calls, 0, "old", "old", 7);
+  await pending;
+  assert.deepEqual(store.destinations.map(row => row.id), ["dest-a"]);
+  const inventory = store.load({ maxAgeMs: 15_000 });
+  await waitForCalls(calls, 2);
+  resolvePair(calls, 1, "dest-b", "acc-b", 9);
+  await inventory;
+  assert.equal(store.loaded, true);
+  assert.deepEqual(store.destinations.map(row => row.id), ["dest-b"]);
+  store.clear();
+});
+
+test("sparse destination detail excludes credentials for confirmed removed accounts", () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
+  const store = useDestinationsStore();
+  useAccountsStore().removeAccount("acc-a");
+  store.upsertDetailProjection({ credentials: detailFixture().credentials, expectation: detailFixture().expectation });
+  assert.deepEqual(store.credentials.map(row => row.id), ["cred-b"]);
+  assert.equal(store.loaded, false);
+  store.clear();
+  useAccountsStore().clearAccounts();
+});
+
+test("sparse destination detail respects backend and revision fences while a mutation is pending", async () => {
+  setActivePinia(createPinia());
+  const controlPlane = useControlPlaneStore();
+  controlPlane.sync({ revision: 7, processGeneration: 99 });
+  const calls = installDeferredFetch();
+  const store = useDestinationsStore();
+  store.commitReadSnapshot(detailFixture());
+  const pending = store.patchDestination("dest-a", {
+    name: "pending", authScheme: "bearer", endpointUrl: "https://lab.example/v1", models: [], upstreamProtocol: "chat_completions",
+  });
+  await waitForCalls(calls, 1);
+  const detail = presentDestination(destinationDto("dest-a", "acc-a", { name: "new-detail" }));
+  store.upsertDetailProjection({ destinations: [detail], expectation: { expectedRevision: 9, processGeneration: 99 } });
+  calls[0]!.resolve({
+    destination: destinationDto("dest-a", "acc-a", { name: "old-mutation" }),
+    credentials: [], revision: { revision: 8, processGeneration: 99 },
+  });
+  await pending;
+  assert.equal(store.byId.get("dest-a")?.name, "new-detail");
+  store.upsertDetailProjection({ destinations: [{ ...detail, name: "old-detail" }], expectation: { expectedRevision: 8, processGeneration: 99 } });
+  assert.equal(store.byId.get("dest-a")?.name, "new-detail");
+  controlPlane.sync({ revision: 1, processGeneration: 100 });
+  store.upsertDetailProjection({ destinations: [{ ...detail, name: "old-backend" }], expectation: { expectedRevision: 10, processGeneration: 99 } });
+  store.upsertDetailProjection({ destinations: [{ ...detail, name: "unbound" }] });
+  assert.equal(store.byId.get("dest-a")?.name, "new-detail");
+  store.upsertDetailProjection({ destinations: [{ ...detail, name: "current-backend" }], expectation: { expectedRevision: 1, processGeneration: 100 } });
+  assert.equal(store.byId.get("dest-a")?.name, "current-backend");
+  store.clear();
+});
+
+test("sparse destination detail, full reads and subsequent mutations stay memory-only", async t => {
+  dropAllSnapshots();
+  const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  const backing = new Map<string, string>();
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: {
+    getItem: (key: string) => backing.get(key) ?? null,
+    setItem: (key: string, value: string) => backing.set(key, value),
+    removeItem: (key: string) => backing.delete(key),
+    get length() { return backing.size; },
+    key: (index: number) => [...backing.keys()][index] ?? null,
+  } });
+  t.after(() => {
+    dropAllSnapshots();
+    if (original) Object.defineProperty(globalThis, "localStorage", original);
+    else Reflect.deleteProperty(globalThis, "localStorage");
+  });
+  setActivePinia(createPinia());
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
+  const store = useDestinationsStore();
+  const detail = presentDestination(destinationDto("dest-a", "acc-a", { name: "edited" }));
+  store.upsertDetailProjection({ destinations: [detail], expectation: { expectedRevision: 8, processGeneration: 99 } });
+  assert.equal(backing.has("ocg.snapshot.v1:destinations"), false);
+  assert.equal(store.loaded, false);
+  t.mock.method(destinationsApi, "patch", async () => ({
+    destination: detail,
+    credentials: detailFixture().credentials,
+    expectation: { expectedRevision: 9, processGeneration: 99 },
+  }));
+  await store.patchDestination("dest-a", {
+    name: "edited", authScheme: "bearer", endpointUrl: "https://lab.example/v1", models: [], upstreamProtocol: "chat_completions",
+  });
+  assert.equal(backing.has("ocg.snapshot.v1:destinations"), false);
+  assert.equal(store.loaded, false);
+  store.commitReadSnapshot(detailFixture());
+  store.upsertDetailProjection({ destinations: [detail], expectation: { expectedRevision: 8, processGeneration: 99 } });
+  assert.equal(backing.has("ocg.snapshot.v1:destinations"), false);
+  assert.deepEqual(store.destinations.map(row => [row.id, row.name]), [["dest-a", "edited"], ["dest-b", "dest-b"]]);
+  assert.deepEqual(store.cards, detailFixture().cards);
+  store.clear();
+});
+
+test("a full destination read cannot commit below an independently advanced same-process revision", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
+  const calls = installDeferredFetch();
+  const store = useDestinationsStore();
+  store.commitReadSnapshot(detailFixture());
+  const pending = store.load();
+  const operation = dashboardApi.getAccountsSnapshot();
+  await waitForCalls(calls, 2);
+  calls[1]!.resolve({ accounts: [], revision: 9, processGeneration: 99 });
+  await operation;
+  resolvePair(calls, 0, "stale", "stale", 8);
+  await pending;
+  assert.deepEqual(store.destinations.map(row => row.id), ["dest-a", "dest-b"]);
+  assert.equal(store.expectation?.expectedRevision, 7);
+  assert.equal(useControlPlaneStore().revision, 9);
+  const recovery = store.load({ maxAgeMs: 15_000 });
+  await waitForCalls(calls, 3);
+  resolvePair(calls, 2, "current", "current", 9);
+  await recovery;
+  assert.deepEqual(store.destinations.map(row => row.id), ["current"]);
+  store.clear();
 });

@@ -1,142 +1,132 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { createPinia, setActivePinia } from "pinia";
-import {
-  dropAllSnapshots,
-  dropSnapshot,
-  flushSnapshots,
-  readSnapshot,
-  writeSnapshot,
-} from "./persistence.ts";
+import { dropAllSnapshots, dropSnapshot } from "./persistence.ts";
 import { useAccountsStore } from "./accounts.ts";
 import { useDestinationsStore } from "./destinations.ts";
 import { useProvidersStore } from "./providers.ts";
+import { useControlPlaneStore } from "./controlPlane.ts";
 import type { Account } from "../api/dashboard.ts";
 
-function installLocalStorage(): Map<string, string> {
+function installLocalStorage(t: TestContext): Map<string, string> {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
   const backing = new Map<string, string>();
   const storage: Storage = {
     get length() { return backing.size; },
     clear: () => backing.clear(),
-    getItem: (key) => backing.get(key) ?? null,
-    key: (index) => [...backing.keys()][index] ?? null,
-    removeItem: (key) => { backing.delete(key); },
+    getItem: () => { throw new Error("retired business snapshots must never be read"); },
+    key: index => [...backing.keys()][index] ?? null,
+    removeItem: key => { backing.delete(key); },
     setItem: (key, value) => { backing.set(key, String(value)); },
   };
   Object.defineProperty(globalThis, "localStorage", { value: storage, configurable: true });
+  t.after(() => {
+    if (original) Object.defineProperty(globalThis, "localStorage", original);
+    else Reflect.deleteProperty(globalThis, "localStorage");
+  });
   return backing;
 }
 
-function seed(key: string, data: unknown): void {
-  globalThis.localStorage.setItem(`ocg.snapshot.v1:${key}`, JSON.stringify({ v: 1, data }));
+function freshStores() {
+  setActivePinia(createPinia());
+  useControlPlaneStore().sync({ revision: 7, processGeneration: 99 });
+  return { accounts: useAccountsStore(), destinations: useDestinationsStore(), providers: useProvidersStore() };
 }
 
-test("a scheduled write reads back after flush, keeping the latest payload", () => {
-  const backing = installLocalStorage();
-  writeSnapshot("k", { n: 1 });
-  writeSnapshot("k", { n: 2 });
-  // Debounced: nothing is stored until the timer or a flush lands.
-  assert.equal(backing.size, 0);
-  flushSnapshots();
-  assert.deepEqual(readSnapshot("k"), { n: 2 });
+test("single-resource cleanup discards only its exact legacy snapshot key", t => {
+  const backing = installLocalStorage(t);
+  backing.set("ocg.snapshot.v1:accounts", "old");
+  backing.set("ocg.snapshot.v1:providers", "other");
+  backing.set("ocg-theme", "dark");
+  dropSnapshot("accounts");
+  assert.deepEqual([...backing.entries()], [["ocg.snapshot.v1:providers", "other"], ["ocg-theme", "dark"]]);
 });
 
-test("corrupt, wrong-version, and validator-rejected entries read as null", () => {
-  installLocalStorage();
-  globalThis.localStorage.setItem("ocg.snapshot.v1:bad", "not json");
-  globalThis.localStorage.setItem("ocg.snapshot.v1:old", JSON.stringify({ v: 99, data: [1] }));
-  seed("shape", { not: "a list" });
-  assert.equal(readSnapshot("bad"), null);
-  assert.equal(readSnapshot("old"), null);
-  assert.equal(
-    readSnapshot("shape", (data) => (Array.isArray(data) ? data : null)),
-    null,
-  );
-});
-
-test("dropSnapshot removes the stored entry and cancels its pending write", () => {
-  const backing = installLocalStorage();
-  seed("k", [1]);
-  writeSnapshot("pending", [2]);
-  dropSnapshot("k");
-  dropSnapshot("pending");
-  flushSnapshots();
-  assert.equal(backing.size, 0);
-});
-
-test("dropAllSnapshots removes only ocg.snapshot keys", () => {
-  const backing = installLocalStorage();
-  seed("a", [1]);
-  seed("b", [2]);
-  globalThis.localStorage.setItem("ocg-theme", "dark");
+test("startup cleanup removes the exact retired namespace and preserves all UI preferences", t => {
+  const backing = installLocalStorage(t);
+  for (const key of ["accounts", "providers", "destinations", "unknown-legacy-resource"]) backing.set(`ocg.snapshot.v1:${key}`, "not json");
+  const preferences = new Map([
+    ["ocg-theme", "dark"], ["ocg-locale", "zh-CN"], ["ocg-sidebar", "collapsed"],
+    ["ocg.snapshot.v2:accounts", "unrelated-version"], ["ocg.snapshot.v1", "unrelated-key"],
+  ]);
+  for (const [key, value] of preferences) backing.set(key, value);
   dropAllSnapshots();
-  assert.deepEqual([...backing.keys()], ["ocg-theme"]);
+  assert.deepEqual(backing, preferences);
 });
 
-test("accounts store hydrates from a persisted snapshot, then clears it", () => {
-  installLocalStorage();
-  const account = { id: "a1", name: "Cached" } as unknown as Account;
-  seed("accounts", [account]);
-  setActivePinia(createPinia());
-  const store = useAccountsStore();
-  assert.equal(store.accounts[0]?.id, "a1");
-  assert.equal(store.loaded, true);
-  store.clearAccounts();
-  assert.equal(readSnapshot("accounts"), null);
-  assert.equal(store.loaded, false);
+test("store creation discards legacy projections and starts with no complete business inventory", t => {
+  const backing = installLocalStorage(t);
+  backing.set("ocg.snapshot.v1:accounts", JSON.stringify({ v: 1, data: [{ id: "old-account" }] }));
+  backing.set("ocg.snapshot.v1:destinations", JSON.stringify({ v: 1, data: { destinations: [{ id: "old-destination" }], credentials: [], cards: [] } }));
+  backing.set("ocg.snapshot.v1:providers", JSON.stringify({ v: 1, data: { catalog: [{ provider_id: "old-provider" }], aliasUnpublished: ["old-model"] } }));
+  const stores = freshStores();
+  assert.equal(backing.size, 0);
+  assert.deepEqual(stores.accounts.accounts, []);
+  assert.equal(stores.accounts.loaded, false);
+  assert.deepEqual(stores.destinations.destinations, []);
+  assert.deepEqual(stores.destinations.cards, []);
+  assert.equal(stores.destinations.loaded, false);
+  assert.equal(stores.destinations.expectation, null);
+  assert.equal(stores.providers.catalog, null);
+  assert.equal(stores.providers.contracts, null);
+  assert.equal(stores.providers.connections, null);
+  assert.equal(stores.providers.aliasPublicationReady, false);
 });
 
-test("accounts store persists setAccounts commits", () => {
-  installLocalStorage();
-  setActivePinia(createPinia());
-  const store = useAccountsStore();
-  store.setAccounts([{ id: "a2" } as unknown as Account]);
-  flushSnapshots();
-  assert.equal((readSnapshot("accounts") as Account[])[0]?.id, "a2");
-});
-
-test("destinations store persists a committed snapshot and hydrates it", () => {
-  installLocalStorage();
-  setActivePinia(createPinia());
-  const expectation = { expectedRevision: 3, processGeneration: 9 };
-  useDestinationsStore().commitSnapshot({
-    destinations: [{ id: "d1" } as never],
-    credentials: [{ id: "c1" } as never],
-    cards: [{ id: "card1" } as never],
-    expectation,
+test("complete and sparse business commits remain in memory without writing browser storage", async t => {
+  const backing = installLocalStorage(t);
+  backing.set("ocg-theme", "dark");
+  const stores = freshStores();
+  stores.accounts.upsertDetailAccount({ id: "detail" } as Account);
+  assert.equal(stores.accounts.loaded, false);
+  stores.accounts.commitPresented([{ id: "full" } as Account]);
+  stores.accounts.upsertAccount({ id: "full", name: "saved" } as Account);
+  stores.destinations.commitReadSnapshot({
+    destinations: [{ id: "destination" } as never], credentials: [], cards: [],
+    expectation: { expectedRevision: 7, processGeneration: 99 },
   });
-  flushSnapshots();
-  setActivePinia(createPinia());
-  const hydrated = useDestinationsStore();
-  assert.equal(hydrated.loaded, true);
-  assert.equal(hydrated.destinations[0]?.id, "d1");
-  assert.equal(hydrated.expectation?.expectedRevision, 3);
-  hydrated.clear();
-  assert.equal(readSnapshot("destinations"), null);
+  stores.providers.commitReadProjection({ catalog: [], contracts: { providers: [], custom_endpoints: [], revision: 7, process_generation: 99 }, connections: [] });
+  assert.equal(stores.accounts.loaded, true);
+  assert.equal(stores.accounts.accounts[0]?.name, "saved");
+  assert.equal(stores.destinations.loaded, true);
+  assert.equal(stores.destinations.destinations[0]?.id, "destination");
+  assert.deepEqual(stores.providers.catalog, []);
+  // Cover the retired debounced writer as well as synchronous writes.
+  await new Promise(resolve => setTimeout(resolve, 600));
+  assert.deepEqual([...backing.entries()], [["ocg-theme", "dark"]]);
+  const next = freshStores();
+  assert.deepEqual(next.accounts.accounts, []);
+  assert.equal(next.accounts.loaded, false);
+  assert.deepEqual(next.destinations.destinations, []);
+  assert.equal(next.destinations.loaded, false);
+  assert.equal(next.providers.catalog, null);
 });
 
-test("providers store hydrates the persisted projection and clear drops it", () => {
-  installLocalStorage();
-  seed("providers", {
-    catalog: [{ provider_id: "p1" }],
-    contracts: { revision: 5, process_generation: 9 },
-    connections: [{ id: "conn1" }],
-    aliasUnpublished: ["hidden-model"],
+test("teardown deletes legacy entries reintroduced after startup without touching preferences", t => {
+  const backing = installLocalStorage(t);
+  const stores = freshStores();
+  for (const key of ["accounts", "destinations", "providers"]) backing.set(`ocg.snapshot.v1:${key}`, "stale-cache");
+  backing.set("ocg-locale", "en");
+  stores.accounts.clearAccounts();
+  stores.destinations.clear();
+  stores.providers.clear();
+  assert.deepEqual([...backing.entries()], [["ocg-locale", "en"]]);
+});
+
+test("restricted browser storage does not block cleanup or memory-only store creation", t => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, get: () => { throw new Error("denied"); } });
+  t.after(() => {
+    if (original) Object.defineProperty(globalThis, "localStorage", original);
+    else Reflect.deleteProperty(globalThis, "localStorage");
   });
-  setActivePinia(createPinia());
-  const store = useProvidersStore();
-  assert.equal(store.catalog?.[0]?.provider_id, "p1");
-  assert.equal(store.connections?.[0]?.id, "conn1");
-  assert.deepEqual(store.aliasUnpublished, ["hidden-model"]);
-  store.clear();
-  assert.equal(readSnapshot("providers"), null);
-  assert.equal(store.catalog, null);
-});
-
-test("a malformed providers snapshot hydrates as empty, never throws", () => {
-  installLocalStorage();
-  seed("providers", { catalog: "not-a-list" });
-  setActivePinia(createPinia());
-  const store = useProvidersStore();
-  assert.equal(store.catalog, null);
+  assert.doesNotThrow(() => { dropSnapshot("accounts"); dropAllSnapshots(); });
+  const stores = freshStores();
+  assert.equal(stores.accounts.loaded, false);
+  assert.equal(stores.destinations.loaded, false);
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: {
+    removeItem() { throw new Error("denied"); },
+    get length() { throw new Error("denied"); },
+  } });
+  assert.doesNotThrow(() => { dropSnapshot("accounts"); dropAllSnapshots(); stores.accounts.clearAccounts(); });
 });

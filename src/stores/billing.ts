@@ -13,7 +13,6 @@ import {
 import { officialApi } from "../api/official-api.ts";
 import { useControlPlaneStore } from "./controlPlane.ts";
 import {
-  applyUsageCalibration,
   cashRefreshKind,
   mergeManualQuotaReceipt,
   type BillingClientError,
@@ -245,22 +244,12 @@ export const useBillingStore = defineStore("billing", () => {
       }
       const control = useControlPlaneStore();
       if (!control.hasTokens()) await control.refresh();
-      const usage = await control.runMutation(
+      await control.runMutation(
         (expectation) => dashboardV3.refreshProviderUsage(accountId, expectation),
         expectationFor(accountId),
       );
       if (!owns(token)) return slots.get(accountId)?.value.status ?? null;
-      const current = slots.get(accountId)?.value.status;
-      if (current) {
-        const status: BillingStatus = {
-          ...current,
-          usage,
-          revision: usage.revision,
-          processGeneration: usage.processGeneration,
-        };
-        applyStatus(accountId, status);
-        return status;
-      }
+      write(accountId, { resyncBeforeMutate: true });
       const status = await billingApi.status(accountId);
       if (!owns(token)) return status;
       applyStatus(accountId, status);
@@ -287,43 +276,23 @@ export const useBillingStore = defineStore("billing", () => {
       const control = useControlPlaneStore();
       if (!control.hasTokens()) await control.refresh();
       if (current && cashRefreshKind(current) === "official_balance") {
-        const cash = await officialApi.refreshBalance(
+        await officialApi.refreshBalance(
           accountId,
           expectationFor(accountId) ?? control.expectation(),
         );
         if (!owns(token)) return slots.get(accountId)?.value.status ?? null;
-        const latest = slots.get(accountId)?.value.status;
-        if (!latest) {
-          const status = await billingApi.status(accountId);
-          if (!owns(token)) return status;
-          applyStatus(accountId, status);
-          return status;
-        }
-        const status: BillingStatus = {
-          ...latest,
-          cash,
-          revision: cash.revision,
-          processGeneration: cash.processGeneration,
-        };
+        write(accountId, { resyncBeforeMutate: true });
+        const status = await billingApi.status(accountId);
+        if (!owns(token)) return status;
         applyStatus(accountId, status);
         return status;
       }
-      const usage = await control.runMutation(
+      await control.runMutation(
         (expectation) => dashboardV3.refreshProviderUsage(accountId, expectation),
         expectationFor(accountId),
       );
       if (!owns(token)) return slots.get(accountId)?.value.status ?? null;
-      const latest = slots.get(accountId)?.value.status;
-      if (latest) {
-        const status: BillingStatus = {
-          ...latest,
-          usage,
-          revision: usage.revision,
-          processGeneration: usage.processGeneration,
-        };
-        applyStatus(accountId, status);
-        return status;
-      }
+      write(accountId, { resyncBeforeMutate: true });
       const status = await billingApi.status(accountId);
       if (!owns(token)) return status;
       applyStatus(accountId, status);
@@ -439,16 +408,20 @@ export const useBillingStore = defineStore("billing", () => {
     if (!owns(token)) return;
     const current = slots.get(accountId)?.value;
     if (!current) return;
-    if (current.status?.usage) {
-      applyStatus(accountId, {
-        ...current.status,
-        usage: applyUsageCalibration(current.status.usage, key, usage, updatedAt),
-      });
-      return;
-    }
     write(accountId, {
       manualReceipt: mergeManualQuotaReceipt(current.manualReceipt, key, usage, updatedAt),
+      resyncBeforeMutate: true,
     });
+    // The quota-only acknowledgement cannot replace a full billing projection.
+    // Keep it visible until the canonical read replaces every derived fact together.
+    void (async () => {
+      try {
+        const status = await billingApi.status(accountId);
+        if (owns(token)) applyStatus(accountId, status);
+      } catch (error) {
+        if (owns(token)) write(accountId, { error: clientErrorFrom(error) });
+      }
+    })();
   }
 
   function remove(accountId: string): void {

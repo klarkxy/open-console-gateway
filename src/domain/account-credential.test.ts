@@ -1,8 +1,8 @@
-import type { AccountCapabilitySource } from "./account-capabilities.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { AccountOperationDetail } from "../api/pages.ts";
 import type { Account } from "../api/dashboard.ts";
-import type { Connection, ConnectionEndpoint } from "../api/connections.ts";
+import type { ConnectionEndpoint } from "../api/connections.ts";
 import type { Identity, IdentityCredential } from "../api/identities.ts";
 import { DashboardConflictError, DashboardRequestError } from "../api/dashboard-v3.ts";
 import {
@@ -12,7 +12,6 @@ import {
   buildBindingPayload,
   buildCreatePayload,
   buildRotatePayload,
-  connectionAllowsIdentityCredentialCreate,
   createPayloadSignature,
   credentialWriteSupport,
   CredentialEditorError,
@@ -22,9 +21,6 @@ import {
   nextCreateOperationId,
   endpointMatchesSavedGrant,
   normalizeOrigin,
-  shareableInferenceCredentials,
-  staleSavedEndpointIds,
-  staleSavedOrigins,
   unionOriginsForEndpoints,
   type CredentialBindingDraft,
 } from "./account-credential.ts";
@@ -216,61 +212,23 @@ test("binding draft hydrates from the selected credential binding without invent
   });
 });
 
-test("write actions stay on the matching card credential and hide Zen, CPA, no-auth, and observer", () => {
-  const shared = identity({
-    credentials: [
-      credential({
-        credential: { ...credential().credential, id: "cred-sib", auth_state: "invalid" },
-        last_error: "sibling",
-        legacy: { kind: "account", id: "acc-2" },
-        bindings: [{
-          id: "bind-sib",
-          connection_id: "conn-1",
-          allowed_endpoint_ids: [],
-          allowed_origins: [],
-          model_scope: { kind: "only", models: ["sibling-model"] },
-          enabled: false,
-          routing_rank: 0,
-        }],
-      }),
-      credential(),
-    ],
-  });
-  const card = credentialWriteSupport(account(), shared, null, null, [connection()]);
-  assert.equal(card.rotate, true);
-  assert.equal(card.binding, true);
-  assert.equal(card.create, true);
-  assert.equal(card.credential?.credential.id, "cred-1");
-  assert.equal(card.bindingRecord?.id, "bind-1");
-  assert.deepEqual(
-    accountCredentialMenuOptions(account(), shared, null, null, [connection()]).map((option) => option.key),
-    ["rotate-key", "add-key", "edit-binding"],
-  );
+function operations(overrides: Partial<AccountOperationDetail> = {}): AccountOperationDetail {
+  return { rotate: true, binding: true, create: true, credentialId: "cred-1", bindingId: "bind-1", identityId: "ident-1",
+    unsupportedReason: null, allowedConnections: [], shareTargets: [], testModels: [], grantedEndpointIds: [], staleEndpointIds: [], staleOrigins: [], ...overrides };
+}
 
-  const siblingCard = credentialWriteSupport(account({ id: "acc-2", name: "Other" }), shared);
-  assert.equal(siblingCard.credential?.credential.id, "cred-sib");
-  assert.equal(siblingCard.bindingRecord?.id, "bind-sib");
-
-  assert.equal(credentialWriteSupport(account({
-    id: "00000000-0000-0000-0000-000000000002",
-    provider_id: "opencode-zen-free",
-    credential_kind: "none",
-  }), identity()).rotate, false);
-  assert.equal(credentialWriteSupport(account({
-    id: "00000000-0000-0000-0000-000000000003",
-    provider_id: "cpa",
-  }), identity()).rotate, false);
-  assert.equal(credentialWriteSupport(account({ credential_kind: "none" }), identity()).rotate, false);
-  assert.equal(credentialWriteSupport(account(), identity({
-    credentials: [credential({
-      credential: { ...credential().credential, purpose: "platform_observer" },
-    })],
-  })).rotate, false);
-  assert.equal(accountCredentialMenuOptions(account(), null).length, 0);
-  assert.equal(credentialWriteSupport(account({ provider_id: "custom" }), identity()).create, false);
-  assert.equal(credentialWriteSupport(account({ provider_id: "custom" }), identity()).rotate, true);
-  assert.ok(!accountCredentialMenuOptions(account({ provider_id: "custom" }), identity())
-    .some((option) => option.key === "add-key"));
+test("write support follows server decisions and selects exact ids among sibling credentials", () => {
+  const sibling = credential({ credential: { ...credential().credential, id: "cred-sibling" }, bindings: [{ ...credential().bindings[0]!, id: "bind-sibling" }] });
+  const shared = identity({ credentials: [sibling, credential()] });
+  const support = credentialWriteSupport(operations(), shared);
+  assert.equal(support.credential?.credential.id, "cred-1");
+  assert.equal(support.bindingRecord?.id, "bind-1");
+  assert.deepEqual(accountCredentialMenuOptions(account(), operations(), shared).map(row => row.key), ["rotate-key", "add-key", "edit-binding"]);
+  assert.equal(credentialWriteSupport(operations({ rotate: false, binding: false, create: false }), shared).rotate, false);
+  assert.equal(credentialWriteSupport(null, shared).create, false);
+  assert.equal(credentialWriteSupport(operations({ credentialId: "missing", bindingId: "missing" }), shared).credential, null);
+  assert.equal(credentialWriteSupport(operations({ bindingId: "bind-sibling" }), shared).bindingRecord, null);
+  assert.equal(credentialWriteSupport(operations({ create: false, unsupportedReason: "dedicated_account_flow" }), shared).create, false);
 });
 
 function endpoint(overrides: Partial<ConnectionEndpoint> = {}): ConnectionEndpoint {
@@ -282,29 +240,6 @@ function endpoint(overrides: Partial<ConnectionEndpoint> = {}): ConnectionEndpoi
     operation: "chat_create",
     url: "https://lab.example/v1/chat/completions",
     wire_protocol: "chat_completions",
-    ...overrides,
-  };
-}
-
-function connection(overrides: Partial<Connection> = {}): Connection {
-  return {
-    credential_create: { allowed: true, materialKinds: ["api_key"], reason: null },
-    id: "conn-1",
-    name: "Go",
-    origin: "builtin",
-    template_ref: null,
-    adapter_kind: "opencode",
-    lifecycle: "configured",
-    authorization: "unknown",
-    eligibility: { state: "eligible", reason: "none" },
-    credential_count: 1,
-    enabled_credential_count: 1,
-    target_count: 1,
-    endpoints: [endpoint()],
-    targets: [],
-    legacy: { kind: "builtin_provider", id: "opencode" },
-    display_family: "OpenCode Go",
-    offering: "plan",
     ...overrides,
   };
 }
@@ -336,57 +271,7 @@ test("create payload defaults to independent quota and only shares when the user
     (error: unknown) => error instanceof CredentialEditorError && error.issue === "missing_share_target",
   );
   assert.equal(emptyCreateDraft("conn-1").sharingKind, "independent");
-  assert.deepEqual(
-    shareableInferenceCredentials(identity({
-      credentials: [
-        credential(),
-        credential({
-          credential: { ...credential().credential, id: "obs-1", purpose: "platform_observer" },
-        }),
-      ],
-    })).map((row) => row.credential.id),
-    ["cred-1"],
-  );
-});
 
-test("Add Key stays hidden for observers, Zen, CPA, no-auth, and Custom API", () => {
-  assert.equal(credentialWriteSupport(account({
-    id: "00000000-0000-0000-0000-000000000002",
-    provider_id: "opencode-zen-free",
-    credential_kind: "none",
-  }), identity()).create, false);
-  assert.equal(credentialWriteSupport(account({
-    id: "00000000-0000-0000-0000-000000000003",
-    provider_id: "cpa",
-  }), identity()).create, false);
-  assert.equal(credentialWriteSupport(account({ credential_kind: "none" }), identity()).create, false);
-  assert.equal(credentialWriteSupport(account(), identity({
-    credentials: [credential({
-      credential: { ...credential().credential, purpose: "platform_observer" },
-    })],
-  })).create, false);
-  assert.equal(connectionAllowsIdentityCredentialCreate(connection({
-    legacy: { kind: "custom_account", id: "acc-9" },
-    origin: "custom_account",
-    credential_create: { allowed: false, materialKinds: [], reason: "dedicated_account_flow" },
-  })), false);
-  assert.equal(connectionAllowsIdentityCredentialCreate(connection({
-    legacy: { kind: "builtin_provider", id: "cpa" },
-    credential_create: { allowed: false, materialKinds: [], reason: "external_integration" },
-  })), false);
-  assert.equal(connectionAllowsIdentityCredentialCreate(connection({
-    legacy: { kind: "builtin_provider", id: "opencode-zen-free" },
-    credential_create: { allowed: false, materialKinds: [], reason: "no_authentication" },
-  })), false);
-  assert.equal(connectionAllowsIdentityCredentialCreate(connection({
-    origin: "custom",
-    legacy: { kind: "dynamic_provider", id: "lab" },
-  })), true);
-  assert.equal(connectionAllowsIdentityCredentialCreate(connection({
-    origin: "builtin",
-    legacy: { kind: "dynamic_provider", id: "lab" },
-    credential_create: { allowed: false, materialKinds: [], reason: "builtin_definition" },
-  })), false);
 });
 
 test("binding grants are omitted until destination selection changes, then both lists are sent", () => {
@@ -418,36 +303,12 @@ test("binding grants are omitted until destination selection changes, then both 
     }],
   }).bindings[0] ?? null;
 
-  const draft = bindingDraftFrom(saved, endpoints);
+  const draft = bindingDraftFrom(saved, ["ep-1"]);
   assert.deepEqual(draft.selectedEndpointIds, ["ep-1"]);
   assert.equal(draft.destinationsTouched, false);
   const unchanged = buildBindingPayload(draft, endpoints);
   assert.equal("allowedEndpointIds" in unchanged, false);
   assert.equal("allowedOrigins" in unchanged, false);
-  assert.deepEqual(staleSavedEndpointIds(saved, endpoints), ["gone-ep"]);
-  assert.deepEqual(staleSavedOrigins(saved, endpoints), ["https://stale.example"]);
-
-  const editedUrl = [endpoint({ url: "https://new.example/v1/chat/completions" })];
-  const afterUrlChange = bindingDraftFrom({
-    id: "bind-1",
-    connection_id: "conn-1",
-    allowed_endpoint_ids: [],
-    allowed_origins: ["https://lab.example"],
-    model_scope: { kind: "all" },
-    enabled: true,
-    routing_rank: 0,
-  }, editedUrl);
-  assert.deepEqual(afterUrlChange.selectedEndpointIds, []);
-  assert.deepEqual(staleSavedOrigins({
-    id: "bind-1",
-    connection_id: "conn-1",
-    allowed_endpoint_ids: [],
-    allowed_origins: ["https://lab.example"],
-    model_scope: { kind: "all" },
-    enabled: true,
-    routing_rank: 0,
-  }, editedUrl), ["https://lab.example"]);
-
   draft.destinationsTouched = true;
   draft.selectedEndpointIds = [];
   const revoked = buildBindingPayload(draft, endpoints);
@@ -518,10 +379,9 @@ test("same endpoint ID with a moved Origin stays unchecked and is not granted by
     enabled: true,
     routing_rank: 0,
   };
-  const draft = bindingDraftFrom(saved, [moved, other]);
+  const draft = bindingDraftFrom(saved, []);
   assert.deepEqual(draft.selectedEndpointIds, []);
   assert.equal(draft.destinationsTouched, false);
-  assert.deepEqual(staleSavedOrigins(saved, [moved, other]), ["https://lab.example"]);
   assert.equal("allowedEndpointIds" in buildBindingPayload(draft, [moved, other]), false);
 
   draft.destinationsTouched = true;
@@ -532,12 +392,11 @@ test("same endpoint ID with a moved Origin stays unchecked and is not granted by
   assert.equal(granted.allowedOrigins?.includes("https://new.example"), false);
   assert.equal(granted.allowedEndpointIds?.includes("ep-1"), false);
 
-  const sealed = endpoint({ id: "ep-sealed", url: null, locked: true });
   const sealedDraft = bindingDraftFrom({
     ...saved,
     allowed_endpoint_ids: ["ep-sealed"],
     allowed_origins: [],
-  }, [sealed]);
+  }, ["ep-sealed"]);
   assert.deepEqual(sealedDraft.selectedEndpointIds, ["ep-sealed"]);
 });
 
@@ -589,38 +448,4 @@ test("create operation id stays stable for an uncertain same payload and rejects
     secretInput: "sk",
     quotaSharing: { kind: "independent" },
   }));
-});
-
-test("credential editing uses the loaded resource owner and integration controls", () => {
-  const destination: AccountCapabilitySource = {
-    account_controls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: "ollama", browserProfile: false },
-    auth_scheme: "bearer", max_credentials: 1, plan: null,
-    capabilities: { testable: true, managed_signup: false, external_integration: false, billing_tier_required: false },
-  };
-  assert.equal(credentialWriteSupport(account({ provider_id: "custom" }), identity(), null, destination, [connection()]).create, true);
-  assert.equal(credentialWriteSupport(account(), identity(), null, {
-    ...destination, account_controls: { ...destination.account_controls, configurationOwner: "account" },
-  }, [connection()]).create, true);
-  assert.equal(credentialWriteSupport(account(), identity(), null, {
-    ...destination, capabilities: { ...destination.capabilities, external_integration: true },
-  }).rotate, false);
-});
-
-test("generic keyless singleton uses no-auth restrictions without inheriting Zen writes", () => {
-  const destination: AccountCapabilitySource = {
-    account_controls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false },
-    auth_scheme: "none", max_credentials: 1, plan: null,
-    capabilities: { testable: true, managed_signup: false, external_integration: false, billing_tier_required: false },
-  };
-  const row = account({ provider_id: "generic", credential_kind: "none" });
-  assert.deepEqual(credentialWriteSupport(row, identity(), null, destination), credentialWriteSupport(row, identity(), null));
-});
-
-test("creation authority comes from the selected connection projection", () => {
-  for (const capability of [undefined, { allowed: false, materialKinds: [], reason: "no_authentication" as const }, { allowed: true, materialKinds: ["external_reference" as const], reason: null }]) {
-    const row = connection({ credential_create: capability });
-    assert.equal(connectionAllowsIdentityCredentialCreate(row), false);
-    assert.equal(credentialWriteSupport(account(), identity(), null, null, [row]).create, false);
-  }
-  assert.equal(credentialWriteSupport(account(), identity(), null, null, [connection({ id: "other" })]).create, false);
 });
