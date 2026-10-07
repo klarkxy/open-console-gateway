@@ -100,6 +100,14 @@ export const useProviderPageStore = defineStore("providerPage", () => {
         // still rejects older data. Switching selections cancels it as before.
         if (selectionChanged || !controllers.has("edit")) invalidate("edit");
       }
+      if (selectionChanged) {
+        // A snapshot version covers every provider; it cannot identify the
+        // owner of cached rows when the new selection's model read fails.
+        models.value = editDetail.value = null;
+        identities.delete("models");
+        identities.delete("edit");
+        errors.value = { ...errors.value, models: "", edit: "" };
+      }
       detail.value = value;
       identities.set("detail", value.item.railKey);
     },
