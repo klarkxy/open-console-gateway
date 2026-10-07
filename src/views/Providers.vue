@@ -895,7 +895,7 @@ const actionLocked = computed(() => (
   || protocolGrantSaving.value
 ));
 const matrixActionLocked = computed(() => (
-  pendingSelection.value || pageStore.loading.models || definitionLoading.value
+  pendingSelection.value || loading.value || pageStore.loading.detail || pageStore.loading.models || definitionLoading.value
   || Boolean(modelsPage.value && pageDetail.value && modelsPage.value.readVersion !== pageDetail.value.readVersion)
   || catalogRefreshing.value
   || catalogRemoving.value
@@ -1058,14 +1058,13 @@ async function ensureOperationDetail(requireVisibleVersion = false): Promise<Non
   if (!selectedKey.value) throw new Error(t("状态已变化，请刷新后重试。"));
   const key = selectedKey.value;
   const session = providerViewSession;
-  const visibleVersion = pageDetail.value?.readVersion;
   definitionLoading.value = true;
   definitionError.value = "";
   try {
     const value = await pageStore.loadEditDetail(key);
     if (session !== providerViewSession || selectedKey.value !== key || !currentUrlIsProvidersView()
       || pageStore.editDetail !== value) throw new Error(t("状态已变化，请刷新后重试。"));
-    if (requireVisibleVersion && value.readVersion !== visibleVersion) {
+    if (requireVisibleVersion && value.readVersion !== pageDetail.value?.readVersion) {
       void loadAll({ retain: true });
       throw new Error(t("状态已变化，请刷新后重试。"));
     }

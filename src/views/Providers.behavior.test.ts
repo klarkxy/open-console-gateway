@@ -41,7 +41,7 @@ type Recorded = { url: string; method: string; body?: Record<string, any> };
 type Release = { reject: (error: Error) => void; resolve: () => void };
 type Gate = { holdGets: boolean; failGets: boolean; token: string; pending: Release[]; variant?: "http" | "refreshable";
   holdRefresh?: boolean; readRevision?: number;
-  editVersion?: string; modelVersion?: string; holdReadSuffixes?: string[]; editAccounts?: object[] };
+  editVersion?: string; headerVersion?: string; modelVersion?: string; holdReadSuffixes?: string[]; editAccounts?: object[] };
 type MessageRecord = { type: string; args: unknown[] };
 
 function memoryStorage(): Storage {
@@ -497,6 +497,7 @@ function installDashboard(modelIds: string[], requests: Recorded[], gate: Gate):
         body = { ...body, revision: typeof revision === "object" ? { ...revision, revision: gate.readRevision } : gate.readRevision };
       }
       if (pathname.endsWith("/edit-detail") && gate.editVersion) body = { ...body, readVersion: gate.editVersion };
+      if (pathname === "/pages/providers/d:dest-opencode" && gate.headerVersion) body = { ...body, readVersion: gate.headerVersion };
       if (pathname.endsWith("/edit-detail") && gate.editAccounts) body = { ...body, accounts: gate.editAccounts };
       if (pathname.endsWith("/models") && gate.modelVersion) body = { ...body, readVersion: gate.modelVersion };
       return new Response(JSON.stringify(body), {
@@ -810,6 +811,21 @@ describe("provider probe and catalog removal", { concurrency: false }, () => {
       } finally { gate.holdRefresh = false; releasePending(gate); mounted.app.unmount(); }
     });
   }
+  test("a header refresh during preparation permits an operation against the current matching view", async () => {
+    const gate: Gate = { holdGets: false, failGets: false, token: "", pending: [] };
+    const mounted = await openProviders([PROBE], gate);
+    try {
+      await until("probe row", () => text(mounted.root).includes(PROBE), () => detail(mounted.root, mounted.requests));
+      gate.holdReadSuffixes = ["/edit-detail"];
+      click(confirmFor(mounted.root, PROBE, "probe"));
+      await until("pending operation detail", () => gate.pending.length === 1, () => detail(mounted.root, mounted.requests));
+      gate.headerVersion = gate.editVersion = "refreshed-view";
+      await useProviderPageStore().loadDetail("d:dest-opencode");
+      gate.holdReadSuffixes = [];
+      releasePending(gate);
+      await until("operation submitted", () => mounted.requests.some(request => request.method === "POST"), () => detail(mounted.root, mounted.requests));
+    } finally { releasePending(gate); mounted.app.unmount(); }
+  });
   test("changed selected read identity requires reapply instead of an automatic model write", async () => {
     const gate: Gate = { holdGets: false, failGets: false, token: "", pending: [] };
     const mounted = await openProviders([PROBE], gate);

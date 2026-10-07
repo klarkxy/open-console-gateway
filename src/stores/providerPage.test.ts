@@ -93,6 +93,53 @@ test("canonical receipt facts and metadata survive a failed page revalidation", 
   assert.equal(store.models?.revision.revision, 8); assert.equal(store.models?.models.length, 2);
 });
 
+test("a refreshed header preserves a pending edit read for the same selection", async () => {
+  setupControlPlane();
+  const store = useProviderPageStore();
+  const body = (revision: number, railKey = "d:destination") => ({
+    revision: { revision, processGeneration: 99 }, readVersion: `page${revision}`, item: { railKey },
+  });
+  installFetchMock(() => body(7));
+  await store.loadDetail("d:destination");
+  const gate = deferred<object>();
+  let editSignal: AbortSignal | null = null;
+  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (url: string, init: RequestInit) => {
+    const result = url.endsWith("/edit-detail")
+      ? (editSignal = init.signal!, await gate.promise) : body(8);
+    return new Response(JSON.stringify(result), { headers: { "Content-Type": "application/json" } });
+  } });
+  const editing = store.loadEditDetail("d:destination");
+  await store.loadDetail("d:destination");
+  assert.equal((editSignal as AbortSignal | null)?.aborted, false);
+  gate.resolve(body(8));
+  await editing;
+  assert.equal(store.editDetail?.readVersion, "page8");
+});
+
+test("switching provider selections still cancels and fences a pending editor", async () => {
+  setupControlPlane();
+  const store = useProviderPageStore();
+  const body = (railKey: string) => ({
+    revision: { revision: 7, processGeneration: 99 }, readVersion: "page7", item: { railKey },
+  });
+  installFetchMock(() => body("d:destination"));
+  await store.loadDetail("d:destination");
+  const gate = deferred<object>();
+  let editSignal: AbortSignal | null = null;
+  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (url: string, init: RequestInit) => {
+    const result = url.endsWith("/edit-detail")
+      ? (editSignal = init.signal!, await gate.promise) : body("d:other");
+    return new Response(JSON.stringify(result), { headers: { "Content-Type": "application/json" } });
+  } });
+  const editing = store.loadEditDetail("d:destination");
+  await store.loadDetail("d:other");
+  assert.equal((editSignal as AbortSignal | null)?.aborted, true);
+  gate.resolve(body("d:destination"));
+  await editing;
+  assert.equal(store.editDetail, null);
+  assert.equal(store.detail?.item.railKey, "d:other");
+});
+
 test("a fresh installation without a pricing snapshot still commits catalog receipts", async () => {
   const store = await selectedPage();
   useControlPlaneStore().sync({ revision: 8, processGeneration: 99 });

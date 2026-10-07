@@ -92,9 +92,13 @@ export const useProviderPageStore = defineStore("providerPage", () => {
       || (key.startsWith("c:") && item.connectionId === key.slice(2)));
     const identity = sameSelected ? item.railKey : key;
     return read("detail", identity, () => detail.value, value => {
-      if (detail.value?.readVersion !== value.readVersion || detail.value.item.railKey !== value.item.railKey) {
+      const selectionChanged = detail.value?.item.railKey !== value.item.railKey;
+      if (detail.value?.readVersion !== value.readVersion || selectionChanged) {
         invalidate("models");
-        invalidate("edit");
+        // A post-save header can finish while the user opens the next editor.
+        // Keep that same-selection edit read alive; its revision guard below
+        // still rejects older data. Switching selections cancels it as before.
+        if (selectionChanged || !controllers.has("edit")) invalidate("edit");
       }
       detail.value = value;
       identities.set("detail", value.item.railKey);
