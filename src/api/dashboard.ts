@@ -182,8 +182,16 @@ export const dashboardApi = {
     await dashboardV3.regeneratePrimaryKey(expectation);
   },
 
-  getAccounts: async (): Promise<Account[]> =>
-    (await dashboardV3.listAccounts()).accounts.map(presentAccount),
+  getAccounts: async (): Promise<Account[]> => (await dashboardApi.getAccountsSnapshot()).accounts,
+
+  /** Complete inventory and the process/CAS pair carried by that same response. */
+  getAccountsSnapshot: async (): Promise<{ accounts: Account[]; expectation: MutationExpectation }> => {
+    const result = await dashboardV3.listAccounts();
+    return {
+      accounts: result.accounts.map(presentAccount),
+      expectation: { expectedRevision: result.revision, processGeneration: result.processGeneration },
+    };
+  },
 
   createAccount: (input: AccountInput): Promise<Account> =>
     mutatedAccount(withLocalCas("account:create", (expectation) => dashboardV3.createAccount(accountCreateInput(input), expectation))),
@@ -287,11 +295,12 @@ export const dashboardApi = {
     window: "window_5h" | "window_week" | "window_month",
     percent: number,
     resetsInMinutes?: number | null,
-  ) => presentUsage((await withCas((expectation) => dashboardV3.patchAccountUsage(id, {
-    window,
-    percent,
-    resetsInMinutes: resetsInMinutes ?? null,
-  } satisfies WithoutExpectation<AccountUsageUpdate>, expectation))).usage),
+  ) => {
+    const receipt = await withCas((expectation) => dashboardV3.patchAccountUsage(id, {
+      window, percent, resetsInMinutes: resetsInMinutes ?? null,
+    } satisfies WithoutExpectation<AccountUsageUpdate>, expectation));
+    return { ...presentUsage(receipt.usage), observed_at: receipt.observedAt };
+  },
   refreshAccountUsage: async (id: string) =>
     presentUsageRefresh(await withCas((expectation) => dashboardV3.refreshAccountUsage(id, expectation))),
 

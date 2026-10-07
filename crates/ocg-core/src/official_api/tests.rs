@@ -1,4 +1,51 @@
 use super::*;
+
+#[test]
+fn official_meter_distinguishes_missing_observation_from_a_native_zero_balance() {
+    let observed_at = DateTime::<Utc>::UNIX_EPOCH;
+    let balances = vec![OfficialBalance {
+        currency: "USD".into(),
+        total: 0.0,
+        granted: 0.0,
+        topped_up: 0.0,
+        observed_at,
+    }];
+    let unavailable = OfficialApiAccountMeter::project(false, &balances);
+    assert_eq!(
+        unavailable.remaining_empty,
+        Some(OfficialApiMeterEmpty::Unavailable)
+    );
+    assert!(unavailable.remaining.is_empty());
+    let missing = OfficialApiAccountMeter::project(true, &[]);
+    assert_eq!(
+        missing.remaining_empty,
+        Some(OfficialApiMeterEmpty::NotQueried)
+    );
+    let zero = OfficialApiAccountMeter::project(true, &balances);
+    assert_eq!(zero.remaining_empty, None);
+    assert_eq!(zero.remaining[0].total, 0.0);
+    assert_eq!(zero.remaining[0].currency, "USD");
+    assert_eq!(zero.remaining[0].gift, None);
+    let native = OfficialApiAccountMeter::project(
+        true,
+        &[
+            OfficialBalance {
+                total: f64::NAN,
+                ..balances[0].clone()
+            },
+            OfficialBalance {
+                currency: "CNY".into(),
+                total: 1.25,
+                granted: 0.25,
+                topped_up: 1.0,
+                observed_at,
+            },
+        ],
+    );
+    assert_eq!(native.remaining.len(), 1);
+    assert_eq!(native.remaining[0].total, 1.25);
+    assert_eq!(native.remaining[0].gift, Some(0.25));
+}
 use serde_json::json;
 
 pub(crate) fn runtime(kind: OfficialApiKind) -> DynamicProviderRuntime {

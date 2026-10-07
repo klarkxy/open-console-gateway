@@ -1544,7 +1544,9 @@ fn validate_custom_endpoint_scope(
     }
 }
 
-fn provider_catalog_from_state(state: &CoreState) -> Result<ProviderCatalog, V3ApiError> {
+pub(crate) fn provider_catalog_from_state(
+    state: &CoreState,
+) -> Result<ProviderCatalog, V3ApiError> {
     let revision = ControlRevision::from_state(state);
     let zen_catalog = state.zen_free_model_catalog();
     let contracts = state.provider_contracts();
@@ -1605,7 +1607,9 @@ fn provider_catalog_from_state(state: &CoreState) -> Result<ProviderCatalog, V3A
     })
 }
 
-fn dynamic_catalog_entry(runtime: &crate::dynamic::DynamicProviderRuntime) -> ProviderCatalogEntry {
+pub(crate) fn dynamic_catalog_entry(
+    runtime: &crate::dynamic::DynamicProviderRuntime,
+) -> ProviderCatalogEntry {
     let auth_schemes = match runtime.auth_kind.upstream_auth() {
         Some(scheme) => vec![AccountAuthScheme::from(scheme)],
         None => Vec::new(),
@@ -1695,7 +1699,7 @@ fn dynamic_catalog_entry(runtime: &crate::dynamic::DynamicProviderRuntime) -> Pr
     }
 }
 
-fn catalog_entry(
+pub(crate) fn catalog_entry(
     plan: &BuiltinProvider,
     zen_models: &[String],
     goat_models: &[String],
@@ -1912,15 +1916,25 @@ fn load_accounts_with_verification(
     Ok((accounts, statuses))
 }
 
-fn provider_contracts_from_state(
+pub(crate) fn provider_contracts_from_state(
     state: &CoreState,
     contracts: &EffectiveContractSet,
     accounts: &[ModelAccount],
     statuses: &HashMap<String, ConnectionVerificationStatus>,
 ) -> Result<ProviderContracts, V3ApiError> {
-    let revision = ControlRevision::from_state(state);
     let saved_projection = crate::destination_projection::load_persisted(&state.db.lock())
         .map_err(V3ApiError::internal)?;
+    provider_contracts_from_capture(state, contracts, accounts, statuses, &saved_projection)
+}
+
+pub(crate) fn provider_contracts_from_capture(
+    state: &CoreState,
+    contracts: &EffectiveContractSet,
+    accounts: &[ModelAccount],
+    statuses: &HashMap<String, ConnectionVerificationStatus>,
+    saved_projection: &crate::destination_projection::DestinationProjection,
+) -> Result<ProviderContracts, V3ApiError> {
+    let revision = ControlRevision::from_state(state);
     let mut providers = Vec::new();
     for scope_id in provider_contracts::builtin_provider_scope_ids() {
         let Some(contract) = contracts.providers.get(scope_id) else {
@@ -1963,7 +1977,21 @@ fn provider_contracts_from_state(
             catalog.models.retain(|id| !is_free_model(id));
             models.retain(|model| !is_free_model(&model.model_id));
         }
+        let presentation = saved_projection
+            .destinations
+            .iter()
+            .find(|d| {
+                d.id == ocg_domain::destination::destination_id_for_builtin(descriptor.provider_id)
+            })
+            .map(|d| {
+                crate::dashboard_v4::pages::model_rows::presentation(
+                    &crate::dashboard_v4::DestinationDto::from(d),
+                    ContractScopeKind::Provider,
+                    models.clone(),
+                )
+            });
         providers.push(ProviderContractGroup {
+            presentation,
             scope_kind: ContractScopeKind::Provider,
             scope_id: scope_id.to_string(),
             provider_id: descriptor.provider_id.to_string(),
@@ -2004,6 +2032,9 @@ fn provider_contracts_from_state(
                     verification_status: AccountVerificationStatus::Pending,
                 });
             CustomEndpointContract {
+                presentation: saved_projection.destinations.iter().find(|d| matches!(&d.legacy,
+                    ocg_domain::destination::LegacyDestinationRef::CustomAccount(id) if id == contract.scope.id()))
+                    .and_then(|d| crate::dashboard_v4::DestinationDto::from(d).presentation),
                 scope_kind: ContractScopeKind::CustomEndpoint,
                 scope_id: contract.scope.id().to_string(),
                 provider_id: CUSTOM_PROVIDER_ID.to_string(),

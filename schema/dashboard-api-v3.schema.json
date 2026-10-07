@@ -2326,6 +2326,10 @@
       "additionalProperties": false,
       "description": "Secret-free CPA runtime snapshot. `supported` is true only on an\ninstalled desktop Host on Windows x64, macOS, or Linux x64.",
       "properties": {
+        "actions": {
+          "$ref": "#/$defs/CpaRuntimeActions",
+          "description": "Authoritative eligibility; clients may additionally gate local requests."
+        },
         "assetSha256": {
           "type": [
             "string",
@@ -2337,6 +2341,12 @@
             "string",
             "null"
           ]
+        },
+        "clientKeysAvailable": {
+          "type": "boolean"
+        },
+        "codexDeviceLoginAvailable": {
+          "type": "boolean"
         },
         "currentOperation": {
           "type": [
@@ -2403,6 +2413,9 @@
         "running": {
           "type": "boolean"
         },
+        "startupRestorePending": {
+          "type": "boolean"
+        },
         "supported": {
           "type": "boolean"
         },
@@ -2417,6 +2430,10 @@
         }
       },
       "required": [
+        "actions",
+        "clientKeysAvailable",
+        "codexDeviceLoginAvailable",
+        "startupRestorePending",
         "supported",
         "unavailableReason",
         "installed",
@@ -2435,6 +2452,42 @@
         "currentOperation",
         "revision",
         "processGeneration"
+      ],
+      "type": "object"
+    },
+    "CpaRuntimeActions": {
+      "additionalProperties": false,
+      "properties": {
+        "checkUpdate": {
+          "type": "boolean"
+        },
+        "install": {
+          "type": "boolean"
+        },
+        "remove": {
+          "type": "boolean"
+        },
+        "rollback": {
+          "type": "boolean"
+        },
+        "start": {
+          "type": "boolean"
+        },
+        "stop": {
+          "type": "boolean"
+        },
+        "update": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "install",
+        "start",
+        "stop",
+        "checkUpdate",
+        "update",
+        "rollback",
+        "remove"
       ],
       "type": "object"
     },
@@ -2463,11 +2516,15 @@
           "minimum": 0,
           "type": "integer"
         },
+        "runtime": {
+          "$ref": "#/$defs/CpaRuntime"
+        },
         "updateAvailable": {
           "type": "boolean"
         }
       },
       "required": [
+        "runtime",
         "currentVersion",
         "latestVersion",
         "updateAvailable",
@@ -2721,6 +2778,16 @@
           },
           "type": "array"
         },
+        "presentation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderCatalogPresentation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "pricing": {
           "$ref": "#/$defs/CapabilitySummary"
         },
@@ -2759,7 +2826,8 @@
         "catalogRoutable",
         "productionInference",
         "disabledReasons",
-        "revision"
+        "revision",
+        "presentation"
       ],
       "type": "object"
     },
@@ -4974,6 +5042,32 @@
       ],
       "type": "object"
     },
+    "ProviderCatalogPresentation": {
+      "additionalProperties": false,
+      "description": "Canonical catalog facts committed directly from a mutation receipt.",
+      "properties": {
+        "allDisabled": {
+          "type": "boolean"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/ProviderModelPresentation"
+          },
+          "type": "array"
+        },
+        "total": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "models",
+        "total",
+        "allDisabled"
+      ],
+      "type": "object"
+    },
     "ProviderContractGroup": {
       "additionalProperties": false,
       "description": "One built-in Provider contract scope.",
@@ -5004,6 +5098,16 @@
             "$ref": "#/$defs/EffectiveModelContract"
           },
           "type": "array"
+        },
+        "presentation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderCatalogPresentation"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "pricing": {
           "$ref": "#/$defs/CapabilitySummary"
@@ -5051,7 +5155,8 @@
         "catalogRoutable",
         "productionInference",
         "disabledReasons",
-        "revision"
+        "revision",
+        "presentation"
       ],
       "type": "object"
     },
@@ -5506,6 +5611,29 @@
       ],
       "type": "object"
     },
+    "ProviderModelAction": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed": {
+          "type": "boolean"
+        },
+        "key": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "key",
+        "allowed",
+        "reason"
+      ],
+      "type": "object"
+    },
     "ProviderModelCapability": {
       "additionalProperties": false,
       "description": "One Go protocol-table capability. GOAT must not reuse these rows.",
@@ -5531,6 +5659,77 @@
         "providerId",
         "preferredProtocol",
         "supportedProtocols"
+      ],
+      "type": "object"
+    },
+    "ProviderModelPresentation": {
+      "additionalProperties": false,
+      "properties": {
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/ProviderModelAction"
+          },
+          "type": "array"
+        },
+        "contract": {
+          "$ref": "#/$defs/EffectiveModelContract"
+        },
+        "effectiveOn": {
+          "type": "boolean"
+        },
+        "publicModel": {
+          "type": "string"
+        },
+        "targetProtocol": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountUpstreamProtocol"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "testProtocol": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountUpstreamProtocol"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "upstreamModel": {
+          "type": "string"
+        },
+        "upstreamOverride": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderModelUpstreamOverride"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "writableProtocols": {
+          "items": {
+            "$ref": "#/$defs/AccountUpstreamProtocol"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "publicModel",
+        "upstreamModel",
+        "contract",
+        "upstreamOverride",
+        "targetProtocol",
+        "testProtocol",
+        "writableProtocols",
+        "effectiveOn",
+        "actions"
       ],
       "type": "object"
     },
@@ -6194,6 +6393,9 @@
       "additionalProperties": false,
       "description": "PATCH `/accounts/{id}/usage` envelope. Calibration does not bump revision.",
       "properties": {
+        "observedAt": {
+          "type": "string"
+        },
         "processGeneration": {
           "format": "uint64",
           "minimum": 0,
@@ -6210,6 +6412,7 @@
       },
       "required": [
         "usage",
+        "observedAt",
         "revision",
         "processGeneration"
       ],
@@ -6704,6 +6907,15 @@
       "$ref": "#/$defs/ProviderContracts"
     },
     {
+      "$ref": "#/$defs/ProviderCatalogPresentation"
+    },
+    {
+      "$ref": "#/$defs/ProviderModelPresentation"
+    },
+    {
+      "$ref": "#/$defs/ProviderModelAction"
+    },
+    {
       "$ref": "#/$defs/ProviderContractGroup"
     },
     {
@@ -6975,6 +7187,9 @@
     },
     {
       "$ref": "#/$defs/CpaRuntime"
+    },
+    {
+      "$ref": "#/$defs/CpaRuntimeActions"
     },
     {
       "$ref": "#/$defs/CpaRuntimePhase"

@@ -105,7 +105,7 @@ impl BillingReadCache {
     }
 }
 
-fn next_change(status: &BillingStatus, now: DateTime<Utc>) -> DateTime<Utc> {
+pub(super) fn next_change(status: &BillingStatus, now: DateTime<Utc>) -> DateTime<Utc> {
     let mut deadline = now + Duration::seconds(15);
     let mut consider = |at: DateTime<Utc>| {
         if at > now {
@@ -132,6 +132,11 @@ fn next_change(status: &BillingStatus, now: DateTime<Utc>) -> DateTime<Utc> {
             }
         }
         if let Some(at) = credits.next_reset_at {
+            consider(at);
+        }
+    }
+    for limit in &status.quota_editor_limits {
+        if let Some(at) = limit.editable_at {
             consider(at);
         }
     }

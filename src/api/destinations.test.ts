@@ -18,6 +18,7 @@ import { installFetchMock, setupControlPlane } from "../test-helpers/dashboard-v
 
 function destination(overrides: Partial<DestinationDto> = {}): DestinationDto {
   return {
+    presentation: null,
     accountControls: { toggleWrite: "account", configurationOwner: "destination", consoleLink: null, browserProfile: false },
     adapter: "http",
     authScheme: "bearer",

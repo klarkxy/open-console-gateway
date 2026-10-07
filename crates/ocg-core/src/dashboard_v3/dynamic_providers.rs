@@ -602,7 +602,7 @@ fn provider_mutation(
     }
 }
 
-fn to_wire(
+pub(crate) fn to_wire(
     runtime: DynamicProviderRuntime,
     revision: u64,
     process_generation: u64,

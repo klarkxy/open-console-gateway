@@ -18,6 +18,111 @@ use ocg_domain::dynamic::DynamicAuthKind;
 use ocg_domain::provider::ProviderOrigin;
 use std::sync::Arc;
 
+#[test]
+fn quota_editor_projection_keeps_native_limits_and_checks_window_cooldowns() {
+    let (dir, state) = state();
+    account(&state, "quota-projection");
+    let db = state.db.lock();
+    let mut account = db.get_account("quota-projection").unwrap().unwrap();
+    let now = Utc::now();
+    account.cooldown_month_until = Some(now + chrono::Duration::minutes(5));
+    let mut usage =
+        crate::dashboard_v3::usage::provider_usage_from_db(&state, &db, "quota-projection")
+            .unwrap();
+    let blank = quota_editor_limits(&usage, "ollama", true, &account, now);
+    assert_eq!(blank.len(), 1);
+    assert_eq!(
+        blank[0].window_kind,
+        crate::billing_types::BillingQuotaWindowKind::Month
+    );
+    assert_eq!(blank[0].limit, 100.0);
+    assert!(!blank[0].editable);
+    assert_eq!(blank[0].editable_at, account.cooldown_month_until);
+    assert!(quota_editor_limits(&usage, "custom", true, &account, now).is_empty());
+    usage.quota_windows.push(crate::dashboard_v3::QuotaWindow {
+        account_id: account.id.clone(),
+        window_kind: "monthly".into(),
+        used: 0.0,
+        limit_value: Some(60.0),
+        started_at: None,
+        resets_at: None,
+        calibration_offset: 0.0,
+        unit: "usd_credits".into(),
+        source: "local".into(),
+        observed_at: None,
+        updated_at: now.to_rfc3339(),
+    });
+    let native = quota_editor_limits(
+        &usage,
+        "ollama",
+        true,
+        &account,
+        now + chrono::Duration::minutes(6),
+    );
+    assert_eq!(native[0].limit, 60.0);
+    assert!(native[0].editable);
+    assert_eq!(native[0].editable_at, None);
+    let readonly = quota_editor_limits(&usage, "minimax", false, &account, now);
+    assert_eq!(readonly[0].limit, 60.0);
+    assert!(!readonly[0].editable);
+    drop(db);
+    drop(state);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn saved_expired_grants_stay_visible_without_read_side_effects() {
+    let (dir, state) = state();
+    account(&state, "archive");
+    let configured = configure(
+        State(state.clone()),
+        Path("archive".into()),
+        body(
+            &state,
+            serde_json::json!({
+                "configuration": configuration(), "initialBuckets": [bucket(75.0)]
+            }),
+        ),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(
+        configured.surface_kind,
+        crate::billing_types::BillingSurfaceKind::CreditsMeter
+    );
+    let db = state.db.lock();
+    let mut meter = storage::load_on(&db.conn, "archive").unwrap().unwrap();
+    meter.buckets.push(crate::billing_types::CreditBucket {
+        id: "expired".into(),
+        kind: crate::billing_types::CreditBucketKind::TopUp,
+        label: "Archive".into(),
+        granted: 100.0,
+        remaining: 80.0,
+        starts_at: Utc::now() - chrono::Duration::days(3),
+        expires_at: Some(Utc::now() - chrono::Duration::days(2)),
+    });
+    storage::save_on(&db.conn, &meter).unwrap();
+    let before =
+        serde_json::to_value(storage::load_on(&db.conn, "archive").unwrap().unwrap()).unwrap();
+    let revision = state.settings_revision();
+    let view = storage::read_view_on(&db.conn, "archive", Utc::now())
+        .unwrap()
+        .unwrap();
+    assert_eq!(view.remaining, 75.0);
+    assert_eq!(view.expired_buckets[0].remaining, 80.0);
+    assert_eq!(view.pending_requests, 0);
+    assert_eq!(view.calibration_block, None);
+    assert_eq!(state.settings_revision(), revision);
+    assert_eq!(
+        serde_json::to_value(storage::load_on(&db.conn, "archive").unwrap().unwrap()).unwrap(),
+        before
+    );
+    drop(db);
+    drop(state);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 fn state() -> (std::path::PathBuf, crate::state::CoreState) {
     let dir = std::env::temp_dir().join(format!("ocg-billing-receipt-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();

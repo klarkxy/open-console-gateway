@@ -332,6 +332,8 @@ export interface ForwardLogClientKey {
 
 export interface UsageWindow {
   account_id: string;
+  /** Server acknowledgement time; present on manual calibration receipts. */
+  observed_at?: string;
   /** Observed percent. Null means that window was not observed. */
   window_5h: number | null;
   window_week: number | null;

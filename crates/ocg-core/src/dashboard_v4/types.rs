@@ -4,6 +4,8 @@
 //! fields as `T | null`. Listings and onboarding results are secret-free. The
 //! error envelope reuses the V3 DTO so clients can share one decoder.
 
+pub use super::pages::types::*;
+
 use schemars::JsonSchema;
 use schemars::generate::{SchemaGenerator, SchemaSettings};
 use serde::{Deserialize, Serialize};
@@ -68,6 +70,44 @@ use ocg_domain::credential::{
 
 /// JSON Schema `$defs` names for the V4 catalog.
 pub const CATALOG_TYPE_NAMES: &[&str] = &[
+    "DashboardPage",
+    "PageReadIssue",
+    "DestinationSummary",
+    "AccountSummary",
+    "CredentialScopeSummary",
+    "AccountCredentialSummary",
+    "PlatformSnapshotSummary",
+    "PlatformSummary",
+    "PlatformLinkSummary",
+    "PageAction",
+    "AccountPageTags",
+    "AccountRefreshFact",
+    "AccountPageRow",
+    "AccountCardPageItem",
+    "AccountPlanFilter",
+    "AccountsPage",
+    "AccountCardCredentialsPage",
+    "AccountPageDetail",
+    "AccountPageLayout",
+    "ProviderPageItem",
+    "ProvidersPage",
+    "ProviderCatalogEntrySummary",
+    "ProviderCatalogSummary",
+    "ProviderScopeSummary",
+    "ProviderModelWriteTarget",
+    "ProviderPageDetail",
+    "ProviderModelPageRow",
+    "ProviderModelsPage",
+    "ProviderEditDetail",
+    "ProviderEditScope",
+    "AliasPageTarget",
+    "AliasCapabilitySummary",
+    "AliasPageRow",
+    "AliasPageGroup",
+    "AliasesPage",
+    "AccountPageRefresh",
+    "AccountPageRefreshMode",
+    "AccountPageRefreshRequest",
     "ByokClient",
     "ByokStatus",
     "ByokInspection",
@@ -1202,6 +1242,7 @@ pub struct AccountControlsDto {
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DestinationDto {
+    pub presentation: Option<crate::dashboard_v3::ProviderCatalogPresentation>,
     pub account_controls: AccountControlsDto,
     /// Stable destination id (deterministic UUIDv5 of the legacy row).
     pub id: String,
@@ -1827,6 +1868,33 @@ pub struct TemporaryPolicyConfiguration {
     pub revision: ControlRevision,
     pub rules: Vec<TemporaryPolicyRule>,
     pub builtins: Vec<TemporaryPolicyBuiltin>,
+    pub effective_views: Vec<TemporaryPolicyEffectiveView>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TemporaryPolicyRuleOrigin {
+    Local,
+    Inherited,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TemporaryPolicyEffectiveRule {
+    pub rule: TemporaryPolicyRule,
+    pub source: TemporaryPolicySource,
+    pub origin: TemporaryPolicyRuleOrigin,
+    pub overridden: bool,
+    pub applicable: bool,
+    pub scope: TemporaryPolicyScope,
+    pub backoff: TemporaryPolicyBackoff,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TemporaryPolicyEffectiveView {
+    pub destination_id: Option<String>,
+    pub rules: Vec<TemporaryPolicyEffectiveRule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1883,6 +1951,44 @@ pub fn contract_schema() -> Value {
         .for_serialize()
         .into_generator();
     include_type::<ControlRevision>(&mut serialize);
+    include_type::<PageReadIssue>(&mut serialize);
+    include_type::<super::pages::overview::DashboardPage>(&mut serialize);
+    include_type::<DestinationSummary>(&mut serialize);
+    include_type::<AccountSummary>(&mut serialize);
+    include_type::<CredentialScopeSummary>(&mut serialize);
+    include_type::<AccountCredentialSummary>(&mut serialize);
+    include_type::<PlatformSnapshotSummary>(&mut serialize);
+    include_type::<PlatformSummary>(&mut serialize);
+    include_type::<PlatformLinkSummary>(&mut serialize);
+    include_type::<PageAction>(&mut serialize);
+    include_type::<AccountPageTags>(&mut serialize);
+    include_type::<AccountRefreshFact>(&mut serialize);
+    include_type::<AccountPageRow>(&mut serialize);
+    include_type::<AccountCardPageItem>(&mut serialize);
+    include_type::<AccountPlanFilter>(&mut serialize);
+    include_type::<AccountsPage>(&mut serialize);
+    include_type::<AccountCardCredentialsPage>(&mut serialize);
+    include_type::<AccountPageDetail>(&mut serialize);
+    include_type::<AccountPageLayout>(&mut serialize);
+    include_type::<ProviderPageItem>(&mut serialize);
+    include_type::<ProvidersPage>(&mut serialize);
+    include_type::<ProviderCatalogEntrySummary>(&mut serialize);
+    include_type::<ProviderCatalogSummary>(&mut serialize);
+    include_type::<ProviderScopeSummary>(&mut serialize);
+    include_type::<ProviderModelWriteTarget>(&mut serialize);
+    include_type::<ProviderPageDetail>(&mut serialize);
+    include_type::<ProviderModelPageRow>(&mut serialize);
+    include_type::<ProviderModelsPage>(&mut serialize);
+    include_type::<ProviderEditDetail>(&mut serialize);
+    include_type::<ProviderEditScope>(&mut serialize);
+    include_type::<AliasPageTarget>(&mut serialize);
+    include_type::<AliasCapabilitySummary>(&mut serialize);
+    include_type::<AliasPageRow>(&mut serialize);
+    include_type::<AliasPageGroup>(&mut serialize);
+    include_type::<AliasesPage>(&mut serialize);
+    include_type::<AccountPageRefresh>(&mut serialize);
+    include_type::<AccountPageRefreshMode>(&mut serialize);
+
     include_type::<V3Error>(&mut serialize);
     include_type::<EndpointSpec>(&mut serialize);
     include_type::<ProviderTemplate>(&mut serialize);
@@ -1989,6 +2095,7 @@ pub fn contract_schema() -> Value {
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
+    include_type::<AccountPageRefreshRequest>(&mut deserialize);
     include_type::<crate::billing_types::BillingSnapshotRequest>(&mut deserialize);
     include_type::<OnboardingCommitRequest>(&mut deserialize);
     include_type::<OnboardingCommitMode>(&mut deserialize);

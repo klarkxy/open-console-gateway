@@ -521,7 +521,8 @@ impl From<&Destination> for AccountControlsDto {
 
 impl From<&Destination> for DestinationDto {
     fn from(destination: &Destination) -> Self {
-        Self {
+        let mut dto = Self {
+            presentation: None,
             account_controls: AccountControlsDto::from(destination),
             id: destination.id.clone(),
             legacy: LegacyDestinationRefDto::from(&destination.legacy),
@@ -552,7 +553,9 @@ impl From<&Destination> for DestinationDto {
             max_credentials: destination.max_credentials,
             observer_credential_id: destination.observer_credential_id.clone(),
             enabled: destination.enabled,
-        }
+        };
+        dto.presentation = super::pages::model_rows::http_presentation(&dto);
+        dto
     }
 }
 

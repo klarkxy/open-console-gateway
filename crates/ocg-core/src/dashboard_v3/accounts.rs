@@ -987,14 +987,25 @@ pub(super) fn mutation_at(
     })
 }
 
-fn account_from_state(state: &CoreState, account: ModelAccount) -> Result<Account, V3ApiError> {
+pub(crate) fn account_from_state(
+    state: &CoreState,
+    account: ModelAccount,
+) -> Result<Account, V3ApiError> {
+    account_from_db(state, &state.db.lock(), account, &state.dynamic_providers())
+}
+
+pub(crate) fn account_from_db(
+    state: &CoreState,
+    db: &crate::db::Database,
+    account: ModelAccount,
+    dynamic: &[crate::dynamic::DynamicProviderRuntime],
+) -> Result<Account, V3ApiError> {
     let (
         (usage_sync_last_success_at, usage_sync_next_allowed_at),
         contract,
         ollama_billing,
         goat_plan,
     ) = {
-        let db = state.db.lock();
         let sync = db
             .account_usage_sync_state(&account.id)
             .map_err(V3ApiError::internal)?;
@@ -1091,8 +1102,7 @@ fn account_from_state(state: &CoreState, account: ModelAccount) -> Result<Accoun
             .map(|value| value.to_rfc3339()),
         verification_error: sanitize_persisted_error(contract.verification.verification_error),
         plan_routable: plan.is_some_and(|plan| plan.routable)
-            || crate::dynamic::find_runtime(&state.dynamic_providers(), &account.provider_id)
-                .is_some(),
+            || crate::dynamic::find_runtime(dynamic, &account.provider_id).is_some(),
         custom_config: contract.custom_config.map(custom_config_from_model),
         model_capabilities: contract
             .model_capabilities

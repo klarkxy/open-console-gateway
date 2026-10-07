@@ -78,6 +78,9 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "ZenFreeModels",
     "ZenFreeModel",
     "ProviderContracts",
+    "ProviderCatalogPresentation",
+    "ProviderModelPresentation",
+    "ProviderModelAction",
     "ProviderContractGroup",
     "CustomEndpointContract",
     "ProviderAccountChoice",
@@ -169,6 +172,7 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "CpaCliImportRequest",
     "CpaCliImportResult",
     "CpaRuntime",
+    "CpaRuntimeActions",
     "CpaRuntimePhase",
     "CpaRuntimeCheck",
     "CpaRuntimeInstall",
@@ -1435,6 +1439,38 @@ pub struct ProviderContracts {
     pub pricing_revision: String,
 }
 
+/// Canonical catalog facts committed directly from a mutation receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderCatalogPresentation {
+    pub models: Vec<ProviderModelPresentation>,
+    pub total: u32,
+    pub all_disabled: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderModelPresentation {
+    pub public_model: String,
+    pub upstream_model: String,
+    pub contract: EffectiveModelContract,
+    pub upstream_override: Option<ProviderModelUpstreamOverride>,
+    pub target_protocol: Option<AccountUpstreamProtocol>,
+    pub test_protocol: Option<AccountUpstreamProtocol>,
+    pub writable_protocols: Vec<AccountUpstreamProtocol>,
+    pub effective_on: bool,
+    pub actions: Vec<ProviderModelAction>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderModelAction {
+    pub key: String,
+    pub allowed: bool,
+    pub reason: Option<String>,
+}
+
 /// One built-in Provider contract scope.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -1458,6 +1494,7 @@ pub struct ProviderContractGroup {
     pub disabled_reasons: Vec<String>,
     /// Display revision for this scope, distinct from the top-level CAS token.
     pub revision: u64,
+    pub presentation: Option<ProviderCatalogPresentation>,
 }
 
 /// One Custom API account scope. Distinct from built-in provider groups.
@@ -1479,6 +1516,7 @@ pub struct CustomEndpointContract {
     pub disabled_reasons: Vec<String>,
     /// Display revision for this endpoint, distinct from the top-level CAS token.
     pub revision: u64,
+    pub presentation: Option<ProviderCatalogPresentation>,
 }
 
 /// Secret-free account identity on a contract card.
@@ -2353,6 +2391,7 @@ pub struct UsageWindow {
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UsageMutation {
     pub usage: UsageWindow,
+    pub observed_at: String,
     pub revision: u64,
     pub process_generation: u64,
 }
@@ -2855,6 +2894,11 @@ pub struct CpaCliImportResult {
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CpaRuntime {
+    /// Authoritative eligibility; clients may additionally gate local requests.
+    pub actions: CpaRuntimeActions,
+    pub client_keys_available: bool,
+    pub codex_device_login_available: bool,
+    pub startup_restore_pending: bool,
     pub supported: bool,
     pub unavailable_reason: Option<String>,
     pub installed: bool,
@@ -2877,6 +2921,19 @@ pub struct CpaRuntime {
     pub process_generation: u64,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CpaRuntimeActions {
+    pub install: bool,
+    pub start: bool,
+    pub stop: bool,
+    pub check_update: bool,
+    pub update: bool,
+    pub rollback: bool,
+    pub remove: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 #[schemars(rename_all = "lowercase")]
@@ -2893,6 +2950,7 @@ pub enum CpaRuntimePhase {
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CpaRuntimeCheck {
+    pub runtime: CpaRuntime,
     pub current_version: Option<String>,
     pub latest_version: String,
     pub update_available: bool,
@@ -3182,6 +3240,9 @@ pub fn contract_schema() -> Value {
     include_type::<ZenFreeModels>(&mut serialize);
     include_type::<ZenFreeModel>(&mut serialize);
     include_type::<ProviderContracts>(&mut serialize);
+    include_type::<ProviderCatalogPresentation>(&mut serialize);
+    include_type::<ProviderModelPresentation>(&mut serialize);
+    include_type::<ProviderModelAction>(&mut serialize);
     include_type::<ProviderContractGroup>(&mut serialize);
     include_type::<CustomEndpointContract>(&mut serialize);
     include_type::<ProviderAccountChoice>(&mut serialize);
@@ -3238,6 +3299,7 @@ pub fn contract_schema() -> Value {
     include_type::<CpaCliImports>(&mut serialize);
     include_type::<CpaCliImportResult>(&mut serialize);
     include_type::<CpaRuntime>(&mut serialize);
+    include_type::<CpaRuntimeActions>(&mut serialize);
     include_type::<CpaRuntimePhase>(&mut serialize);
     include_type::<CpaRuntimeCheck>(&mut serialize);
     include_type::<CpaRuntimeLogs>(&mut serialize);

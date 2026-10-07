@@ -27,6 +27,7 @@ pub(crate) mod logs;
 mod model_metadata;
 mod official_api;
 mod onboarding;
+pub(crate) mod pages;
 mod platform_keys;
 mod publication;
 mod routing;
@@ -43,6 +44,7 @@ use axum::{Json, Router};
 use crate::dashboard_v3::{ControlRevision, require_v3_session};
 use crate::state::CoreState;
 
+pub use pages::types::*;
 pub use types::{
     CATALOG_TYPE_NAMES, ConnectionList, ConnectionSummary, CpaCatalog, CpaCatalogUpdate,
     CredentialList, CredentialRotateRequest, CredentialRotateResult, DestinationCredentialDto,
@@ -57,6 +59,23 @@ pub use types::{
 pub fn api_router(state: CoreState) -> Router<CoreState> {
     let v4_native = Router::new()
         .route("/contract", get(get_contract))
+        .route("/pages/dashboard", get(pages::overview::get))
+        .route("/pages/accounts", get(pages::accounts_page))
+        .route("/pages/accounts/layout", get(pages::account_layout))
+        .route(
+            "/pages/accounts/cards/{id}/credentials",
+            get(pages::card_credentials),
+        )
+        .route("/pages/accounts/{id}/detail", get(pages::account_detail))
+        .route("/pages/accounts/{id}/refresh", post(pages::refresh_account))
+        .route("/pages/providers", get(pages::providers_page))
+        .route("/pages/providers/{id}", get(pages::provider_detail))
+        .route("/pages/providers/{id}/models", get(pages::provider_models))
+        .route(
+            "/pages/providers/{id}/edit-detail",
+            get(pages::provider_edit_detail),
+        )
+        .route("/pages/aliases", get(pages::aliases_page))
         .route(
             "/applications/byok/{client}",
             get(byok_applications::inspect)

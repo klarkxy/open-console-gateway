@@ -72,6 +72,53 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 const USER: &str = "pat-user-credential-do-not-echo";
 const KEY: &str = "sk-key-secret-do-not-echo";
 
+#[tokio::test]
+async fn automatic_key_observation_requests_only_quota_and_preserves_secret_redaction() {
+    for kind in [PlatformKind::NewApi, PlatformKind::Sub2api] {
+        let mut routes = HashMap::new();
+        routes.insert(
+            "/api/status".into(),
+            Route::ok(r#"{"success":true,"data":{"quota_per_unit":500000}}"#),
+        );
+        routes.insert("/api/usage/token/".into(),Route::ok(r#"{"code":true,"data":{"total_granted":800000,"total_used":300000,"total_available":500000,"unlimited_quota":false,"model_limits_enabled":true,"model_limits":{"catalog-model":true}}}"#));
+        routes.insert(
+            "/v1/usage".into(),
+            Route::ok(r#"{"mode":"quota_limited","remaining":9,"limit":10,"used":1}"#),
+        );
+        let (base, client, captured) = spawn_mock(routes).await;
+        let group = PlatformGroup::default();
+        let snapshot = read_observation(
+            &client,
+            &PlatformReadRequest {
+                kind,
+                base_url: &base,
+                user_credential: Some(USER),
+                key: Some(KEY),
+                group: &group,
+                now: now(),
+            },
+        )
+        .await;
+        assert!(snapshot.models.is_empty());
+        assert!(snapshot.prices.is_empty());
+        assert!(snapshot.groups.is_empty());
+        assert!(!snapshot.quotas.is_empty());
+        let paths = captured
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.path.clone())
+            .collect::<Vec<_>>();
+        assert!(!paths.iter().any(|p| p.contains("models")
+            || p.contains("pricing")
+            || p.contains("groups")
+            || p.contains("user/self")));
+        let text = serde_json::to_string(&snapshot).unwrap();
+        assert!(!text.contains(USER));
+        assert!(!text.contains(KEY));
+    }
+}
+
 fn now() -> i64 {
     chrono::DateTime::parse_from_rfc3339("2026-04-15T12:00:00Z")
         .unwrap()

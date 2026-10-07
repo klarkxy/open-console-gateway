@@ -158,12 +158,63 @@ pub struct OfficialApiStatus {
     pub kind: OfficialApiKind,
     pub balance_available: bool,
     pub balances: Vec<OfficialBalance>,
+    pub meter: OfficialApiAccountMeter,
     pub month_started_at: DateTime<Utc>,
     pub month_spend: Vec<OfficialSpend>,
     pub lifetime_spend: Vec<OfficialSpend>,
     pub unpriced_requests: u64,
     pub revision: u64,
     pub process_generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OfficialApiMeterEmpty {
+    Unavailable,
+    NotQueried,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OfficialApiMeterRemaining {
+    pub currency: String,
+    pub total: f64,
+    pub gift: Option<f64>,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OfficialApiAccountMeter {
+    pub remaining_empty: Option<OfficialApiMeterEmpty>,
+    pub remaining: Vec<OfficialApiMeterRemaining>,
+}
+
+impl OfficialApiAccountMeter {
+    pub(crate) fn project(available: bool, balances: &[OfficialBalance]) -> Self {
+        if !available {
+            return Self {
+                remaining_empty: Some(OfficialApiMeterEmpty::Unavailable),
+                remaining: Vec::new(),
+            };
+        }
+        let remaining: Vec<_> = balances
+            .iter()
+            .filter(|row| row.total.is_finite())
+            .map(|row| OfficialApiMeterRemaining {
+                currency: row.currency.clone(),
+                total: row.total,
+                gift: (row.granted.is_finite() && row.granted > 0.0).then_some(row.granted),
+                observed_at: row.observed_at,
+            })
+            .collect();
+        Self {
+            remaining_empty: remaining
+                .is_empty()
+                .then_some(OfficialApiMeterEmpty::NotQueried),
+            remaining,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

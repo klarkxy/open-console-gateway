@@ -5,6 +5,44 @@
  */
 
 export type DashboardApiV4 =
+  | DashboardPage
+  | PageReadIssue
+  | DestinationSummary
+  | AccountSummary
+  | CredentialScopeSummary
+  | AccountCredentialSummary
+  | PlatformSnapshotSummary
+  | PlatformSummary
+  | PlatformLinkSummary
+  | PageAction
+  | AccountPageTags
+  | AccountRefreshFact
+  | AccountPageRow
+  | AccountCardPageItem
+  | AccountPlanFilter
+  | AccountsPage
+  | AccountCardCredentialsPage
+  | AccountPageDetail
+  | AccountPageLayout
+  | ProviderPageItem
+  | ProvidersPage
+  | ProviderCatalogEntrySummary
+  | ProviderCatalogSummary
+  | ProviderScopeSummary
+  | ProviderModelWriteTarget
+  | ProviderPageDetail
+  | ProviderModelPageRow
+  | ProviderModelsPage
+  | ProviderEditDetail
+  | ProviderEditScope
+  | AliasPageTarget
+  | AliasCapabilitySummary
+  | AliasPageRow
+  | AliasPageGroup
+  | AliasesPage
+  | AccountPageRefresh
+  | AccountPageRefreshMode
+  | AccountPageRefreshRequest
   | ByokClient
   | ByokStatus
   | ByokInspection
@@ -162,37 +200,136 @@ export type DashboardApiV4 =
   | RequestLogQuery
   | RequestAttempts
   | ForwardLog;
-export type ByokClient = "codex" | "kimi" | "minimax" | "zcode";
-export type ByokStatus =
-  "unsupported_runtime" | "not_detected" | "ready" | "configured" | "incompatible" | "conflict" | "recovery_required";
+export type DashboardAttentionReason = "auth-error" | "expired" | "cooling" | "setup-incomplete";
 /**
- * Inference operation advertised by one endpoint. Mapped 1:1 from
- * [`UpstreamProtocolKind`].
+ * Owner of endpoint, protocol and model configuration.
  */
-export type EndpointOperation = "chat_create" | "response_create" | "message_create";
+export type AccountConfigurationOwnerDto = "account" | "destination";
+export type AccountConsoleLinkDto = "opencode" | "ollama";
+/**
+ * Persistence target for the account enable switch.
+ */
+export type AccountToggleWriteDto = "account" | "provider_settings";
+/**
+ * Sealed adapter kind. Wire values match the domain serde names.
+ */
+export type AdapterKindDto = "opencode_go" | "zen" | "goat" | "minimax" | "kimi" | "ollama" | "cpa" | "http";
+/**
+ * Destination auth scheme. Wire values match the domain serde names.
+ */
+export type AuthSchemeDto = "none" | "bearer" | "x_api_key" | "api_key";
+/**
+ * Redirect policy advertised on a destination.
+ */
+export type RedirectPolicyDto = "no_follow" | "follow_keyless";
+/**
+ * Which V3-era row a destination was projected from.
+ */
+export type LegacyDestinationKindDto = "builtin" | "dynamic" | "custom_account" | "platform_parent";
+/**
+ * Which client model names may resolve to a destination mapping.
+ */
+export type ModelResolutionDto = "adapter_defined" | "public_only" | "public_and_upstream";
+/**
+ * How a Plan expires, when it has a cadence.
+ */
+export type ExpiryCadenceDto = "monthly";
+/**
+ * Where a Plan's prices come from.
+ */
+export type PricingSourceDto = "official" | "verified_snapshot" | "unpriced";
+/**
+ * Where a Plan reads usage from.
+ */
+export type UsageSourceDto = "official_api" | "local_projection" | "none";
+/**
+ * One Plan usage window kind.
+ */
+export type PlanWindowKindDto = "five_hours" | "week" | "month" | "free";
+/**
+ * Wire protocol for destination catalog and transport rows.
+ */
+export type ProtocolDto = "chat_completions" | "responses" | "messages";
+/**
+ * Wire identity matching V2 `key` / `managed`.
+ */
+export type AccountType = "key" | "managed";
+/**
+ * Wire identity matching V2 `api_key` / `none`.
+ */
+export type AccountCredentialKind = "api_key" | "none";
+/**
+ * Paid Ollama Cloud billing profile. Wire values are exactly `pro`, `max`,
+ * and `team`. Absence of a stored row (migrated/unconfigured) and non-Ollama
+ * accounts serialize the account field as `null`.
+ */
+export type OllamaBillingTier = "pro" | "max" | "team";
+/**
+ * Wire identity matching V2 `key` / `egress-ip`.
+ */
+export type AccountQuotaScope = "key" | "egress-ip";
+/**
+ * Managed-setup wizard step. Wire values match V2 snake_case.
+ */
+export type AccountSetupStep = "google_account" | "opencode_registration" | "payment" | "key_verification" | "ready";
+/**
+ * Connection-verification status. Wire values match V2 snake_case.
+ */
+export type AccountVerificationStatus = "not_required" | "pending" | "verified" | "failed";
+export type AuthState = "unknown" | "valid" | "invalid";
+export type OnboardingTaskKind = "managed_registration";
+export type OnboardingTaskState = "in_progress" | "completed";
+/**
+ * Why the credential was confirmed exhausted.
+ */
+export type QuotaRecoveryReason = "quota_exhausted" | "insufficient_balance";
+/**
+ * Presentation status for a confirmed quota-recovery episode.
+ */
+export type QuotaRecoveryStatus = "waiting" | "ready" | "probing";
+/**
+ * Window named by confirmed exhaustion evidence.
+ */
+export type QuotaRecoveryWindow = "five_hours" | "week" | "month" | "unknown";
+export type PlatformQuotaKind = "wallet" | "subscription" | "key_limit";
+export type PlatformKind = "new_api" | "sub2api";
+export type OfficialApiKind = "deepseek" | "zhipu";
+export type OfficialApiMeterEmpty = "unavailable" | "not_queried";
+export type CreditBucketKind = "monthly" | "top_up" | "manual";
+export type CreditCalibrationBlock = "pending";
+export type BillingModel = "quota" | "cash" | "credits";
+export type BillingQuotaWindowKind = "five_hours" | "week" | "month";
+export type BillingSource = "official" | "local_estimate" | "unavailable";
+export type BillingSurfaceKind =
+  "cash" | "cash_balances" | "quota" | "credits_meter" | "credits_setup" | "credits_usd_month" | "empty";
+/**
+ * Registry usage availability. Wire values stay snake_case.
+ */
+export type UsageAvailability = "available" | "unavailable" | "local_state";
+export type MaterialKind = "api_key" | "external_reference";
+/**
+ * Why this connection cannot accept another credential through identity creation.
+ */
+export type CredentialCreateUnavailableReasonDto =
+  | "external_integration"
+  | "singleton"
+  | "no_authentication"
+  | "dedicated_account_flow"
+  | "builtin_definition"
+  | "unavailable"
+  | "draft";
+/**
+ * Account selection mode. Wire values stay kebab-case, matching V2.
+ */
+export type RoutingMode = "strict-priority" | "sticky-global" | "round-robin";
 /**
  * Custom/upstream protocol. Wire values match V2 snake_case.
  */
 export type AccountUpstreamProtocol = "chat_completions" | "responses" | "messages";
 /**
- * Custom auth scheme. Wire values match V2 kebab-case.
+ * Local authorization projection. Unknown is not a verified success.
  */
-export type AccountAuthScheme = "bearer" | "x-api-key" | "api-key";
-/**
- * Wire identity matching V2 `api_key` / `none`.
- */
-export type AccountCredentialKind = "api_key" | "none";
-export type OfferingKind = "plan" | "api";
-export type TemplateSource = "builtin" | "preset";
-/**
- * Auth advertised on a connection endpoint. `Sealed` is used for built-in
- * adapters whose scheme is owned by code, not by the projected row.
- */
-export type EndpointAuthScheme = "bearer" | "x-api-key" | "api-key" | "sealed" | "none";
-/**
- * Pre-unification row a connection was projected from.
- */
-export type LegacyConnectionKind = "builtin_provider" | "dynamic_provider" | "custom_account";
+export type AuthorizationState = "not_required" | "missing" | "unknown" | "valid" | "invalid";
 /**
  * Why a connection is eligible or not. `None` is a successful Eligible row.
  */
@@ -209,31 +346,78 @@ export type EligibilityReason =
  */
 export type EligibilityState = "eligible" | "ineligible" | "cooling";
 /**
- * Local authorization projection. Unknown is not a verified success.
+ * Auth advertised on a connection endpoint. `Sealed` is used for built-in
+ * adapters whose scheme is owned by code, not by the projected row.
  */
-export type AuthorizationState = "not_required" | "missing" | "unknown" | "valid" | "invalid";
-export type MaterialKind = "api_key" | "external_reference";
+export type EndpointAuthScheme = "bearer" | "x-api-key" | "api-key" | "sealed" | "none";
 /**
- * Why this connection cannot accept another credential through identity creation.
+ * Inference operation advertised by one endpoint. Mapped 1:1 from
+ * [`UpstreamProtocolKind`].
  */
-export type CredentialCreateUnavailableReasonDto =
-  | "external_integration"
-  | "singleton"
-  | "no_authentication"
-  | "dedicated_account_flow"
-  | "builtin_definition"
-  | "unavailable"
-  | "draft";
+export type EndpointOperation = "chat_create" | "response_create" | "message_create";
+/**
+ * Pre-unification row a connection was projected from.
+ */
+export type LegacyConnectionKind = "builtin_provider" | "dynamic_provider" | "custom_account";
 /**
  * V4 connection lifecycle, including persisted onboarding drafts.
  *
  * Draft is control-plane only: routing snapshots never carry it.
  */
 export type ConnectionLifecycle = "configured" | "disabled" | "draft";
+export type OfferingKind = "plan" | "api";
 /**
  * Provenance of a projected connection.
  */
 export type ConnectionOrigin = "builtin" | "preset" | "custom" | "custom_account";
+export type ModelScope =
+  | {
+      kind: "all";
+    }
+  | {
+      kind: "only";
+      models: string[];
+    };
+/**
+ * Last explicit probe outcome stored on evidence. Distinct from
+ * [`ProtocolProbeResult`].
+ */
+export type ProbeResultKind = "success" | "failure";
+/**
+ * Per-model/per-protocol override state. `auto` removes any persisted override.
+ */
+export type ProtocolOverrideState = "auto" | "force_on" | "force_off";
+/**
+ * How a protocol row was established. Wire values match V2 snake_case.
+ */
+export type ContractEvidenceSource = "static" | "preset" | "probe_confirmed" | "probe_observed";
+export type CredentialPurpose = "inference" | "platform_observer";
+export type IdentityLegacyKind = "account" | "platform_account";
+export type QuotaPeriod = "generic" | "five_hours" | "week" | "month" | "free";
+export type QuotaPolicyMode = "observe_only" | "authoritative_limit";
+export type RelationConfidence = "unknown" | "declared";
+export type QuotaSubject = "credential" | "egress";
+export type RuntimeSubjectKind = "account_credential" | "anonymous" | "external_runtime";
+export type SubscriptionSource = "legacy_manual" | "managed_payment";
+export type IdentityConfidence = "opaque" | "declared";
+/**
+ * Custom auth scheme. Wire values match V2 kebab-case.
+ */
+export type AccountAuthScheme = "bearer" | "x-api-key" | "api-key";
+/**
+ * Contract scope kind. Wire values match V2 `provider` / `custom_endpoint`.
+ */
+export type ContractScopeKind = "provider" | "custom_endpoint";
+/**
+ * Auth kind owned by a Provider definition. Independent of protocol.
+ * Nullable on the wire because builtin rows leave the field empty.
+ */
+export type ProviderDefinitionAuthKind = "bearer" | "x-api-key" | "api-key" | "none";
+export type AccountPageRefreshMode = "automatic" | "manual";
+export type ByokClient = "codex" | "kimi" | "minimax" | "zcode";
+export type ByokStatus =
+  "unsupported_runtime" | "not_detected" | "ready" | "configured" | "incompatible" | "conflict" | "recovery_required";
+export type TemplateSource = "builtin" | "preset";
 export type OnboardingAuthorization =
   | {
       accountLabel?: string | null;
@@ -262,40 +446,7 @@ export type OnboardingConnection =
       connectionId: string;
       kind: "existing";
     };
-/**
- * Auth kind owned by a Provider definition. Independent of protocol.
- * Nullable on the wire because builtin rows leave the field empty.
- */
-export type ProviderDefinitionAuthKind = "bearer" | "x-api-key" | "api-key" | "none";
-/**
- * Destination auth scheme. Wire values match the domain serde names.
- */
-export type AuthSchemeDto = "none" | "bearer" | "x_api_key" | "api_key";
-/**
- * Wire protocol for destination catalog and transport rows.
- */
-export type ProtocolDto = "chat_completions" | "responses" | "messages";
 export type OnboardingCommitMode = "draft" | "complete";
-export type ModelScope =
-  | {
-      kind: "all";
-    }
-  | {
-      kind: "only";
-      models: string[];
-    };
-export type AuthState = "unknown" | "valid" | "invalid";
-export type CredentialPurpose = "inference" | "platform_observer";
-export type IdentityLegacyKind = "account" | "platform_account";
-export type OnboardingTaskKind = "managed_registration";
-export type OnboardingTaskState = "in_progress" | "completed";
-export type QuotaPeriod = "generic" | "five_hours" | "week" | "month" | "free";
-export type QuotaPolicyMode = "observe_only" | "authoritative_limit";
-export type RelationConfidence = "unknown" | "declared";
-export type QuotaSubject = "credential" | "egress";
-export type RuntimeSubjectKind = "account_credential" | "anonymous" | "external_runtime";
-export type SubscriptionSource = "legacy_manual" | "managed_payment";
-export type IdentityConfidence = "opaque" | "declared";
 export type QuotaSharing =
   | {
       kind: "independent";
@@ -304,83 +455,9 @@ export type QuotaSharing =
       credentialId: string;
       kind: "shared";
     };
-/**
- * Connection-verification status. Wire values match V2 snake_case.
- */
-export type AccountVerificationStatus = "not_required" | "pending" | "verified" | "failed";
-/**
- * Last explicit probe outcome stored on evidence. Distinct from
- * [`ProtocolProbeResult`].
- */
-export type ProbeResultKind = "success" | "failure";
-/**
- * Per-model/per-protocol override state. `auto` removes any persisted override.
- */
-export type ProtocolOverrideState = "auto" | "force_on" | "force_off";
-/**
- * How a protocol row was established. Wire values match V2 snake_case.
- */
-export type ContractEvidenceSource = "static" | "preset" | "probe_confirmed" | "probe_observed";
-/**
- * Contract scope kind. Wire values match V2 `provider` / `custom_endpoint`.
- */
-export type ContractScopeKind = "provider" | "custom_endpoint";
 export type DshApplicationStatus =
   "unsupported_runtime" | "not_detected" | "ready" | "installed" | "incompatible" | "conflict";
 export type DshApplicationOutcome = "applied" | "restart-required" | "overridden" | "failed" | "cancelled";
-/**
- * Owner of endpoint, protocol and model configuration.
- */
-export type AccountConfigurationOwnerDto = "account" | "destination";
-export type AccountConsoleLinkDto = "opencode" | "ollama";
-/**
- * Persistence target for the account enable switch.
- */
-export type AccountToggleWriteDto = "account" | "provider_settings";
-/**
- * Sealed adapter kind. Wire values match the domain serde names.
- */
-export type AdapterKindDto = "opencode_go" | "zen" | "goat" | "minimax" | "kimi" | "ollama" | "cpa" | "http";
-/**
- * Redirect policy advertised on a destination.
- */
-export type RedirectPolicyDto = "no_follow" | "follow_keyless";
-/**
- * Which V3-era row a destination was projected from.
- */
-export type LegacyDestinationKindDto = "builtin" | "dynamic" | "custom_account" | "platform_parent";
-/**
- * How a Plan expires, when it has a cadence.
- */
-export type ExpiryCadenceDto = "monthly";
-/**
- * Where a Plan's prices come from.
- */
-export type PricingSourceDto = "official" | "verified_snapshot" | "unpriced";
-/**
- * Where a Plan reads usage from.
- */
-export type UsageSourceDto = "official_api" | "local_projection" | "none";
-/**
- * One Plan usage window kind.
- */
-export type PlanWindowKindDto = "five_hours" | "week" | "month" | "free";
-/**
- * Which client model names may resolve to a destination mapping.
- */
-export type ModelResolutionDto = "adapter_defined" | "public_only" | "public_and_upstream";
-/**
- * Why the credential was confirmed exhausted.
- */
-export type QuotaRecoveryReason = "quota_exhausted" | "insufficient_balance";
-/**
- * Presentation status for a confirmed quota-recovery episode.
- */
-export type QuotaRecoveryStatus = "waiting" | "ready" | "probing";
-/**
- * Window named by confirmed exhaustion evidence.
- */
-export type QuotaRecoveryWindow = "five_hours" | "week" | "month" | "unknown";
 /**
  * Mapping-error variant name in camelCase.
  */
@@ -395,18 +472,6 @@ export type MappingErrorCodeDto =
  * Legacy row kind named in a destination-projection refusal.
  */
 export type RefusedRowKindDto = "account" | "dynamic_provider" | "platform_parent";
-export type OfficialApiKind = "deepseek" | "zhipu";
-export type BillingModel = "quota" | "cash" | "credits";
-export type BillingSource = "official" | "local_estimate" | "unavailable";
-export type CreditBucketKind = "monthly" | "top_up" | "manual";
-/**
- * Registry usage availability. Wire values stay snake_case.
- */
-export type UsageAvailability = "available" | "unavailable" | "local_state";
-/**
- * Account selection mode. Wire values stay kebab-case, matching V2.
- */
-export type RoutingMode = "strict-priority" | "sticky-global" | "round-robin";
 /**
  * Client protocol accepted by `GET /routing/explain`.
  */
@@ -466,46 +531,45 @@ export type TemporaryPolicyRule =
       id: string;
       kind: "builtin_override";
     };
+export type TemporaryPolicyRuleOrigin = "local" | "inherited";
 export type OperationSource = "dashboard" | "cli" | "desktop";
 export type OperationOutcome = "pending" | "success" | "rejected" | "failed" | "partial" | "compensated";
 
-export interface ByokInspection {
-  activationRequired: boolean;
-  backupPath: string | null;
-  client: ByokClient;
-  configPath: string;
-  configureSupported: boolean;
-  configuredModelIds: string[];
-  defaultModelId: string | null;
-  detail: string | null;
-  detected: boolean;
-  discoverySource: string;
-  fingerprint: string | null;
-  recoverySupported: boolean;
-  removeSupported: boolean;
-  requiresClosedClient: boolean;
-  status: ByokStatus;
-  targetPaths: string[];
-}
-export interface ByokApplication {
-  activationRequired: boolean;
-  backupPath: string | null;
-  client: ByokClient;
-  configPath: string;
-  configureSupported: boolean;
-  configuredModelIds: string[];
-  defaultModelId: string | null;
-  detail: string | null;
-  detected: boolean;
-  discoverySource: string;
-  fingerprint: string | null;
-  gatewayV1Url: string;
-  recoverySupported: boolean;
-  removeSupported: boolean;
-  requiresClosedClient: boolean;
+export interface DashboardPage {
+  asOf: string;
+  attentionItems: DashboardAttentionItem[];
+  attentionLimit: number;
+  attentionTotal: number;
+  chartDays: number;
+  chartSeries: DashboardChartDay[];
+  dailyAverageTokens: number;
+  errors: PageReadIssue[];
+  modelTotals: DashboardModelTotal[];
+  readVersion: string;
   revision: ControlRevision;
-  status: ByokStatus;
-  targetPaths: string[];
+  summary: DashboardPageSummary;
+  totalTokens: number;
+  validUntil: string;
+}
+export interface DashboardAttentionItem {
+  accountId: string;
+  accountName: string;
+  expiredDays: number | null;
+  reason: DashboardAttentionReason;
+}
+export interface DashboardChartDay {
+  date: string;
+  models: DashboardModelTotal[];
+  totalTokens: number;
+}
+export interface DashboardModelTotal {
+  model: string;
+  tokens: number;
+}
+export interface PageReadIssue {
+  code: string;
+  id: string | null;
+  resource: string;
 }
 /**
  * Live CAS token, process generation, and pricing snapshot id.
@@ -515,122 +579,416 @@ export interface ControlRevision {
   processGeneration: number;
   revision: number;
 }
-export interface ByokConfigureRequest {
-  clientClosed: boolean;
-  expectedFingerprint: string;
-  expectedRevision: number;
-  processGeneration: number;
-  targetPath?: string | null;
+export interface DashboardPageSummary {
+  availableAccounts: number;
+  gatewayRunning: boolean;
+  monthCost: number | null;
+  todayCost: number | null;
+  totalAccounts: number;
+  weekCost: number | null;
 }
-export interface ByokMutationRequest {
-  clientClosed: boolean;
-  expectedFingerprint: string;
-  expectedRevision: number;
-  processGeneration: number;
-  targetPath?: string | null;
-}
-/**
- * Stable non-2xx JSON envelope for every Dashboard V3 error.
- */
-export interface V3Error {
-  code: string;
-  currentRevision: number | null;
-  message: string;
-  processGeneration: number | null;
-}
-export interface EndpointSpec {
-  locked: boolean;
-  operation: EndpointOperation;
-  url: string | null;
-  wireProtocol: AccountUpstreamProtocol;
-}
-export interface ProviderTemplate {
-  adapterKind: string;
-  authSchemes: AccountAuthScheme[];
-  credentialKind: AccountCredentialKind;
-  defaultEndpoints: EndpointSpec[];
-  displayName: string;
-  editableFields: string[];
-  familyId: string | null;
-  id: string;
-  offeringTags: OfferingKind[];
-  pricingMultiplierEditable: boolean;
-  source: TemplateSource;
-  upstreamProtocols: AccountUpstreamProtocol[];
-  version: number;
-}
-export interface TemplateList {
-  templates: ProviderTemplate[];
-}
-export interface ConnectionEndpoint {
-  authScheme: EndpointAuthScheme;
-  connectionId: string;
-  id: string;
-  locked: boolean;
-  /**
-   * Official balance support for this exact configured URL, including its path.
-   */
-  officialBalance: boolean;
-  operation: EndpointOperation;
-  url: string | null;
-  wireProtocol: AccountUpstreamProtocol;
-}
-export interface ConnectionTarget {
-  connectionId: string;
+export interface DestinationSummary {
+  accountControls: AccountControlsDto;
+  adapter: AdapterKindDto;
+  authScheme: AuthSchemeDto;
+  baseUrl: string | null;
+  brandFamily: string | null;
+  capabilities: CapabilitiesDto;
+  catalogCount: number;
   enabled: boolean;
-  endpointIds: string[];
+  enabledCatalogCount: number;
   id: string;
-  publicName: string;
-  upstreamModelId: string;
-}
-export interface LegacyIdentity {
-  id: string;
-  kind: LegacyConnectionKind;
-}
-export interface Eligibility {
-  reason: EligibilityReason;
-  state: EligibilityState;
-}
-export interface TemplateRef {
-  id: string;
-  version: number;
-}
-export interface ConnectionSummary {
-  adapterKind: string;
-  authorization: AuthorizationState;
-  credentialCount: number;
-  credentialCreate: CredentialCreateCapabilityDto;
-  /**
-   * Personal credit setup for Key forms. None means unsupported; an empty
-   * list permits custom configuration without a provider preset.
-   */
-  creditPresets?: CreditPreset[] | null;
-  displayFamily: string | null;
-  eligibility: Eligibility;
-  enabledCredentialCount: number;
-  endpoints: ConnectionEndpoint[];
-  id: string;
-  legacy: LegacyIdentity;
-  lifecycle: ConnectionLifecycle;
+  legacy: LegacyDestinationRefDto;
+  maxCredentials: number | null;
+  modelResolution: ModelResolutionDto;
   name: string;
-  offering: OfferingKind;
-  origin: ConnectionOrigin;
-  targetCount: number;
-  targets: ConnectionTarget[];
-  templateRef: TemplateRef | null;
+  observerCredentialId: string | null;
+  plan: PlanDto | null;
+  protocolRoutes: HttpProtocolRouteDto[];
+  protocols: ProtocolDto[];
 }
 /**
- * Server-owned operation capability; writes recheck it against current state.
+ * Read-only account actions derived from the destination's resource ownership.
  */
-export interface CredentialCreateCapabilityDto {
-  allowed: boolean;
-  materialKinds: MaterialKind[];
-  reason: CredentialCreateUnavailableReasonDto | null;
+export interface AccountControlsDto {
+  browserProfile: boolean;
+  configurationOwner: AccountConfigurationOwnerDto;
+  consoleLink: AccountConsoleLinkDto | null;
+  toggleWrite: AccountToggleWriteDto;
 }
-export interface CreditPreset {
-  configuration: CreditConfiguration;
+/**
+ * Destination capability flags. Mirrors the domain `Capabilities` record.
+ */
+export interface CapabilitiesDto {
+  /**
+   * A billing tier must be selected before the destination is usable.
+   */
+  billingTierRequired: boolean;
+  /**
+   * The destination can discover models from the upstream.
+   */
+  discoverableModels: boolean;
+  /**
+   * The destination is an external integration and holds no local inference secret.
+   */
+  externalIntegration: boolean;
+  /**
+   * The adapter attaches identity headers on egress.
+   */
+  identityHeaders: boolean;
+  /**
+   * Managed signup can start an onboarding task on a credential.
+   */
+  managedSignup: boolean;
+  /**
+   * The destination holds a non-inference observer credential (platform parent).
+   */
+  observer: boolean;
+  /**
+   * Hosts Configurable HTTP may probe for an official current-balance API.
+   */
+  officialBalanceProbe: string[];
+  redirectPolicy: RedirectPolicyDto;
+  /**
+   * Test connection is offered on every ready credential except external integrations.
+   */
+  testable: boolean;
+}
+/**
+ * Migration-era bridge from a projected destination back to the V3 row that
+ * still owns its mutations. Removed once destinations become primary.
+ */
+export interface LegacyDestinationRefDto {
+  /**
+   * Row id in the V3 model named by `kind`.
+   */
   id: string;
-  initialGrant: number;
+  kind: LegacyDestinationKindDto;
+}
+/**
+ * Commercial offering embedded in a destination. Mirrors the domain `Plan`.
+ */
+export interface PlanDto {
+  expiryCadence: ExpiryCadenceDto | null;
+  /**
+   * Operators may enter local usage numbers by hand.
+   */
+  manualCalibration: boolean;
+  pricingSource: PricingSourceDto;
+  usageSource: UsageSourceDto;
+  windows: PlanWindowDto[];
+}
+/**
+ * One Plan usage window.
+ */
+export interface PlanWindowDto {
+  kind: PlanWindowKindDto;
+}
+export interface HttpProtocolRouteDto {
+  authScheme: AuthSchemeDto;
+  endpointUrl: string;
+  protocol: ProtocolDto;
+}
+export interface AccountSummary {
+  accountType: AccountType;
+  authError: string | null;
+  connectionVerifiedAt: string | null;
+  cooldown5hUntil: string | null;
+  cooldownFreeUntil: string | null;
+  cooldownGenericUntil: string | null;
+  cooldownMonthUntil: string | null;
+  cooldownUntil: string | null;
+  cooldownWeekUntil: string | null;
+  createdAt: string;
+  credentialKind: AccountCredentialKind;
+  enabled: boolean;
+  expiresOn: string;
+  id: string;
+  lastError: string | null;
+  modelCapabilityCount: number;
+  name: string;
+  notes: string | null;
+  ollamaBillingTier: OllamaBillingTier | null;
+  planRoutable: boolean;
+  processGeneration: number;
+  providerId: string;
+  purchaseDate: string;
+  quotaScope: AccountQuotaScope;
+  revision: number;
+  setupStep: AccountSetupStep;
+  updatedAt: string;
+  usageSyncLastSuccessAt: string | null;
+  usageSyncNextAllowedAt: string | null;
+  username: string | null;
+  verificationError: string | null;
+  verificationStatus: AccountVerificationStatus;
+}
+export interface CredentialScopeSummary {
+  kind: string;
+  modelCount: number;
+  singleModel: string | null;
+}
+export interface AccountCredentialSummary {
+  authState: AuthState;
+  cooldowns: CredentialCooldownsDto;
+  destinationId: string;
+  enabled: boolean;
+  grants: CredentialGrantsDto;
+  hasSecret: boolean;
+  id: string;
+  keyPreview: string | null;
+  lastError: string | null;
+  legacyAccountId: string;
+  name: string;
+  notes: string | null;
+  onboardingTask: DestinationOnboardingTaskDto | null;
+  purchaseDate: string | null;
+  quotaPoolId: string | null;
+  quotaRecovery: QuotaRecoveryDto | null;
+  routingRank: number;
+  scope: CredentialScopeSummary;
+}
+/**
+ * Per-window cooldown timestamps on a projected credential.
+ */
+export interface CredentialCooldownsDto {
+  /**
+   * Five-hour window cooldown expiry as RFC 3339, or null.
+   */
+  fiveHourUntil: string | null;
+  /**
+   * Free-window cooldown expiry as RFC 3339, or null.
+   */
+  freeUntil: string | null;
+  /**
+   * Generic cooldown expiry as RFC 3339, or null.
+   */
+  genericUntil: string | null;
+  /**
+   * Monthly window cooldown expiry as RFC 3339, or null.
+   */
+  monthUntil: string | null;
+  /**
+   * Weekly window cooldown expiry as RFC 3339, or null.
+   */
+  weekUntil: string | null;
+}
+/**
+ * Allowed egress grants on a projected credential.
+ */
+export interface CredentialGrantsDto {
+  /**
+   * Endpoint ids this secret may be sent to.
+   */
+  allowedEndpointIds: string[];
+  /**
+   * Origins this secret may be sent to.
+   */
+  allowedOrigins: string[];
+}
+/**
+ * Managed-signup task on a projected credential. Domain shape; no task id.
+ */
+export interface DestinationOnboardingTaskDto {
+  kind: OnboardingTaskKind;
+  state: OnboardingTaskState;
+  /**
+   * Current setup step string.
+   */
+  step: string;
+}
+/**
+ * Optional per-Key quota recovery overlay. Status is presentation-only.
+ */
+export interface QuotaRecoveryDto {
+  failureCount: number;
+  nextRetryAt: string;
+  observedAt: string;
+  reason: QuotaRecoveryReason;
+  resetsAt: string | null;
+  status: QuotaRecoveryStatus;
+  window: QuotaRecoveryWindow;
+}
+export interface PlatformSnapshotSummary {
+  billingPreference: string | null;
+  errors: string[];
+  groupCount: number;
+  keyName: string | null;
+  keyRemaining: PlatformAmountSummary | null;
+  modelCount: number;
+  observedAt: number;
+  priceCount: number;
+  quotas: PlatformQuota[];
+  stale: boolean;
+  wallet: PlatformWalletSummary | null;
+  walletOverflow: boolean | null;
+}
+export interface PlatformAmountSummary {
+  amount: number;
+  unit: string;
+}
+export interface PlatformQuota {
+  expiresAt: number | null;
+  kind: PlatformQuotaKind;
+  limit: number | null;
+  period: string | null;
+  remaining: number | null;
+  resetsAt: number | null;
+  scopeId: string;
+  source: string;
+  unit: string;
+  unlimited: boolean;
+  used: number | null;
+}
+export interface PlatformWalletSummary {
+  historyUsed: number | null;
+  monthUsed: number | null;
+  observedAt: number | null;
+  remaining: number | null;
+  remainingUnlimited: boolean;
+  unit: string;
+}
+export interface PlatformSummary {
+  baseUrl: string;
+  hasUserCredential: boolean;
+  id: string;
+  kind: PlatformKind;
+  name: string;
+  snapshot: PlatformSnapshotSummary | null;
+  version: number;
+}
+export interface PlatformLinkSummary {
+  accountId: string;
+  group: PlatformGroup;
+  platformAccountId: string;
+  snapshot: PlatformSnapshotSummary | null;
+}
+export interface PlatformGroup {
+  autoGroups: string[];
+  id: string | null;
+  platform: string | null;
+  subscriptionType: string | null;
+  verified: boolean;
+}
+export interface PageAction {
+  allowed: boolean;
+  key: string;
+  reason: string | null;
+}
+export interface AccountPageTags {
+  bindingDisabled: boolean;
+  credentialCount: number;
+  duplicateName: boolean;
+  quotaShareCount: number;
+  quotaShareName: string | null;
+}
+export interface AccountRefreshFact {
+  freshUntil: string | null;
+  nextAllowedAt: string | null;
+  observedAt: string | null;
+  supported: boolean;
+}
+export interface AccountPageRow {
+  account: AccountSummary | null;
+  actions: PageAction[];
+  billing: BillingStatus | null;
+  credential: AccountCredentialSummary;
+  inferenceEndpointUrl: string | null;
+  modelCount: number;
+  platformLink: PlatformLinkSummary | null;
+  refresh: AccountRefreshFact;
+  routeAvailable: boolean;
+  status: string;
+  tags: AccountPageTags;
+}
+export interface BillingStatus {
+  accountId: string;
+  cash: OfficialApiStatus | null;
+  configurableCredits: boolean;
+  credits: CreditMeterView | null;
+  manualCalibration: boolean;
+  model: BillingModel;
+  officialRefresh: boolean;
+  presets: CreditPreset[];
+  processGeneration: number;
+  providerWindows: boolean;
+  quotaEditorLimits: BillingQuotaEditorLimit[];
+  quotaManualCalibration: boolean;
+  revision: number;
+  source: BillingSource;
+  surfaceKind: BillingSurfaceKind;
+  unit: string;
+  usage: ProviderUsage | null;
+}
+export interface OfficialApiStatus {
+  accountId: string;
+  balanceAvailable: boolean;
+  balances: OfficialBalance[];
+  kind: OfficialApiKind;
+  lifetimeSpend: OfficialSpend[];
+  meter: OfficialApiAccountMeter;
+  monthSpend: OfficialSpend[];
+  monthStartedAt: string;
+  processGeneration: number;
+  providerId: string;
+  revision: number;
+  unpricedRequests: number;
+}
+export interface OfficialBalance {
+  currency: string;
+  granted: number;
+  observedAt: string;
+  toppedUp: number;
+  total: number;
+}
+export interface OfficialSpend {
+  amount: number;
+  currency: string;
+  pricedRequests: number;
+}
+export interface OfficialApiAccountMeter {
+  remaining: OfficialApiMeterRemaining[];
+  remainingEmpty: OfficialApiMeterEmpty | null;
+}
+export interface OfficialApiMeterRemaining {
+  currency: string;
+  gift: number | null;
+  observedAt: string;
+  total: number;
+}
+export interface CreditMeterView {
+  activeGranted: number;
+  buckets: CreditBucket[];
+  calibrationBlock: CreditCalibrationBlock | null;
+  canCalibrate: boolean;
+  configuration: CreditConfiguration;
+  credentialId: string;
+  estimatedAt: string;
+  /**
+   * Saved expired grants remain visible, but do not contribute to available balances.
+   */
+  expiredBuckets: CreditBucket[];
+  lastCalibrationAt: string | null;
+  meterId: string;
+  /**
+   * Next actual renewal; configuration.next_reset_at remains the calendar anchor.
+   */
+  nextResetAt: string | null;
+  overdrawn: number;
+  pendingRequests: number;
+  remaining: number;
+  scheduledBuckets: CreditBucket[];
+  spentSinceCalibration: number;
+  unpricedRequests: number;
+}
+export interface CreditBucket {
+  expiresAt: string | null;
+  granted: number;
+  id: string;
+  kind: CreditBucketKind;
+  label: string;
+  remaining: number;
+  startsAt: string;
 }
 export interface CreditConfiguration {
   creditsPerCurrency: number;
@@ -659,70 +1017,475 @@ export interface CreditRate {
   model: string;
   outputPerMillion: number;
 }
-export interface ConnectionList {
-  connections: ConnectionSummary[];
+export interface CreditPreset {
+  configuration: CreditConfiguration;
+  id: string;
+  initialGrant: number;
+}
+export interface BillingQuotaEditorLimit {
+  editable: boolean;
+  editableAt: string | null;
+  limit: number;
+  windowKind: BillingQuotaWindowKind;
+}
+/**
+ * GET `/accounts/{id}/provider-usage` body. Distinct from stored quota rows.
+ *
+ * `pricingRevision` is always absent. Usage is no longer a pricing CAS token.
+ */
+export interface ProviderUsage {
+  accountId: string;
+  availability: UsageAvailability;
+  creditBalances: CreditBalance[];
+  experimental: boolean;
+  freeCooldownUntil: string | null;
+  pricingRevision: string | null;
+  processGeneration: number;
+  providerId: string;
+  quotaWindows: QuotaWindow[];
+  revision: number;
+  syncState: UsageSyncState | null;
+}
+/**
+ * One credit balance row as projected for provider usage. Distinct from the
+ * stored provider credit row.
+ */
+export interface CreditBalance {
+  accountId: string;
+  amount: number;
+  balanceKind: string;
+  observedAt: string | null;
+  source: string;
+  unit: string;
+  updatedAt: string;
+}
+/**
+ * One live or synthetic quota window. Distinct from `models::QuotaWindow`.
+ */
+export interface QuotaWindow {
+  accountId: string;
+  calibrationOffset: number;
+  limitValue: number | null;
+  observedAt: string | null;
+  resetsAt: string | null;
+  source: string;
+  startedAt: string | null;
+  unit: string;
+  updatedAt: string;
+  used: number;
+  windowKind: string;
+}
+/**
+ * Official-usage sync metadata as projected for provider usage. Distinct from
+ * the stored `provider_usage_sync_state` row.
+ */
+export interface UsageSyncState {
+  accountId: string;
+  failureStreak: number;
+  lastAttemptAt: string | null;
+  lastExpeditedAt: string | null;
+  lastSuccessAt: string | null;
+  nextEligibleAt: string | null;
+}
+export interface AccountCardPageItem {
+  actions: PageAction[];
+  availability: string;
+  cardId: string;
+  cpaStatus: string | null;
+  credentialCreate: CredentialCreateCapabilityDto | null;
+  destination: DestinationSummary;
+  matchedCredentials: number;
+  platform: PlatformSummary | null;
+  position: number;
+  rows: AccountPageRow[];
+  rowsHasMore: boolean;
+  rowsOffset: number;
+  totalCredentials: number;
+}
+/**
+ * Server-owned operation capability; writes recheck it against current state.
+ */
+export interface CredentialCreateCapabilityDto {
+  allowed: boolean;
+  materialKinds: MaterialKind[];
+  reason: CredentialCreateUnavailableReasonDto | null;
+}
+export interface AccountPlanFilter {
+  cardCount: number;
+  credentialCount: number;
+  label: string;
+  value: string;
+}
+export interface AccountsPage {
+  asOf: string;
+  cards: AccountCardPageItem[];
+  conversationSticky: boolean;
+  errors: PageReadIssue[];
+  hasMore: boolean;
+  limit: number;
+  matchedCards: number;
+  matchedCredentials: number;
+  offset: number;
+  planOptions: AccountPlanFilter[];
+  readVersion: string;
+  revision: ControlRevision;
+  routingMode: RoutingMode;
+  totalCards: number;
+  totalCredentials: number;
+  validUntil: string | null;
+}
+export interface AccountCardCredentialsPage {
+  asOf: string;
+  cardId: string;
+  errors: PageReadIssue[];
+  filteredTotal: number;
+  hasMore: boolean;
+  limit: number;
+  offset: number;
+  readVersion: string;
+  revision: ControlRevision;
+  rows: AccountPageRow[];
+  total: number;
+  validUntil: string | null;
+}
+export interface AccountPageDetail {
+  account: Account;
+  connection: ConnectionSummary | null;
+  credential: DestinationCredentialDto | null;
+  destination: DestinationDto | null;
+  identity: IdentitySummary | null;
+  operations: AccountOperationDetail;
+  platform: PlatformAccount | null;
+  platformLink: PlatformLink | null;
   revision: ControlRevision;
 }
 /**
- * Required process-scoped mutation precondition.
+ * Secret-free account resource. Distinct from `models::Account`.
  *
- * Both fields travel at the top level of every mutation request. The random
- * process generation prevents a revision captured before restart from being
- * accepted by a fresh process whose in-memory counter reused the same value.
+ * Responses emit `T | null` for every optional field. Plaintext upstream
+ * keys, passwords, ciphers, gateway Keys, and referral codes never appear.
  */
-export interface OnboardingCommitRequest {
-  authorization?: OnboardingAuthorization | null;
-  /**
-   * Explicit consent to union safe current default/same-origin grants.
-   * Ignored unless `mode` is present; false is omitted from the digest.
-   */
-  authorizeCurrentEndpoint?: boolean;
-  connection: OnboardingConnection;
-  expectedRevision: number;
-  /**
-   * Omitted preserves legacy commit behavior and HMAC digest bytes.
-   */
-  mode?: OnboardingCommitMode | null;
-  operationId: string;
+export interface Account {
+  accountType: AccountType;
+  authError: string | null;
+  connectionVerifiedAt: string | null;
+  cooldown5hUntil: string | null;
+  cooldownFreeUntil: string | null;
+  cooldownGenericUntil: string | null;
+  cooldownMonthUntil: string | null;
+  cooldownUntil: string | null;
+  cooldownWeekUntil: string | null;
+  createdAt: string;
+  credentialKind: AccountCredentialKind;
+  customConfig: AccountCustomConfig | null;
+  enabled: boolean;
+  expiresOn: string;
+  id: string;
+  lastError: string | null;
+  modelCapabilities: AccountModelCapability[];
+  name: string;
+  notes: string | null;
+  ollamaBillingTier: OllamaBillingTier | null;
+  planRoutable: boolean;
   processGeneration: number;
-  targets: OnboardingTarget[];
+  providerId: string;
+  purchaseDate: string;
+  quotaScope: AccountQuotaScope;
+  revision: number;
+  setupStep: AccountSetupStep;
+  updatedAt: string;
+  usageSyncLastSuccessAt: string | null;
+  usageSyncNextAllowedAt: string | null;
+  username: string | null;
+  verificationError: string | null;
+  verificationStatus: AccountVerificationStatus;
 }
-export interface HttpProtocolRouteDto {
+/**
+ * Nested Custom HTTP destination as returned on an account.
+ */
+export interface AccountCustomConfig {
+  accountId: string;
+  createdAt: string;
+  endpointUrl: string;
+  updatedAt: string;
+  upstreamProtocol: AccountUpstreamProtocol;
+}
+/**
+ * One declared Custom model capability as returned on an account.
+ */
+export interface AccountModelCapability {
+  protocol: AccountUpstreamProtocol;
+  publicModel: string;
+  source: string;
+  upstreamModel: string;
+  verifiedAt: string | null;
+}
+export interface ConnectionSummary {
+  adapterKind: string;
+  authorization: AuthorizationState;
+  credentialCount: number;
+  credentialCreate: CredentialCreateCapabilityDto;
+  /**
+   * Personal credit setup for Key forms. None means unsupported; an empty
+   * list permits custom configuration without a provider preset.
+   */
+  creditPresets?: CreditPreset[] | null;
+  displayFamily: string | null;
+  eligibility: Eligibility;
+  enabledCredentialCount: number;
+  endpoints: ConnectionEndpoint[];
+  id: string;
+  legacy: LegacyIdentity;
+  lifecycle: ConnectionLifecycle;
+  name: string;
+  offering: OfferingKind;
+  origin: ConnectionOrigin;
+  targetCount: number;
+  targets: ConnectionTarget[];
+  templateRef: TemplateRef | null;
+}
+export interface Eligibility {
+  reason: EligibilityReason;
+  state: EligibilityState;
+}
+export interface ConnectionEndpoint {
+  authScheme: EndpointAuthScheme;
+  connectionId: string;
+  id: string;
+  locked: boolean;
+  /**
+   * Official balance support for this exact configured URL, including its path.
+   */
+  officialBalance: boolean;
+  operation: EndpointOperation;
+  url: string | null;
+  wireProtocol: AccountUpstreamProtocol;
+}
+export interface LegacyIdentity {
+  id: string;
+  kind: LegacyConnectionKind;
+}
+export interface ConnectionTarget {
+  connectionId: string;
+  enabled: boolean;
+  endpointIds: string[];
+  id: string;
+  publicName: string;
+  upstreamModelId: string;
+}
+export interface TemplateRef {
+  id: string;
+  version: number;
+}
+/**
+ * RFC credential projection row. Carries `hasSecret` only; never ciphertext or plaintext.
+ */
+export interface DestinationCredentialDto {
+  authState: AuthState;
+  cooldowns: CredentialCooldownsDto;
+  /**
+   * Destination this credential routes through.
+   */
+  destinationId: string;
+  /**
+   * Routing enable switch (`account.enabled && binding.enabled`).
+   */
+  enabled: boolean;
+  grants: CredentialGrantsDto;
+  /**
+   * Whether a secret is stored. Always false for keyless Zen and CPA.
+   */
+  hasSecret: boolean;
+  /**
+   * Stable credential id (deterministic UUIDv5 of the legacy account).
+   */
+  id: string;
+  /**
+   * Last error string from the legacy account row, or null.
+   */
+  lastError: string | null;
+  /**
+   * The V3 `accounts` row this credential was projected from (migration-era
+   * bridge to the V3 mutation routes).
+   */
+  legacyAccountId: string;
+  /**
+   * Display name.
+   */
+  name: string;
+  /**
+   * Operator notes.
+   */
+  notes: string | null;
+  onboardingTask: DestinationOnboardingTaskDto | null;
+  /**
+   * Purchase date when the destination has a Plan.
+   */
+  purchaseDate: string | null;
+  /**
+   * Shared quota pool id when the credential joined one.
+   */
+  quotaPoolId: string | null;
+  /**
+   * Confirmed per-Key exhaustion/recovery. Omitted or null means no confirmed exhaustion.
+   */
+  quotaRecovery?: QuotaRecoveryDto | null;
+  /**
+   * Position in the persisted account order.
+   */
+  routingRank: number;
+  scope: ModelScope;
+}
+/**
+ * Secret-free destination facts and derived account controls.
+ */
+export interface DestinationDto {
+  accountControls: AccountControlsDto;
+  adapter: AdapterKindDto;
   authScheme: AuthSchemeDto;
+  /**
+   * Upstream origin. Sealed for builtin adapters; user data for `http`.
+   */
+  baseUrl: string | null;
+  /**
+   * Brand family for grouping, when the adapter or platform kind has one.
+   */
+  brandFamily: string | null;
+  capabilities: CapabilitiesDto;
+  catalog: CatalogModelDto[];
+  /**
+   * Destination enablement.
+   */
+  enabled: boolean;
+  /**
+   * Stable destination id (deterministic UUIDv5 of the legacy row).
+   */
+  id: string;
+  legacy: LegacyDestinationRefDto1;
+  /**
+   * `1` for true singletons; `null` for multi-credential destinations.
+   */
+  maxCredentials: number | null;
+  /**
+   * Which client model names may resolve to a destination mapping.
+   */
+  modelResolution: "adapter_defined" | "public_only" | "public_and_upstream";
+  /**
+   * Display name.
+   */
+  name: string;
+  /**
+   * Non-inference observer credential id when `capabilities.observer` is set.
+   */
+  observerCredentialId: string | null;
+  plan: PlanDto | null;
+  presentation: ProviderCatalogPresentation | null;
+  protocolRoutes: HttpProtocolRouteDto[];
+  protocols: ProtocolDto[];
+}
+/**
+ * One catalog model on a destination.
+ */
+export interface CatalogModelDto {
+  /**
+   * Whether any protocol is enabled.
+   */
+  enabled: boolean;
+  preferred: ProtocolDto | null;
+  protocols: ProtocolDto[];
+  /**
+   * Public name exposed to clients.
+   */
+  publicModel: string;
+  /**
+   * Upstream model id sent on egress.
+   */
+  upstreamModel: string;
+  upstreamOverride: DestinationUpstreamOverridePatch | null;
+}
+/**
+ * Optional per-model route override for a configurable HTTP destination.
+ */
+export interface DestinationUpstreamOverridePatch {
   endpointUrl: string;
   protocol: ProtocolDto;
 }
-export interface OnboardingConnectionNew {
-  authKind: ProviderDefinitionAuthKind;
-  endpointUrl: string;
-  name: string;
-  protocolRoutes?: HttpProtocolRouteDto[] | null;
-  templateId: string;
-  upstreamProtocol: AccountUpstreamProtocol;
+/**
+ * Migration-era bridge from a projected destination back to the V3 row that
+ * still owns its mutations. Removed once destinations become primary.
+ */
+export interface LegacyDestinationRefDto1 {
+  /**
+   * Row id in the V3 model named by `kind`.
+   */
+  id: string;
+  kind: LegacyDestinationKindDto;
 }
-export interface OnboardingTarget {
+/**
+ * Canonical catalog facts committed directly from a mutation receipt.
+ */
+export interface ProviderCatalogPresentation {
+  allDisabled: boolean;
+  models: ProviderModelPresentation[];
+  total: number;
+}
+export interface ProviderModelPresentation {
+  actions: ProviderModelAction[];
+  contract: EffectiveModelContract;
+  effectiveOn: boolean;
   publicModel: string;
+  targetProtocol: AccountUpstreamProtocol | null;
+  testProtocol: AccountUpstreamProtocol | null;
   upstreamModel: string;
-  upstreamOverride?: OnboardingUpstreamOverride | null;
+  upstreamOverride: ProviderModelUpstreamOverride | null;
+  writableProtocols: AccountUpstreamProtocol[];
 }
-export interface OnboardingUpstreamOverride {
+export interface ProviderModelAction {
+  allowed: boolean;
+  key: string;
+  reason: string | null;
+}
+/**
+ * One model's preferred protocol and per-protocol evidence.
+ */
+export interface EffectiveModelContract {
+  alias: string;
+  disabledReasons: string[];
+  modelId: string;
+  preferredProtocol: AccountUpstreamProtocol;
+  protocols: EffectiveModelProtocols;
+  routable: boolean;
+}
+/**
+ * Per-protocol evidence keyed by snake_case protocol tokens. Missing
+ * protocols serialize as `null` and must not be invented as available.
+ */
+export interface EffectiveModelProtocols {
+  chat_completions: EffectiveProtocolEvidence | null;
+  messages: EffectiveProtocolEvidence | null;
+  responses: EffectiveProtocolEvidence | null;
+}
+/**
+ * Merged evidence for one upstream protocol on one model.
+ */
+export interface EffectiveProtocolEvidence {
+  available: boolean;
+  enabled: boolean;
+  lastProbeAt: string | null;
+  lastProbeError: string | null;
+  lastProbeResult: ProbeResultKind | null;
+  observedAt: string | null;
+  override: ProtocolOverrideState;
+  protocol: AccountUpstreamProtocol;
+  source: ContractEvidenceSource;
+  verifiedAt: string | null;
+}
+/**
+ * One public-to-upstream mapping owned by a Provider definition.
+ */
+export interface ProviderModelUpstreamOverride {
   endpointUrl: string;
   protocol: AccountUpstreamProtocol;
-}
-export interface OnboardingCommitResult {
-  /**
-   * Legacy receipts omit this; replay emits null via serde default.
-   */
-  accountId: string | null;
-  connectionId: string;
-  credentialId: string | null;
-  replayed: boolean;
-  revision: ControlRevision;
-  targetIds: string[];
-}
-export interface IdentityList {
-  identities: IdentitySummary[];
-  revision: ControlRevision;
 }
 export interface IdentitySummary {
   credentials: CredentialSummary[];
@@ -805,6 +1568,693 @@ export interface UpstreamAccountDto {
 export interface AuthorityRefDto {
   issuerOrSite: string;
   tenantOrSubject: string | null;
+}
+export interface AccountOperationDetail {
+  allowedConnections: ConnectionSummary[];
+  binding: boolean;
+  bindingId: string | null;
+  create: boolean;
+  credentialId: string | null;
+  grantedEndpointIds: string[];
+  identityId: string | null;
+  rotate: boolean;
+  shareTargets: AccountCredentialShareTarget[];
+  staleEndpointIds: string[];
+  staleOrigins: string[];
+  testModels: AccountTestModelChoice[];
+  unsupportedReason: string | null;
+}
+export interface AccountCredentialShareTarget {
+  id: string;
+  label: string;
+}
+export interface AccountTestModelChoice {
+  alias: string;
+  modelId: string;
+  protocol: AccountUpstreamProtocol;
+}
+export interface PlatformAccount {
+  baseUrl: string;
+  hasUserCredential: boolean;
+  id: string;
+  kind: PlatformKind;
+  name: string;
+  snapshot: PlatformSnapshot | null;
+  version: number;
+}
+export interface PlatformSnapshot {
+  billingPreference: string | null;
+  /**
+   * Fixed component/error codes only, never upstream bodies or credentials.
+   */
+  errors: string[];
+  groups: PlatformGroup[];
+  models: PlatformModel[];
+  observedAt: number;
+  prices: PlatformPrice[];
+  quotas: PlatformQuota[];
+  stale: boolean;
+  walletOverflow: boolean | null;
+}
+export interface PlatformModel {
+  groupId: string | null;
+  id: string;
+  platform: string | null;
+  /**
+   * A storefront row is never proof of inference permission.
+   */
+  source: string;
+}
+export interface PlatformPrice {
+  cacheRead: number | null;
+  cacheWrite: number | null;
+  currency: string;
+  groupId: string | null;
+  /**
+   * All numeric rates are currency per token, never per million tokens.
+   */
+  input: number | null;
+  model: string;
+  officialReference: boolean;
+  output: number | null;
+  source: string;
+  unavailableReason: string | null;
+  validUntil: number;
+}
+export interface PlatformLink {
+  accountId: string;
+  group: PlatformGroup;
+  platformAccountId: string;
+  snapshot: PlatformSnapshot | null;
+}
+export interface AccountPageLayout {
+  cards: RoutingCard[];
+  revision: ControlRevision;
+}
+export interface RoutingCard {
+  credentialIds: string[];
+  destinationId: string;
+  id: string;
+}
+export interface ProviderPageItem {
+  authorization: AuthorizationState;
+  brandFamily: string | null;
+  catalogCount: number;
+  connectionId: string | null;
+  credentialCount: number;
+  credentialCreate: CredentialCreateCapabilityDto;
+  destinationId: string | null;
+  eligibility: Eligibility;
+  enabledCredentialCount: number;
+  legacy: LegacyIdentity;
+  lifecycle: ConnectionLifecycle;
+  name: string;
+  origin: ConnectionOrigin;
+  presetId: string | null;
+  providerId: string | null;
+  railKey: string;
+}
+export interface ProvidersPage {
+  asOf: string;
+  errors: PageReadIssue[];
+  filteredTotal: number;
+  hasMore: boolean;
+  items: ProviderPageItem[];
+  limit: number;
+  offset: number;
+  readVersion: string;
+  revision: ControlRevision;
+  total: number;
+  validUntil: string | null;
+}
+export interface ProviderCatalogEntrySummary {
+  authSchemes: AccountAuthScheme[];
+  creationAvailability: string;
+  creationUnavailableReason: string | null;
+  credentialKind: AccountCredentialKind;
+  /**
+   * Whether the dashboard may DELETE this entry. Same rules as `editable`.
+   */
+  deletable: boolean;
+  displayFamily: string;
+  displayName: string;
+  /**
+   * Whether the dashboard may PATCH this entry. Always `false` for
+   * `builtin` rows; `true` for `preset`/`custom`.
+   */
+  editable: boolean;
+  formFields: ProviderCatalogFormField[];
+  keyPrefix: string | null;
+  managedRegistration: boolean;
+  manualUsageCalibration: boolean;
+  modelAliasCount: number;
+  modelSource: string;
+  /**
+   * Plan/api offering label carried by the catalog row. Builtin rows use
+   * the sealed builtin map; dynamic rows mirror the persisted `offering`.
+   */
+  offering: string;
+  /**
+   * Row provenance in the unified `providers` table. Wire values:
+   * `builtin` (sealed adapter), `preset` (preset-derived dynamic row),
+   * `custom` (manual dynamic row).
+   */
+  origin: "builtin" | "preset" | "custom";
+  pricingAvailability: string;
+  providerId: string;
+  quotaScope: AccountQuotaScope;
+  quotaUnit: string;
+  routable: boolean;
+  singleton: boolean;
+  upstreamProtocols: AccountUpstreamProtocol[];
+  usageAvailability: string;
+  verificationPolicy: string;
+  verificationRuntimeAvailability: string;
+}
+/**
+ * One create-form field advertised by a catalog provider.
+ */
+export interface ProviderCatalogFormField {
+  id: string;
+  immutableAfterCreate: boolean;
+  kind: string;
+  required: boolean;
+}
+export interface ProviderCatalogSummary {
+  modelCount: number;
+  refreshSupported: boolean;
+  refreshedAt: string | null;
+  source: string;
+  sourceUrl: string;
+}
+export interface ProviderScopeSummary {
+  accountCount: number;
+  allDisabled: boolean;
+  card: CardCapabilitySummary;
+  catalog: ProviderCatalogSummary;
+  catalogRoutable: boolean;
+  disabledReasons: string[];
+  key: string;
+  label: string;
+  productionInference: boolean;
+  providerId: string;
+  revision: number;
+  scopeId: string;
+  scopeKind: ContractScopeKind;
+  staticProtocolSnapshotDate: string | null;
+  usage: CapabilitySummary;
+}
+/**
+ * Provider-page actions that are actually implemented for this scope.
+ */
+export interface CardCapabilitySummary {
+  catalogRefresh: boolean;
+  discoverModels: boolean;
+  fetchZenModels: boolean;
+  protocolProbe: boolean;
+}
+/**
+ * Registry pricing or usage availability copied as display data.
+ */
+export interface CapabilitySummary {
+  availability: string;
+}
+export interface ProviderModelWriteTarget {
+  id: string;
+  kind: string;
+}
+export interface ProviderPageDetail {
+  actions: PageAction[];
+  catalogEntry: ProviderCatalogEntrySummary | null;
+  destination: DestinationSummary | null;
+  endpoints: ConnectionEndpoint[];
+  item: ProviderPageItem;
+  modelWriteTarget: ProviderModelWriteTarget | null;
+  readVersion: string;
+  revision: ControlRevision;
+  scope: ProviderScopeSummary | null;
+}
+export interface ProviderModelPageRow {
+  actions: PageAction[];
+  contract: EffectiveModelContract;
+  effectiveOn: boolean;
+  metadata: ModelMetadata | null;
+  metadataSource: string | null;
+  publicModel: string;
+  targetProtocol: AccountUpstreamProtocol | null;
+  testProtocol: AccountUpstreamProtocol | null;
+  upstreamModel: string;
+  upstreamOverride: ProviderModelUpstreamOverride | null;
+  writableProtocols: AccountUpstreamProtocol[];
+}
+export interface ModelMetadata {
+  contextWindow?: number | null;
+  inputModalities?: string[] | null;
+  maxOutputTokens?: number | null;
+  name?: string | null;
+  outputModalities?: string[] | null;
+  parallelToolCalls?: boolean | null;
+  reasoning?: boolean | null;
+  /**
+   * Exact DSH selector level -> Chat Completions reasoning_effort spelling.
+   * Absence is unknown, an empty map explicitly offers no selectable levels.
+   */
+  reasoningEfforts?: {
+    [k: string]: string;
+  } | null;
+  toolCalling?: boolean | null;
+}
+export interface ProviderModelsPage {
+  allDisabled: boolean;
+  filteredTotal: number;
+  hasMore: boolean;
+  limit: number;
+  models: ProviderModelPageRow[];
+  offset: number;
+  readVersion: string;
+  revision: ControlRevision;
+  total: number;
+}
+export interface ProviderEditDetail {
+  accounts: Account[];
+  catalogEntry: ProviderCatalogEntry | null;
+  connection: ConnectionSummary | null;
+  credentials: DestinationCredentialDto[];
+  definition: ProviderDefinition | null;
+  destination: DestinationDto | null;
+  identities: IdentitySummary[];
+  item: ProviderPageItem;
+  readVersion: string;
+  relatedContracts: ProviderContracts;
+  revision: ControlRevision;
+  scope: ProviderEditScope | null;
+}
+/**
+ * One Provider Registry entry as a wire catalog row. Identity strings are
+ * data copied from the static registry; this DTO does not define them.
+ */
+export interface ProviderCatalogEntry {
+  authSchemes: AccountAuthScheme[];
+  creationAvailability: string;
+  creationUnavailableReason: string | null;
+  credentialKind: AccountCredentialKind;
+  /**
+   * Whether the dashboard may DELETE this entry. Same rules as `editable`.
+   */
+  deletable: boolean;
+  displayFamily: string;
+  displayName: string;
+  /**
+   * Whether the dashboard may PATCH this entry. Always `false` for
+   * `builtin` rows; `true` for `preset`/`custom`.
+   */
+  editable: boolean;
+  formFields: ProviderCatalogFormField[];
+  keyPrefix: string | null;
+  managedRegistration: boolean;
+  manualUsageCalibration: boolean;
+  modelAliases: string[];
+  modelSource: string;
+  /**
+   * Plan/api offering label carried by the catalog row. Builtin rows use
+   * the sealed builtin map; dynamic rows mirror the persisted `offering`.
+   */
+  offering: string;
+  /**
+   * Row provenance in the unified `providers` table. Wire values:
+   * `builtin` (sealed adapter), `preset` (preset-derived dynamic row),
+   * `custom` (manual dynamic row).
+   */
+  origin: "builtin" | "preset" | "custom";
+  pricingAvailability: string;
+  providerId: string;
+  quotaScope: AccountQuotaScope;
+  quotaUnit: string;
+  routable: boolean;
+  singleton: boolean;
+  upstreamProtocols: AccountUpstreamProtocol[];
+  usageAvailability: string;
+  verificationPolicy: string;
+  verificationRuntimeAvailability: string;
+}
+/**
+ * Secret-free Provider definition. Surfaces both builtin and dynamic rows
+ * through the same wire shape. `endpointUrl` / `upstreamProtocol` /
+ * `authKind` are nullable because builtin rows leave them empty (the sealed
+ * adapter drives those at call time).
+ */
+export interface ProviderDefinition {
+  /**
+   * Nullable: builtin rows leave the field empty.
+   */
+  authKind?: ProviderDefinitionAuthKind | null;
+  createdAt: string;
+  /**
+   * Whether the dashboard may DELETE this row. Always `false` for builtin.
+   */
+  deletable: boolean;
+  /**
+   * Whether the dashboard may PATCH this row. Always `false` for builtin.
+   */
+  editable: boolean;
+  /**
+   * Nullable: builtin rows leave the field empty.
+   */
+  endpointUrl?: string | null;
+  id: string;
+  /**
+   * Empty for builtin rows; builtin catalogs feed the contract projection.
+   */
+  models: ProviderDefinitionModel[];
+  name: string;
+  /**
+   * Plan/api offering label persisted alongside the row.
+   */
+  offering: string;
+  /**
+   * Row provenance: `builtin` | `preset` | `custom`.
+   */
+  origin: "builtin" | "preset" | "custom";
+  presetId?: string | null;
+  processGeneration: number;
+  revision: number;
+  updatedAt: string;
+  /**
+   * Nullable: builtin rows leave the field empty.
+   */
+  upstreamProtocol?: AccountUpstreamProtocol | null;
+}
+export interface ProviderDefinitionModel {
+  publicModel: string;
+  upstreamModel: string;
+  upstreamOverride?: ProviderModelUpstreamOverride | null;
+}
+/**
+ * Effective provider-scope and custom-endpoint contracts.
+ *
+ * Top-level `revision` is the settings CAS token. Nested `revision` values
+ * are display-only and must not be sent as `expectedRevision`.
+ */
+export interface ProviderContracts {
+  customEndpoints: CustomEndpointContract[];
+  pricingRevision: string;
+  processGeneration: number;
+  providers: ProviderContractGroup[];
+  revision: number;
+}
+/**
+ * One Custom API account scope. Distinct from built-in provider groups.
+ */
+export interface CustomEndpointContract {
+  account: ProviderAccountChoice;
+  card: CardCapabilitySummary;
+  catalog: EffectiveCatalog;
+  catalogRoutable: boolean;
+  disabledReasons: string[];
+  models: EffectiveModelContract[];
+  presentation: ProviderCatalogPresentation | null;
+  pricing: CapabilitySummary;
+  productionInference: boolean;
+  providerId: string;
+  /**
+   * Display revision for this endpoint, distinct from the top-level CAS token.
+   */
+  revision: number;
+  scopeId: string;
+  scopeKind: ContractScopeKind;
+  usage: CapabilitySummary;
+}
+/**
+ * Secret-free account identity on a contract card.
+ */
+export interface ProviderAccountChoice {
+  enabled: boolean;
+  id: string;
+  name: string;
+  verificationStatus: AccountVerificationStatus;
+}
+/**
+ * Merged model-id catalog for one contract scope.
+ */
+export interface EffectiveCatalog {
+  models: string[];
+  refreshSupported: boolean;
+  refreshedAt: string | null;
+  source: string;
+  sourceUrl: string;
+}
+/**
+ * One built-in Provider contract scope.
+ */
+export interface ProviderContractGroup {
+  accounts: ProviderAccountChoice[];
+  card: CardCapabilitySummary;
+  catalog: EffectiveCatalog;
+  catalogRoutable: boolean;
+  disabledReasons: string[];
+  models: EffectiveModelContract[];
+  presentation: ProviderCatalogPresentation | null;
+  pricing: CapabilitySummary;
+  productionInference: boolean;
+  providerId: string;
+  /**
+   * Display revision for this scope, distinct from the top-level CAS token.
+   */
+  revision: number;
+  scopeId: string;
+  scopeKind: ContractScopeKind;
+  /**
+   * The built-in provider's static protocol-evidence snapshot date. This is
+   * `null` when the scope has no restorable snapshot and is distinct from
+   * catalog `refreshed_at`.
+   */
+  staticProtocolSnapshotDate: string | null;
+  usage: CapabilitySummary;
+}
+export interface ProviderEditScope {
+  accounts: ProviderAccountChoice[];
+  models: ProviderModelPageRow[];
+  summary: ProviderScopeSummary;
+}
+export interface AliasPageTarget {
+  accountId: string | null;
+  capabilities: boolean;
+  destinationId: string | null;
+  model: string;
+  providerId: string | null;
+}
+export interface AliasCapabilitySummary {
+  destinationId: string | null;
+  inputModalities: string[];
+  outputModalities: string[];
+  source: string | null;
+  state: string;
+}
+export interface AliasPageRow {
+  capability: AliasCapabilitySummary;
+  capabilityTarget: AliasPageTarget | null;
+  customAccount: string | null;
+  customAccountId: string | null;
+  destinationId: string | null;
+  key: string;
+  platformLabel: string | null;
+  providerId: string;
+  providerPlan: string;
+  publicModel: string;
+  routable: boolean;
+  routingRanks: number[];
+  target: AliasPageTarget | null;
+  upstreamModel: string;
+}
+export interface AliasPageGroup {
+  continued: boolean;
+  hasOverlap: boolean;
+  matchingRows: number;
+  publicModel: string;
+  publicationKey: string;
+  published: boolean;
+  rows: AliasPageRow[];
+  totalRows: number;
+}
+export interface AliasesPage {
+  asOf: string;
+  errors: PageReadIssue[];
+  filteredGroups: number;
+  filteredRows: number;
+  groups: AliasPageGroup[];
+  hasMore: boolean;
+  limit: number;
+  offset: number;
+  readVersion: string;
+  revision: ControlRevision;
+  totalGroups: number;
+  totalRows: number;
+  validUntil: string | null;
+}
+export interface AccountPageRefresh {
+  account: Account | null;
+  billing: BillingStatus | null;
+  errors: PageReadIssue[];
+  outcome: string;
+  refresh: AccountRefreshFact;
+  revision: ControlRevision;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface AccountPageRefreshRequest {
+  expectedRevision: number;
+  mode: AccountPageRefreshMode;
+  processGeneration: number;
+}
+export interface ByokInspection {
+  activationRequired: boolean;
+  backupPath: string | null;
+  client: ByokClient;
+  configPath: string;
+  configureSupported: boolean;
+  configuredModelIds: string[];
+  defaultModelId: string | null;
+  detail: string | null;
+  detected: boolean;
+  discoverySource: string;
+  fingerprint: string | null;
+  recoverySupported: boolean;
+  removeSupported: boolean;
+  requiresClosedClient: boolean;
+  status: ByokStatus;
+  targetPaths: string[];
+}
+export interface ByokApplication {
+  activationRequired: boolean;
+  backupPath: string | null;
+  client: ByokClient;
+  configPath: string;
+  configureSupported: boolean;
+  configuredModelIds: string[];
+  defaultModelId: string | null;
+  detail: string | null;
+  detected: boolean;
+  discoverySource: string;
+  fingerprint: string | null;
+  gatewayV1Url: string;
+  recoverySupported: boolean;
+  removeSupported: boolean;
+  requiresClosedClient: boolean;
+  revision: ControlRevision;
+  status: ByokStatus;
+  targetPaths: string[];
+}
+export interface ByokConfigureRequest {
+  clientClosed: boolean;
+  expectedFingerprint: string;
+  expectedRevision: number;
+  processGeneration: number;
+  targetPath?: string | null;
+}
+export interface ByokMutationRequest {
+  clientClosed: boolean;
+  expectedFingerprint: string;
+  expectedRevision: number;
+  processGeneration: number;
+  targetPath?: string | null;
+}
+/**
+ * Stable non-2xx JSON envelope for every Dashboard V3 error.
+ */
+export interface V3Error {
+  code: string;
+  currentRevision: number | null;
+  message: string;
+  processGeneration: number | null;
+}
+export interface EndpointSpec {
+  locked: boolean;
+  operation: EndpointOperation;
+  url: string | null;
+  wireProtocol: AccountUpstreamProtocol;
+}
+export interface ProviderTemplate {
+  adapterKind: string;
+  authSchemes: AccountAuthScheme[];
+  credentialKind: AccountCredentialKind;
+  defaultEndpoints: EndpointSpec[];
+  displayName: string;
+  editableFields: string[];
+  familyId: string | null;
+  id: string;
+  offeringTags: OfferingKind[];
+  pricingMultiplierEditable: boolean;
+  source: TemplateSource;
+  upstreamProtocols: AccountUpstreamProtocol[];
+  version: number;
+}
+export interface TemplateList {
+  templates: ProviderTemplate[];
+}
+export interface ConnectionList {
+  connections: ConnectionSummary[];
+  revision: ControlRevision;
+}
+/**
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
+ */
+export interface OnboardingCommitRequest {
+  authorization?: OnboardingAuthorization | null;
+  /**
+   * Explicit consent to union safe current default/same-origin grants.
+   * Ignored unless `mode` is present; false is omitted from the digest.
+   */
+  authorizeCurrentEndpoint?: boolean;
+  connection: OnboardingConnection;
+  expectedRevision: number;
+  /**
+   * Omitted preserves legacy commit behavior and HMAC digest bytes.
+   */
+  mode?: OnboardingCommitMode | null;
+  operationId: string;
+  processGeneration: number;
+  targets: OnboardingTarget[];
+}
+export interface OnboardingConnectionNew {
+  authKind: ProviderDefinitionAuthKind;
+  endpointUrl: string;
+  name: string;
+  protocolRoutes?: HttpProtocolRouteDto[] | null;
+  templateId: string;
+  upstreamProtocol: AccountUpstreamProtocol;
+}
+export interface OnboardingTarget {
+  publicModel: string;
+  upstreamModel: string;
+  upstreamOverride?: OnboardingUpstreamOverride | null;
+}
+export interface OnboardingUpstreamOverride {
+  endpointUrl: string;
+  protocol: AccountUpstreamProtocol;
+}
+export interface OnboardingCommitResult {
+  /**
+   * Legacy receipts omit this; replay emits null via serde default.
+   */
+  accountId: string | null;
+  connectionId: string;
+  credentialId: string | null;
+  replayed: boolean;
+  revision: ControlRevision;
+  targetIds: string[];
+}
+export interface IdentityList {
+  identities: IdentitySummary[];
+  revision: ControlRevision;
 }
 /**
  * Required process-scoped mutation precondition.
@@ -917,136 +2367,6 @@ export interface CatalogModelsAddRequest {
   processGeneration: number;
 }
 /**
- * Effective provider-scope and custom-endpoint contracts.
- *
- * Top-level `revision` is the settings CAS token. Nested `revision` values
- * are display-only and must not be sent as `expectedRevision`.
- */
-export interface ProviderContracts {
-  customEndpoints: CustomEndpointContract[];
-  pricingRevision: string;
-  processGeneration: number;
-  providers: ProviderContractGroup[];
-  revision: number;
-}
-/**
- * One Custom API account scope. Distinct from built-in provider groups.
- */
-export interface CustomEndpointContract {
-  account: ProviderAccountChoice;
-  card: CardCapabilitySummary;
-  catalog: EffectiveCatalog;
-  catalogRoutable: boolean;
-  disabledReasons: string[];
-  models: EffectiveModelContract[];
-  pricing: CapabilitySummary;
-  productionInference: boolean;
-  providerId: string;
-  /**
-   * Display revision for this endpoint, distinct from the top-level CAS token.
-   */
-  revision: number;
-  scopeId: string;
-  scopeKind: ContractScopeKind;
-  usage: CapabilitySummary;
-}
-/**
- * Secret-free account identity on a contract card.
- */
-export interface ProviderAccountChoice {
-  enabled: boolean;
-  id: string;
-  name: string;
-  verificationStatus: AccountVerificationStatus;
-}
-/**
- * Provider-page actions that are actually implemented for this scope.
- */
-export interface CardCapabilitySummary {
-  catalogRefresh: boolean;
-  discoverModels: boolean;
-  fetchZenModels: boolean;
-  protocolProbe: boolean;
-}
-/**
- * Merged model-id catalog for one contract scope.
- */
-export interface EffectiveCatalog {
-  models: string[];
-  refreshSupported: boolean;
-  refreshedAt: string | null;
-  source: string;
-  sourceUrl: string;
-}
-/**
- * One model's preferred protocol and per-protocol evidence.
- */
-export interface EffectiveModelContract {
-  alias: string;
-  disabledReasons: string[];
-  modelId: string;
-  preferredProtocol: AccountUpstreamProtocol;
-  protocols: EffectiveModelProtocols;
-  routable: boolean;
-}
-/**
- * Per-protocol evidence keyed by snake_case protocol tokens. Missing
- * protocols serialize as `null` and must not be invented as available.
- */
-export interface EffectiveModelProtocols {
-  chat_completions: EffectiveProtocolEvidence | null;
-  messages: EffectiveProtocolEvidence | null;
-  responses: EffectiveProtocolEvidence | null;
-}
-/**
- * Merged evidence for one upstream protocol on one model.
- */
-export interface EffectiveProtocolEvidence {
-  available: boolean;
-  enabled: boolean;
-  lastProbeAt: string | null;
-  lastProbeError: string | null;
-  lastProbeResult: ProbeResultKind | null;
-  observedAt: string | null;
-  override: ProtocolOverrideState;
-  protocol: AccountUpstreamProtocol;
-  source: ContractEvidenceSource;
-  verifiedAt: string | null;
-}
-/**
- * Registry pricing or usage availability copied as display data.
- */
-export interface CapabilitySummary {
-  availability: string;
-}
-/**
- * One built-in Provider contract scope.
- */
-export interface ProviderContractGroup {
-  accounts: ProviderAccountChoice[];
-  card: CardCapabilitySummary;
-  catalog: EffectiveCatalog;
-  catalogRoutable: boolean;
-  disabledReasons: string[];
-  models: EffectiveModelContract[];
-  pricing: CapabilitySummary;
-  productionInference: boolean;
-  providerId: string;
-  /**
-   * Display revision for this scope, distinct from the top-level CAS token.
-   */
-  revision: number;
-  scopeId: string;
-  scopeKind: ContractScopeKind;
-  /**
-   * The built-in provider's static protocol-evidence snapshot date. This is
-   * `null` when the scope has no restorable snapshot and is distinct from
-   * catalog `refreshed_at`.
-   */
-  staticProtocolSnapshotDate: string | null;
-  usage: CapabilitySummary;
-}
-/**
  * Remove models from a persisted built-in Provider catalog snapshot.
  *
  * Local-only. An official catalog refresh may add the same IDs back.
@@ -1152,155 +2472,6 @@ export interface DestinationList {
   revision: ControlRevision;
 }
 /**
- * Secret-free destination facts and derived account controls.
- */
-export interface DestinationDto {
-  accountControls: AccountControlsDto;
-  adapter: AdapterKindDto;
-  authScheme: AuthSchemeDto;
-  /**
-   * Upstream origin. Sealed for builtin adapters; user data for `http`.
-   */
-  baseUrl: string | null;
-  /**
-   * Brand family for grouping, when the adapter or platform kind has one.
-   */
-  brandFamily: string | null;
-  capabilities: CapabilitiesDto;
-  catalog: CatalogModelDto[];
-  /**
-   * Destination enablement.
-   */
-  enabled: boolean;
-  /**
-   * Stable destination id (deterministic UUIDv5 of the legacy row).
-   */
-  id: string;
-  legacy: LegacyDestinationRefDto;
-  /**
-   * `1` for true singletons; `null` for multi-credential destinations.
-   */
-  maxCredentials: number | null;
-  /**
-   * Model-name resolution owned by this destination.
-   */
-  modelResolution: "adapter_defined" | "public_only" | "public_and_upstream";
-  /**
-   * Display name.
-   */
-  name: string;
-  /**
-   * Non-inference observer credential id when `capabilities.observer` is set.
-   */
-  observerCredentialId: string | null;
-  plan: PlanDto | null;
-  protocolRoutes: HttpProtocolRouteDto[];
-  protocols: ProtocolDto[];
-}
-/**
- * Read-only account actions derived from the destination's resource ownership.
- */
-export interface AccountControlsDto {
-  browserProfile: boolean;
-  configurationOwner: AccountConfigurationOwnerDto;
-  consoleLink: AccountConsoleLinkDto | null;
-  toggleWrite: AccountToggleWriteDto;
-}
-/**
- * Destination capability flags. Mirrors the domain `Capabilities` record.
- */
-export interface CapabilitiesDto {
-  /**
-   * A billing tier must be selected before the destination is usable.
-   */
-  billingTierRequired: boolean;
-  /**
-   * The destination can discover models from the upstream.
-   */
-  discoverableModels: boolean;
-  /**
-   * The destination is an external integration and holds no local inference secret.
-   */
-  externalIntegration: boolean;
-  /**
-   * The adapter attaches identity headers on egress.
-   */
-  identityHeaders: boolean;
-  /**
-   * Managed signup can start an onboarding task on a credential.
-   */
-  managedSignup: boolean;
-  /**
-   * The destination holds a non-inference observer credential (platform parent).
-   */
-  observer: boolean;
-  /**
-   * Hosts Configurable HTTP may probe for an official current-balance API.
-   */
-  officialBalanceProbe: string[];
-  redirectPolicy: RedirectPolicyDto;
-  /**
-   * Test connection is offered on every ready credential except external integrations.
-   */
-  testable: boolean;
-}
-/**
- * One catalog model on a destination.
- */
-export interface CatalogModelDto {
-  /**
-   * Whether any protocol is enabled.
-   */
-  enabled: boolean;
-  preferred: ProtocolDto | null;
-  protocols: ProtocolDto[];
-  /**
-   * Public name exposed to clients.
-   */
-  publicModel: string;
-  /**
-   * Upstream model id sent on egress.
-   */
-  upstreamModel: string;
-  upstreamOverride: DestinationUpstreamOverridePatch | null;
-}
-/**
- * Optional per-model route override for a configurable HTTP destination.
- */
-export interface DestinationUpstreamOverridePatch {
-  endpointUrl: string;
-  protocol: ProtocolDto;
-}
-/**
- * V3 row this destination was projected from.
- */
-export interface LegacyDestinationRefDto {
-  /**
-   * Row id in the V3 model named by `kind`.
-   */
-  id: string;
-  kind: LegacyDestinationKindDto;
-}
-/**
- * Commercial offering embedded in a destination. Mirrors the domain `Plan`.
- */
-export interface PlanDto {
-  expiryCadence: ExpiryCadenceDto | null;
-  /**
-   * Operators may enter local usage numbers by hand.
-   */
-  manualCalibration: boolean;
-  pricingSource: PricingSourceDto;
-  usageSource: UsageSourceDto;
-  windows: PlanWindowDto[];
-}
-/**
- * One Plan usage window.
- */
-export interface PlanWindowDto {
-  kind: PlanWindowKindDto;
-}
-/**
  * Complete public-to-upstream mapping written by a destination PATCH.
  */
 export interface DestinationModelPatch {
@@ -1342,126 +2513,6 @@ export interface DestinationPatchResult {
   destination: DestinationDto;
   revision: ControlRevision;
 }
-/**
- * RFC credential projection row. Carries `hasSecret` only; never ciphertext or plaintext.
- */
-export interface DestinationCredentialDto {
-  authState: AuthState;
-  cooldowns: CredentialCooldownsDto;
-  /**
-   * Destination this credential routes through.
-   */
-  destinationId: string;
-  /**
-   * Routing enable switch (`account.enabled && binding.enabled`).
-   */
-  enabled: boolean;
-  grants: CredentialGrantsDto;
-  /**
-   * Whether a secret is stored. Always false for keyless Zen and CPA.
-   */
-  hasSecret: boolean;
-  /**
-   * Stable credential id (deterministic UUIDv5 of the legacy account).
-   */
-  id: string;
-  /**
-   * Last error string from the legacy account row, or null.
-   */
-  lastError: string | null;
-  /**
-   * The V3 `accounts` row this credential was projected from (migration-era
-   * bridge to the V3 mutation routes).
-   */
-  legacyAccountId: string;
-  /**
-   * Display name.
-   */
-  name: string;
-  /**
-   * Operator notes.
-   */
-  notes: string | null;
-  onboardingTask: DestinationOnboardingTaskDto | null;
-  /**
-   * Purchase date when the destination has a Plan.
-   */
-  purchaseDate: string | null;
-  /**
-   * Shared quota pool id when the credential joined one.
-   */
-  quotaPoolId: string | null;
-  /**
-   * Confirmed per-Key exhaustion/recovery. Omitted or null means no confirmed exhaustion.
-   */
-  quotaRecovery?: QuotaRecoveryDto | null;
-  /**
-   * Position in the persisted account order.
-   */
-  routingRank: number;
-  scope: ModelScope;
-}
-/**
- * Per-window cooldown timestamps on a projected credential.
- */
-export interface CredentialCooldownsDto {
-  /**
-   * Five-hour window cooldown expiry as RFC 3339, or null.
-   */
-  fiveHourUntil: string | null;
-  /**
-   * Free-window cooldown expiry as RFC 3339, or null.
-   */
-  freeUntil: string | null;
-  /**
-   * Generic cooldown expiry as RFC 3339, or null.
-   */
-  genericUntil: string | null;
-  /**
-   * Monthly window cooldown expiry as RFC 3339, or null.
-   */
-  monthUntil: string | null;
-  /**
-   * Weekly window cooldown expiry as RFC 3339, or null.
-   */
-  weekUntil: string | null;
-}
-/**
- * Allowed egress grants on a projected credential.
- */
-export interface CredentialGrantsDto {
-  /**
-   * Endpoint ids this secret may be sent to.
-   */
-  allowedEndpointIds: string[];
-  /**
-   * Origins this secret may be sent to.
-   */
-  allowedOrigins: string[];
-}
-/**
- * Managed-signup task on a projected credential. Domain shape; no task id.
- */
-export interface DestinationOnboardingTaskDto {
-  kind: OnboardingTaskKind;
-  state: OnboardingTaskState;
-  /**
-   * Current setup step string.
-   */
-  step: string;
-}
-/**
- * Optional per-Key quota recovery overlay. Status is presentation-only.
- */
-export interface QuotaRecoveryDto {
-  failureCount: number;
-  nextRetryAt: string;
-  observedAt: string;
-  reason: QuotaRecoveryReason;
-  resetsAt: string | null;
-  status: QuotaRecoveryStatus;
-  window: QuotaRecoveryWindow;
-}
 export interface DestinationCatalogRefreshResult {
   addedCount: number;
   destination: DestinationDto;
@@ -1486,23 +2537,6 @@ export interface DestinationCatalogModelUpdate {
   preferred?: ProtocolDto | null;
   protocols?: ProtocolDto[] | null;
   publicModel: string;
-}
-export interface ModelMetadata {
-  contextWindow?: number | null;
-  inputModalities?: string[] | null;
-  maxOutputTokens?: number | null;
-  name?: string | null;
-  outputModalities?: string[] | null;
-  parallelToolCalls?: boolean | null;
-  reasoning?: boolean | null;
-  /**
-   * Exact DSH selector level -> Chat Completions reasoning_effort spelling.
-   * Absence is unknown, an empty map explicitly offers no selectable levels.
-   */
-  reasoningEfforts?: {
-    [k: string]: string;
-  } | null;
-  toolCalling?: boolean | null;
 }
 export interface DestinationModelMetadata {
   destinationId: string;
@@ -1578,11 +2612,6 @@ export interface CredentialList {
   credentials: DestinationCredentialDto[];
   revision: ControlRevision;
 }
-export interface RoutingCard {
-  credentialIds: string[];
-  destinationId: string;
-  id: string;
-}
 /**
  * One consistent, secret-free snapshot of cards and the resources they show.
  */
@@ -1646,132 +2675,6 @@ export interface RefusedRowDto {
    * Provider id when the refused row is an account.
    */
   providerId: string | null;
-}
-export interface OfficialBalance {
-  currency: string;
-  granted: number;
-  observedAt: string;
-  toppedUp: number;
-  total: number;
-}
-export interface OfficialSpend {
-  amount: number;
-  currency: string;
-  pricedRequests: number;
-}
-export interface OfficialApiStatus {
-  accountId: string;
-  balanceAvailable: boolean;
-  balances: OfficialBalance[];
-  kind: OfficialApiKind;
-  lifetimeSpend: OfficialSpend[];
-  monthSpend: OfficialSpend[];
-  monthStartedAt: string;
-  processGeneration: number;
-  providerId: string;
-  revision: number;
-  unpricedRequests: number;
-}
-export interface BillingStatus {
-  accountId: string;
-  cash: OfficialApiStatus | null;
-  configurableCredits: boolean;
-  credits: CreditMeterView | null;
-  manualCalibration: boolean;
-  model: BillingModel;
-  officialRefresh: boolean;
-  presets: CreditPreset[];
-  processGeneration: number;
-  revision: number;
-  source: BillingSource;
-  unit: string;
-  usage: ProviderUsage | null;
-}
-export interface CreditMeterView {
-  activeGranted: number;
-  buckets: CreditBucket[];
-  configuration: CreditConfiguration;
-  credentialId: string;
-  estimatedAt: string;
-  lastCalibrationAt: string | null;
-  meterId: string;
-  /**
-   * Next actual renewal; configuration.next_reset_at remains the calendar anchor.
-   */
-  nextResetAt: string | null;
-  overdrawn: number;
-  pendingRequests: number;
-  remaining: number;
-  spentSinceCalibration: number;
-  unpricedRequests: number;
-}
-export interface CreditBucket {
-  expiresAt: string | null;
-  granted: number;
-  id: string;
-  kind: CreditBucketKind;
-  label: string;
-  remaining: number;
-  startsAt: string;
-}
-/**
- * GET `/accounts/{id}/provider-usage` body. Distinct from stored quota rows.
- *
- * `pricingRevision` is always absent. Usage is no longer a pricing CAS token.
- */
-export interface ProviderUsage {
-  accountId: string;
-  availability: UsageAvailability;
-  creditBalances: CreditBalance[];
-  experimental: boolean;
-  freeCooldownUntil: string | null;
-  pricingRevision: string | null;
-  processGeneration: number;
-  providerId: string;
-  quotaWindows: QuotaWindow[];
-  revision: number;
-  syncState: UsageSyncState | null;
-}
-/**
- * One credit balance row as projected for provider usage. Distinct from the
- * stored provider credit row.
- */
-export interface CreditBalance {
-  accountId: string;
-  amount: number;
-  balanceKind: string;
-  observedAt: string | null;
-  source: string;
-  unit: string;
-  updatedAt: string;
-}
-/**
- * One live or synthetic quota window. Distinct from `models::QuotaWindow`.
- */
-export interface QuotaWindow {
-  accountId: string;
-  calibrationOffset: number;
-  limitValue: number | null;
-  observedAt: string | null;
-  resetsAt: string | null;
-  source: string;
-  startedAt: string | null;
-  unit: string;
-  updatedAt: string;
-  used: number;
-  windowKind: string;
-}
-/**
- * Official-usage sync metadata as projected for provider usage. Distinct from
- * the stored `provider_usage_sync_state` row.
- */
-export interface UsageSyncState {
-  accountId: string;
-  failureStreak: number;
-  lastAttemptAt: string | null;
-  lastExpeditedAt: string | null;
-  lastSuccessAt: string | null;
-  nextEligibleAt: string | null;
 }
 /**
  * Bounded, local-only batch read; it is not a control-plane mutation.
@@ -1923,8 +2826,22 @@ export interface TemporaryPolicyBuiltin {
 }
 export interface TemporaryPolicyConfiguration {
   builtins: TemporaryPolicyBuiltin[];
+  effectiveViews: TemporaryPolicyEffectiveView[];
   revision: ControlRevision;
   rules: TemporaryPolicyRule[];
+}
+export interface TemporaryPolicyEffectiveView {
+  destinationId: string | null;
+  rules: TemporaryPolicyEffectiveRule[];
+}
+export interface TemporaryPolicyEffectiveRule {
+  applicable: boolean;
+  backoff: TemporaryPolicyBackoff;
+  origin: TemporaryPolicyRuleOrigin;
+  overridden: boolean;
+  rule: TemporaryPolicyRule;
+  scope: TemporaryPolicyScope;
+  source: TemporaryPolicySource;
 }
 export interface TemporaryPolicyRestriction {
   credentialId: string;

@@ -110,6 +110,91 @@ pub async fn read(client: &reqwest::Client, request: &PlatformReadRequest<'_>) -
     snapshot
 }
 
+/// Observe one linked inference Key's quota only. Page-driven automatic
+/// refreshes must not discover model catalogs, prices, or platform groups.
+pub(crate) async fn read_observation(
+    client: &reqwest::Client,
+    request: &PlatformReadRequest<'_>,
+) -> PlatformSnapshot {
+    let mut snapshot = PlatformSnapshot {
+        observed_at: request.now,
+        ..PlatformSnapshot::default()
+    };
+    let Ok(base) = super::validate_platform_base_url(request.base_url)
+        .and_then(|root| reqwest::Url::parse(&root).map_err(Into::into))
+    else {
+        snapshot.errors.push(ERR_BASE_URL_INVALID.into());
+        snapshot.stale = true;
+        return snapshot;
+    };
+    let Some(key) = trim_secret(request.key) else {
+        snapshot.errors.push(ERR_AUTH_MISSING.into());
+        snapshot.stale = true;
+        return snapshot;
+    };
+    match request.kind {
+        PlatformKind::NewApi => {
+            let quota_per_unit =
+                match get_json(client, &base, "api/status", "new_api.status", None, None).await {
+                    Ok(fetched) => match new_api_data(&fetched.value, "new_api.status") {
+                        Ok(data) => json_f64(data.get("quota_per_unit")).filter(|v| *v > 0.0),
+                        Err(error) => {
+                            push_error(&mut snapshot, error);
+                            None
+                        }
+                    },
+                    Err(error) => {
+                        push_error(&mut snapshot, error);
+                        None
+                    }
+                };
+            match get_json(
+                client,
+                &base,
+                "api/usage/token/",
+                "new_api.token_usage",
+                Some(key),
+                None,
+            )
+            .await
+            {
+                Ok(fetched) => {
+                    match new_api_token_usage_data(&fetched.value, "new_api.token_usage") {
+                        Ok(data) => parse_new_api_token_usage(
+                            data,
+                            &mut BTreeSet::new(),
+                            &mut snapshot,
+                            quota_per_unit,
+                        ),
+                        Err(error) => push_error(&mut snapshot, error),
+                    }
+                }
+                Err(error) => push_error(&mut snapshot, error),
+            }
+        }
+        PlatformKind::Sub2api => {
+            match get_json(client, &base, "v1/usage", "sub2api.usage", Some(key), None).await {
+                Ok(fetched) => {
+                    if let Err(error) = parse_sub2_usage(&fetched.value, &mut snapshot) {
+                        push_error(&mut snapshot, error);
+                    }
+                }
+                Err(error) => push_error(&mut snapshot, error),
+            }
+        }
+    }
+    snapshot.models.clear();
+    snapshot.prices.clear();
+    snapshot.groups.clear();
+    scrub_secrets(
+        &mut snapshot,
+        trim_secret(request.user_credential),
+        Some(key),
+    );
+    snapshot.stale = !snapshot.errors.is_empty();
+    snapshot
+}
+
 fn trim_secret(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }

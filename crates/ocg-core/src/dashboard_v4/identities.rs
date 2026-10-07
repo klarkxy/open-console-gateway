@@ -478,7 +478,7 @@ fn encrypt_connection_secret(
     state.encrypt_key(secret).map_err(V3ApiError::internal)
 }
 
-fn project_identities(
+pub(super) fn project_identities(
     state: &CoreState,
     snapshot: IdentityModelSnapshot,
     dynamic_providers: &[DynamicProviderRuntime],

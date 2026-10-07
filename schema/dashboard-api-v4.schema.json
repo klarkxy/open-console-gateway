@@ -1,6 +1,211 @@
 {
   "$comment": "Extensible Dashboard V4 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. Connection, template, destination, and credential listings are secret-free. OnboardingCommitRequest.secretInput, CredentialRotateRequest.secretInput, and IdentityCredentialCreateRequest.secretInput are write-only. Operation and request log reads redact known stored secrets.",
   "$defs": {
+    "Account": {
+      "additionalProperties": false,
+      "description": "Secret-free account resource. Distinct from `models::Account`.\n\nResponses emit `T | null` for every optional field. Plaintext upstream\nkeys, passwords, ciphers, gateway Keys, and referral codes never appear.",
+      "properties": {
+        "accountType": {
+          "$ref": "#/$defs/AccountType"
+        },
+        "authError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "connectionVerifiedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldown5hUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldownFreeUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldownGenericUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldownMonthUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldownUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldownWeekUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "credentialKind": {
+          "$ref": "#/$defs/AccountCredentialKind"
+        },
+        "customConfig": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountCustomConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "expiresOn": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "modelCapabilities": {
+          "items": {
+            "$ref": "#/$defs/AccountModelCapability"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ollamaBillingTier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OllamaBillingTier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "planRoutable": {
+          "type": "boolean"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "purchaseDate": {
+          "type": "string"
+        },
+        "quotaScope": {
+          "$ref": "#/$defs/AccountQuotaScope"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "setupStep": {
+          "$ref": "#/$defs/AccountSetupStep"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "usageSyncLastSuccessAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "usageSyncNextAllowedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verificationError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verificationStatus": {
+          "$ref": "#/$defs/AccountVerificationStatus"
+        }
+      },
+      "required": [
+        "id",
+        "providerId",
+        "credentialKind",
+        "quotaScope",
+        "name",
+        "username",
+        "enabled",
+        "accountType",
+        "setupStep",
+        "purchaseDate",
+        "expiresOn",
+        "cooldownUntil",
+        "cooldownGenericUntil",
+        "cooldown5hUntil",
+        "cooldownWeekUntil",
+        "cooldownMonthUntil",
+        "cooldownFreeUntil",
+        "lastError",
+        "authError",
+        "notes",
+        "usageSyncLastSuccessAt",
+        "usageSyncNextAllowedAt",
+        "createdAt",
+        "updatedAt",
+        "revision",
+        "processGeneration",
+        "verificationStatus",
+        "connectionVerifiedAt",
+        "verificationError",
+        "planRoutable",
+        "customConfig",
+        "modelCapabilities",
+        "ollamaBillingTier"
+      ],
+      "type": "object"
+    },
     "AccountAuthScheme": {
       "description": "Custom auth scheme. Wire values match V2 kebab-case.",
       "enum": [
@@ -9,6 +214,170 @@
         "api-key"
       ],
       "type": "string"
+    },
+    "AccountCardCredentialsPage": {
+      "additionalProperties": false,
+      "properties": {
+        "asOf": {
+          "type": "string"
+        },
+        "cardId": {
+          "type": "string"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/PageReadIssue"
+          },
+          "type": "array"
+        },
+        "filteredTotal": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hasMore": {
+          "type": "boolean"
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "readVersion": {
+          "type": "string"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/AccountPageRow"
+          },
+          "type": "array"
+        },
+        "total": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "validUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "revision",
+        "readVersion",
+        "asOf",
+        "validUntil",
+        "cardId",
+        "total",
+        "filteredTotal",
+        "rows",
+        "offset",
+        "limit",
+        "hasMore",
+        "errors"
+      ],
+      "type": "object"
+    },
+    "AccountCardPageItem": {
+      "additionalProperties": false,
+      "properties": {
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/PageAction"
+          },
+          "type": "array"
+        },
+        "availability": {
+          "type": "string"
+        },
+        "cardId": {
+          "type": "string"
+        },
+        "cpaStatus": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credentialCreate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CredentialCreateCapabilityDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "destination": {
+          "$ref": "#/$defs/DestinationSummary"
+        },
+        "matchedCredentials": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "platform": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlatformSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "position": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/AccountPageRow"
+          },
+          "type": "array"
+        },
+        "rowsHasMore": {
+          "type": "boolean"
+        },
+        "rowsOffset": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "totalCredentials": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cardId",
+        "position",
+        "destination",
+        "platform",
+        "totalCredentials",
+        "matchedCredentials",
+        "rows",
+        "credentialCreate",
+        "actions",
+        "availability",
+        "rowsOffset",
+        "rowsHasMore",
+        "cpaStatus"
+      ],
+      "type": "object"
     },
     "AccountConfigurationOwnerDto": {
       "description": "Owner of endpoint, protocol and model configuration.",
@@ -65,11 +434,890 @@
       ],
       "type": "string"
     },
+    "AccountCredentialShareTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "type": "object"
+    },
+    "AccountCredentialSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "authState": {
+          "$ref": "#/$defs/AuthState"
+        },
+        "cooldowns": {
+          "$ref": "#/$defs/CredentialCooldownsDto"
+        },
+        "destinationId": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "grants": {
+          "$ref": "#/$defs/CredentialGrantsDto"
+        },
+        "hasSecret": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "keyPreview": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "legacyAccountId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "onboardingTask": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DestinationOnboardingTaskDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "purchaseDate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quotaPoolId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quotaRecovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QuotaRecoveryDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "routingRank": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/CredentialScopeSummary"
+        }
+      },
+      "required": [
+        "id",
+        "legacyAccountId",
+        "destinationId",
+        "name",
+        "notes",
+        "hasSecret",
+        "keyPreview",
+        "enabled",
+        "routingRank",
+        "scope",
+        "grants",
+        "authState",
+        "lastError",
+        "cooldowns",
+        "quotaPoolId",
+        "onboardingTask",
+        "purchaseDate",
+        "quotaRecovery"
+      ],
+      "type": "object"
+    },
+    "AccountCustomConfig": {
+      "additionalProperties": false,
+      "description": "Nested Custom HTTP destination as returned on an account.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "endpointUrl": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "upstreamProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        }
+      },
+      "required": [
+        "accountId",
+        "endpointUrl",
+        "upstreamProtocol",
+        "createdAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "AccountModelCapability": {
+      "additionalProperties": false,
+      "description": "One declared Custom model capability as returned on an account.",
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "publicModel": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "upstreamModel": {
+          "type": "string"
+        },
+        "verifiedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "publicModel",
+        "upstreamModel",
+        "protocol",
+        "verifiedAt",
+        "source"
+      ],
+      "type": "object"
+    },
+    "AccountOperationDetail": {
+      "additionalProperties": false,
+      "properties": {
+        "allowedConnections": {
+          "items": {
+            "$ref": "#/$defs/ConnectionSummary"
+          },
+          "type": "array"
+        },
+        "binding": {
+          "type": "boolean"
+        },
+        "bindingId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "create": {
+          "type": "boolean"
+        },
+        "credentialId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "grantedEndpointIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "identityId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rotate": {
+          "type": "boolean"
+        },
+        "shareTargets": {
+          "items": {
+            "$ref": "#/$defs/AccountCredentialShareTarget"
+          },
+          "type": "array"
+        },
+        "staleEndpointIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "staleOrigins": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "testModels": {
+          "items": {
+            "$ref": "#/$defs/AccountTestModelChoice"
+          },
+          "type": "array"
+        },
+        "unsupportedReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "rotate",
+        "binding",
+        "create",
+        "unsupportedReason",
+        "credentialId",
+        "bindingId",
+        "identityId",
+        "allowedConnections",
+        "shareTargets",
+        "testModels",
+        "grantedEndpointIds",
+        "staleEndpointIds",
+        "staleOrigins"
+      ],
+      "type": "object"
+    },
+    "AccountPageDetail": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "$ref": "#/$defs/Account"
+        },
+        "connection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConnectionSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "credential": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DestinationCredentialDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "destination": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DestinationDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "identity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IdentitySummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operations": {
+          "$ref": "#/$defs/AccountOperationDetail"
+        },
+        "platform": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlatformAccount"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "platformLink": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlatformLink"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "account",
+        "destination",
+        "credential",
+        "identity",
+        "connection",
+        "platform",
+        "platformLink",
+        "operations"
+      ],
+      "type": "object"
+    },
+    "AccountPageLayout": {
+      "additionalProperties": false,
+      "properties": {
+        "cards": {
+          "items": {
+            "$ref": "#/$defs/RoutingCard"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "cards"
+      ],
+      "type": "object"
+    },
+    "AccountPageRefresh": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Account"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "billing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BillingStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/PageReadIssue"
+          },
+          "type": "array"
+        },
+        "outcome": {
+          "type": "string"
+        },
+        "refresh": {
+          "$ref": "#/$defs/AccountRefreshFact"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        }
+      },
+      "required": [
+        "revision",
+        "outcome",
+        "billing",
+        "account",
+        "refresh",
+        "errors"
+      ],
+      "type": "object"
+    },
+    "AccountPageRefreshMode": {
+      "enum": [
+        "automatic",
+        "manual"
+      ],
+      "type": "string"
+    },
+    "AccountPageRefreshRequest": {
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "mode": {
+          "$ref": "#/$defs/AccountPageRefreshMode"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "AccountPageRow": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/PageAction"
+          },
+          "type": "array"
+        },
+        "billing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BillingStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "credential": {
+          "$ref": "#/$defs/AccountCredentialSummary"
+        },
+        "inferenceEndpointUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "modelCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "platformLink": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlatformLinkSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "refresh": {
+          "$ref": "#/$defs/AccountRefreshFact"
+        },
+        "routeAvailable": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string"
+        },
+        "tags": {
+          "$ref": "#/$defs/AccountPageTags"
+        }
+      },
+      "required": [
+        "credential",
+        "account",
+        "platformLink",
+        "status",
+        "routeAvailable",
+        "modelCount",
+        "inferenceEndpointUrl",
+        "actions",
+        "billing",
+        "refresh",
+        "tags"
+      ],
+      "type": "object"
+    },
+    "AccountPageTags": {
+      "additionalProperties": false,
+      "properties": {
+        "bindingDisabled": {
+          "type": "boolean"
+        },
+        "credentialCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "duplicateName": {
+          "type": "boolean"
+        },
+        "quotaShareCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "quotaShareName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "credentialCount",
+        "bindingDisabled",
+        "quotaShareName",
+        "quotaShareCount",
+        "duplicateName"
+      ],
+      "type": "object"
+    },
+    "AccountPlanFilter": {
+      "additionalProperties": false,
+      "properties": {
+        "cardCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "credentialCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "label": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "label",
+        "cardCount",
+        "credentialCount"
+      ],
+      "type": "object"
+    },
+    "AccountQuotaScope": {
+      "description": "Wire identity matching V2 `key` / `egress-ip`.",
+      "enum": [
+        "key",
+        "egress-ip"
+      ],
+      "type": "string"
+    },
+    "AccountRefreshFact": {
+      "additionalProperties": false,
+      "properties": {
+        "freshUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nextAllowedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "supported": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "supported",
+        "observedAt",
+        "freshUntil",
+        "nextAllowedAt"
+      ],
+      "type": "object"
+    },
+    "AccountSetupStep": {
+      "description": "Managed-setup wizard step. Wire values match V2 snake_case.",
+      "enum": [
+        "google_account",
+        "opencode_registration",
+        "payment",
+        "key_verification",
+        "ready"
+      ],
+      "type": "string"
+    },
+    "AccountSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "accountType": {
+          "$ref": "#/$defs/AccountType"
+        },
+        "authError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "connectionVerifiedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldown5hUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldownFreeUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldownGenericUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldownMonthUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldownUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldownWeekUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "credentialKind": {
+          "$ref": "#/$defs/AccountCredentialKind"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "expiresOn": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "modelCapabilityCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ollamaBillingTier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OllamaBillingTier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "planRoutable": {
+          "type": "boolean"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "purchaseDate": {
+          "type": "string"
+        },
+        "quotaScope": {
+          "$ref": "#/$defs/AccountQuotaScope"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "setupStep": {
+          "$ref": "#/$defs/AccountSetupStep"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "usageSyncLastSuccessAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "usageSyncNextAllowedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verificationError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verificationStatus": {
+          "$ref": "#/$defs/AccountVerificationStatus"
+        }
+      },
+      "required": [
+        "id",
+        "providerId",
+        "credentialKind",
+        "quotaScope",
+        "name",
+        "username",
+        "enabled",
+        "accountType",
+        "setupStep",
+        "purchaseDate",
+        "expiresOn",
+        "cooldownUntil",
+        "cooldownGenericUntil",
+        "cooldown5hUntil",
+        "cooldownWeekUntil",
+        "cooldownMonthUntil",
+        "cooldownFreeUntil",
+        "lastError",
+        "authError",
+        "notes",
+        "usageSyncLastSuccessAt",
+        "usageSyncNextAllowedAt",
+        "createdAt",
+        "updatedAt",
+        "revision",
+        "processGeneration",
+        "verificationStatus",
+        "connectionVerifiedAt",
+        "verificationError",
+        "planRoutable",
+        "ollamaBillingTier",
+        "modelCapabilityCount"
+      ],
+      "type": "object"
+    },
+    "AccountTestModelChoice": {
+      "additionalProperties": false,
+      "properties": {
+        "alias": {
+          "type": "string"
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        }
+      },
+      "required": [
+        "modelId",
+        "alias",
+        "protocol"
+      ],
+      "type": "object"
+    },
     "AccountToggleWriteDto": {
       "description": "Persistence target for the account enable switch.",
       "enum": [
         "account",
         "provider_settings"
+      ],
+      "type": "string"
+    },
+    "AccountType": {
+      "description": "Wire identity matching V2 `key` / `managed`.",
+      "enum": [
+        "key",
+        "managed"
       ],
       "type": "string"
     },
@@ -92,6 +1340,102 @@
       ],
       "type": "string"
     },
+    "AccountsPage": {
+      "additionalProperties": false,
+      "properties": {
+        "asOf": {
+          "type": "string"
+        },
+        "cards": {
+          "items": {
+            "$ref": "#/$defs/AccountCardPageItem"
+          },
+          "type": "array"
+        },
+        "conversationSticky": {
+          "type": "boolean"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/PageReadIssue"
+          },
+          "type": "array"
+        },
+        "hasMore": {
+          "type": "boolean"
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "matchedCards": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "matchedCredentials": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "planOptions": {
+          "items": {
+            "$ref": "#/$defs/AccountPlanFilter"
+          },
+          "type": "array"
+        },
+        "readVersion": {
+          "type": "string"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "routingMode": {
+          "$ref": "#/$defs/RoutingMode"
+        },
+        "totalCards": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "totalCredentials": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "validUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "revision",
+        "readVersion",
+        "asOf",
+        "validUntil",
+        "totalCards",
+        "totalCredentials",
+        "matchedCards",
+        "matchedCredentials",
+        "cards",
+        "offset",
+        "limit",
+        "hasMore",
+        "errors",
+        "planOptions",
+        "routingMode",
+        "conversationSticky"
+      ],
+      "type": "object"
+    },
     "AdapterKindDto": {
       "description": "Sealed adapter kind. Wire values match the domain serde names.",
       "enum": [
@@ -105,6 +1449,225 @@
         "http"
       ],
       "type": "string"
+    },
+    "AliasCapabilitySummary": {
+      "additionalProperties": false,
+      "properties": {
+        "destinationId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inputModalities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "outputModalities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "destinationId",
+        "source",
+        "inputModalities",
+        "outputModalities"
+      ],
+      "type": "object"
+    },
+    "AliasPageGroup": {
+      "additionalProperties": false,
+      "properties": {
+        "continued": {
+          "type": "boolean"
+        },
+        "hasOverlap": {
+          "type": "boolean"
+        },
+        "matchingRows": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "publicModel": {
+          "type": "string"
+        },
+        "publicationKey": {
+          "type": "string"
+        },
+        "published": {
+          "type": "boolean"
+        },
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/AliasPageRow"
+          },
+          "type": "array"
+        },
+        "totalRows": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "publicModel",
+        "publicationKey",
+        "published",
+        "totalRows",
+        "matchingRows",
+        "hasOverlap",
+        "continued",
+        "rows"
+      ],
+      "type": "object"
+    },
+    "AliasPageRow": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "$ref": "#/$defs/AliasCapabilitySummary"
+        },
+        "capabilityTarget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AliasPageTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "customAccount": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "customAccountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "destinationId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "type": "string"
+        },
+        "platformLabel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "providerPlan": {
+          "type": "string"
+        },
+        "publicModel": {
+          "type": "string"
+        },
+        "routable": {
+          "type": "boolean"
+        },
+        "routingRanks": {
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AliasPageTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "upstreamModel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "providerId",
+        "destinationId",
+        "publicModel",
+        "upstreamModel",
+        "providerPlan",
+        "customAccountId",
+        "customAccount",
+        "routable",
+        "routingRanks",
+        "platformLabel",
+        "capability",
+        "target",
+        "capabilityTarget"
+      ],
+      "type": "object"
+    },
+    "AliasPageTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "accountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "capabilities": {
+          "type": "boolean"
+        },
+        "destinationId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "providerId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "accountId",
+        "providerId",
+        "destinationId",
+        "model",
+        "capabilities"
+      ],
+      "type": "object"
     },
     "AliasPublication": {
       "additionalProperties": false,
@@ -152,6 +1715,87 @@
         "processGeneration",
         "publicModel",
         "published"
+      ],
+      "type": "object"
+    },
+    "AliasesPage": {
+      "additionalProperties": false,
+      "properties": {
+        "asOf": {
+          "type": "string"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/PageReadIssue"
+          },
+          "type": "array"
+        },
+        "filteredGroups": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "filteredRows": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "groups": {
+          "items": {
+            "$ref": "#/$defs/AliasPageGroup"
+          },
+          "type": "array"
+        },
+        "hasMore": {
+          "type": "boolean"
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "readVersion": {
+          "type": "string"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "totalGroups": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "totalRows": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "validUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "revision",
+        "readVersion",
+        "asOf",
+        "validUntil",
+        "totalGroups",
+        "totalRows",
+        "filteredGroups",
+        "filteredRows",
+        "groups",
+        "offset",
+        "limit",
+        "hasMore",
+        "errors"
       ],
       "type": "object"
     },
@@ -208,6 +1852,43 @@
         "quota",
         "cash",
         "credits"
+      ],
+      "type": "string"
+    },
+    "BillingQuotaEditorLimit": {
+      "additionalProperties": false,
+      "properties": {
+        "editable": {
+          "type": "boolean"
+        },
+        "editableAt": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "double",
+          "type": "number"
+        },
+        "windowKind": {
+          "$ref": "#/$defs/BillingQuotaWindowKind"
+        }
+      },
+      "required": [
+        "windowKind",
+        "limit",
+        "editable",
+        "editableAt"
+      ],
+      "type": "object"
+    },
+    "BillingQuotaWindowKind": {
+      "enum": [
+        "five_hours",
+        "week",
+        "month"
       ],
       "type": "string"
     },
@@ -318,6 +1999,18 @@
           "minimum": 0,
           "type": "integer"
         },
+        "providerWindows": {
+          "type": "boolean"
+        },
+        "quotaEditorLimits": {
+          "items": {
+            "$ref": "#/$defs/BillingQuotaEditorLimit"
+          },
+          "type": "array"
+        },
+        "quotaManualCalibration": {
+          "type": "boolean"
+        },
         "revision": {
           "format": "uint64",
           "minimum": 0,
@@ -325,6 +2018,9 @@
         },
         "source": {
           "$ref": "#/$defs/BillingSource"
+        },
+        "surfaceKind": {
+          "$ref": "#/$defs/BillingSurfaceKind"
         },
         "unit": {
           "type": "string"
@@ -343,10 +2039,14 @@
       "required": [
         "accountId",
         "model",
+        "surfaceKind",
         "source",
         "unit",
         "configurableCredits",
         "manualCalibration",
+        "quotaManualCalibration",
+        "providerWindows",
+        "quotaEditorLimits",
         "officialRefresh",
         "usage",
         "cash",
@@ -356,6 +2056,18 @@
         "processGeneration"
       ],
       "type": "object"
+    },
+    "BillingSurfaceKind": {
+      "enum": [
+        "cash",
+        "cash_balances",
+        "quota",
+        "credits_meter",
+        "credits_setup",
+        "credits_usd_month",
+        "empty"
+      ],
+      "type": "string"
     },
     "BindingDto": {
       "additionalProperties": false,
@@ -1641,6 +3353,31 @@
       ],
       "type": "object"
     },
+    "CredentialScopeSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "modelCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "singleModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "modelCount",
+        "singleModel"
+      ],
+      "type": "object"
+    },
     "CredentialSummary": {
       "additionalProperties": false,
       "properties": {
@@ -1818,6 +3555,12 @@
         "monthly",
         "top_up",
         "manual"
+      ],
+      "type": "string"
+    },
+    "CreditCalibrationBlock": {
+      "enum": [
+        "pending"
       ],
       "type": "string"
     },
@@ -2015,6 +3758,19 @@
           },
           "type": "array"
         },
+        "calibrationBlock": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CreditCalibrationBlock"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "canCalibrate": {
+          "type": "boolean"
+        },
         "configuration": {
           "$ref": "#/$defs/CreditConfiguration"
         },
@@ -2024,6 +3780,13 @@
         "estimatedAt": {
           "format": "date-time",
           "type": "string"
+        },
+        "expiredBuckets": {
+          "description": "Saved expired grants remain visible, but do not contribute to available balances.",
+          "items": {
+            "$ref": "#/$defs/CreditBucket"
+          },
+          "type": "array"
         },
         "lastCalibrationAt": {
           "format": "date-time",
@@ -2056,6 +3819,12 @@
           "format": "double",
           "type": "number"
         },
+        "scheduledBuckets": {
+          "items": {
+            "$ref": "#/$defs/CreditBucket"
+          },
+          "type": "array"
+        },
         "spentSinceCalibration": {
           "format": "double",
           "type": "number"
@@ -2071,6 +3840,10 @@
         "meterId",
         "configuration",
         "buckets",
+        "expiredBuckets",
+        "scheduledBuckets",
+        "calibrationBlock",
+        "canCalibrate",
         "remaining",
         "activeGranted",
         "spentSinceCalibration",
@@ -2170,6 +3943,16 @@
           },
           "type": "array"
         },
+        "presentation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderCatalogPresentation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "pricing": {
           "$ref": "#/$defs/CapabilitySummary"
         },
@@ -2208,7 +3991,218 @@
         "catalogRoutable",
         "productionInference",
         "disabledReasons",
-        "revision"
+        "revision",
+        "presentation"
+      ],
+      "type": "object"
+    },
+    "DashboardAttentionItem": {
+      "additionalProperties": false,
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "accountName": {
+          "type": "string"
+        },
+        "expiredDays": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "reason": {
+          "$ref": "#/$defs/DashboardAttentionReason"
+        }
+      },
+      "required": [
+        "accountId",
+        "accountName",
+        "reason",
+        "expiredDays"
+      ],
+      "type": "object"
+    },
+    "DashboardAttentionReason": {
+      "enum": [
+        "auth-error",
+        "expired",
+        "cooling",
+        "setup-incomplete"
+      ],
+      "type": "string"
+    },
+    "DashboardChartDay": {
+      "additionalProperties": false,
+      "properties": {
+        "date": {
+          "type": "string"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/DashboardModelTotal"
+          },
+          "type": "array"
+        },
+        "totalTokens": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "date",
+        "totalTokens",
+        "models"
+      ],
+      "type": "object"
+    },
+    "DashboardModelTotal": {
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "tokens": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "model",
+        "tokens"
+      ],
+      "type": "object"
+    },
+    "DashboardPage": {
+      "additionalProperties": false,
+      "properties": {
+        "asOf": {
+          "type": "string"
+        },
+        "attentionItems": {
+          "items": {
+            "$ref": "#/$defs/DashboardAttentionItem"
+          },
+          "type": "array"
+        },
+        "attentionLimit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "attentionTotal": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "chartDays": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "chartSeries": {
+          "items": {
+            "$ref": "#/$defs/DashboardChartDay"
+          },
+          "type": "array"
+        },
+        "dailyAverageTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/PageReadIssue"
+          },
+          "type": "array"
+        },
+        "modelTotals": {
+          "items": {
+            "$ref": "#/$defs/DashboardModelTotal"
+          },
+          "type": "array"
+        },
+        "readVersion": {
+          "type": "string"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "summary": {
+          "$ref": "#/$defs/DashboardPageSummary"
+        },
+        "totalTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "validUntil": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "revision",
+        "readVersion",
+        "asOf",
+        "validUntil",
+        "summary",
+        "attentionItems",
+        "attentionTotal",
+        "attentionLimit",
+        "modelTotals",
+        "totalTokens",
+        "dailyAverageTokens",
+        "chartDays",
+        "chartSeries",
+        "errors"
+      ],
+      "type": "object"
+    },
+    "DashboardPageSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "availableAccounts": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gatewayRunning": {
+          "type": "boolean"
+        },
+        "monthCost": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "todayCost": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "totalAccounts": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "weekCost": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "totalAccounts",
+        "availableAccounts",
+        "gatewayRunning",
+        "todayCost",
+        "weekCost",
+        "monthCost"
       ],
       "type": "object"
     },
@@ -2536,6 +4530,16 @@
             }
           ]
         },
+        "presentation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderCatalogPresentation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "protocolRoutes": {
           "default": [],
           "items": {
@@ -2551,6 +4555,7 @@
         }
       },
       "required": [
+        "presentation",
         "accountControls",
         "id",
         "legacy",
@@ -2967,6 +4972,117 @@
         "currentRevision",
         "processGeneration",
         "details"
+      ],
+      "type": "object"
+    },
+    "DestinationSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "accountControls": {
+          "$ref": "#/$defs/AccountControlsDto"
+        },
+        "adapter": {
+          "$ref": "#/$defs/AdapterKindDto"
+        },
+        "authScheme": {
+          "$ref": "#/$defs/AuthSchemeDto"
+        },
+        "baseUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "brandFamily": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "capabilities": {
+          "$ref": "#/$defs/CapabilitiesDto"
+        },
+        "catalogCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "enabledCatalogCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "legacy": {
+          "$ref": "#/$defs/LegacyDestinationRefDto"
+        },
+        "maxCredentials": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "modelResolution": {
+          "$ref": "#/$defs/ModelResolutionDto"
+        },
+        "name": {
+          "type": "string"
+        },
+        "observerCredentialId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocolRoutes": {
+          "items": {
+            "$ref": "#/$defs/HttpProtocolRouteDto"
+          },
+          "type": "array"
+        },
+        "protocols": {
+          "items": {
+            "$ref": "#/$defs/ProtocolDto"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "accountControls",
+        "id",
+        "legacy",
+        "adapter",
+        "name",
+        "brandFamily",
+        "baseUrl",
+        "protocols",
+        "protocolRoutes",
+        "authScheme",
+        "modelResolution",
+        "capabilities",
+        "plan",
+        "maxCredentials",
+        "observerCredentialId",
+        "enabled",
+        "catalogCount",
+        "enabledCatalogCount"
       ],
       "type": "object"
     },
@@ -4190,12 +6306,73 @@
       ],
       "type": "string"
     },
+    "OfficialApiAccountMeter": {
+      "properties": {
+        "remaining": {
+          "items": {
+            "$ref": "#/$defs/OfficialApiMeterRemaining"
+          },
+          "type": "array"
+        },
+        "remainingEmpty": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OfficialApiMeterEmpty"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "remainingEmpty",
+        "remaining"
+      ],
+      "type": "object"
+    },
     "OfficialApiKind": {
       "enum": [
         "deepseek",
         "zhipu"
       ],
       "type": "string"
+    },
+    "OfficialApiMeterEmpty": {
+      "enum": [
+        "unavailable",
+        "not_queried"
+      ],
+      "type": "string"
+    },
+    "OfficialApiMeterRemaining": {
+      "properties": {
+        "currency": {
+          "type": "string"
+        },
+        "gift": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "observedAt": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "total": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "currency",
+        "total",
+        "gift",
+        "observedAt"
+      ],
+      "type": "object"
     },
     "OfficialApiStatus": {
       "properties": {
@@ -4219,6 +6396,9 @@
             "$ref": "#/$defs/OfficialSpend"
           },
           "type": "array"
+        },
+        "meter": {
+          "$ref": "#/$defs/OfficialApiAccountMeter"
         },
         "monthSpend": {
           "items": {
@@ -4255,6 +6435,7 @@
         "kind",
         "balanceAvailable",
         "balances",
+        "meter",
         "monthStartedAt",
         "monthSpend",
         "lifetimeSpend",
@@ -4316,6 +6497,15 @@
         "pricedRequests"
       ],
       "type": "object"
+    },
+    "OllamaBillingTier": {
+      "description": "Paid Ollama Cloud billing profile. Wire values are exactly `pro`, `max`,\nand `team`. Absence of a stored row (migrated/unconfigured) and non-Ollama\naccounts serialize the account field as `null`.",
+      "enum": [
+        "pro",
+        "max",
+        "team"
+      ],
+      "type": "string"
     },
     "OnboardingAuthorization": {
       "oneOf": [
@@ -4929,6 +7119,52 @@
       ],
       "type": "string"
     },
+    "PageAction": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed": {
+          "type": "boolean"
+        },
+        "key": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "key",
+        "allowed",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "PageReadIssue": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "resource",
+        "id",
+        "code"
+      ],
+      "type": "object"
+    },
     "PlanDto": {
       "additionalProperties": false,
       "description": "Commercial offering embedded in a destination. Mirrors the domain `Plan`.",
@@ -4991,6 +7227,107 @@
         "free"
       ],
       "type": "string"
+    },
+    "PlatformAccount": {
+      "properties": {
+        "baseUrl": {
+          "type": "string"
+        },
+        "hasUserCredential": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/PlatformKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlatformSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "name",
+        "baseUrl",
+        "hasUserCredential",
+        "version",
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "PlatformAmountSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
+          "format": "double",
+          "type": "number"
+        },
+        "unit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "amount",
+        "unit"
+      ],
+      "type": "object"
+    },
+    "PlatformGroup": {
+      "properties": {
+        "autoGroups": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "platform": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subscriptionType": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verified": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "platform",
+        "subscriptionType",
+        "autoGroups",
+        "verified"
+      ],
+      "type": "object"
     },
     "PlatformKeyImportFailure": {
       "additionalProperties": false,
@@ -5086,6 +7423,512 @@
       ],
       "type": "object"
     },
+    "PlatformKind": {
+      "enum": [
+        "new_api",
+        "sub2api"
+      ],
+      "type": "string"
+    },
+    "PlatformLink": {
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "group": {
+          "$ref": "#/$defs/PlatformGroup"
+        },
+        "platformAccountId": {
+          "type": "string"
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlatformSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "accountId",
+        "platformAccountId",
+        "group",
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "PlatformLinkSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "group": {
+          "$ref": "#/$defs/PlatformGroup"
+        },
+        "platformAccountId": {
+          "type": "string"
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlatformSnapshotSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "accountId",
+        "platformAccountId",
+        "group",
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "PlatformModel": {
+      "properties": {
+        "groupId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "platform": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "A storefront row is never proof of inference permission.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "platform",
+        "groupId",
+        "source"
+      ],
+      "type": "object"
+    },
+    "PlatformPrice": {
+      "properties": {
+        "cacheRead": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "cacheWrite": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "currency": {
+          "type": "string"
+        },
+        "groupId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "input": {
+          "description": "All numeric rates are currency per token, never per million tokens.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "officialReference": {
+          "type": "boolean"
+        },
+        "output": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "unavailableReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "validUntil": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "model",
+        "groupId",
+        "currency",
+        "input",
+        "output",
+        "cacheRead",
+        "cacheWrite",
+        "source",
+        "officialReference",
+        "unavailableReason",
+        "validUntil"
+      ],
+      "type": "object"
+    },
+    "PlatformQuota": {
+      "properties": {
+        "expiresAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/PlatformQuotaKind"
+        },
+        "limit": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "period": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "remaining": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "resetsAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scopeId": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "unlimited": {
+          "type": "boolean"
+        },
+        "used": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "scopeId",
+        "unit",
+        "used",
+        "remaining",
+        "limit",
+        "unlimited",
+        "period",
+        "resetsAt",
+        "expiresAt",
+        "source"
+      ],
+      "type": "object"
+    },
+    "PlatformQuotaKind": {
+      "enum": [
+        "wallet",
+        "subscription",
+        "key_limit"
+      ],
+      "type": "string"
+    },
+    "PlatformSnapshot": {
+      "properties": {
+        "billingPreference": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errors": {
+          "description": "Fixed component/error codes only, never upstream bodies or credentials.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "groups": {
+          "items": {
+            "$ref": "#/$defs/PlatformGroup"
+          },
+          "type": "array"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/PlatformModel"
+          },
+          "type": "array"
+        },
+        "observedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "prices": {
+          "items": {
+            "$ref": "#/$defs/PlatformPrice"
+          },
+          "type": "array"
+        },
+        "quotas": {
+          "items": {
+            "$ref": "#/$defs/PlatformQuota"
+          },
+          "type": "array"
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "walletOverflow": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "observedAt",
+        "stale",
+        "errors",
+        "quotas",
+        "models",
+        "prices",
+        "groups",
+        "billingPreference",
+        "walletOverflow"
+      ],
+      "type": "object"
+    },
+    "PlatformSnapshotSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "billingPreference": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "groupCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "keyName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "keyRemaining": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlatformAmountSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "modelCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "observedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "priceCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "quotas": {
+          "items": {
+            "$ref": "#/$defs/PlatformQuota"
+          },
+          "type": "array"
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "wallet": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlatformWalletSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "walletOverflow": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "observedAt",
+        "stale",
+        "errors",
+        "quotas",
+        "billingPreference",
+        "walletOverflow",
+        "modelCount",
+        "priceCount",
+        "groupCount",
+        "wallet",
+        "keyRemaining",
+        "keyName"
+      ],
+      "type": "object"
+    },
+    "PlatformSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "baseUrl": {
+          "type": "string"
+        },
+        "hasUserCredential": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/PlatformKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlatformSnapshotSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "name",
+        "baseUrl",
+        "hasUserCredential",
+        "version",
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "PlatformWalletSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "historyUsed": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "monthUsed": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "observedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "remaining": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "remainingUnlimited": {
+          "type": "boolean"
+        },
+        "unit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "unit",
+        "remaining",
+        "remainingUnlimited",
+        "historyUsed",
+        "monthUsed",
+        "observedAt"
+      ],
+      "type": "object"
+    },
     "PricingSourceDto": {
       "description": "Where a Plan's prices come from.",
       "enum": [
@@ -5146,6 +7989,358 @@
       ],
       "type": "object"
     },
+    "ProviderCatalogEntry": {
+      "additionalProperties": false,
+      "description": "One Provider Registry entry as a wire catalog row. Identity strings are\ndata copied from the static registry; this DTO does not define them.",
+      "properties": {
+        "authSchemes": {
+          "items": {
+            "$ref": "#/$defs/AccountAuthScheme"
+          },
+          "type": "array"
+        },
+        "creationAvailability": {
+          "type": "string"
+        },
+        "creationUnavailableReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credentialKind": {
+          "$ref": "#/$defs/AccountCredentialKind"
+        },
+        "deletable": {
+          "description": "Whether the dashboard may DELETE this entry. Same rules as `editable`.",
+          "type": "boolean"
+        },
+        "displayFamily": {
+          "type": "string"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "editable": {
+          "description": "Whether the dashboard may PATCH this entry. Always `false` for\n`builtin` rows; `true` for `preset`/`custom`.",
+          "type": "boolean"
+        },
+        "formFields": {
+          "items": {
+            "$ref": "#/$defs/ProviderCatalogFormField"
+          },
+          "type": "array"
+        },
+        "keyPrefix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "managedRegistration": {
+          "type": "boolean"
+        },
+        "manualUsageCalibration": {
+          "type": "boolean"
+        },
+        "modelAliases": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "modelSource": {
+          "type": "string"
+        },
+        "offering": {
+          "description": "Plan/api offering label carried by the catalog row. Builtin rows use\nthe sealed builtin map; dynamic rows mirror the persisted `offering`.",
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/ProviderOrigin",
+          "description": "Row provenance in the unified `providers` table. Wire values:\n`builtin` (sealed adapter), `preset` (preset-derived dynamic row),\n`custom` (manual dynamic row)."
+        },
+        "pricingAvailability": {
+          "type": "string"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "quotaScope": {
+          "$ref": "#/$defs/AccountQuotaScope"
+        },
+        "quotaUnit": {
+          "type": "string"
+        },
+        "routable": {
+          "type": "boolean"
+        },
+        "singleton": {
+          "type": "boolean"
+        },
+        "upstreamProtocols": {
+          "items": {
+            "$ref": "#/$defs/AccountUpstreamProtocol"
+          },
+          "type": "array"
+        },
+        "usageAvailability": {
+          "type": "string"
+        },
+        "verificationPolicy": {
+          "type": "string"
+        },
+        "verificationRuntimeAvailability": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "providerId",
+        "origin",
+        "editable",
+        "deletable",
+        "offering",
+        "displayName",
+        "displayFamily",
+        "credentialKind",
+        "quotaScope",
+        "singleton",
+        "creationAvailability",
+        "creationUnavailableReason",
+        "verificationPolicy",
+        "verificationRuntimeAvailability",
+        "routable",
+        "managedRegistration",
+        "pricingAvailability",
+        "usageAvailability",
+        "manualUsageCalibration",
+        "quotaUnit",
+        "modelSource",
+        "keyPrefix",
+        "authSchemes",
+        "upstreamProtocols",
+        "formFields",
+        "modelAliases"
+      ],
+      "type": "object"
+    },
+    "ProviderCatalogEntrySummary": {
+      "additionalProperties": false,
+      "properties": {
+        "authSchemes": {
+          "items": {
+            "$ref": "#/$defs/AccountAuthScheme"
+          },
+          "type": "array"
+        },
+        "creationAvailability": {
+          "type": "string"
+        },
+        "creationUnavailableReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credentialKind": {
+          "$ref": "#/$defs/AccountCredentialKind"
+        },
+        "deletable": {
+          "description": "Whether the dashboard may DELETE this entry. Same rules as `editable`.",
+          "type": "boolean"
+        },
+        "displayFamily": {
+          "type": "string"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "editable": {
+          "description": "Whether the dashboard may PATCH this entry. Always `false` for\n`builtin` rows; `true` for `preset`/`custom`.",
+          "type": "boolean"
+        },
+        "formFields": {
+          "items": {
+            "$ref": "#/$defs/ProviderCatalogFormField"
+          },
+          "type": "array"
+        },
+        "keyPrefix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "managedRegistration": {
+          "type": "boolean"
+        },
+        "manualUsageCalibration": {
+          "type": "boolean"
+        },
+        "modelAliasCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "modelSource": {
+          "type": "string"
+        },
+        "offering": {
+          "description": "Plan/api offering label carried by the catalog row. Builtin rows use\nthe sealed builtin map; dynamic rows mirror the persisted `offering`.",
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/ProviderOrigin",
+          "description": "Row provenance in the unified `providers` table. Wire values:\n`builtin` (sealed adapter), `preset` (preset-derived dynamic row),\n`custom` (manual dynamic row)."
+        },
+        "pricingAvailability": {
+          "type": "string"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "quotaScope": {
+          "$ref": "#/$defs/AccountQuotaScope"
+        },
+        "quotaUnit": {
+          "type": "string"
+        },
+        "routable": {
+          "type": "boolean"
+        },
+        "singleton": {
+          "type": "boolean"
+        },
+        "upstreamProtocols": {
+          "items": {
+            "$ref": "#/$defs/AccountUpstreamProtocol"
+          },
+          "type": "array"
+        },
+        "usageAvailability": {
+          "type": "string"
+        },
+        "verificationPolicy": {
+          "type": "string"
+        },
+        "verificationRuntimeAvailability": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "providerId",
+        "origin",
+        "editable",
+        "deletable",
+        "offering",
+        "displayName",
+        "displayFamily",
+        "credentialKind",
+        "quotaScope",
+        "singleton",
+        "creationAvailability",
+        "creationUnavailableReason",
+        "verificationPolicy",
+        "verificationRuntimeAvailability",
+        "routable",
+        "managedRegistration",
+        "pricingAvailability",
+        "usageAvailability",
+        "manualUsageCalibration",
+        "quotaUnit",
+        "modelSource",
+        "keyPrefix",
+        "authSchemes",
+        "upstreamProtocols",
+        "formFields",
+        "modelAliasCount"
+      ],
+      "type": "object"
+    },
+    "ProviderCatalogFormField": {
+      "additionalProperties": false,
+      "description": "One create-form field advertised by a catalog provider.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "immutableAfterCreate": {
+          "type": "boolean"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "required",
+        "immutableAfterCreate"
+      ],
+      "type": "object"
+    },
+    "ProviderCatalogPresentation": {
+      "additionalProperties": false,
+      "description": "Canonical catalog facts committed directly from a mutation receipt.",
+      "properties": {
+        "allDisabled": {
+          "type": "boolean"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/ProviderModelPresentation"
+          },
+          "type": "array"
+        },
+        "total": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "models",
+        "total",
+        "allDisabled"
+      ],
+      "type": "object"
+    },
+    "ProviderCatalogSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "modelCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "refreshSupported": {
+          "type": "boolean"
+        },
+        "refreshedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "sourceUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "sourceUrl",
+        "refreshedAt",
+        "modelCount",
+        "refreshSupported"
+      ],
+      "type": "object"
+    },
     "ProviderContractGroup": {
       "additionalProperties": false,
       "description": "One built-in Provider contract scope.",
@@ -5176,6 +8371,16 @@
             "$ref": "#/$defs/EffectiveModelContract"
           },
           "type": "array"
+        },
+        "presentation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderCatalogPresentation"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "pricing": {
           "$ref": "#/$defs/CapabilitySummary"
@@ -5223,7 +8428,8 @@
         "catalogRoutable",
         "productionInference",
         "disabledReasons",
-        "revision"
+        "revision",
+        "presentation"
       ],
       "type": "object"
     },
@@ -5266,6 +8472,106 @@
       ],
       "type": "object"
     },
+    "ProviderDefinition": {
+      "additionalProperties": false,
+      "description": "Secret-free Provider definition. Surfaces both builtin and dynamic rows\nthrough the same wire shape. `endpointUrl` / `upstreamProtocol` /\n`authKind` are nullable because builtin rows leave them empty (the sealed\nadapter drives those at call time).",
+      "properties": {
+        "authKind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderDefinitionAuthKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Nullable: builtin rows leave the field empty."
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "deletable": {
+          "description": "Whether the dashboard may DELETE this row. Always `false` for builtin.",
+          "type": "boolean"
+        },
+        "editable": {
+          "description": "Whether the dashboard may PATCH this row. Always `false` for builtin.",
+          "type": "boolean"
+        },
+        "endpointUrl": {
+          "description": "Nullable: builtin rows leave the field empty.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "models": {
+          "description": "Empty for builtin rows; builtin catalogs feed the contract projection.",
+          "items": {
+            "$ref": "#/$defs/ProviderDefinitionModel"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "offering": {
+          "description": "Plan/api offering label persisted alongside the row.",
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/ProviderOrigin",
+          "description": "Row provenance: `builtin` | `preset` | `custom`."
+        },
+        "presetId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "upstreamProtocol": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountUpstreamProtocol"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Nullable: builtin rows leave the field empty."
+        }
+      },
+      "required": [
+        "origin",
+        "editable",
+        "deletable",
+        "offering",
+        "id",
+        "name",
+        "models",
+        "createdAt",
+        "updatedAt",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
     "ProviderDefinitionAuthKind": {
       "description": "Auth kind owned by a Provider definition. Independent of protocol.\nNullable on the wire because builtin rows leave the field empty.",
       "enum": [
@@ -5275,6 +8581,687 @@
         "none"
       ],
       "type": "string"
+    },
+    "ProviderDefinitionModel": {
+      "additionalProperties": false,
+      "properties": {
+        "publicModel": {
+          "type": "string"
+        },
+        "upstreamModel": {
+          "type": "string"
+        },
+        "upstreamOverride": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderModelUpstreamOverride"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "publicModel",
+        "upstreamModel"
+      ],
+      "type": "object"
+    },
+    "ProviderEditDetail": {
+      "additionalProperties": false,
+      "properties": {
+        "accounts": {
+          "items": {
+            "$ref": "#/$defs/Account"
+          },
+          "type": "array"
+        },
+        "catalogEntry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderCatalogEntry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "connection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConnectionSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "credentials": {
+          "items": {
+            "$ref": "#/$defs/DestinationCredentialDto"
+          },
+          "type": "array"
+        },
+        "definition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderDefinition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "destination": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DestinationDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "identities": {
+          "items": {
+            "$ref": "#/$defs/IdentitySummary"
+          },
+          "type": "array"
+        },
+        "item": {
+          "$ref": "#/$defs/ProviderPageItem"
+        },
+        "readVersion": {
+          "type": "string"
+        },
+        "relatedContracts": {
+          "$ref": "#/$defs/ProviderContracts"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderEditScope"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "revision",
+        "readVersion",
+        "item",
+        "destination",
+        "definition",
+        "relatedContracts",
+        "catalogEntry",
+        "credentials",
+        "accounts",
+        "identities",
+        "connection",
+        "scope"
+      ],
+      "type": "object"
+    },
+    "ProviderEditScope": {
+      "additionalProperties": false,
+      "properties": {
+        "accounts": {
+          "items": {
+            "$ref": "#/$defs/ProviderAccountChoice"
+          },
+          "type": "array"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/ProviderModelPageRow"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "$ref": "#/$defs/ProviderScopeSummary"
+        }
+      },
+      "required": [
+        "summary",
+        "models",
+        "accounts"
+      ],
+      "type": "object"
+    },
+    "ProviderModelAction": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed": {
+          "type": "boolean"
+        },
+        "key": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "key",
+        "allowed",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "ProviderModelPageRow": {
+      "additionalProperties": false,
+      "properties": {
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/PageAction"
+          },
+          "type": "array"
+        },
+        "contract": {
+          "$ref": "#/$defs/EffectiveModelContract"
+        },
+        "effectiveOn": {
+          "type": "boolean"
+        },
+        "metadata": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelMetadata"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "metadataSource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "publicModel": {
+          "type": "string"
+        },
+        "targetProtocol": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountUpstreamProtocol"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "testProtocol": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountUpstreamProtocol"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "upstreamModel": {
+          "type": "string"
+        },
+        "upstreamOverride": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderModelUpstreamOverride"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "writableProtocols": {
+          "items": {
+            "$ref": "#/$defs/AccountUpstreamProtocol"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "publicModel",
+        "upstreamModel",
+        "contract",
+        "upstreamOverride",
+        "metadata",
+        "metadataSource",
+        "targetProtocol",
+        "testProtocol",
+        "writableProtocols",
+        "effectiveOn",
+        "actions"
+      ],
+      "type": "object"
+    },
+    "ProviderModelPresentation": {
+      "additionalProperties": false,
+      "properties": {
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/ProviderModelAction"
+          },
+          "type": "array"
+        },
+        "contract": {
+          "$ref": "#/$defs/EffectiveModelContract"
+        },
+        "effectiveOn": {
+          "type": "boolean"
+        },
+        "publicModel": {
+          "type": "string"
+        },
+        "targetProtocol": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountUpstreamProtocol"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "testProtocol": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountUpstreamProtocol"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "upstreamModel": {
+          "type": "string"
+        },
+        "upstreamOverride": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderModelUpstreamOverride"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "writableProtocols": {
+          "items": {
+            "$ref": "#/$defs/AccountUpstreamProtocol"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "publicModel",
+        "upstreamModel",
+        "contract",
+        "upstreamOverride",
+        "targetProtocol",
+        "testProtocol",
+        "writableProtocols",
+        "effectiveOn",
+        "actions"
+      ],
+      "type": "object"
+    },
+    "ProviderModelUpstreamOverride": {
+      "additionalProperties": false,
+      "description": "One public-to-upstream mapping owned by a Provider definition.",
+      "properties": {
+        "endpointUrl": {
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        }
+      },
+      "required": [
+        "protocol",
+        "endpointUrl"
+      ],
+      "type": "object"
+    },
+    "ProviderModelWriteTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
+    "ProviderModelsPage": {
+      "additionalProperties": false,
+      "properties": {
+        "allDisabled": {
+          "type": "boolean"
+        },
+        "filteredTotal": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hasMore": {
+          "type": "boolean"
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/ProviderModelPageRow"
+          },
+          "type": "array"
+        },
+        "offset": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "readVersion": {
+          "type": "string"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "total": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "readVersion",
+        "total",
+        "filteredTotal",
+        "allDisabled",
+        "models",
+        "offset",
+        "limit",
+        "hasMore"
+      ],
+      "type": "object"
+    },
+    "ProviderOrigin": {
+      "description": "Provenance of a row in the unified `providers` table. The column is\nadditive in v42 and never feeds routing decisions: builtin adapters stay\nsealed, and dynamic rows keep their `ConfigurableHttp` adapter path.",
+      "enum": [
+        "builtin",
+        "preset",
+        "custom"
+      ],
+      "type": "string"
+    },
+    "ProviderPageDetail": {
+      "additionalProperties": false,
+      "properties": {
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/PageAction"
+          },
+          "type": "array"
+        },
+        "catalogEntry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderCatalogEntrySummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "destination": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DestinationSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "endpoints": {
+          "items": {
+            "$ref": "#/$defs/ConnectionEndpoint"
+          },
+          "type": "array"
+        },
+        "item": {
+          "$ref": "#/$defs/ProviderPageItem"
+        },
+        "modelWriteTarget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderModelWriteTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "readVersion": {
+          "type": "string"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderScopeSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "revision",
+        "readVersion",
+        "item",
+        "destination",
+        "endpoints",
+        "catalogEntry",
+        "scope",
+        "modelWriteTarget",
+        "actions"
+      ],
+      "type": "object"
+    },
+    "ProviderPageItem": {
+      "additionalProperties": false,
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/AuthorizationState"
+        },
+        "brandFamily": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "catalogCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "connectionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credentialCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "credentialCreate": {
+          "$ref": "#/$defs/CredentialCreateCapabilityDto"
+        },
+        "destinationId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "eligibility": {
+          "$ref": "#/$defs/Eligibility"
+        },
+        "enabledCredentialCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "legacy": {
+          "$ref": "#/$defs/LegacyIdentity"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/ConnectionLifecycle"
+        },
+        "name": {
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/ConnectionOrigin"
+        },
+        "presetId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "providerId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "railKey": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "railKey",
+        "destinationId",
+        "connectionId",
+        "providerId",
+        "legacy",
+        "name",
+        "brandFamily",
+        "presetId",
+        "origin",
+        "lifecycle",
+        "authorization",
+        "eligibility",
+        "credentialCreate",
+        "credentialCount",
+        "enabledCredentialCount",
+        "catalogCount"
+      ],
+      "type": "object"
+    },
+    "ProviderScopeSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "accountCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "allDisabled": {
+          "type": "boolean"
+        },
+        "card": {
+          "$ref": "#/$defs/CardCapabilitySummary"
+        },
+        "catalog": {
+          "$ref": "#/$defs/ProviderCatalogSummary"
+        },
+        "catalogRoutable": {
+          "type": "boolean"
+        },
+        "disabledReasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "key": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "productionInference": {
+          "type": "boolean"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scopeId": {
+          "type": "string"
+        },
+        "scopeKind": {
+          "$ref": "#/$defs/ContractScopeKind"
+        },
+        "staticProtocolSnapshotDate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "usage": {
+          "$ref": "#/$defs/CapabilitySummary"
+        }
+      },
+      "required": [
+        "key",
+        "scopeKind",
+        "scopeId",
+        "providerId",
+        "label",
+        "staticProtocolSnapshotDate",
+        "accountCount",
+        "catalog",
+        "usage",
+        "card",
+        "catalogRoutable",
+        "productionInference",
+        "disabledReasons",
+        "revision",
+        "allDisabled"
+      ],
+      "type": "object"
     },
     "ProviderTemplate": {
       "additionalProperties": false,
@@ -5429,6 +9416,75 @@
         "revision",
         "processGeneration",
         "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "ProvidersPage": {
+      "additionalProperties": false,
+      "properties": {
+        "asOf": {
+          "type": "string"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/PageReadIssue"
+          },
+          "type": "array"
+        },
+        "filteredTotal": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hasMore": {
+          "type": "boolean"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ProviderPageItem"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "readVersion": {
+          "type": "string"
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "total": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "validUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "revision",
+        "readVersion",
+        "asOf",
+        "validUntil",
+        "total",
+        "filteredTotal",
+        "items",
+        "offset",
+        "limit",
+        "hasMore",
+        "errors"
       ],
       "type": "object"
     },
@@ -6589,6 +10645,12 @@
           },
           "type": "array"
         },
+        "effectiveViews": {
+          "items": {
+            "$ref": "#/$defs/TemporaryPolicyEffectiveView"
+          },
+          "type": "array"
+        },
         "revision": {
           "$ref": "#/$defs/ControlRevision"
         },
@@ -6602,7 +10664,66 @@
       "required": [
         "revision",
         "rules",
-        "builtins"
+        "builtins",
+        "effectiveViews"
+      ],
+      "type": "object"
+    },
+    "TemporaryPolicyEffectiveRule": {
+      "additionalProperties": false,
+      "properties": {
+        "applicable": {
+          "type": "boolean"
+        },
+        "backoff": {
+          "$ref": "#/$defs/TemporaryPolicyBackoff"
+        },
+        "origin": {
+          "$ref": "#/$defs/TemporaryPolicyRuleOrigin"
+        },
+        "overridden": {
+          "type": "boolean"
+        },
+        "rule": {
+          "$ref": "#/$defs/TemporaryPolicyRule"
+        },
+        "scope": {
+          "$ref": "#/$defs/TemporaryPolicyScope"
+        },
+        "source": {
+          "$ref": "#/$defs/TemporaryPolicySource"
+        }
+      },
+      "required": [
+        "rule",
+        "source",
+        "origin",
+        "overridden",
+        "applicable",
+        "scope",
+        "backoff"
+      ],
+      "type": "object"
+    },
+    "TemporaryPolicyEffectiveView": {
+      "additionalProperties": false,
+      "properties": {
+        "destinationId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/TemporaryPolicyEffectiveRule"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "destinationId",
+        "rules"
       ],
       "type": "object"
     },
@@ -6822,6 +10943,13 @@
         }
       ]
     },
+    "TemporaryPolicyRuleOrigin": {
+      "enum": [
+        "local",
+        "inherited"
+      ],
+      "type": "string"
+    },
     "TemporaryPolicyScope": {
       "enum": [
         "credential",
@@ -7009,6 +11137,120 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "anyOf": [
+    {
+      "$ref": "#/$defs/DashboardPage"
+    },
+    {
+      "$ref": "#/$defs/PageReadIssue"
+    },
+    {
+      "$ref": "#/$defs/DestinationSummary"
+    },
+    {
+      "$ref": "#/$defs/AccountSummary"
+    },
+    {
+      "$ref": "#/$defs/CredentialScopeSummary"
+    },
+    {
+      "$ref": "#/$defs/AccountCredentialSummary"
+    },
+    {
+      "$ref": "#/$defs/PlatformSnapshotSummary"
+    },
+    {
+      "$ref": "#/$defs/PlatformSummary"
+    },
+    {
+      "$ref": "#/$defs/PlatformLinkSummary"
+    },
+    {
+      "$ref": "#/$defs/PageAction"
+    },
+    {
+      "$ref": "#/$defs/AccountPageTags"
+    },
+    {
+      "$ref": "#/$defs/AccountRefreshFact"
+    },
+    {
+      "$ref": "#/$defs/AccountPageRow"
+    },
+    {
+      "$ref": "#/$defs/AccountCardPageItem"
+    },
+    {
+      "$ref": "#/$defs/AccountPlanFilter"
+    },
+    {
+      "$ref": "#/$defs/AccountsPage"
+    },
+    {
+      "$ref": "#/$defs/AccountCardCredentialsPage"
+    },
+    {
+      "$ref": "#/$defs/AccountPageDetail"
+    },
+    {
+      "$ref": "#/$defs/AccountPageLayout"
+    },
+    {
+      "$ref": "#/$defs/ProviderPageItem"
+    },
+    {
+      "$ref": "#/$defs/ProvidersPage"
+    },
+    {
+      "$ref": "#/$defs/ProviderCatalogEntrySummary"
+    },
+    {
+      "$ref": "#/$defs/ProviderCatalogSummary"
+    },
+    {
+      "$ref": "#/$defs/ProviderScopeSummary"
+    },
+    {
+      "$ref": "#/$defs/ProviderModelWriteTarget"
+    },
+    {
+      "$ref": "#/$defs/ProviderPageDetail"
+    },
+    {
+      "$ref": "#/$defs/ProviderModelPageRow"
+    },
+    {
+      "$ref": "#/$defs/ProviderModelsPage"
+    },
+    {
+      "$ref": "#/$defs/ProviderEditDetail"
+    },
+    {
+      "$ref": "#/$defs/ProviderEditScope"
+    },
+    {
+      "$ref": "#/$defs/AliasPageTarget"
+    },
+    {
+      "$ref": "#/$defs/AliasCapabilitySummary"
+    },
+    {
+      "$ref": "#/$defs/AliasPageRow"
+    },
+    {
+      "$ref": "#/$defs/AliasPageGroup"
+    },
+    {
+      "$ref": "#/$defs/AliasesPage"
+    },
+    {
+      "$ref": "#/$defs/AccountPageRefresh"
+    },
+    {
+      "$ref": "#/$defs/AccountPageRefreshMode"
+    },
+    {
+      "$ref": "#/$defs/AccountPageRefreshRequest"
+    },
     {
       "$ref": "#/$defs/ByokClient"
     },

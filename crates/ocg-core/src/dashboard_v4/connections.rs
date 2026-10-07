@@ -44,11 +44,20 @@ pub(super) async fn list_connections(
     list_connections_locked(&state).map(Json)
 }
 
-fn list_connections_locked(state: &CoreState) -> Result<ConnectionList, V3ApiError> {
+pub(super) fn list_connections_locked(state: &CoreState) -> Result<ConnectionList, V3ApiError> {
     let _settings_update = state.settings_update.lock();
     let now = Utc::now();
-    let contracts = state.provider_contracts();
-    let (accounts, custom_runtimes, dynamic_providers, draft_ids, projection, goat_plans) = {
+    let revision = ControlRevision::from_state(state);
+    let (
+        accounts,
+        custom_runtimes,
+        dynamic_providers,
+        draft_ids,
+        projection,
+        goat_plans,
+        zen,
+        persisted,
+    ) = {
         let db = state.db.lock();
         let accounts = db.list_accounts().map_err(V3ApiError::internal)?;
         let custom_runtimes = db
@@ -90,8 +99,17 @@ fn list_connections_locked(state: &CoreState) -> Result<ConnectionList, V3ApiErr
             draft_ids,
             projection,
             goat_plans,
+            db.zen_free_model_catalog()
+                .map_err(V3ApiError::internal)?
+                .unwrap_or_default(),
+            db.load_persisted_contracts()
+                .map_err(V3ApiError::internal)?,
         )
     };
+    drop(_settings_update);
+    let mut contracts =
+        crate::provider_contracts::build_effective_contracts(&zen, &custom_runtimes, persisted);
+    contracts.apply_destination_configuration(&projection);
 
     let mut by_provider: HashMap<String, Vec<usize>> = HashMap::new();
     for (index, (account, _)) in accounts.iter().enumerate() {
@@ -217,7 +235,7 @@ fn list_connections_locked(state: &CoreState) -> Result<ConnectionList, V3ApiErr
     }
 
     Ok(ConnectionList {
-        revision: ControlRevision::from_state(state),
+        revision,
         connections,
     })
 }

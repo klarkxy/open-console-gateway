@@ -66,14 +66,17 @@ pub(super) fn status_locked(
     let (lifetime_spend, _) = db
         .official_api_spend(&account, DateTime::<Utc>::UNIX_EPOCH, now)
         .map_err(V3ApiError::internal)?;
+    let balances = db
+        .official_api_balances(&account, &runtime)
+        .map_err(V3ApiError::internal)?;
+    let meter = official_api::OfficialApiAccountMeter::project(kind.balance_available(), &balances);
     Ok(OfficialApiStatus {
         account_id: id.into(),
         provider_id: runtime.id.clone(),
         kind,
         balance_available: kind.balance_available(),
-        balances: db
-            .official_api_balances(&account, &runtime)
-            .map_err(V3ApiError::internal)?,
+        balances,
+        meter,
         month_started_at: since,
         month_spend: spend,
         lifetime_spend,

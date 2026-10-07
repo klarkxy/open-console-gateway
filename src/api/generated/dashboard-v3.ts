@@ -41,6 +41,9 @@ export type DashboardApiV3 =
   | ZenFreeModels
   | ZenFreeModel
   | ProviderContracts
+  | ProviderCatalogPresentation
+  | ProviderModelPresentation
+  | ProviderModelAction
   | ProviderContractGroup
   | CustomEndpointContract
   | ProviderAccountChoice
@@ -132,6 +135,7 @@ export type DashboardApiV3 =
   | CpaCliImportRequest
   | CpaCliImportResult
   | CpaRuntime
+  | CpaRuntimeActions1
   | CpaRuntimePhase
   | CpaRuntimeCheck
   | CpaRuntimeInstall
@@ -724,6 +728,7 @@ export interface CustomEndpointContract {
   catalogRoutable: boolean;
   disabledReasons: string[];
   models: EffectiveModelContract[];
+  presentation: ProviderCatalogPresentation | null;
   pricing: CapabilitySummary;
   productionInference: boolean;
   providerId: string;
@@ -799,6 +804,37 @@ export interface EffectiveProtocolEvidence {
   verifiedAt: string | null;
 }
 /**
+ * Canonical catalog facts committed directly from a mutation receipt.
+ */
+export interface ProviderCatalogPresentation {
+  allDisabled: boolean;
+  models: ProviderModelPresentation[];
+  total: number;
+}
+export interface ProviderModelPresentation {
+  actions: ProviderModelAction[];
+  contract: EffectiveModelContract;
+  effectiveOn: boolean;
+  publicModel: string;
+  targetProtocol: AccountUpstreamProtocol | null;
+  testProtocol: AccountUpstreamProtocol | null;
+  upstreamModel: string;
+  upstreamOverride: ProviderModelUpstreamOverride | null;
+  writableProtocols: AccountUpstreamProtocol[];
+}
+export interface ProviderModelAction {
+  allowed: boolean;
+  key: string;
+  reason: string | null;
+}
+/**
+ * One public-to-upstream mapping owned by a Provider definition.
+ */
+export interface ProviderModelUpstreamOverride {
+  endpointUrl: string;
+  protocol: AccountUpstreamProtocol;
+}
+/**
  * Registry pricing or usage availability copied as display data.
  */
 export interface CapabilitySummary {
@@ -814,6 +850,7 @@ export interface ProviderContractGroup {
   catalogRoutable: boolean;
   disabledReasons: string[];
   models: EffectiveModelContract[];
+  presentation: ProviderCatalogPresentation | null;
   pricing: CapabilitySummary;
   productionInference: boolean;
   providerId: string;
@@ -1125,6 +1162,7 @@ export interface UsageWindow {
  * PATCH `/accounts/{id}/usage` envelope. Calibration does not bump revision.
  */
 export interface UsageMutation {
+  observedAt: string;
   processGeneration: number;
   revision: number;
   usage: UsageWindow;
@@ -1711,8 +1749,11 @@ export interface CpaCliImportResult {
  * installed desktop Host on Windows x64, macOS, or Linux x64.
  */
 export interface CpaRuntime {
+  actions: CpaRuntimeActions;
   assetSha256: string | null;
   baseUrl: string | null;
+  clientKeysAvailable: boolean;
+  codexDeviceLoginAvailable: boolean;
   currentOperation: string | null;
   currentVersion: string | null;
   /**
@@ -1730,9 +1771,31 @@ export interface CpaRuntime {
   processGeneration: number;
   revision: number;
   running: boolean;
+  startupRestorePending: boolean;
   supported: boolean;
   unavailableReason: string | null;
   updateAvailable: boolean;
+}
+/**
+ * Authoritative eligibility; clients may additionally gate local requests.
+ */
+export interface CpaRuntimeActions {
+  checkUpdate: boolean;
+  install: boolean;
+  remove: boolean;
+  rollback: boolean;
+  start: boolean;
+  stop: boolean;
+  update: boolean;
+}
+export interface CpaRuntimeActions1 {
+  checkUpdate: boolean;
+  install: boolean;
+  remove: boolean;
+  rollback: boolean;
+  start: boolean;
+  stop: boolean;
+  update: boolean;
 }
 export interface CpaRuntimeCheck {
   currentVersion: string | null;
@@ -1740,6 +1803,7 @@ export interface CpaRuntimeCheck {
   processGeneration: number;
   releaseUrl: string;
   revision: number;
+  runtime: CpaRuntime;
   updateAvailable: boolean;
 }
 /**
@@ -1785,13 +1849,6 @@ export interface ProviderDefinitionModel {
   publicModel: string;
   upstreamModel: string;
   upstreamOverride?: ProviderModelUpstreamOverride | null;
-}
-/**
- * One public-to-upstream mapping owned by a Provider definition.
- */
-export interface ProviderModelUpstreamOverride {
-  endpointUrl: string;
-  protocol: AccountUpstreamProtocol;
 }
 /**
  * Secret-free Provider definition. Surfaces both builtin and dynamic rows

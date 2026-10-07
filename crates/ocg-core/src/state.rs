@@ -125,6 +125,11 @@ pub struct CoreStateInner {
     pub(crate) balance_refresh:
         crate::usage_sync::SingleFlight<Result<(), crate::dashboard_v3::V3ApiError>>,
     /// Leaf lock, acquired only after settings_update and db; never over I/O.
+    pub(crate) management_page_cache: Mutex<crate::dashboard_v4::pages::PageReadCache>,
+    pub(crate) management_auto_refresh: Mutex<crate::dashboard_v4::pages::AutomaticRefreshCache>,
+    pub(crate) management_page_refresh: crate::usage_sync::SingleFlight<
+        Result<crate::dashboard_v4::pages::RefreshOutcome, crate::dashboard_v3::V3ApiError>,
+    >,
     pub(crate) billing_cache: Mutex<crate::dashboard_v4::billing_cache::BillingReadCache>,
     /// Serializes typed operations against the one local CPA integration.
     /// Network calls may hold this async gate but never the SQLite mutex.
@@ -614,6 +619,11 @@ impl CoreStateInner {
                 crate::usage_sync::PROVIDER_REFRESH_CONCURRENCY,
             ),
             balance_refresh: crate::usage_sync::SingleFlight::default(),
+            management_page_cache: Mutex::new(crate::dashboard_v4::pages::PageReadCache::default()),
+            management_auto_refresh: Mutex::new(
+                crate::dashboard_v4::pages::AutomaticRefreshCache::default(),
+            ),
+            management_page_refresh: crate::usage_sync::SingleFlight::default(),
             billing_cache: Mutex::new(
                 crate::dashboard_v4::billing_cache::BillingReadCache::default(),
             ),

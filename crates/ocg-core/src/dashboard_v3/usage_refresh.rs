@@ -29,7 +29,7 @@ use super::types::{
 };
 use super::{V3ApiError, check_expectation, parse_mutation_json};
 
-pub(super) enum RefreshApiError {
+pub(crate) enum RefreshApiError {
     Api(V3ApiError),
     Throttled {
         body: UsageRefreshThrottleError,

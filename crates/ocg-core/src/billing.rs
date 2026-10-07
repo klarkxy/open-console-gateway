@@ -199,11 +199,30 @@ impl CreditMeterState {
             .collect();
         let remaining = buckets.iter().map(|bucket| bucket.remaining).sum();
         let active_granted = buckets.iter().map(|bucket| bucket.granted).sum();
+        let expired_buckets = self
+            .buckets
+            .iter()
+            .filter(|bucket| bucket_expired(bucket, now))
+            .cloned()
+            .collect();
+        let scheduled_buckets = self
+            .buckets
+            .iter()
+            .filter(|bucket| !bucket_expired(bucket, now) && bucket.starts_at > now)
+            .cloned()
+            .collect();
+        let calibration_block =
+            (pending_requests > 0).then_some(crate::billing_types::CreditCalibrationBlock::Pending);
+        let can_calibrate = calibration_block.is_none() && !buckets.is_empty();
         CreditMeterView {
             credential_id: self.credential_id.clone(),
             meter_id: self.meter_id.clone(),
             configuration: self.configuration.clone(),
             buckets,
+            expired_buckets,
+            scheduled_buckets,
+            calibration_block,
+            can_calibrate,
             remaining,
             active_granted,
             spent_since_calibration: self.spent_since_calibration,

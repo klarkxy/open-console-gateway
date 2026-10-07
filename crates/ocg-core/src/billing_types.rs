@@ -73,6 +73,11 @@ pub struct CreditMeterView {
     pub meter_id: String,
     pub configuration: CreditConfiguration,
     pub buckets: Vec<CreditBucket>,
+    /// Saved expired grants remain visible, but do not contribute to available balances.
+    pub expired_buckets: Vec<CreditBucket>,
+    pub scheduled_buckets: Vec<CreditBucket>,
+    pub calibration_block: Option<CreditCalibrationBlock>,
+    pub can_calibrate: bool,
     pub remaining: f64,
     pub active_granted: f64,
     pub spent_since_calibration: f64,
@@ -83,6 +88,41 @@ pub struct CreditMeterView {
     pub estimated_at: DateTime<Utc>,
     /// Next actual renewal; configuration.next_reset_at remains the calendar anchor.
     pub next_reset_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CreditCalibrationBlock {
+    Pending,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingSurfaceKind {
+    Cash,
+    CashBalances,
+    Quota,
+    CreditsMeter,
+    CreditsSetup,
+    CreditsUsdMonth,
+    Empty,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingQuotaWindowKind {
+    FiveHours,
+    Week,
+    Month,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BillingQuotaEditorLimit {
+    pub window_kind: BillingQuotaWindowKind,
+    pub limit: f64,
+    pub editable: bool,
+    pub editable_at: Option<DateTime<Utc>>,
 }
 
 /// Portable personal-account baseline. Local request receipts and meter identities stay local.
@@ -105,10 +145,14 @@ pub struct PortableCreditMeter {
 pub struct BillingStatus {
     pub account_id: String,
     pub model: BillingModel,
+    pub surface_kind: BillingSurfaceKind,
     pub source: BillingSource,
     pub unit: String,
     pub configurable_credits: bool,
     pub manual_calibration: bool,
+    pub quota_manual_calibration: bool,
+    pub provider_windows: bool,
+    pub quota_editor_limits: Vec<BillingQuotaEditorLimit>,
     pub official_refresh: bool,
     pub usage: Option<crate::dashboard_v3::ProviderUsage>,
     pub cash: Option<crate::official_api::OfficialApiStatus>,

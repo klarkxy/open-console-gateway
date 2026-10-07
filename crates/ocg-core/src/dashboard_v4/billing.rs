@@ -2,8 +2,8 @@
 
 use crate::billing::{billing_model_for_destination, stepfun_plan_credits};
 use crate::billing_types::{
-    BillingModel, BillingSource, BillingStatus, CreditCalibrationRequest, CreditConfigureRequest,
-    CreditGrantRequest,
+    BillingModel, BillingSource, BillingStatus, BillingSurfaceKind, CreditCalibrationRequest,
+    CreditConfigureRequest, CreditGrantRequest,
 };
 use crate::dashboard_v3::{
     MutationExpectation, V3ApiError, check_expectation, parse_mutation_json,
@@ -35,7 +35,7 @@ fn status(state: &CoreState, id: &str) -> Result<BillingStatus, V3ApiError> {
     cached_status(state, &db, id)
 }
 
-fn cached_status(
+pub(super) fn cached_status(
     state: &CoreState,
     db: &crate::db::Database,
     id: &str,
@@ -118,6 +118,7 @@ fn compose_status(
         id,
         state.settings_revision(),
         &account.provider_id,
+        &account,
         adapter,
         &endpoint,
         configurable,
@@ -205,6 +206,7 @@ fn project_billing(
     id: &str,
     revision: u64,
     provider_id: &str,
+    account: &crate::models::Account,
     adapter: AdapterKind,
     endpoint: &str,
     configurable: bool,
@@ -257,13 +259,44 @@ fn project_billing(
     if let Some(cash) = cash.as_mut() {
         cash.revision = revision;
     }
+    let surface_kind = match model {
+        BillingModel::Cash if cash.is_some() => BillingSurfaceKind::Cash,
+        BillingModel::Cash => BillingSurfaceKind::CashBalances,
+        BillingModel::Quota => BillingSurfaceKind::Quota,
+        BillingModel::Credits if credits.is_some() => BillingSurfaceKind::CreditsMeter,
+        BillingModel::Credits
+            if usage.quota_windows.iter().any(|window| {
+                matches!(window.window_kind.as_str(), "month" | "monthly")
+                    && window.unit == "usd_credits"
+            }) =>
+        {
+            BillingSurfaceKind::CreditsUsdMonth
+        }
+        BillingModel::Credits if configurable => BillingSurfaceKind::CreditsSetup,
+        BillingModel::Credits => BillingSurfaceKind::Empty,
+    };
+    let plan = ocg_domain::destination::sealed_plan(provider_id);
+    let quota_manual_calibration = manual_calibration
+        && credits.is_none()
+        && plan.as_ref().is_none_or(|plan| plan.manual_calibration);
+    let quota_editor_limits = quota_editor_limits(
+        &usage,
+        provider_id,
+        quota_manual_calibration,
+        account,
+        state.usage_sync.now(),
+    );
     BillingStatus {
         account_id: id.into(),
         model,
+        surface_kind,
         source,
         unit,
         configurable_credits: configurable,
         manual_calibration,
+        quota_manual_calibration,
+        provider_windows: true,
+        quota_editor_limits,
         official_refresh,
         usage: Some(usage),
         cash,
@@ -276,6 +309,74 @@ fn project_billing(
         revision,
         process_generation: state.process_generation(),
     }
+}
+
+fn quota_editor_limits(
+    usage: &crate::dashboard_v3::ProviderUsage,
+    provider_id: &str,
+    manual: bool,
+    account: &crate::models::Account,
+    now: chrono::DateTime<Utc>,
+) -> Vec<crate::billing_types::BillingQuotaEditorLimit> {
+    use crate::billing_types::{BillingQuotaEditorLimit, BillingQuotaWindowKind};
+    let plan = ocg_domain::destination::sealed_plan(provider_id);
+    [
+        (BillingQuotaWindowKind::FiveHours, "five_hours"),
+        (BillingQuotaWindowKind::Week, "week"),
+        (BillingQuotaWindowKind::Month, "month"),
+    ]
+    .into_iter()
+    .filter_map(|(window_kind, kind)| {
+        let observed = usage
+            .quota_windows
+            .iter()
+            .find(|row| row.window_kind == kind)
+            .or_else(|| {
+                (kind == "month")
+                    .then(|| {
+                        usage
+                            .quota_windows
+                            .iter()
+                            .find(|row| row.window_kind == "monthly")
+                    })
+                    .flatten()
+            })
+            .filter(|row| row.used.is_finite());
+        let manual_allowed = manual
+            && match provider_id {
+                "opencode" | "command-code" => true,
+                "ollama" => kind == "month",
+                _ => false,
+            }
+            && plan.as_ref().is_none_or(|plan| {
+                plan.windows.iter().any(|window| match window.kind {
+                    ocg_domain::destination::PlanWindowKind::FiveHours => kind == "five_hours",
+                    ocg_domain::destination::PlanWindowKind::Week => kind == "week",
+                    ocg_domain::destination::PlanWindowKind::Month => kind == "month",
+                    _ => false,
+                })
+            });
+        if observed.is_none() && !manual_allowed {
+            return None;
+        }
+        let limit = observed
+            .and_then(|row| row.limit_value)
+            .filter(|limit| limit.is_finite() && *limit > 0.0)
+            .unwrap_or(100.0);
+        let editable_at = match window_kind {
+            BillingQuotaWindowKind::FiveHours => account.cooldown_5h_until,
+            BillingQuotaWindowKind::Week => account.cooldown_week_until,
+            BillingQuotaWindowKind::Month => account.cooldown_month_until,
+        }
+        .filter(|at| *at > now);
+        Some(BillingQuotaEditorLimit {
+            window_kind,
+            limit,
+            editable: manual_allowed && editable_at.is_none(),
+            editable_at,
+        })
+    })
+    .collect()
 }
 
 fn mutate(
@@ -340,6 +441,7 @@ fn mutate(
         id,
         state.settings_revision(),
         &account.provider_id,
+        &account,
         adapter,
         &endpoint,
         configurable,

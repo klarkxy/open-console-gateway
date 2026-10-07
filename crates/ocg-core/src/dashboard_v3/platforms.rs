@@ -307,7 +307,7 @@ async fn unlink_inner(
     effect.note_follow_up(view(&state).map(Json))
 }
 
-pub(super) async fn refresh(
+pub(crate) async fn refresh(
     State(state): State<CoreState>,
     Path(id): Path<String>,
     body: Bytes,
@@ -340,6 +340,52 @@ async fn refresh_inner(
     body: Bytes,
 ) -> Result<(Json<PlatformAccounts>, u32), V3ApiError> {
     let input = parse_mutation_json::<PlatformRefresh>(&body)?;
+    refresh_input(state, id, input, false).await
+}
+
+pub(crate) async fn refresh_for_page(
+    state: CoreState,
+    id: String,
+    account_id: String,
+    expectation: MutationExpectation,
+    automatic: bool,
+) -> Result<(), V3ApiError> {
+    let op = super::settings::open_dashboard(
+        &state,
+        "platform.refresh",
+        "platform",
+        super::settings::known_subject(&id),
+    );
+    let result = refresh_input(
+        state.clone(),
+        id,
+        PlatformRefresh {
+            expectation,
+            account_id: Some(account_id),
+        },
+        automatic,
+    )
+    .await;
+    let (ok_outcome, counts) = match &result {
+        Ok((_, errors)) if *errors > 0 => (
+            Some((
+                crate::log_types::OperationOutcome::Partial,
+                "outboundFailed",
+            )),
+            (Some(1), Some(1), Some(*errors)),
+        ),
+        Ok(_) => (None, (Some(1), Some(1), None)),
+        Err(_) => (None, (Some(1), None, Some(1))),
+    };
+    super::settings::record_after(op, &state, &[], counts, ok_outcome, result.map(|_| ()))
+}
+
+async fn refresh_input(
+    state: CoreState,
+    id: String,
+    input: PlatformRefresh,
+    automatic: bool,
+) -> Result<(Json<PlatformAccounts>, u32), V3ApiError> {
     let (parent, group, credential, key, token) = {
         let _lock = state.settings_update.lock();
         check_expectation(&state, &input.expectation)?;
@@ -385,18 +431,19 @@ async fn refresh_inner(
     };
     let client =
         crate::http_client::build_no_redirect(&state.config()).map_err(V3ApiError::internal)?;
-    let mut snapshot = reader::read(
-        &client,
-        &PlatformReadRequest {
-            kind: parent.kind,
-            base_url: &parent.base_url,
-            user_credential: credential.as_deref(),
-            key: key.as_deref(),
-            group: &group,
-            now: chrono::Utc::now().timestamp(),
-        },
-    )
-    .await;
+    let request = PlatformReadRequest {
+        kind: parent.kind,
+        base_url: &parent.base_url,
+        user_credential: credential.as_deref(),
+        key: key.as_deref(),
+        group: &group,
+        now: chrono::Utc::now().timestamp(),
+    };
+    let mut snapshot = if automatic {
+        reader::read_observation(&client, &request).await
+    } else {
+        reader::read(&client, &request).await
+    };
     let error_count = u32::try_from(snapshot.errors.len()).unwrap_or(u32::MAX);
     if error_count > 0 {
         snapshot.stale = true;
@@ -414,6 +461,22 @@ async fn refresh_inner(
             .retain(|q| !matches!(q.kind, PlatformQuotaKind::KeyLimit));
     }
     let _lock = state.settings_update.lock();
+    check_expectation(&state, &input.expectation)?;
+    if automatic && let Some(account_id) = &input.account_id {
+        let saved = state
+            .db
+            .lock()
+            .list_platform_links()
+            .map_err(V3ApiError::internal)?
+            .into_iter()
+            .find(|l| &l.account_id == account_id)
+            .and_then(|l| l.snapshot);
+        if let Some(saved) = saved {
+            snapshot.models = saved.models;
+            snapshot.prices = saved.prices;
+            snapshot.groups = saved.groups;
+        }
+    }
     if !state
         .db
         .lock()

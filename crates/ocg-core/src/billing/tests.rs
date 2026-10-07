@@ -2,6 +2,72 @@ use super::*;
 use ocg_domain::billing::BillingTokens;
 
 #[test]
+fn credit_projection_classifies_saved_buckets_and_preserves_native_amounts() {
+    let now = at("2026-09-21T00:00:00Z");
+    let state = meter(
+        vec![
+            bucket(
+                "zero",
+                CreditBucketKind::Manual,
+                12.5,
+                0.0,
+                "2026-09-01T00:00:00Z",
+                None,
+            ),
+            bucket(
+                "active",
+                CreditBucketKind::TopUp,
+                4.5,
+                1.25,
+                "2026-09-01T00:00:00Z",
+                None,
+            ),
+            bucket(
+                "expired",
+                CreditBucketKind::TopUp,
+                100.0,
+                80.0,
+                "2026-09-01T00:00:00Z",
+                Some("2026-09-21T00:00:00Z"),
+            ),
+            bucket(
+                "scheduled",
+                CreditBucketKind::Manual,
+                200.0,
+                190.0,
+                "2026-10-01T00:00:00Z",
+                None,
+            ),
+        ],
+        None,
+        Vec::new(),
+    );
+    let before = serde_json::to_value(&state).unwrap();
+    let view = state.project(now, 0);
+    assert_eq!(view.remaining, 1.25);
+    assert_eq!(view.active_granted, 17.0);
+    assert_eq!(
+        view.buckets
+            .iter()
+            .map(|bucket| bucket.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["zero", "active"]
+    );
+    assert_eq!(view.expired_buckets[0].id, "expired");
+    assert_eq!(view.expired_buckets[0].remaining, 80.0);
+    assert_eq!(view.scheduled_buckets[0].id, "scheduled");
+    assert!(view.can_calibrate);
+    assert_eq!(view.calibration_block, None);
+    let blocked = state.project(now, 2);
+    assert!(!blocked.can_calibrate);
+    assert_eq!(
+        blocked.calibration_block,
+        Some(crate::billing_types::CreditCalibrationBlock::Pending)
+    );
+    assert_eq!(serde_json::to_value(&state).unwrap(), before);
+}
+
+#[test]
 fn initial_monthly_credit_expiry_precedes_a_later_topup() {
     let now = at("2026-09-21T00:00:00Z");
     let mut state = CreditMeterState::new(

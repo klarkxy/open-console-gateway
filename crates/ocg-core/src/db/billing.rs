@@ -168,9 +168,13 @@ pub(crate) fn read_view_on(
     let Some(mut state) = load_on(conn, account_id)? else {
         return Ok(None);
     };
+    // Keep the saved archive before the effective read projection prunes history.
+    let expired_buckets = state.project(now, 0).expired_buckets;
     state.advance(now)?;
     // This runtime creates no credit receipts. Stored pending rows stay on disk and are not active.
-    Ok(Some(state.project(now, 0)))
+    let mut view = state.project(now, 0);
+    view.expired_buckets = expired_buckets;
+    Ok(Some(view))
 }
 
 #[cfg(test)]

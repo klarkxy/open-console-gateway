@@ -21,7 +21,7 @@
 mod account_model_test;
 mod account_transfer;
 mod account_verify;
-mod accounts;
+pub(crate) mod accounts;
 mod auth;
 mod browser;
 mod command_code_usage_refresh;
@@ -32,9 +32,9 @@ pub(crate) mod dynamic_providers;
 mod keys;
 mod managed_key_verify;
 pub(crate) mod observability;
-mod platforms;
+pub(crate) mod platforms;
 mod pricing;
-mod providers;
+pub(crate) mod providers;
 mod proxy_test;
 #[cfg(test)]
 mod receipt_test_support;
@@ -42,7 +42,7 @@ mod settings;
 mod types;
 mod updater;
 pub(crate) mod usage;
-mod usage_refresh;
+pub(crate) mod usage_refresh;
 
 use axum::extract::{DefaultBodyLimit, FromRequestParts, Query, Request, State};
 use axum::http::StatusCode;
@@ -67,6 +67,7 @@ pub use providers::set_zen_models_source_url_override_for_tests;
 pub use proxy_test::PROXY_TEST_TARGET;
 #[cfg(debug_assertions)]
 pub use proxy_test::{ProxyTestTargetGuard, install_proxy_test_target_for_tests};
+pub(crate) use types::ContractEvidenceSource;
 pub use types::{
     Account, AccountAuthScheme, AccountCreate, AccountCredentialKind, AccountCustomConfig,
     AccountCustomConfigUpdate, AccountCustomConfigWrite, AccountExport, AccountExportRequest,
@@ -102,11 +103,12 @@ pub use types::{
     PricingRefreshUpdate, PricingRevision, PricingSnapshot, PricingTimeWindow,
     ProtocolOverrideState, ProtocolProbeRequest, ProtocolProbeResponse, ProtocolProbeResult,
     ProviderAccountChoice, ProviderCatalog, ProviderCatalogEntry, ProviderCatalogFormField,
-    ProviderCatalogRiskNotice, ProviderContractGroup, ProviderContracts, ProviderDefinition,
-    ProviderDefinitionAuthKind, ProviderDefinitionCreate, ProviderDefinitionDiscoverRequest,
-    ProviderDefinitionDiscoverResponse, ProviderDefinitionModel, ProviderDefinitionMutation,
-    ProviderDefinitionTestRequest, ProviderDefinitionTestResponse, ProviderDefinitionUpdate,
-    ProviderModelCapability, ProviderModelUpstreamOverride, ProviderPricing,
+    ProviderCatalogPresentation, ProviderCatalogRiskNotice, ProviderContractGroup,
+    ProviderContracts, ProviderDefinition, ProviderDefinitionAuthKind, ProviderDefinitionCreate,
+    ProviderDefinitionDiscoverRequest, ProviderDefinitionDiscoverResponse, ProviderDefinitionModel,
+    ProviderDefinitionMutation, ProviderDefinitionTestRequest, ProviderDefinitionTestResponse,
+    ProviderDefinitionUpdate, ProviderModelAction, ProviderModelCapability,
+    ProviderModelPresentation, ProviderModelUpstreamOverride, ProviderPricing,
     ProviderPricingRefresh, ProviderPricingRefreshUpdate, ProviderUsage, ProxyListDirection,
     ProxyMode, ProxySupportedModel, ProxyTestRequest, ProxyTestResponse, QuotaWindow, RoutingMode,
     Settings, SettingsUpdate, UpdateCheck, UsageAvailability, UsageMutation, UsageRefresh,

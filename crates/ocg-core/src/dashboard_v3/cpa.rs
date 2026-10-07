@@ -26,14 +26,18 @@ use super::types::{
     CpaCliImportRequest, CpaCliImportResult, CpaCliImportSource, CpaCliImports,
     CpaConnectionReport, CpaIntegration, CpaIntegrationUpdate, CpaModel, CpaModels, CpaOAuthMethod,
     CpaOAuthProvider, CpaOAuthSessionDelete, CpaOAuthStart, CpaOAuthStartRequest, CpaOAuthStatus,
-    CpaQuotaReset, CpaRuntime, CpaRuntimeCheck, CpaRuntimeInstall, CpaRuntimeKey,
-    CpaRuntimeKeyCreated, CpaRuntimeKeys, CpaRuntimeLogs, CpaRuntimePhase, CpaTestRequest,
-    MutationAck, MutationExpectation,
+    CpaQuotaReset, CpaRuntime, CpaRuntimeActions, CpaRuntimeCheck, CpaRuntimeInstall,
+    CpaRuntimeKey, CpaRuntimeKeyCreated, CpaRuntimeKeys, CpaRuntimeLogs, CpaRuntimePhase,
+    CpaTestRequest, MutationAck, MutationExpectation,
 };
 use super::{V3ApiError, check_expectation, parse_json, parse_mutation_json};
 
 #[cfg(all(test, windows))]
 mod receipt_tests;
+
+#[cfg(test)]
+#[path = "cpa/tests.rs"]
+mod runtime_projection_tests;
 
 struct SavedCpa {
     base_url: String,
@@ -847,6 +851,7 @@ async fn check_runtime_update_inner(
         .await
         .map_err(|error| map_plain_runtime(&state, error))?;
     Ok(Json(CpaRuntimeCheck {
+        runtime: runtime_view(&state, state.cpa_runtime_snapshot()),
         current_version: check.current_version,
         latest_version: check.latest_version,
         update_available: check.update_available,
@@ -1426,7 +1431,15 @@ fn integration_view(state: &CoreState) -> Result<CpaIntegration, V3ApiError> {
 }
 
 fn runtime_view(state: &CoreState, snapshot: cpa_runtime::CpaRuntimeSnapshot) -> CpaRuntime {
+    let external_selected = std::env::var_os(cpa::CPA_BASE_URL_ENV).is_some();
+    let client_keys_available = snapshot.supported && snapshot.owned && snapshot.installed;
     CpaRuntime {
+        actions: runtime_actions(&snapshot, external_selected),
+        client_keys_available,
+        codex_device_login_available: client_keys_available
+            && snapshot.running
+            && !external_selected,
+        startup_restore_pending: snapshot.installed && snapshot.owned && snapshot.desired_running,
         supported: snapshot.supported,
         unavailable_reason: snapshot.unavailable_reason,
         installed: snapshot.installed,
@@ -1445,6 +1458,34 @@ fn runtime_view(state: &CoreState, snapshot: cpa_runtime::CpaRuntimeSnapshot) ->
         current_operation: snapshot.current_operation,
         revision: state.settings_revision(),
         process_generation: state.process_generation(),
+    }
+}
+
+fn runtime_actions(
+    snapshot: &cpa_runtime::CpaRuntimeSnapshot,
+    external_selected: bool,
+) -> CpaRuntimeActions {
+    let busy = !matches!(
+        snapshot.phase,
+        cpa_runtime::CpaRuntimePhase::Idle | cpa_runtime::CpaRuntimePhase::Failed
+    );
+    if busy || !snapshot.supported || (snapshot.installed && !snapshot.owned) {
+        return CpaRuntimeActions::default();
+    }
+    CpaRuntimeActions {
+        install: !snapshot.installed && !external_selected,
+        start: snapshot.installed && !snapshot.running && !external_selected,
+        stop: snapshot.installed && (snapshot.running || snapshot.desired_running),
+        check_update: true,
+        update: snapshot.installed
+            && snapshot.update_available
+            && snapshot
+                .latest_version
+                .as_ref()
+                .is_some_and(|version| !version.is_empty())
+            && !external_selected,
+        rollback: snapshot.installed && snapshot.previous_version.is_some() && !external_selected,
+        remove: snapshot.installed,
     }
 }
 

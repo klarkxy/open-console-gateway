@@ -1,3 +1,4 @@
+import type { ProviderCatalogPresentation } from "./generated/dashboard-v3.ts";
 import {
   dashboardV3,
   isRevisionConflict,
@@ -217,6 +218,7 @@ export interface CardCapabilitySummary {
 }
 
 export interface ProviderContractGroup {
+  presentation?: ProviderCatalogPresentation | null;
   scope_kind: ContractScopeKind;
   scope_id: string;
   provider_id: string;
@@ -233,6 +235,7 @@ export interface ProviderContractGroup {
 }
 
 export interface CustomEndpointContract {
+  presentation?: ProviderCatalogPresentation | null;
   scope_kind: ContractScopeKind;
   scope_id: string;
   provider_id: string;
@@ -248,6 +251,7 @@ export interface CustomEndpointContract {
 }
 
 export interface ProviderContractsResponse {
+  pricing_revision?: string;
   /** Shared settings revision for PUT `expected_revision`. Distinct from each scope `revision`. */
   revision: number;
   /** Backend process identity; revisions are comparable only within one generation. */
@@ -336,7 +340,7 @@ function presentProviderDefinitionMappingOverride(
   return { protocol, endpoint_url: endpointUrl };
 }
 
-function presentProviderDefinition(value: V3ProviderDefinition): ProviderDefinitionView {
+export function presentProviderDefinition(value: V3ProviderDefinition): ProviderDefinitionView {
   return {
     id: value.id,
     name: value.name,
@@ -367,7 +371,7 @@ function assertNoSecret(value: object): void {
   }
 }
 
-function presentCatalogEntry(value: V3ProviderCatalogEntry): ProviderCatalogEntry {
+export function presentCatalogEntryProperties(value: Omit<V3ProviderCatalogEntry, "modelAliases">): Omit<ProviderCatalogEntry, "model_aliases"> {
   return {
     provider_id: value.providerId,
     origin: value.origin,
@@ -398,8 +402,11 @@ function presentCatalogEntry(value: V3ProviderCatalogEntry): ProviderCatalogEntr
       required: field.required,
       immutable_after_create: field.immutableAfterCreate,
     })),
-    model_aliases: [...value.modelAliases],
   };
+}
+
+export function presentCatalogEntry(value: V3ProviderCatalogEntry): ProviderCatalogEntry {
+  return { ...presentCatalogEntryProperties(value), model_aliases: [...value.modelAliases] };
 }
 
 function presentEvidence(value: V3ProviderContracts["providers"][number]["models"][number]["protocols"]["chat_completions"]): EffectiveProtocolEvidence | undefined {
@@ -418,7 +425,7 @@ function presentEvidence(value: V3ProviderContracts["providers"][number]["models
   };
 }
 
-function presentModel(value: V3ProviderContracts["providers"][number]["models"][number]): EffectiveModelContract {
+export function presentModel(value: V3ProviderContracts["providers"][number]["models"][number]): EffectiveModelContract {
   const protocols: Record<string, EffectiveProtocolEvidence> = {};
   const chat = presentEvidence(value.protocols.chat_completions);
   const responses = presentEvidence(value.protocols.responses);
@@ -436,7 +443,7 @@ function presentModel(value: V3ProviderContracts["providers"][number]["models"][
   };
 }
 
-function presentCard(value: V3ProviderContracts["providers"][number]["card"]): CardCapabilitySummary {
+export function presentCard(value: V3ProviderContracts["providers"][number]["card"]): CardCapabilitySummary {
   return {
     fetch_zen_models: value.fetchZenModels,
     discover_models: value.discoverModels,
@@ -455,7 +462,7 @@ function presentCatalog(value: V3ProviderContracts["providers"][number]["catalog
   };
 }
 
-function presentAccountChoice(value: V3ProviderContracts["providers"][number]["accounts"][number]): ProviderAccountChoice {
+export function presentAccountChoice(value: V3ProviderContracts["providers"][number]["accounts"][number]): ProviderAccountChoice {
   return {
     id: value.id,
     name: value.name,
@@ -464,11 +471,13 @@ function presentAccountChoice(value: V3ProviderContracts["providers"][number]["a
   };
 }
 
-function presentContracts(value: V3ProviderContracts): ProviderContractsResponse {
+export function presentContracts(value: V3ProviderContracts): ProviderContractsResponse {
   return {
     revision: value.revision,
     process_generation: value.processGeneration,
+    pricing_revision: value.pricingRevision,
     providers: value.providers.map((scope) => ({
+      presentation: scope.presentation,
       scope_kind: scope.scopeKind,
       scope_id: scope.scopeId,
       provider_id: scope.providerId,
@@ -484,6 +493,7 @@ function presentContracts(value: V3ProviderContracts): ProviderContractsResponse
       revision: scope.revision,
     })),
     custom_endpoints: value.customEndpoints.map((scope) => ({
+      presentation: scope.presentation,
       scope_kind: scope.scopeKind,
       scope_id: scope.scopeId,
       provider_id: scope.providerId,
@@ -555,7 +565,15 @@ function presentProbe(value: V3ProtocolProbeResponse): ProtocolProbeResponse {
 }
 
 export const providerApi = {
-  getProviderCatalog: async () => (await dashboardV3.getProviders()).entries.map(presentCatalogEntry),
+  getProviderCatalog: async (): Promise<ProviderCatalogEntry[]> => (await providerApi.getProviderCatalogSnapshot()).catalog,
+  /** Catalog and the process/CAS pair carried by that same response. */
+  getProviderCatalogSnapshot: async (): Promise<{ catalog: ProviderCatalogEntry[]; expectation: MutationExpectation }> => {
+    const result = await dashboardV3.getProviders();
+    return {
+      catalog: result.entries.map(presentCatalogEntry),
+      expectation: { expectedRevision: result.revision, processGeneration: result.processGeneration },
+    };
+  },
   getProviderUsage: async (accountId: string) =>
     presentProviderUsage(await dashboardV3.getProviderUsage(accountId)),
   refreshProviderUsage: async (accountId: string) => {

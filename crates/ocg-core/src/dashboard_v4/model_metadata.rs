@@ -169,7 +169,7 @@ fn payload(state: &CoreState, id: &str) -> Result<DestinationModelMetadata, V3Ap
     })
 }
 
-fn entries(
+pub(super) fn entries(
     records: &[model_metadata::Record],
     modelsdev: &crate::modelsdev::ModelsDevCatalog,
     destination: &ocg_domain::destination::Destination,

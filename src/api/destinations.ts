@@ -1,3 +1,4 @@
+import type { ProviderCatalogPresentation, ControlRevision } from "./generated/dashboard-v3.ts";
 /**
  * Dashboard V4 destination / credential projection presenter.
  *
@@ -108,6 +109,8 @@ export interface LegacyDestinationRef {
 }
 
 export interface Destination {
+  presentation?: ProviderCatalogPresentation | null;
+  presentation_revision?: ControlRevision;
   account_controls: AccountControlsDto;
   adapter: AdapterKindDto;
   legacy: LegacyDestinationRef;
@@ -356,7 +359,7 @@ function presentCatalogModel(value: CatalogModelDto): DestinationCatalogModel {
   };
 }
 
-function presentProtocolRoutes(value: DestinationDto): DestinationProtocolRoute[] {
+function presentProtocolRoutes(value: Pick<DestinationDto, "protocolRoutes">): DestinationProtocolRoute[] {
   const routes = value.protocolRoutes;
   if (!Array.isArray(routes)) return [];
   return routes.map((route) => ({
@@ -366,7 +369,8 @@ function presentProtocolRoutes(value: DestinationDto): DestinationProtocolRoute[
   }));
 }
 
-export function presentDestination(value: DestinationDto): Destination {
+/** Scalar destination facts shared by complete resources and explicit summaries. */
+export function presentDestinationProperties(value: Omit<DestinationDto, "catalog" | "presentation">): Omit<Destination, "catalog"> {
   return {
     account_controls: { ...value.accountControls },
     adapter: value.adapter,
@@ -374,7 +378,6 @@ export function presentDestination(value: DestinationDto): Destination {
     base_url: value.baseUrl,
     brand_family: value.brandFamily,
     capabilities: presentCapabilities(value.capabilities),
-    catalog: value.catalog.map(presentCatalogModel),
     enabled: value.enabled,
     id: value.id,
     legacy: { kind: value.legacy.kind, id: value.legacy.id },
@@ -385,6 +388,11 @@ export function presentDestination(value: DestinationDto): Destination {
     protocols: [...value.protocols],
     protocol_routes: presentProtocolRoutes(value),
   };
+}
+
+export function presentDestination(value: DestinationDto, revision?: ControlRevision): Destination {
+  return { ...presentDestinationProperties(value), catalog: value.catalog.map(presentCatalogModel),
+    presentation: value.presentation, ...(revision ? { presentation_revision: revision } : {}) };
 }
 
 const QUOTA_RECOVERY_STATUSES = new Set<QuotaRecoveryStatus>(["waiting", "ready", "probing"]);
@@ -463,7 +471,7 @@ export function presentDestinationListSnapshot(
   value: DestinationList,
 ): DestinationListSnapshot {
   return {
-    destinations: value.destinations.map(presentDestination),
+    destinations: value.destinations.map(destination => presentDestination(destination, value.revision)),
     expectation: {
       expectedRevision: value.revision.revision,
       processGeneration: value.revision.processGeneration,
@@ -492,7 +500,7 @@ function presentRoutingCard(value: RoutingCard): RoutingCardView {
 export function presentRoutingCardListSnapshot(value: RoutingCardList): RoutingCardListSnapshot {
   return {
     cards: value.cards.map(presentRoutingCard),
-    destinations: value.destinations.map(presentDestination),
+    destinations: value.destinations.map(destination => presentDestination(destination, value.revision)),
     credentials: value.credentials.map(presentDestinationCredential),
     expectation: {
       expectedRevision: value.revision.revision,
@@ -579,7 +587,7 @@ export const destinationsApi = {
   refreshCatalog: async (id: string, expectation?: MutationExpectation) => {
     const value = await withCas((tokens) => dashboardV4.refreshDestinationCatalog(id, tokens), expectation);
     return {
-      destination: presentDestination(value.destination),
+      destination: presentDestination(value.destination, value.revision),
       addedCount: value.addedCount,
       truncated: value.truncated,
       expectation: {
@@ -598,7 +606,7 @@ export const destinationsApi = {
       expectation,
     );
     return {
-      destination: presentDestination(value.destination),
+      destination: presentDestination(value.destination, value.revision),
       credentials: value.credentials.map(presentDestinationCredential),
       expectation: {
         expectedRevision: value.revision.revision,
@@ -648,7 +656,7 @@ export const destinationsApi = {
       expectation,
     );
     return {
-      destination: presentDestination(value.destination),
+      destination: presentDestination(value.destination, value.revision),
       credentials: value.credentials.map(presentDestinationCredential),
       expectation: {
         expectedRevision: value.revision.revision,

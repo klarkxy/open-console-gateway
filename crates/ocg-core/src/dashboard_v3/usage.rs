@@ -140,7 +140,7 @@ fn balance_refresh_kind(
     Ok(ProviderUsageRefreshKind::Balance { endpoint_url })
 }
 
-pub(super) async fn refresh_provider_usage(
+pub(crate) async fn refresh_provider_usage(
     State(state): State<CoreState>,
     Path(id): Path<String>,
     body: Bytes,
@@ -568,6 +568,7 @@ fn patch_account_usage_locked(
     }
     Ok(UsageMutation {
         usage: usage_window_from_observed(state, id, &observed),
+        observed_at: Utc::now().to_rfc3339(),
         revision: state.settings_revision(),
         process_generation: state.process_generation(),
     })

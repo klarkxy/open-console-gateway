@@ -862,6 +862,7 @@ fn sample_catalog_entry() -> ProviderCatalogEntry {
 
 fn sample_contracts() -> ProviderContracts {
     let goat = ProviderContractGroup {
+        presentation: None,
         scope_kind: ContractScopeKind::Provider,
         scope_id: "command-code".into(),
         provider_id: "command-code".into(),
@@ -922,6 +923,7 @@ fn sample_contracts() -> ProviderContracts {
     ProviderContracts {
         providers: vec![goat],
         custom_endpoints: vec![CustomEndpointContract {
+            presentation: None,
             scope_kind: ContractScopeKind::CustomEndpoint,
             scope_id: "custom-1".into(),
             provider_id: "custom".into(),
@@ -1572,6 +1574,9 @@ const PROVIDER_CATALOG_TYPES: &[&str] = &[
     "ZenFreeModels",
     "ZenFreeModel",
     "ProviderContracts",
+    "ProviderCatalogPresentation",
+    "ProviderModelPresentation",
+    "ProviderModelAction",
     "ProviderContractGroup",
     "CustomEndpointContract",
     "ProviderAccountChoice",
@@ -1713,6 +1718,7 @@ const CPA_CATALOG_TYPES: &[&str] = &[
     "CpaCliImportRequest",
     "CpaCliImportResult",
     "CpaRuntime",
+    "CpaRuntimeActions",
     "CpaRuntimePhase",
     "CpaRuntimeCheck",
     "CpaRuntimeInstall",
@@ -2397,6 +2403,7 @@ fn usage_responses_emit_camel_case_nulls_and_reject_unknown_request_fields() {
 
     let mutation = UsageMutation {
         usage: goat,
+        observed_at: "2026-10-07T00:00:00Z".into(),
         revision: 11,
         process_generation: 9,
     };

@@ -78,9 +78,159 @@ async fn get_returns_builtin_catalog_and_empty_rules() {
     assert!(config.rules.is_empty());
     assert_eq!(config.builtins.len(), 1);
     assert_eq!(config.builtins[0].id, GOAT_CREDITS_REJECTION_RULE);
+    let global = config
+        .effective_views
+        .iter()
+        .find(|view| view.destination_id.is_none())
+        .unwrap();
+    assert_eq!(global.rules.len(), 1);
+    assert!(global.rules[0].applicable);
+    assert!(!global.rules[0].overridden);
+    let db = state.db.lock();
+    for view in config
+        .effective_views
+        .iter()
+        .filter(|view| view.destination_id.is_some())
+    {
+        let adapter: String = db
+            .conn
+            .query_row(
+                "SELECT adapter FROM destinations WHERE id = ?1",
+                [view.destination_id.as_ref().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(view.rules[0].applicable, adapter == "goat");
+    }
+    drop(db);
     let Json(listed) = get_restrictions(State(state.clone())).await.unwrap();
     assert!(listed.restrictions.is_empty());
     assert!(super::super::applications::operation_receipts(&state).is_empty());
+}
+
+#[tokio::test]
+async fn read_and_write_receipts_project_local_masks_and_restore_global_rules() {
+    let state = fresh();
+    let dest = destination_ids(&state.db.lock())
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let global = json!({
+        "kind": "custom", "id": "shared", "destinationId": null, "enabled": true,
+        "scope": "credential", "match": { "statusCodes": [503] },
+        "backoff": { "initialSeconds": 12, "maxSeconds": 40 }
+    });
+    let mask = json!({
+        "kind": "custom", "id": "shared", "destinationId": dest, "enabled": false,
+        "scope": "credential_model", "match": { "errorCodes": ["local"] },
+        "backoff": { "initialSeconds": 20, "maxSeconds": 80 }
+    });
+    let Json(saved) = put_configuration(
+        State(state.clone()),
+        update_bytes(&state, json!([global, mask])),
+    )
+    .await
+    .unwrap();
+    let view = saved
+        .effective_views
+        .iter()
+        .find(|view| view.destination_id.as_deref() == Some(&dest))
+        .unwrap();
+    let row = view
+        .rules
+        .iter()
+        .find(|row| matches!(&row.rule, TemporaryPolicyRule::Custom { id, .. } if id == "shared"))
+        .unwrap();
+    assert_eq!(row.origin, TemporaryPolicyRuleOrigin::Local);
+    assert_eq!(row.source, TemporaryPolicySource::Connection);
+    assert_eq!(row.scope, TemporaryPolicyScope::CredentialModel);
+    assert_eq!(row.backoff.initial_seconds, 20);
+    assert!(row.overridden && row.applicable);
+    assert!(matches!(
+        row.rule,
+        TemporaryPolicyRule::Custom { enabled: false, .. }
+    ));
+    assert!(
+        !state
+            .recovery
+            .policy_snapshot()
+            .effective_for(&dest)
+            .iter()
+            .any(|rule| rule.source.rule_id == "shared")
+    );
+    let Json(read) = get_configuration(State(state.clone())).await.unwrap();
+    assert_eq!(read.effective_views, saved.effective_views);
+    let Json(restored) =
+        put_configuration(State(state.clone()), update_bytes(&state, json!([global])))
+            .await
+            .unwrap();
+    for view in &restored.effective_views {
+        let row = view
+            .rules
+            .iter()
+            .find(
+                |row| matches!(&row.rule, TemporaryPolicyRule::Custom { id, .. } if id == "shared"),
+            )
+            .unwrap();
+        assert_eq!(row.source, TemporaryPolicySource::Global);
+        assert_eq!(row.scope, TemporaryPolicyScope::Credential);
+        assert_eq!(row.backoff.initial_seconds, 12);
+        assert_eq!(
+            row.origin,
+            if view.destination_id.is_none() {
+                TemporaryPolicyRuleOrigin::Local
+            } else {
+                TemporaryPolicyRuleOrigin::Inherited
+            }
+        );
+        assert!(matches!(
+            row.rule,
+            TemporaryPolicyRule::Custom { enabled: true, .. }
+        ));
+    }
+}
+
+#[test]
+fn builtin_projection_uses_compiled_override_defaults_and_destination_applicability() {
+    let configured = vec![
+        ConfiguredRule::BuiltinOverride {
+            id: GOAT_CREDITS_REJECTION_RULE.into(),
+            destination_id: None,
+            enabled: false,
+            backoff: Some(PolicyBackoff {
+                initial_secs: 15,
+                max_secs: 90,
+            }),
+        },
+        ConfiguredRule::BuiltinOverride {
+            id: GOAT_CREDITS_REJECTION_RULE.into(),
+            destination_id: Some("goat".into()),
+            enabled: true,
+            backoff: None,
+        },
+    ];
+    let snapshot = compile_from_previous(&configured, &EffectivePolicySnapshot::builtin());
+    let global = effective_view(&snapshot, &configured, None, true);
+    assert!(matches!(
+        global.rules[0].rule,
+        TemporaryPolicyRule::BuiltinOverride { enabled: false, .. }
+    ));
+    assert_eq!(global.rules[0].backoff.initial_seconds, 15);
+    assert!(global.rules[0].overridden);
+    let local = effective_view(&snapshot, &configured, Some("goat"), true);
+    assert!(matches!(
+        local.rules[0].rule,
+        TemporaryPolicyRule::BuiltinOverride { enabled: true, .. }
+    ));
+    assert_eq!(local.rules[0].backoff.initial_seconds, DEFAULT_INITIAL_SECS);
+    assert_eq!(local.rules[0].scope, TemporaryPolicyScope::CredentialModel);
+    assert_eq!(local.rules[0].source, TemporaryPolicySource::Connection);
+    let other = effective_view(&snapshot, &configured, Some("http"), false);
+    assert!(!other.rules[0].applicable);
+    assert!(!other.rules[0].overridden);
+    assert_eq!(other.rules[0].origin, TemporaryPolicyRuleOrigin::Inherited);
+    assert_eq!(other.rules[0].backoff.initial_seconds, 15);
 }
 
 #[tokio::test]

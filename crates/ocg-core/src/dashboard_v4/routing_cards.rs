@@ -75,7 +75,7 @@ pub(super) async fn replace(
 }
 
 /// Caller holds settings_update so revision, layout and rows describe one state.
-fn snapshot(state: &CoreState) -> Result<RoutingCardList, DestinationsError> {
+pub(super) fn snapshot(state: &CoreState) -> Result<RoutingCardList, DestinationsError> {
     // Capture the plan map with the projection. The overlay is pure and must
     // not take the database lock again; this mutex is not reentrant.
     let (projection, cards, recoveries, probes, goat_plans, revision) = {
