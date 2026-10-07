@@ -240,7 +240,34 @@ fn assert_v3_error(body: &Value, code: &str) {
 }
 
 fn assert_secret_free(body: &Value, secrets: &[&str]) {
-    for name in json_field_names(body) {
+    // These fixed UI action identifiers are not credentials. Keep the field
+    // prohibition everywhere else and scan all original values below.
+    let mut fields = body.clone();
+    for collection in ["providers", "customEndpoints"] {
+        if let Some(scopes) = fields.get_mut(collection).and_then(Value::as_array_mut) {
+            for scope in scopes {
+                if let Some(models) = scope
+                    .pointer_mut("/presentation/models")
+                    .and_then(Value::as_array_mut)
+                {
+                    for model in models {
+                        if let Some(actions) =
+                            model.get_mut("actions").and_then(Value::as_array_mut)
+                        {
+                            for action in actions {
+                                assert!(matches!(
+                                    action.get("key").and_then(Value::as_str),
+                                    Some("toggle" | "test" | "modelEditable" | "metadataEditable")
+                                ));
+                                action.as_object_mut().unwrap().remove("key");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for name in json_field_names(&fields) {
         assert!(
             !matches!(
                 name,

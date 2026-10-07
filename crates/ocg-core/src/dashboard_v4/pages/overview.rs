@@ -280,9 +280,9 @@ pub(crate) async fn get(
 
 fn project(state: &CoreState, offset: i32) -> Result<Json<DashboardPage>, V3ApiError> {
     for _ in 0..3 {
-        let s = snapshot(&state)?;
+        let s = snapshot(state)?;
         let _settings = state.settings_update.lock();
-        let before = cache::ReadVersion::capture(&state)?;
+        let before = cache::ReadVersion::capture(state)?;
         if before.token() != s.read_version {
             continue;
         }
@@ -308,7 +308,7 @@ fn project(state: &CoreState, offset: i32) -> Result<Json<DashboardPage>, V3ApiE
                     .collect::<Vec<_>>(),
             )
         };
-        if before != cache::ReadVersion::capture(&state)? {
+        if before != cache::ReadVersion::capture(state)? {
             continue;
         }
         let (attention_items, attention_total, valid_until) = attention(&s, now, offset);
@@ -339,7 +339,7 @@ fn project(state: &CoreState, offset: i32) -> Result<Json<DashboardPage>, V3ApiE
         }));
     }
     Err(V3ApiError::conflict_at(
-        &state,
+        state,
         "dashboard snapshot changed during read",
     ))
 }
