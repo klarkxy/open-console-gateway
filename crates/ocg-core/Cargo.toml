@@ -87,3 +87,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_SystemServices",
     "Win32_System_Threading",
 ] }
+
+[[example]]
+name = "copilot_host_smoke"
+required-features = ["dsh-local-host"]

@@ -1,0 +1,60 @@
+{
+  "name": "copilot",
+  "publisher": "open-console-gateway",
+  "displayName": "Open Console Gateway",
+  "description": "Use OCG models in VS Code Chat and agents with a dynamic model catalog.",
+  "version": "0.1.0",
+  "license": "SEE LICENSE IN LICENSE",
+  "private": true,
+  "type": "commonjs",
+  "engines": {
+    "vscode": "^1.141.0"
+  },
+  "main": "./dist/extension.cjs",
+  "extensionKind": [
+    "ui"
+  ],
+  "activationEvents": [
+    "onUri",
+    "onLanguageModelChatProvider:open-console-gateway"
+  ],
+  "contributes": {
+    "languageModelChatProviders": [
+      {
+        "vendor": "open-console-gateway",
+        "displayName": "Open Console Gateway",
+        "managementCommand": "ocg.connect"
+      }
+    ],
+    "commands": [
+      {
+        "command": "ocg.connect",
+        "title": "OCG: Connect"
+      },
+      {
+        "command": "ocg.disconnect",
+        "title": "OCG: Disconnect"
+      },
+      {
+        "command": "ocg.refresh",
+        "title": "OCG: Refresh Models"
+      },
+      {
+        "command": "ocg.reasoning",
+        "title": "OCG: Set Reasoning Effort"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "node build.mjs --check",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "1.1.0",
+    "gpt-tokenizer": "3.4.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
+  }
+}

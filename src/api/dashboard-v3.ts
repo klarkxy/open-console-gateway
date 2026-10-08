@@ -348,6 +348,7 @@ export async function requestDashboard<T>(
   path: string,
   init: RequestInit = {},
   notifyAuthRequired = true,
+  responseType: "json" | "blob" = "json",
 ): Promise<T> {
   // Resetting the session also replaces the revision sink. A receipt or 401
   // from an earlier session must not alter the newly authenticated session.
@@ -431,6 +432,7 @@ export async function requestDashboard<T>(
       Array.isArray(body?.details) ? body.details : [],
     );
   }
+  if (responseType === "blob") return await response.blob() as T;
   if (response.status === 204) return undefined as T;
   const body = await response.json() as T;
   publishTokens(body, epoch, originProcess);

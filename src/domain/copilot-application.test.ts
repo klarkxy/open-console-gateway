@@ -1,0 +1,5 @@
+import test from "node:test";import assert from "node:assert/strict";
+import {copilotActionReady,copilotTargetKey} from "./copilot-application.ts";
+import type {CopilotApplicationView} from "../api/copilot-application.ts";
+test("extension actions require reviewed target, fingerprint and capability",()=>{const view={fingerprint:"fp",status:"ready",installSupported:true,uninstallSupported:false} as CopilotApplicationView;assert.equal(copilotActionReady(view,"install",true,false),true);assert.equal(copilotActionReady(view,"install",false,false),false);assert.equal(copilotActionReady(view,"install",true,true),false);assert.equal(copilotActionReady({...view,status:"conflict"},"install",true,false),false);assert.equal(copilotActionReady(view,"uninstall",true,false),false);});
+test("profile and directory changes distinguish install targets",()=>{const target={installation:null,profile:null,userDataDir:null,extensionsDir:null};assert.notEqual(copilotTargetKey(target),copilotTargetKey({...target,profile:"Writer"}));assert.notEqual(copilotTargetKey(target),copilotTargetKey({...target,extensionsDir:"C:/isolated"}));});

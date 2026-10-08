@@ -58,6 +58,7 @@ export const OPERATION_ACTION_KEYS = {
   "account.ping": "测试账号连接",
   "application.configure": "配置应用",
   "application.install": "安装应用",
+  "application.disconnect": "断开连接",
   "application.recover": "恢复应用配置",
   "application.remove": "移除应用配置",
   "application.uninstall": "卸载应用",

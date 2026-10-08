@@ -18,6 +18,7 @@ mod bindings;
 mod byok_applications;
 mod catalog;
 mod connections;
+mod copilot_applications;
 mod cpa;
 mod credentials;
 mod destination_catalog;
@@ -134,6 +135,20 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route(
             "/accounts/{id}/official-api/balance",
             post(official_api::refresh_balance),
+        )
+        .route(
+            "/applications/copilot-extension",
+            get(copilot_applications::inspect)
+                .post(copilot_applications::install)
+                .delete(copilot_applications::uninstall),
+        )
+        .route(
+            "/applications/copilot-extension/disconnect",
+            post(copilot_applications::disconnect),
+        )
+        .route(
+            "/applications/copilot-extension/package",
+            get(copilot_applications::download_package),
         )
         .route(
             "/applications/dsh",

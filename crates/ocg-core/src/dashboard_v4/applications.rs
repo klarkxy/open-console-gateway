@@ -217,7 +217,7 @@ fn gateway_v1_url(state: &CoreState) -> String {
     }
 }
 
-fn selected_gateway_key(state: &CoreState, key_id: &str) -> Result<String, V3ApiError> {
+pub(super) fn selected_gateway_key(state: &CoreState, key_id: &str) -> Result<String, V3ApiError> {
     if key_id == PRIMARY_KEY_ID {
         let key = state.config().gateway_key;
         if key.is_empty() {

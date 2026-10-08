@@ -1,2 +1,5 @@
+packages:
+  - .
+  - integrations/copilot-extension
 allowBuilds:
   esbuild: true

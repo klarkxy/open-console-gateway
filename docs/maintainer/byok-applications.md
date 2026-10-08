@@ -272,6 +272,16 @@ when upgrading an adapter. Real desktop activation, tools, attachments, and
 multi-turn inference still require explicit client-runtime verification; a
 successful save must not be presented as proof of those behaviors.
 
+## Copilot extension boundary
+
+The main Copilot tab uses `copilot_application`, `copilot_application_host`, and the immutable `copilot_extension_package`; the BYOK Copilot adapter remains the explicit legacy JSON path. V4 `/applications/copilot-extension` owns inspect/install/uninstall, `/disconnect` requests extension-owned secret deletion, and `/package` serves the same secret-free VSIX on every runtime. Native builds register the host under the existing local-host capability. Auth, CAS, enabled ordinary Key selection, preflight-before-Key effects, and operation receipts remain at the control plane.
+
+Inspection reads existing product/Profile/extension registrations without creating directories or invoking CLI commands. Installation uses trusted detected executables and argument arrays, exact CLI registration readback, runtime digest/provenance receipts, private bounded handoffs, and explicit activation acknowledgments. Connections live under the actual Profile globalStorage, never inside an executable package or VS Code secret database. The local UI extension host consumes its own handoff, stores the Key in SecretStorage, acknowledges import/deletion, and revalidates `/v1/models` before use. Unknown token metadata is actionable in OCG instead of becoming an invented global budget. Test installed, activated, catalog, and inference states separately.
+
+Run `pnpm run build:copilot`, `pnpm run check:copilot`, and `pnpm run test:copilot`; generated runtime and full license notices are pinned with LF endings. The root tooling suite includes extension tests and the Quality workflow checks reproducibility. `node scripts/copilot-extension-host-smoke.mjs` runs the installed Windows Insiders host with isolated temporary user data and synthetic credentials; override `OCG_SMOKE_CODE_ROOT` for its installation location. It does not touch the user Profile.
+
+If an existing Windows update mutex blocks startup, `--isolated-runtime` copies and verifies the official executable/application code, changing only the temporary copy’s mutex identity. This is isolated runtime evidence, not activation in the installed user Profile.
+
 ---
 
 [Maintainer guide index](../MAINTAINER.md) · [简体中文](byok-applications.zh-CN.md) · [Docs index](../README.md)

@@ -155,6 +155,11 @@ function applicationsHarnessPlugin() {
     byokApi: `
       export const byokApplicationsApi = new Proxy({}, { get: (_, key) => (...args) => globalThis.__byokApi[key](...args) });
     `,
+    copilotApi: `
+      export const copilotApplicationApi = {
+        inspect: async (target) => ({ target, status: 'ready', installed: false, installSupported: true, uninstallSupported: false, activationRequired: false, discoveredInstallations: [], fingerprint: 'copilot-fp', extensionVersion: null, detail: null, connectionStatus: null, modelCount: null, metadataMissing: [], gatewayV1Url: 'http://127.0.0.1/v1', revision: {revision:1,processGeneration:1,pricingRevision:'p'} }),
+      };
+    `,
     connection: `export const useConnectionStore = () => globalThis.__dshConnectionStore;`,
     session: `export const useSessionStore = () => ({ authenticated: true });`,
     store: `
@@ -173,6 +178,7 @@ function applicationsHarnessPlugin() {
     ["src/api/dashboard-v3.ts", "dashboardV3"],
     ["src/api/dashboard-v4.ts", "api"],
     ["src/api/byok-applications.ts", "byokApi"],
+    ["src/api/copilot-application.ts", "copilotApi"],
     ["src/stores/connection.ts", "connection"],
     ["src/stores/controlPlane.ts", "store"],
     ["src/stores/session.ts", "session"],
@@ -818,7 +824,7 @@ test("all native tabs switch with pending inspects and explicit Refresh still wo
       (tabs()[index]!.props.onClick as () => void)();
       await settle();
     }
-    assert.deepEqual(byokInspects, ["codex", "kimi", "minimax", "zcode", "copilot"]);
+    assert.deepEqual(byokInspects, ["codex", "kimi", "minimax", "zcode"]);
 
     (tabs()[0]!.props.onClick as () => void)();
     await settle();
@@ -873,7 +879,7 @@ test("client tabs expose tab semantics and switching syncs the app query", async
 });
 
 
-test("Copilot confirmation gates closed-client acknowledgement and sends adjustable budgets", async () => {
+test("Copilot main flow hides budget configuration until explicit legacy migration", async () => {
   const writes: Array<{ client: string; input: Record<string, unknown> }> = [];
   const mounted = await mount({ shell: true,
     api: { getDshApplication: async () => dshApp() },
@@ -885,6 +891,12 @@ test("Copilot confirmation gates closed-client acknowledgement and sends adjusta
   try {
     await mounted.router.push({ query: { app: "copilot" } });
     await settle(40);
+    assert.equal(walkHostNodes(mounted.root).some(node => node.props.type === "number"), false);
+    assert.equal(walkHostNodes(mounted.root).some(node => node.props.class === "byok-actions"), false);
+    assert.ok(walkHostNodes(mounted.root).find(node => node.props["data-action"] === "install"));
+    const legacy = walkHostNodes(mounted.root).find(node => node.props["data-section"] === "legacy")!;
+    (legacy.props.onToggle as (event: object) => void)({ target: { open: true } });
+    await settle();
     const actions = walkHostNodes(mounted.root).find((node) => node.props.class === "byok-actions")!;
     const open = walkHostNodes(actions).find((node) => node.type === "button" && node.props.type === "primary")!;
     (open.props.onClick as () => void)();

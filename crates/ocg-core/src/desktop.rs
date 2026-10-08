@@ -99,6 +99,7 @@ pub struct DesktopCapabilities {
     auto_start_sync: OnceLock<AutoStartSync>,
     dock_visibility_sync: OnceLock<DockVisibilitySync>,
     desktop_update_starter: OnceLock<DesktopUpdateStarter>,
+    copilot_application_host: OnceLock<crate::copilot_application::CopilotApplicationHost>,
     dsh_application_host: OnceLock<crate::dsh_application::DshApplicationHost>,
     byok_application_host: OnceLock<crate::byok_application::ByokApplicationHost>,
     desktop_update_status: Mutex<DesktopUpdateStatus>,
@@ -110,6 +111,7 @@ impl DesktopCapabilities {
             auto_start_sync: OnceLock::new(),
             dock_visibility_sync: OnceLock::new(),
             desktop_update_starter: OnceLock::new(),
+            copilot_application_host: OnceLock::new(),
             dsh_application_host: OnceLock::new(),
             byok_application_host: OnceLock::new(),
             desktop_update_status: Mutex::new(DesktopUpdateStatus::new()),
@@ -175,6 +177,21 @@ impl DesktopCapabilities {
 
     pub fn byok_application_host(&self) -> Option<crate::byok_application::ByokApplicationHost> {
         self.byok_application_host.get().cloned()
+    }
+
+    pub fn set_copilot_application_host(
+        &self,
+        host: crate::copilot_application::CopilotApplicationHost,
+    ) {
+        assert!(
+            self.copilot_application_host.set(host).is_ok(),
+            "Copilot host is already configured"
+        );
+    }
+    pub fn copilot_application_host(
+        &self,
+    ) -> Option<crate::copilot_application::CopilotApplicationHost> {
+        self.copilot_application_host.get().cloned()
     }
 
     pub fn set_dsh_application_host(&self, host: crate::dsh_application::DshApplicationHost) {

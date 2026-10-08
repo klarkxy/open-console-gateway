@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 mod adapters;
-mod fs;
+pub(crate) mod fs;
 mod lock;
 mod paths;
 mod receipt;

@@ -3176,6 +3176,325 @@
       ],
       "type": "object"
     },
+    "CopilotApplication": {
+      "properties": {
+        "activationRequired": {
+          "type": "boolean"
+        },
+        "connectionStatus": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "discoveredInstallations": {
+          "items": {
+            "$ref": "#/$defs/CopilotInstallation"
+          },
+          "type": "array"
+        },
+        "extensionVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gatewayV1Url": {
+          "type": "string"
+        },
+        "installSupported": {
+          "type": "boolean"
+        },
+        "installed": {
+          "type": "boolean"
+        },
+        "metadataMissing": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "modelCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "revision": {
+          "$ref": "#/$defs/ControlRevision"
+        },
+        "status": {
+          "$ref": "#/$defs/CopilotStatus"
+        },
+        "target": {
+          "$ref": "#/$defs/CopilotTarget"
+        },
+        "uninstallSupported": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "target",
+        "status",
+        "installed",
+        "installSupported",
+        "uninstallSupported",
+        "activationRequired",
+        "discoveredInstallations",
+        "fingerprint",
+        "extensionVersion",
+        "detail",
+        "connectionStatus",
+        "modelCount",
+        "metadataMissing",
+        "gatewayV1Url",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "CopilotInspection": {
+      "additionalProperties": false,
+      "properties": {
+        "activationRequired": {
+          "type": "boolean"
+        },
+        "connectionStatus": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "discoveredInstallations": {
+          "items": {
+            "$ref": "#/$defs/CopilotInstallation"
+          },
+          "type": "array"
+        },
+        "extensionVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "installSupported": {
+          "type": "boolean"
+        },
+        "installed": {
+          "type": "boolean"
+        },
+        "metadataMissing": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "modelCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/CopilotStatus"
+        },
+        "target": {
+          "$ref": "#/$defs/CopilotTarget"
+        },
+        "uninstallSupported": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "target",
+        "status",
+        "installed",
+        "installSupported",
+        "uninstallSupported",
+        "activationRequired",
+        "discoveredInstallations",
+        "fingerprint",
+        "extensionVersion",
+        "detail",
+        "connectionStatus",
+        "modelCount",
+        "metadataMissing"
+      ],
+      "type": "object"
+    },
+    "CopilotInstallRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "expectedFingerprint": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "keyId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target": {
+          "$ref": "#/$defs/CopilotTarget"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "target",
+        "expectedFingerprint"
+      ],
+      "type": "object"
+    },
+    "CopilotInstallation": {
+      "additionalProperties": false,
+      "properties": {
+        "executable": {
+          "type": "string"
+        },
+        "extensionsDir": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "userDataDir": {
+          "type": "string"
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "executable",
+        "version",
+        "userDataDir",
+        "extensionsDir"
+      ],
+      "type": "object"
+    },
+    "CopilotMutationRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "expectedFingerprint": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target": {
+          "$ref": "#/$defs/CopilotTarget"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "target",
+        "expectedFingerprint"
+      ],
+      "type": "object"
+    },
+    "CopilotStatus": {
+      "enum": [
+        "unsupported_runtime",
+        "not_detected",
+        "ready",
+        "installed_pending",
+        "connected",
+        "disconnected",
+        "connection_error",
+        "conflict"
+      ],
+      "type": "string"
+    },
+    "CopilotTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "extensionsDir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "installation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "profile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "userDataDir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "installation",
+        "profile",
+        "userDataDir",
+        "extensionsDir"
+      ],
+      "type": "object"
+    },
     "CopilotTokenBudget": {
       "additionalProperties": false,
       "description": "Local Copilot request budgets, not declarations about upstream capability.",
@@ -11603,6 +11922,27 @@
     },
     {
       "$ref": "#/$defs/AliasPublicationUpdate"
+    },
+    {
+      "$ref": "#/$defs/CopilotTarget"
+    },
+    {
+      "$ref": "#/$defs/CopilotStatus"
+    },
+    {
+      "$ref": "#/$defs/CopilotInstallation"
+    },
+    {
+      "$ref": "#/$defs/CopilotInspection"
+    },
+    {
+      "$ref": "#/$defs/CopilotApplication"
+    },
+    {
+      "$ref": "#/$defs/CopilotInstallRequest"
+    },
+    {
+      "$ref": "#/$defs/CopilotMutationRequest"
     },
     {
       "$ref": "#/$defs/DshApplicationStatus"

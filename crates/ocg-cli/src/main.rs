@@ -253,6 +253,8 @@ fn register_dsh_application_host(_state: &Arc<CoreStateInner>) {
     ocg_core::byok_application_host::register(_state);
     #[cfg(feature = "dsh-local-host")]
     ocg_core::dsh_application_host::register(_state);
+    #[cfg(feature = "dsh-local-host")]
+    ocg_core::copilot_application_host::register(_state);
 }
 
 async fn serve(
