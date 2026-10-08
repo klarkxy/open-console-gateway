@@ -39,10 +39,10 @@ second handwritten Rust map. Presets without a plan offering use `"api"`.
 
 ## 2. Applications
 
-The Applications page currently contains one DSH-specific V4 flow and one
-OCG-owned package; it is not a generic registry or a promised extension point.
-Add a second application only from its concrete install, credential, lifecycle,
-and acceptance contract. See [Applications](../user/applications.md).
+The Applications page has concrete DSH plugin and VS Code Copilot extension V4
+flows alongside native client configuration. Each owns its install, credential,
+lifecycle, and acceptance contract; these are not a generic plugin registry.
+A new application needs the same explicit ownership and runtime evidence. See [Applications](../user/applications.md).
 
 ## 3. External Integration: Static Local-Service Adapter
 

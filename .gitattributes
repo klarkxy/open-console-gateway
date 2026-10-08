@@ -5,3 +5,8 @@
 # Keep pinned upstream resources byte-identical across Windows checkouts.
 resources/codex-byok/prompt.md text eol=lf
 resources/codex-byok/LICENSE text eol=lf
+
+# Reproducible embedded Copilot artifacts
+# Generated tokenizer data contains meaningful literal whitespace.
+integrations/copilot-extension/dist/extension.cjs text eol=lf -whitespace
+integrations/copilot-extension/THIRD_PARTY_NOTICES text eol=lf

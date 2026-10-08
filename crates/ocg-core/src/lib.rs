@@ -11,6 +11,10 @@ pub mod byok_application;
 pub mod byok_application_host;
 pub(crate) mod command_code_usage;
 pub(crate) mod control;
+pub mod copilot_application;
+#[cfg(feature = "dsh-local-host")]
+pub mod copilot_application_host;
+pub mod copilot_extension_package;
 pub mod cpa;
 pub(crate) mod cpa_cli_import;
 pub mod cpa_runtime;

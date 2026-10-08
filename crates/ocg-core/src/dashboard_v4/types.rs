@@ -4,6 +4,9 @@
 //! fields as `T | null`. Listings and onboarding results are secret-free. The
 //! error envelope reuses the V3 DTO so clients can share one decoder.
 
+mod copilot;
+pub use copilot::*;
+
 pub use super::pages::types::*;
 
 use schemars::JsonSchema;
@@ -179,6 +182,13 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "CatalogModelsRemoveResult",
     "AliasPublication",
     "AliasPublicationUpdate",
+    "CopilotTarget",
+    "CopilotStatus",
+    "CopilotInstallation",
+    "CopilotInspection",
+    "CopilotApplication",
+    "CopilotInstallRequest",
+    "CopilotMutationRequest",
     "DshApplicationStatus",
     "DshApplication",
     "DshDiscoveredProfile",
@@ -2038,6 +2048,11 @@ pub fn contract_schema() -> Value {
     include_type::<crate::dashboard_v3::ProviderContracts>(&mut serialize);
     include_type::<CatalogModelsRemoveResult>(&mut serialize);
     include_type::<AliasPublication>(&mut serialize);
+    include_type::<CopilotTarget>(&mut serialize);
+    include_type::<CopilotStatus>(&mut serialize);
+    include_type::<CopilotInstallation>(&mut serialize);
+    include_type::<CopilotInspection>(&mut serialize);
+    include_type::<CopilotApplication>(&mut serialize);
     include_type::<DshApplicationStatus>(&mut serialize);
     include_type::<ByokClient>(&mut serialize);
     include_type::<ByokStatus>(&mut serialize);
@@ -2129,6 +2144,8 @@ pub fn contract_schema() -> Value {
     include_type::<CatalogModelsAddRequest>(&mut deserialize);
     include_type::<CatalogModelsRemoveRequest>(&mut deserialize);
     include_type::<AliasPublicationUpdate>(&mut deserialize);
+    include_type::<CopilotInstallRequest>(&mut deserialize);
+    include_type::<CopilotMutationRequest>(&mut deserialize);
     include_type::<DshApplicationInstallRequest>(&mut deserialize);
     include_type::<ByokPreviewRequest>(&mut deserialize);
     include_type::<ByokConfigureRequest>(&mut deserialize);

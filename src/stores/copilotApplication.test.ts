@@ -1,0 +1,25 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import {createPinia,setActivePinia} from "pinia";
+import {installWindowDashboard} from "../test-helpers/dashboard-v3-fetch.ts";
+import {useCopilotApplicationStore} from "./copilotApplication.ts";
+import {useSessionStore} from "./session.ts";
+import type {CopilotApplicationView,CopilotTarget} from "../api/copilot-application.ts";
+const target:CopilotTarget={installation:null,profile:null,userDataDir:null,extensionsDir:null};
+function value(overrides:Partial<CopilotApplicationView>={}):CopilotApplicationView{return {target,status:"ready",installed:false,installSupported:true,uninstallSupported:false,activationRequired:false,discoveredInstallations:[],fingerprint:"fp",extensionVersion:null,detail:null,connectionStatus:null,modelCount:null,metadataMissing:[],gatewayV1Url:"http://127.0.0.1/v1",revision:{revision:1,processGeneration:1,pricingRevision:"p"},...overrides};}
+function setup(){setActivePinia(createPinia());installWindowDashboard();const calls:Array<{url:string,init:RequestInit,resolve:(v:unknown,status?:number)=>void}>=[];Object.defineProperty(globalThis,"fetch",{configurable:true,value:(url:string,init:RequestInit={})=>new Promise<Response>(resolve=>calls.push({url:String(url),init,resolve:(v,status=200)=>resolve(new Response(JSON.stringify(v),{status,headers:{"Content-Type":"application/json"}}))}))});return {store:useCopilotApplicationStore(),calls};}
+async function tick(){for(let i=0;i<10;i++)await new Promise<void>(r=>setImmediate(r));}
+const expectation={expectedRevision:1,processGeneration:1};
+test("pending identical target inspections coalesce and cache stays visible",async()=>{const {store,calls}=setup();const a=store.inspect(target),b=store.inspect(target);await tick();assert.equal(calls.length,1);calls[0]!.resolve(value());await Promise.all([a,b]);const refresh=store.inspect(target);await tick();assert.equal(store.application?.fingerprint,"fp");assert.equal(store.loading,true);calls[1]!.resolve(value({fingerprint:"new"}));await refresh;assert.equal(store.application?.fingerprint,"new");});
+test("old target response cannot commit after later target or logout",async()=>{const {store,calls}=setup();const a=store.inspect(target);const next={...target,profile:"Writer"};const b=store.inspect(next);await tick();calls[1]!.resolve(value({target:next,fingerprint:"writer"}));await b;calls[0]!.resolve(value());await a;assert.equal(store.application?.fingerprint,"writer");const late=store.inspect(target);await tick();useSessionStore().dropSession();calls[2]!.resolve(value());await late;assert.equal(store.application,null);assert.equal(store.loading,false);});
+test("mutation commits in place and never starts a duplicate GET",async()=>{const {store,calls}=setup();const load=store.inspect(target);await tick();calls[0]!.resolve(value());await load;const write=store.mutate("install",{target,expectedFingerprint:"fp",keyId:null},expectation);await tick();assert.equal(calls.length,2);assert.equal(calls[1]!.init.method,"POST");calls[1]!.resolve(value({status:"installed_pending",installed:true,fingerprint:"done"}));await write;assert.equal(store.application?.fingerprint,"done");assert.equal(calls.length,2);});
+test("409 invalidates the reviewed snapshot without replay",async()=>{const {store,calls}=setup();const load=store.inspect(target);await tick();calls[0]!.resolve(value());await load;const write=store.mutate("install",{target,expectedFingerprint:"fp",keyId:null},expectation);await tick();calls[1]!.resolve({code:"revisionConflict",message:"fixture changed",currentRevision:2,processGeneration:1},409);await assert.rejects(write);assert.equal(calls.length,2);assert.equal(store.snapshotKey,null);assert.equal(store.application?.fingerprint,"fp");});
+test("mutation acknowledgment after session teardown stays out of the cache",async()=>{const {store,calls}=setup();const load=store.inspect(target);await tick();calls[0]!.resolve(value());await load;const write=store.mutate("install",{target,expectedFingerprint:"fp",keyId:null},expectation);await tick();store.clear();calls[1]!.resolve(value({fingerprint:"late"}));await write;assert.equal(store.application,null);assert.equal(store.mutating,false);});
+
+test("late conflict cannot invalidate a new session inspection",async()=>{
+  const {store,calls}=setup();const load=store.inspect(target);await tick();calls[0]!.resolve(value());await load;
+  const write=store.mutate("install",{target,expectedFingerprint:"fp",keyId:null},expectation);const rejected=assert.rejects(write);await tick();
+  store.clear();const next=store.inspect(target);await tick();calls[2]!.resolve(value({fingerprint:"new-session"}));await next;
+  const snapshot=store.snapshotKey;calls[1]!.resolve({code:"revisionConflict",message:"fixture conflict",currentRevision:2,processGeneration:1},409);await rejected;
+  assert.equal(store.snapshotKey,snapshot);assert.equal(store.application?.fingerprint,"new-session");assert.equal(store.error,"");
+});

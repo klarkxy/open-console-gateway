@@ -1301,6 +1301,18 @@ impl CoreStateInner {
         self.desktop.byok_application_host()
     }
 
+    pub fn set_copilot_application_host(
+        &self,
+        host: crate::copilot_application::CopilotApplicationHost,
+    ) {
+        self.desktop.set_copilot_application_host(host);
+    }
+    pub fn copilot_application_host(
+        &self,
+    ) -> Option<crate::copilot_application::CopilotApplicationHost> {
+        self.desktop.copilot_application_host()
+    }
+
     pub fn set_dsh_application_host(&self, host: crate::dsh_application::DshApplicationHost) {
         self.desktop.set_dsh_application_host(host);
     }

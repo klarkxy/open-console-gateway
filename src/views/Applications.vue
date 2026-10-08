@@ -22,14 +22,15 @@
         :value="client"
         class="applications-tab-content"
       >
-        <ByokApplicationPanel :client="client" />
+        <CopilotApplicationPanel v-if="client === 'copilot'" />
+        <ByokApplicationPanel v-else :client="client" />
       </TabsContent>
     </TabsRoot>
   </div>
 </template>
 
 <script setup lang="ts">
-import { nextTick, onMounted, ref, watch } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { TabsContent, TabsList, TabsRoot, TabsTrigger } from "reka-ui";
 import { t } from "../i18n/index.ts";
@@ -40,6 +41,7 @@ import {
   type ApplicationsTab,
 } from "../domain/byok-applications.ts";
 import { routeQuerySearch } from "./app-navigation.ts";
+import CopilotApplicationPanel from "../components/applications/CopilotApplicationPanel.vue";
 import DshApplicationPanel from "../components/applications/DshApplicationPanel.vue";
 import ByokApplicationPanel from "../components/applications/ByokApplicationPanel.vue";
 
@@ -68,7 +70,16 @@ watch(activeTab, (tab) => {
 });
 
 // A deep-linked reload (e.g. ?app=zcode) starts on the clipped trigger.
-onMounted(revealActiveTab);
+let tabResizeObserver: ResizeObserver | null = null;
+onMounted(() => {
+  revealActiveTab();
+  const element = tabList.value?.$el;
+  if (typeof ResizeObserver === "function" && element instanceof Element) {
+    tabResizeObserver = new ResizeObserver(revealActiveTab);
+    tabResizeObserver.observe(element);
+  }
+});
+onBeforeUnmount(() => tabResizeObserver?.disconnect());
 
 // Same-view navigation (back/forward, deep links) drives the tab back.
 watch(() => route.query.app, () => {

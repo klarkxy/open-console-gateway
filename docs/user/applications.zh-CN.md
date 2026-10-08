@@ -2,7 +2,7 @@
 
 # 应用
 
-五个本机客户端页签是 **Codex**、**Kimi Code**、**MiniMax Code**、**ZCode** 和 **VS Code Copilot**。**DSH** 使用下文的插件流程。
+本机配置页签为 **Codex**、**Kimi Code**、**MiniMax Code** 和 **ZCode**。**VS Code Copilot** 与 **DSH** 分别使用下文的扩展和插件流程。
 
 ## Codex、Kimi Code、MiniMax Code 与 ZCode
 
@@ -43,24 +43,32 @@ MiniMax 的 YAML 配置会在保存时重新排版，保留其他字段值；原
 
 ## VS Code Copilot
 
-此页签在本机 `chatLanguageModels.json` 中配置 VS Code 内置的 **Custom Endpoint** 供应商，创建或复用名称为 `copilot` 的已启用普通 Key，并把全部可路由的已发布公开模型导出为快照，不安装扩展。格式基线为 [VS Code 1.141](https://github.com/microsoft/vscode/blob/1.141.0/extensions/copilot/src/extension/byok/vscode-node/customEndpointProvider.ts)；原生控件见[官方语言模型指南](https://code.visualstudio.com/docs/agent-customization/language-models)。
+主流程安装 **Open Console Gateway** VS Code 模型提供者扩展。OCG 创建或复用名为 `copilot` 的启用普通 Key；扩展将其导入所选 Profile 的 **SecretStorage**。VS Code 发现模型及每次发请求前，扩展读取已鉴权 `/v1/models`。无需再维护一套上下文预算或模型快照。
 
-1. 在与 VS Code 相同的电脑上，以同一个系统用户运行 OCG 桌面应用或原生 CLI。打开 **应用 > VS Code Copilot**，检查确切的目标文件。使用命名 Profile、便携安装或 `--user-data-dir` 时，显式选择该安装实际使用的 `chatLanguageModels.json` 路径。
-2. **配置**、**更新配置**、**移除**或**恢复**之前，完整退出 VS Code。VS Code 不提供共享外部文件锁，操作期间也不要在其他编辑器中打开该文件。
-3. 检查确认窗口中的输入和输出 token 预算。草稿初始为**输入 100,000**、**输出 8,192**，可按请求需求调整。这是导出的客户端配置预算，不是已知供应商上限，也不是上游模型元数据声明。已知模型上限会约束导出值；已知上下文窗口小于两者之和时，两个值按比例缩小。未知上限使用你明确设置的预算。这些值用于 VS Code 的上下文管理和输出预留；实际请求参数与上游限制取决于客户端和模型，不能保证每次请求都有硬性输出上限。保存的 Copilot 预算会持久化，并在后续预览中再次显示。普通刷新会保留兼容的逐模型自定义预算；只有实际编辑预算时，新的全局预算才会应用。
-4. 确认后重新打开 VS Code，在 Chat 模型选择器或 **Chat: Manage Language Models** 中选择 **Open Console Gateway** 下的模型。OCG 不切换默认模型，也不修改 `settings.json`。发送请求，并在 OCG **日志**中确认。
+1. 在 VS Code 所在电脑、同一用户下运行 OCG Desktop 或原生 CLI。打开 **应用 > VS Code Copilot**，核对显示的安装、Profile、用户数据目录和扩展目录。**其他安装目标**可选择 Stable/Insiders、已有命名 Profile 或指定目录。命名 Profile 需先在 VS Code 中打开一次；共享默认全局状态的 Profile 应使用默认 Profile 的连接。要求 VS Code 1.141 或更新版本。
+2. 点击 **安装并连接**。OCG 通过官方 VS Code CLI 安装随应用附带、不含 Key 的 VSIX，并将私有一次性交接文件写入该 Profile 的扩展存储。打开或重新加载所选 Profile，再刷新应用状态。**等待 VS Code 激活**与**已连接 OCG**是不同阶段。
+3. 在 Chat 模型选择器的 **Open Console Gateway** 下选择模型。上下文和输出限制直接来自各模型的 OCG 元数据；输入容量为输出上限预留空间。缺少任一限制的模型会显示在应用的元数据提示中。点击**前往模型能力**，在 OCG 补齐一次，再在 VS Code 执行 **OCG: Refresh Models**。未知工具/图像能力保持关闭；Agent 要求已声明工具调用能力。
+4. 发出请求，并在 OCG **日志**中确认。安装、Key 导入和目录发现均不等于推理成功。扩展提供 Chat 和 Agent 模型，不提供行内代码补全或 Next Edit Suggestions。
 
-全部模型都会导出供 Chat 使用。Agent 模型选择器要求明确的 `toolCalling: true`；未知工具和视觉能力会导出为 `false`。支持工具的模型未出现在 Agent 中时，请先验证能力，在 OCG 现有模型元数据页面声明，再更新配置。Chat Completions 或 Responses 的已知推理档位会去重后原样写入 `supportsReasoningEffort`，并使用匹配的 `reasoningEffortFormat`。Messages 不会获得猜测的推理菜单或思考预算。
+实验性的 VS Code Agent Host/Agents Window 桥接还需要在 VS Code 启用
+`chat.agentHost.byokModels.enabled`。OCG 不代为开启；Agent Host 支持与普通
+Chat/Agent 模型发现分开验收。详见[VS Code 模型定制](https://code.visualstudio.com/docs/agent-customization/language-models)。
 
-受管供应商名为 **Open Console Gateway**，`vendor` 为 `customendpoint`。每个模型按已发布的首选协议写入完整 `/v1/chat/completions`、`/v1/responses` 或 `/v1/messages` 地址。供应商层省略 `url`，让 VS Code 使用完整的已保存列表；1.141 的动态发现实现可能跳过未知模型。配置省略 `apiKey`，在每个模型的 `requestHeaders.Authorization` 写入字面值 `Bearer <OCG Key>`，使单次文件操作无需另走 VS Code 凭据提示。Key 因此以明文保存在私有本机配置和私有恢复备份中，Dashboard 响应不会返回它。偏好 VS Code secret storage 时，可按[手动配置](add-application.zh-CN.md#vs-code-copilot)使用其原生界面；OCG 不写入 VS Code secret storage。
+Key 或网关地址变更后，使用**更新或重新连接**刷新扩展和该 Profile 的连接。它不修改默认模型或 `settings.json`。VS Code 共用扩展文件时，可执行包保持不可变，各 Profile 独立保存交接文件与 SecretStorage 连接。扩展运行在本机 UI 扩展宿主；远程工作区也使用本机宿主，不向远程宿主传递本机交接路径。
 
-公开模型、协议、能力或推理档位变化后，**更新配置**会刷新完整快照。OCG 保留其他供应商及其 JSONC 注释、兼容的逐模型自定义预算和客户端偏好。重新生成的受管条目可能重新排版，私有备份保留原始字节。唯一的现有 OCG 供应商可经预览明确接管；重复或畸形条目、不安全的外部引用以及竞争性的受管编辑仍受冲突检查保护。**移除**、**撤销接管**和中断操作的**恢复**沿用所有权检查、私有备份、CAS 和已检查文件的指纹，保留其他供应商及 OCG Key，拒绝覆盖后续编辑。成功操作后请关闭并重新打开 VS Code；保存成功不代表客户端已经激活配置。
+**断开连接**请求正在运行的扩展清除加密连接。**卸载扩展**必须收到扩展已删除秘密的明确回执，才会让 CLI 移除该 Profile 的扩展注册。如果仍等待激活，请打开所选 Profile，刷新后继续卸载。移除后会检查其他 Profile。OCG 不编辑 VS Code 的秘密数据库，也不删除 OCG 中的普通 Key。
 
-默认目标是 `Code/User/chatLanguageModels.json`；Stable 目录不存在而 `Code - Insiders/User` 已存在时，使用后者。优先使用便携数据目录（`VSCODE_PORTABLE`），其次是 `VSCODE_APPDATA` 与产品目录名，最后是平台根目录：Windows 的 `%APPDATA%`、macOS 的 `~/Library/Application Support`，或 Linux 的 `$XDG_CONFIG_HOME`（否则为 `~/.config`）。写入前核对显示的路径。
+Docker、另一台电脑或不支持的本机目标可用**下载 VSIX 手动安装**。在 VS Code 执行 **Extensions: Install from VSIX** 安装该文件，再运行 **OCG: Connect**，填写一次网关 `/v1` 地址和启用的 Key。**OCG: Disconnect** 清除扩展连接。远程网关要求 HTTPS；内网和回环地址可用 HTTP。
 
-该集成支持 VS Code Chat、Agent、inline chat 和 utility tasks，不提供行内代码补全或 Next Edit Suggestions。Agent Host BYOK 属于实验功能，需要原生 `chat.agentHost.byokModels.enabled` 设置；OCG 不会启用它。Docker 或不含本机配置能力的构建使用[手动配置](add-application.zh-CN.md#vs-code-copilot)。
+扩展按模型发布的首选 Chat Completions、Responses 或 Messages 协议请求，支持已声明的图像、工具、流式响应和取消。文本 Token 计数使用 o200k 编码，加上消息/工具开销和保守图像估算；其他模型的分词可能不同。计数估算不修改已发布上限。私有推理签名保存在有界的内存重放缓存中，仅用于匹配的会话轮次；重新加载、断开或重新连接会清空它。
 
-下面的 **DSH** 子页签通过 OCG 插件把 DSH 本身接入 Gateway。
+可用 **OCG: Set Reasoning Effort** 为各模型选择 OCG 已声明的 Chat Completions 或 Responses 推理强度，不为 Messages 猜测强度菜单或思考预算。
+
+### 旧 JSON 配置与迁移
+
+展开**旧 JSON 配置与迁移**，可继续使用原有的原生 Custom Endpoint 适配器。扩展连接成功后，通过旧配置的受审查**移除**动作删除 OCG JSON 供应商，避免重复显示。文件操作前需关闭 VS Code。归属回执、CAS、指纹检查、备份、撤销和恢复会保留其他供应商，并拒绝覆盖后续编辑。安装扩展不会静默编辑或删除旧供应商。
+
+JSON 兼容流程仍将快照导出到 `chatLanguageModels.json`，保留原有逐模型客户端设置，并提供显式客户端预算。这些预算只属于兼容流程。Key 以字面值认证 Header 保存在私有 JSON 文件和恢复备份中；扩展流程使用 SecretStorage。详见[手动配置](add-application.zh-CN.md#vs-code-copilot)及[官方提供者接口](https://code.visualstudio.com/api/extension-guides/ai/language-model-chat-provider)。
 
 ## DSH
 

@@ -38,6 +38,10 @@ does not prove that the client loaded it.
 
 ## VS Code Copilot
 
+Download the VSIX from **Applications > VS Code Copilot**, install it with **Extensions: Install from VSIX**, and run **OCG: Connect**. OCG supplies the dynamic model directory and token limits; the Profile SecretStorage holds the Key. See [extension setup and legacy migration](applications.md#vs-code-copilot).
+
+### Native Custom Endpoint compatibility configuration
+
 Use the [Applications > VS Code Copilot flow](applications.md#vs-code-copilot) for native configuration. For a manual setup, open VS Code's **Chat: Manage Language Models**, choose **Add Models > Custom Endpoint**, and edit the resulting `chatLanguageModels.json`. Keep its top-level array and other providers. The [official guide](https://code.visualstudio.com/docs/agent-customization/language-models) describes the native UI; OCG's advanced format baseline is [VS Code 1.141](https://github.com/microsoft/vscode/blob/1.141.0/extensions/copilot/src/extension/byok/vscode-node/customEndpointProvider.ts).
 
 The following is a single explicit Chat Completions entry. Replace `public-model-id` with an exact published model ID and `<OCG Key>` with your Key. The numeric values are example client configuration budgets, not vendor metadata. Constrain the configured values to verified input/output limits and proportionally reduce both if their sum exceeds a known context window. These values guide VS Code's context management and output reservation; actual request parameters and upstream limits depend on the client and model, so they do not guarantee a hard output limit for every request.

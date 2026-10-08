@@ -70,6 +70,16 @@ Host 通过 `runtime_log` 共享的控制台 sink 向上进程的 stderr 逐事�
 
 格式解析、配置保存、客户端加载和真实推理是不同的证据。升级适配器时，使用目标源码 schema 检查生成文件。真实桌面激活、工具、附件和多轮推理仍需单独验证，不能用保存成功代替这些行为的验证。
 
+## Copilot 扩展边界
+
+Copilot 主标签使用 `copilot_application`、`copilot_application_host` 和不可变的 `copilot_extension_package`；BYOK Copilot 适配器保留为显式旧 JSON 入口。V4 `/applications/copilot-extension` 管理检查/安装/卸载，`/disconnect` 请求扩展自行删除秘密，`/package` 在所有运行时提供同一份无 Key 的 VSIX。原生构建沿用本机 Host 能力注册安装器。认证、CAS、启用普通 Key 的选择、创建 Key 前的目标预检和操作回执仍由控制面负责。
+
+检查只读已有产品、Profile 和扩展注册，不创建目录或调用 CLI。安装使用检测到的可信可执行文件和参数数组，验证 CLI 注册、运行文件摘要和归属回执；交接文件私有且有大小限制，激活使用明确回执。连接位于实际 Profile 的 globalStorage，不写进可执行包或 VS Code 秘密数据库。本机 UI 扩展宿主只读取自己的交接文件，将 Key 写入 SecretStorage，确认导入/删除，并在使用前重新验证 `/v1/models`。未知 Token 元数据引导用户在 OCG 补齐，不生成猜测的全局预算。安装、激活、目录和推理证据分开验证。
+
+运行 `pnpm run build:copilot`、`pnpm run check:copilot` 和 `pnpm run test:copilot`；生成的运行文件与完整许可证声明固定 LF 换行。根 tooling 套件包含扩展测试，Quality 工作流检查可重现打包。`node scripts/copilot-extension-host-smoke.mjs` 用临时用户数据和合成凭据运行已安装的 Windows Insiders 宿主，可用 `OCG_SMOKE_CODE_ROOT` 指定安装目录；不触碰用户 Profile。
+
+Windows 更新互斥锁阻止启动时，可加 `--isolated-runtime` 复制并核验官方可执行文件和应用代码，仅改临时副本的互斥标识。这属于隔离运行时证据，不代表已安装用户 Profile 的激活。
+
 ---
 
 [维护者指南索引](../MAINTAINER.zh-CN.md) · [English](byok-applications.md) · [文档索引](../README.zh-CN.md)

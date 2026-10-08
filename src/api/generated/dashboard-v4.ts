@@ -99,6 +99,13 @@ export type DashboardApiV4 =
   | CatalogModelsRemoveResult
   | AliasPublication
   | AliasPublicationUpdate
+  | CopilotTarget
+  | CopilotStatus
+  | CopilotInstallation
+  | CopilotInspection
+  | CopilotApplication
+  | CopilotInstallRequest
+  | CopilotMutationRequest
   | DshApplicationStatus
   | DshApplication
   | DshDiscoveredProfile
@@ -457,6 +464,15 @@ export type QuotaSharing =
       credentialId: string;
       kind: "shared";
     };
+export type CopilotStatus =
+  | "unsupported_runtime"
+  | "not_detected"
+  | "ready"
+  | "installed_pending"
+  | "connected"
+  | "disconnected"
+  | "connection_error"
+  | "conflict";
 export type DshApplicationStatus =
   "unsupported_runtime" | "not_detected" | "ready" | "installed" | "incompatible" | "conflict";
 export type DshApplicationOutcome = "applied" | "restart-required" | "overridden" | "failed" | "cancelled";
@@ -2434,6 +2450,65 @@ export interface AliasPublicationUpdate {
   processGeneration: number;
   publicModel: string;
   published: boolean;
+}
+export interface CopilotTarget {
+  extensionsDir: string | null;
+  installation: string | null;
+  profile: string | null;
+  userDataDir: string | null;
+}
+export interface CopilotInstallation {
+  executable: string;
+  extensionsDir: string;
+  id: string;
+  label: string;
+  userDataDir: string;
+  version: string | null;
+}
+export interface CopilotInspection {
+  activationRequired: boolean;
+  connectionStatus: string | null;
+  detail: string | null;
+  discoveredInstallations: CopilotInstallation[];
+  extensionVersion: string | null;
+  fingerprint: string | null;
+  installSupported: boolean;
+  installed: boolean;
+  metadataMissing: string[];
+  modelCount: number | null;
+  status: CopilotStatus;
+  target: CopilotTarget;
+  uninstallSupported: boolean;
+}
+export interface CopilotApplication {
+  activationRequired: boolean;
+  connectionStatus: string | null;
+  detail: string | null;
+  discoveredInstallations: CopilotInstallation[];
+  extensionVersion: string | null;
+  fingerprint: string | null;
+  gatewayV1Url: string;
+  installSupported: boolean;
+  installed: boolean;
+  metadataMissing: string[];
+  modelCount: number | null;
+  revision: ControlRevision;
+  status: CopilotStatus;
+  target: CopilotTarget;
+  uninstallSupported: boolean;
+}
+export interface CopilotInstallRequest {
+  expectedFingerprint: string;
+  expectedRevision: number;
+  keyId?: string | null;
+  processGeneration: number;
+  target: CopilotTarget;
+}
+export interface CopilotMutationRequest {
+  expectedFingerprint: string;
+  expectedRevision: number;
+  processGeneration: number;
+  target: CopilotTarget;
 }
 export interface DshApplication {
   activationRequired: boolean;

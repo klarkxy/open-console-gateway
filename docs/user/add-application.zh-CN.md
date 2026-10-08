@@ -31,6 +31,10 @@ curl http://127.0.0.1:9042/v1/models \
 
 ## VS Code Copilot
 
+推荐从 **应用 > VS Code Copilot** 下载 VSIX，在 VS Code 执行 **Extensions: Install from VSIX**，再运行 **OCG: Connect**。模型目录、上下文和输出限制由 OCG 动态提供，Key 保存在该 Profile 的 SecretStorage。详见[扩展接入与旧配置迁移](applications.zh-CN.md#vs-code-copilot)。
+
+### 原生 Custom Endpoint 兼容配置
+
 本机自动配置使用[应用 > VS Code Copilot 流程](applications.zh-CN.md#vs-code-copilot)。手动配置时，在 VS Code 打开 **Chat: Manage Language Models**，选择 **Add Models > Custom Endpoint**，编辑生成的 `chatLanguageModels.json`。保留顶层数组和其他供应商。[官方指南](https://code.visualstudio.com/docs/agent-customization/language-models)说明原生界面；OCG 的高级格式基线为 [VS Code 1.141](https://github.com/microsoft/vscode/blob/1.141.0/extensions/copilot/src/extension/byok/vscode-node/customEndpointProvider.ts)。
 
 下面是一条显式 Chat Completions 配置。把 `public-model-id` 替换成准确的已发布模型 ID，把 `<OCG Key>` 替换成你的 Key。数值是示例客户端配置预算，不是供应商元数据。按已验证的输入、输出上限约束配置值；两者之和超过已知上下文窗口时，按比例缩小两者。这些值用于 VS Code 的上下文管理和输出预留；实际请求参数与上游限制取决于客户端和模型，不能保证每次请求都有硬性输出上限。

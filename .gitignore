@@ -83,3 +83,7 @@ diff.txt
 
 # Local agent mockups and generated routing acceptance evidence
 .grok/
+
+# Immutable Copilot runtime embedded in native and Docker builds
+!integrations/copilot-extension/dist/
+!integrations/copilot-extension/dist/extension.cjs

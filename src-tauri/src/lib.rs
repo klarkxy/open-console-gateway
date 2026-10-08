@@ -155,6 +155,7 @@ fn initialize_host() -> Result<state::AppState> {
 
     host::register_desktop_settings(&core_state);
     ocg_core::dsh_application_host::register(&core_state);
+    ocg_core::copilot_application_host::register(&core_state);
     ocg_core::byok_application_host::register(&core_state);
     host::cpa_runtime::register(&core_state);
 
