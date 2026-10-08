@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const RECEIPT_VERSION: u32 = 1;
+pub const RECEIPT_VERSION: u32 = 2;
 const PROVIDER_ID: &str = "ocg";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +73,14 @@ pub struct Receipt {
     pub first_owned: serde_json::Value,
     pub last_managed: ManagedSnapshot,
     pub pending: Option<PendingOperation>,
+    #[serde(default)]
+    pub adopted: bool,
+    #[serde(default)]
+    pub copilot_token_budget: Option<crate::byok_application::CopilotTokenBudget>,
+    #[serde(default)]
+    pub adopted_secret_hashes: serde_json::Value,
+    #[serde(default)]
+    pub last_generated: serde_json::Value,
 }
 
 #[derive(Debug, Clone)]
@@ -102,11 +110,88 @@ pub struct Store {
 impl Store {
     pub fn open(data_dir: &Path, target: &ResolvedTarget) -> ByokResult<Self> {
         let hash = super::fs::sha256_hex(target.path.to_string_lossy().as_bytes());
-        let dir = data_dir
+        let client_dir = data_dir
             .join("applications")
             .join("byok")
-            .join(target.client.id())
-            .join(hash);
+            .join(target.client.id());
+        let direct = client_dir.join(hash);
+        let hint = target
+            .store_identity_hint
+            .as_ref()
+            .map(|path| client_dir.join(super::fs::sha256_hex(path.to_string_lossy().as_bytes())));
+        let mut matches = Vec::new();
+        let mut unknown_journal = false;
+        // A pre-canonicalization receipt stays at its existing private location.
+        // Only an unambiguous, safely resolved same-file identity is reused.
+        super::fs::reject_symlink_ancestors(&client_dir.join("receipt.json"))?;
+        match fs::read_dir(&client_dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.map_err(|_| {
+                        ByokError::internal("failed to read BYOK receipt directory")
+                    })?;
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.len() != 64
+                        || !name.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        || crate::dsh_application_host::is_link_or_reparse(&entry.path())
+                    {
+                        continue;
+                    }
+                    let receipt_bytes = read_regular_file(&entry.path().join("receipt.json"))?;
+                    let receipt = receipt_bytes
+                        .as_deref()
+                        .and_then(|bytes| serde_json::from_slice::<Receipt>(bytes).ok());
+                    let journal = read_regular_file(&entry.path().join("journal.json"))?
+                        .as_deref()
+                        .and_then(|bytes| serde_json::from_slice::<Journal>(bytes).ok());
+                    let identity = receipt.as_ref().or_else(|| {
+                        journal
+                            .as_ref()
+                            .and_then(|journal| journal.prior_receipt.as_ref())
+                    });
+                    if let Some(receipt) = identity {
+                        if receipt.client == target.client.id() {
+                            if super::fs::identity_path(Path::new(&receipt.target_path))
+                                .is_ok_and(|path| path == target.path)
+                            {
+                                matches.push(entry.path());
+                            }
+                            #[cfg(windows)]
+                            if !target.path.exists()
+                                && possible_missing_alias(
+                                    Path::new(&receipt.target_path),
+                                    &target.path,
+                                )?
+                                && !matches.contains(&entry.path())
+                            {
+                                return Err(ByokError::conflict(
+                                    "A receipt identifies a possible missing-file case alias; use its original target path",
+                                ));
+                            }
+                        }
+                    } else if journal.is_some() {
+                        if entry.path() == direct || hint.as_ref() == Some(&entry.path()) {
+                            matches.push(entry.path());
+                        } else {
+                            unknown_journal = true;
+                        }
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(ByokError::internal("failed to read BYOK receipt directory")),
+        }
+        if matches.is_empty() && unknown_journal {
+            return Err(ByokError::conflict(
+                "An older interrupted BYOK write has no file identity; recover it using its original target path",
+            ));
+        }
+        if matches.len() > 1 {
+            return Err(ByokError::conflict(
+                "More than one receipt identifies this BYOK configuration",
+            ));
+        }
+        let dir = matches.pop().unwrap_or(direct);
         Ok(Self {
             dir,
             #[cfg(test)]
@@ -140,7 +225,7 @@ impl Store {
         };
         let receipt: Receipt = serde_json::from_slice(&bytes)
             .map_err(|_| ByokError::conflict("BYOK receipt is unreadable"))?;
-        if receipt.version != RECEIPT_VERSION {
+        if !matches!(receipt.version, 1 | RECEIPT_VERSION) {
             return Err(ByokError::conflict("BYOK receipt version is unsupported"));
         }
         Ok(Some(receipt))
@@ -165,7 +250,10 @@ impl Store {
                 "BYOK receipt client does not match the target",
             ));
         }
-        if receipt.target_path != target.path.to_string_lossy() {
+        if receipt.target_path != target.path.to_string_lossy()
+            && !super::fs::identity_path(Path::new(&receipt.target_path))
+                .is_ok_and(|path| path == target.path)
+        {
             return Err(ByokError::conflict(
                 "BYOK receipt target does not match the path",
             ));
@@ -256,6 +344,22 @@ impl Store {
         plan: ApplyPlan,
         kind: PendingKind,
     ) -> ByokResult<Option<Receipt>> {
+        self.apply_reviewed(target, prior, plan, kind, None)
+    }
+
+    pub fn apply_reviewed(
+        &self,
+        target: &ResolvedTarget,
+        prior: Option<Receipt>,
+        plan: ApplyPlan,
+        kind: PendingKind,
+        metadata: Option<(
+            bool,
+            Option<crate::byok_application::CopilotTokenBudget>,
+            serde_json::Value,
+            serde_json::Value,
+        )>,
+    ) -> ByokResult<Option<Receipt>> {
         if let Some(receipt) = &prior {
             self.validate_identity(target, receipt)?;
         }
@@ -306,6 +410,7 @@ impl Store {
 
         let first_adoption = prior.is_none();
         let mut receipt = prior.unwrap_or_else(|| new_receipt(target));
+        receipt.version = RECEIPT_VERSION;
         receipt.first_owned = plan.first_owned.clone();
         receipt.baseline_default = plan.baseline_default.clone();
         if first_adoption {
@@ -318,6 +423,12 @@ impl Store {
         receipt.last_managed = managed;
         receipt.last_applied_default = plan.last_applied_default;
         receipt.pending = None;
+        if let Some((adopted, budget, hashes, generated)) = metadata {
+            receipt.adopted = adopted;
+            receipt.copilot_token_budget = budget;
+            receipt.adopted_secret_hashes = hashes;
+            receipt.last_generated = generated;
+        }
         self.save_receipt(&receipt)?;
         self.clear_journal()?;
         Ok(Some(receipt))
@@ -364,7 +475,7 @@ impl Store {
         match &journal.prior_receipt {
             None => Ok(()),
             Some(receipt) => {
-                if receipt.version != RECEIPT_VERSION {
+                if !matches!(receipt.version, 1 | RECEIPT_VERSION) {
                     return Err(ByokError::conflict(
                         "BYOK journal prior receipt version is unsupported",
                     ));
@@ -452,6 +563,10 @@ pub fn new_receipt(target: &ResolvedTarget) -> Receipt {
             applied_default: None,
         },
         pending: None,
+        adopted: false,
+        copilot_token_budget: None,
+        adopted_secret_hashes: serde_json::Value::Null,
+        last_generated: serde_json::Value::Null,
     }
 }
 
@@ -498,6 +613,7 @@ const SECRET_FIELDS: &[&str] = &[
     "experimental_bearer_token",
     "api_key",
     "apiKey",
+    "Authorization",
     "access_token",
     "refresh_token",
 ];
@@ -523,4 +639,17 @@ pub fn without_secrets(value: &serde_json::Value) -> serde_json::Value {
         }
         other => other.clone(),
     }
+}
+
+#[cfg(windows)]
+fn possible_missing_alias(left: &Path, right: &Path) -> ByokResult<bool> {
+    let left = super::fs::identity_path(left)?;
+    let names = left
+        .file_name()
+        .zip(right.file_name())
+        .is_some_and(|(left, right)| {
+            left.to_string_lossy()
+                .eq_ignore_ascii_case(&right.to_string_lossy())
+        });
+    Ok(names && left.parent() == right.parent())
 }

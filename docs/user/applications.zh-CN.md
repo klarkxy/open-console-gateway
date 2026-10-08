@@ -2,6 +2,8 @@
 
 # 应用
 
+五个本机客户端页签是 **Codex**、**Kimi Code**、**MiniMax Code**、**ZCode** 和 **VS Code Copilot**。**DSH** 使用下文的插件流程。
+
 ## Codex、Kimi Code、MiniMax Code 与 ZCode
 
 这些页签向本机客户端配置添加 **Open Console Gateway** 模型供应商。Codex 指 CLI 或桌面中的本地 Codex 工作流，不会改变普通 ChatGPT Chat 或云端 Work 的推理地址。
@@ -13,7 +15,13 @@
 
 Gateway 的路由标记只在客户端原样转发不透明原生历史时保护这段历史。Codex、Kimi Code、MiniMax Code 和 ZCode 各自负责会话的序列化。供应商、API 或模型身份变化时，它们的 SDK 可以把原生不透明字段改成纯文本，也可以丢掉该字段。OCG 无法恢复一个从未到达的字段，也无法发现这次丢弃。切换协议分组或改写客户端配置，不会迁移旧会话。原生身份变化时，需要新开会话，或者发送已经解析好的历史。带标记的历史确实到达时，同一条已配置路由就是这项保证的边界：上游模型、端点或凭据版本的直接变化会在发出 HTTP 之前拒绝。DSH 插件会在基础适配器改写已出现的签名信封之前检查该信封。
 
-**更新配置**会重新导出当前全部模型。这些原生目录是配置时的快照；公开模型变化后，请更新配置。**移除**只移除或恢复 OCG 管理的部分，保留客户端登录、其他供应商和 OCG Key。原 Key 或模型已删除也不影响移除。用户后来修改过受管字段时，OCG 会提示冲突，不会静默覆盖。手工 ZCode 规则留在原处。它与即将写入的受管规则使用同一个受管供应商和模型，或者仍指向这次写入会移除的受管供应商时，OCG 报告冲突。受管模型规则上 OCG 不拥有的字段予以保留。既有的 CAS 检查和所有权冲突保护仍然保留。
+在**配置**或**更新配置**之前，页面会先执行只读的新鲜预览。**移除**和**恢复**在确认前重新检查状态。预览显示当前 revision、process generation、检查得到的文件指纹，以及计划中的受管模型/供应商变化。预览不会创建 Key、写入客户端文件、创建 receipt、创建原生配置目录，也不会修改上游目录。配置提交时会附带预览指纹，并在需要时明确确认接管、覆盖和移除。提交会重新校验所有预检值和计划指纹；页面过期时必须重新准备并再次审阅，不会自动重试。
+
+**更新配置**会重新导出完整的已发布模型目录，不提供模型选择器。已有受管供应商和模型、未知额外字段以及客户端偏好会按各适配器的所有权规则保留。**移除**只移除或恢复 OCG 管理的部分，保留客户端登录、其他供应商和 OCG Key。即使原 Key 或已发布目录已不存在，仍可移除或恢复；空目录也可以移除已有应用配置，因为预检不会创建 Key。预检后实际文件 I/O 失败可能留下一个启用的同名 Key；结果会准确报告部分完成，不会自动删除该 Key。
+
+OCG 将适配器管理的路由、身份和元数据字段与无关字节区分开；字节指纹仍用于并发保护。Codex 目录中的空白在语义上相同。receipt 丢失时，唯一的 OCG 命名空间可以经过审阅后接管，确认时将当前配置保存为私有基线；重复或畸形条目、外部引用仍会阻止操作。受管值被修改后，必须明确选择经审阅的**应用 OCG 更改**或**取消**。已移除的自定义行需要明确确认整行删除。不会自动重试 409。
+
+检查结果标记为已接管时，移除操作显示为**撤销接管**。撤销只恢复 OCG 修改过、且仍匹配最后应用值的受管字段；接管块中后来添加的额外字段和偏好，以及其他无关内容都会保留。竞争性的受管编辑会产生冲突；撤销无法恢复首次 OCG 更改之前未知的状态。
 
 配置时，当前 OCG 模型仍在公开列表中就保留，否则启用导出的第一个模型；之后在客户端内切换模型。Codex 会启用 OCG 目录作为全局目录，不会把它合并进原生 ChatGPT 目录。未知模型上限保持未指定；模型可见不代表它支持编程客户端所需的全部工具能力。
 
@@ -23,7 +31,7 @@ Kimi 会将普通档位转成小写，并把 `on`、`off` 当作原生开关。O
 
 MiniMax 会将关闭参数 `off` 改写成 `none`。如果这会改变已声明的上游参数，OCG 就不导出字面值 `off` 选项；明确声明的 `none` 仍可选择。导出不会强制设置思考开关模式，也不会编造默认档位。
 
-已停用的 Key 不会重新启用；没有同名已启用 Key 时才新建。若创建 Key 后客户端文件写入失败，该 Key 仍保留在连接中心，重试会复用它。模型列表为空时，在创建 Key 或写入客户端文件前就会拒绝配置。
+已停用的 Key 不会重新启用；没有同名已启用 Key 时才新建。若创建 Key 后客户端文件写入失败，该 Key 仍保留在连接中心，重试会复用它。配置和更新时，模型列表为空会在创建 Key 或写入客户端文件前拒绝；移除已有应用配置仍然可用。
 
 生成的 Codex 目录附带 Codex 0.153.4 官方通用编码指令，该版本要求每个自定义模型提供指令来源。OCG 同时附带来源说明与 Apache 2.0 许可证。
 
@@ -32,6 +40,25 @@ OCG 在替换配置前保存私有恢复数据。操作中断后，如果日志�
 MiniMax 的 YAML 配置会在保存时重新排版，保留其他字段值；原有注释可在首次备份中查看。
 
 页签会解析各客户端的 Home、数据目录等覆盖设置，也可选择自定义 Profile 的配置路径。Codex、Kimi 使用 `config.toml`，MiniMax 使用 `config.yaml`，当前 ZCode 使用带版本的 `provider_config.json` Personal Provider 格式。旧格式或损坏文件不会被覆盖。CLI 与桌面端仅在使用相同位置及兼容格式时共享配置。Docker 或不含本机能力的构建无法配置浏览器电脑上的客户端，请使用[手动客户端配置](add-application.zh-CN.md)。
+
+## VS Code Copilot
+
+此页签在本机 `chatLanguageModels.json` 中配置 VS Code 内置的 **Custom Endpoint** 供应商，创建或复用名称为 `copilot` 的已启用普通 Key，并把全部可路由的已发布公开模型导出为快照，不安装扩展。格式基线为 [VS Code 1.141](https://github.com/microsoft/vscode/blob/1.141.0/extensions/copilot/src/extension/byok/vscode-node/customEndpointProvider.ts)；原生控件见[官方语言模型指南](https://code.visualstudio.com/docs/agent-customization/language-models)。
+
+1. 在与 VS Code 相同的电脑上，以同一个系统用户运行 OCG 桌面应用或原生 CLI。打开 **应用 > VS Code Copilot**，检查确切的目标文件。使用命名 Profile、便携安装或 `--user-data-dir` 时，显式选择该安装实际使用的 `chatLanguageModels.json` 路径。
+2. **配置**、**更新配置**、**移除**或**恢复**之前，完整退出 VS Code。VS Code 不提供共享外部文件锁，操作期间也不要在其他编辑器中打开该文件。
+3. 检查确认窗口中的输入和输出 token 预算。草稿初始为**输入 100,000**、**输出 8,192**，可按请求需求调整。这是导出的客户端配置预算，不是已知供应商上限，也不是上游模型元数据声明。已知模型上限会约束导出值；已知上下文窗口小于两者之和时，两个值按比例缩小。未知上限使用你明确设置的预算。这些值用于 VS Code 的上下文管理和输出预留；实际请求参数与上游限制取决于客户端和模型，不能保证每次请求都有硬性输出上限。保存的 Copilot 预算会持久化，并在后续预览中再次显示。普通刷新会保留兼容的逐模型自定义预算；只有实际编辑预算时，新的全局预算才会应用。
+4. 确认后重新打开 VS Code，在 Chat 模型选择器或 **Chat: Manage Language Models** 中选择 **Open Console Gateway** 下的模型。OCG 不切换默认模型，也不修改 `settings.json`。发送请求，并在 OCG **日志**中确认。
+
+全部模型都会导出供 Chat 使用。Agent 模型选择器要求明确的 `toolCalling: true`；未知工具和视觉能力会导出为 `false`。支持工具的模型未出现在 Agent 中时，请先验证能力，在 OCG 现有模型元数据页面声明，再更新配置。Chat Completions 或 Responses 的已知推理档位会去重后原样写入 `supportsReasoningEffort`，并使用匹配的 `reasoningEffortFormat`。Messages 不会获得猜测的推理菜单或思考预算。
+
+受管供应商名为 **Open Console Gateway**，`vendor` 为 `customendpoint`。每个模型按已发布的首选协议写入完整 `/v1/chat/completions`、`/v1/responses` 或 `/v1/messages` 地址。供应商层省略 `url`，让 VS Code 使用完整的已保存列表；1.141 的动态发现实现可能跳过未知模型。配置省略 `apiKey`，在每个模型的 `requestHeaders.Authorization` 写入字面值 `Bearer <OCG Key>`，使单次文件操作无需另走 VS Code 凭据提示。Key 因此以明文保存在私有本机配置和私有恢复备份中，Dashboard 响应不会返回它。偏好 VS Code secret storage 时，可按[手动配置](add-application.zh-CN.md#vs-code-copilot)使用其原生界面；OCG 不写入 VS Code secret storage。
+
+公开模型、协议、能力或推理档位变化后，**更新配置**会刷新完整快照。OCG 保留其他供应商及其 JSONC 注释、兼容的逐模型自定义预算和客户端偏好。重新生成的受管条目可能重新排版，私有备份保留原始字节。唯一的现有 OCG 供应商可经预览明确接管；重复或畸形条目、不安全的外部引用以及竞争性的受管编辑仍受冲突检查保护。**移除**、**撤销接管**和中断操作的**恢复**沿用所有权检查、私有备份、CAS 和已检查文件的指纹，保留其他供应商及 OCG Key，拒绝覆盖后续编辑。成功操作后请关闭并重新打开 VS Code；保存成功不代表客户端已经激活配置。
+
+默认目标是 `Code/User/chatLanguageModels.json`；Stable 目录不存在而 `Code - Insiders/User` 已存在时，使用后者。优先使用便携数据目录（`VSCODE_PORTABLE`），其次是 `VSCODE_APPDATA` 与产品目录名，最后是平台根目录：Windows 的 `%APPDATA%`、macOS 的 `~/Library/Application Support`，或 Linux 的 `$XDG_CONFIG_HOME`（否则为 `~/.config`）。写入前核对显示的路径。
+
+该集成支持 VS Code Chat、Agent、inline chat 和 utility tasks，不提供行内代码补全或 Next Edit Suggestions。Agent Host BYOK 属于实验功能，需要原生 `chat.agentHost.byokModels.enabled` 设置；OCG 不会启用它。Docker 或不含本机配置能力的构建使用[手动配置](add-application.zh-CN.md#vs-code-copilot)。
 
 下面的 **DSH** 子页签通过 OCG 插件把 DSH 本身接入 Gateway。
 

@@ -213,7 +213,21 @@ async fn get_v3(harness: &V3Harness, path: &str) -> (StatusCode, Value) {
 fn json_field_names(value: &Value) -> Vec<&str> {
     match value {
         Value::Object(map) => {
-            let mut names: Vec<&str> = map.keys().map(String::as_str).collect();
+            // V4 presentation actions use a semantic `key`, never Key material.
+            let action = map.len() == 3
+                && matches!(
+                    map.get("key").and_then(Value::as_str),
+                    Some("toggle" | "test" | "modelEditable" | "metadataEditable")
+                )
+                && map.get("allowed").is_some_and(Value::is_boolean)
+                && map
+                    .get("reason")
+                    .is_some_and(|value| value.is_null() || value.is_string());
+            let mut names: Vec<&str> = map
+                .keys()
+                .map(String::as_str)
+                .filter(|name| *name != "key" || !action)
+                .collect();
             names.extend(map.values().flat_map(json_field_names));
             names
         }
@@ -584,6 +598,21 @@ async fn dashboard_v3_provider_catalog_aliases_follow_saved_builtin_catalogs() {
         )
         .unwrap();
     }
+    let baseline = ocg_core::dashboard_v3::OfficialProtocolBaseline::mapped_protocols([(
+        goat[0].as_str(),
+        vec![ocg_core::provider::UpstreamProtocolKind::ChatCompletions],
+    )]);
+    harness
+        .state
+        .db
+        .lock()
+        .apply_official_protocol_baseline(
+            &ContractScope::provider(COMMAND_CODE_PROVIDER_ID),
+            &goat,
+            &baseline,
+            now,
+        )
+        .unwrap();
     harness.state.reload_provider_contracts().unwrap();
 
     let (status, body) = get_v3(&harness, "/providers").await;
@@ -596,8 +625,8 @@ async fn dashboard_v3_provider_catalog_aliases_follow_saved_builtin_catalogs() {
         .expect("Command Code catalog entry");
     assert_eq!(
         goat_entry.model_aliases,
-        ["nemotron-3-ultra"],
-        "GOAT should expose only code-owned short Aliases from its saved catalog"
+        ["nemotron-3-ultra-550b-a55b"],
+        "fresh GOAT catalog names follow the saved leaf"
     );
     let minimax_entry = parsed
         .entries
@@ -625,10 +654,10 @@ async fn dashboard_v3_provider_catalog_aliases_follow_saved_builtin_catalogs() {
     assert_eq!(
         kimi_entry.model_aliases,
         [
+            "k3",
+            "k3-256k",
             "kimi-for-coding",
             "kimi-for-coding-highspeed",
-            "kimi-k3",
-            "kimi-k3-256k",
         ]
     );
 
@@ -651,8 +680,8 @@ async fn dashboard_v3_provider_catalog_aliases_follow_saved_builtin_catalogs() {
         aliases.get("kimi-for-coding-highspeed"),
         Some(&"kimi-for-coding-highspeed")
     );
-    assert_eq!(aliases.get("k3"), Some(&"kimi-k3"));
-    assert_eq!(aliases.get("k3-256k"), Some(&"kimi-k3-256k"));
+    assert_eq!(aliases.get("k3"), Some(&"k3"));
+    assert_eq!(aliases.get("k3-256k"), Some(&"k3-256k"));
 
     harness.stop();
 }
@@ -1697,4 +1726,14 @@ async fn retired_v2_provider_routes_stay_gone_and_v3_omits_legacy_aliases() {
     assert!(v3_zen.get("account").is_none());
 
     harness.stop();
+}
+
+#[test]
+fn provider_secret_check_distinguishes_action_codes_from_key_material() {
+    let action = json!({"key":"toggle", "allowed":true, "reason":null});
+    assert!(!json_field_names(&action).contains(&"key"));
+    let material = json!({"key":"opaque-test-secret", "allowed":true, "reason":null});
+    assert!(json_field_names(&material).contains(&"key"));
+    assert!(json_string_values(&material).contains(&"opaque-test-secret"));
+    assert!(json_field_names(&json!({"keyCipher":"encrypted-test-secret"})).contains(&"keyCipher"));
 }

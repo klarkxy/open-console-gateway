@@ -17,7 +17,6 @@ use crate::models::Account;
 use crate::provider::{
     COMMAND_CODE_GOAT_BASE_URL, OPENCODE_CONSTRUCTABLE_PROTOCOLS, ProtocolProbeDescriptor,
     ProviderAdapterKind, ProviderRegistry, StructuralProbeCeiling, UpstreamProtocolKind,
-    command_code_goat_includes_model,
 };
 use crate::redaction::sanitize_upstream_error_value_with_known_secret;
 use chrono::{DateTime, Utc};
@@ -760,7 +759,7 @@ pub fn safety_ceiling_protocols(
     match probe.structural_ceiling {
         StructuralProbeCeiling::Unavailable => Vec::new(),
         StructuralProbeCeiling::CommandCodeConstructable => {
-            ocg_domain::protocol::command_code_supported_formats(model_id)
+            ocg_domain::protocol::command_code_constructable_formats(model_id)
                 .iter()
                 .copied()
                 .filter_map(protocol_from_api)
@@ -809,24 +808,6 @@ pub fn official_static_protocols(
         .collect()
 }
 
-fn structural_admission_protocols(
-    adapter: ProviderAdapterKind,
-    probe: ProtocolProbeDescriptor,
-    model_id: &str,
-) -> Vec<UpstreamProtocolKind> {
-    if adapter == ProviderAdapterKind::CommandCodeGoat
-        && !model_id.eq_ignore_ascii_case("stealth/ox-alpha")
-    {
-        ocg_domain::protocol::command_code_supported_formats(model_id)
-            .iter()
-            .copied()
-            .filter_map(protocol_from_api)
-            .collect()
-    } else {
-        safety_ceiling_protocols(probe, model_id)
-    }
-}
-
 /// Protocols the effective contract may admit: the adapter structural ceiling
 /// plus current official-docs Static evidence. Probe-manufactured rows do not
 /// widen this set on sealed adapters.
@@ -836,7 +817,7 @@ pub fn admitted_protocols(
     model_id: &str,
     evidence: &[PersistedModelProtocol],
 ) -> Vec<UpstreamProtocolKind> {
-    let mut admitted = structural_admission_protocols(adapter, probe, model_id);
+    let mut admitted = safety_ceiling_protocols(probe, model_id);
     for protocol in official_static_protocols(adapter, model_id, evidence) {
         if !admitted.contains(&protocol) {
             admitted.push(protocol);
@@ -1188,10 +1169,8 @@ fn merge_provider_scope(
 
     let mut models = BTreeMap::new();
     for model_id in &static_models {
-        let default_source = if (adapter == ProviderAdapterKind::CommandCodeGoat
-            && command_code_goat_includes_model(model_id))
-            || (adapter == ProviderAdapterKind::OllamaCloud
-                && crate::kernel::protocol::ollama_cloud_includes_model(model_id))
+        let default_source = if adapter == ProviderAdapterKind::OllamaCloud
+            && crate::kernel::protocol::ollama_cloud_includes_model(model_id)
         {
             ContractEvidenceSource::Preset
         } else {
@@ -1368,13 +1347,6 @@ fn merge_model_contract(
     adapter_routable: bool,
 ) -> EffectiveModelContract {
     let official_docs = official_static_protocols(adapter, model_id, evidence);
-    // GOAT extras stay Auto-off until official-docs Static evidence exists.
-    // Included preset rows, and every other sealed adapter, default on once a
-    // trusted protocol baseline makes the protocol available. Directory
-    // discovery still cannot assert Chat for a model with no protocol evidence.
-    let default_enabled = adapter != ProviderAdapterKind::CommandCodeGoat
-        || command_code_goat_includes_model(model_id)
-        || !official_docs.is_empty();
     let preferred = official_docs
         .first()
         .copied()
@@ -1432,10 +1404,7 @@ fn merge_model_contract(
             }
             ProtocolOverrideState::ForceOn => (true, true),
             ProtocolOverrideState::ForceOff => (evidence_available, false),
-            ProtocolOverrideState::Auto => (
-                evidence_available,
-                evidence_available && (default_enabled || source == ContractEvidenceSource::Preset),
-            ),
+            ProtocolOverrideState::Auto => (evidence_available, evidence_available),
         };
         protocols.insert(
             protocol.as_str().to_string(),
@@ -1463,7 +1432,7 @@ fn merge_model_contract(
             EffectiveProtocolEvidence {
                 protocol: preferred,
                 available: true,
-                enabled: default_enabled,
+                enabled: true,
                 source: default_source,
                 verified_at: None,
                 observed_at: None,

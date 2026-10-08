@@ -2,6 +2,12 @@
 
 # 存储与迁移
 
+## Schema v67 — 保存目录兼容
+
+v67 只迁移已保存数据，不增加表或列。既有数据库先生成经校验的 `data.sqlite.pre-v67.<timestamp>.bak` 和 SHA-256 sidecar，再在一个事务中把仍保留的 Kimi `k3`/`k3-256k` 与 GOAT Nemotron 默认公开名称保存为显式目录映射。用户改过的名称保持原样，冲突名称跳过，原始 ID 与凭据范围不变。既有 GOAT 行中非空且处于适配器能力范围内的协议声明，通过已保存预设证据继续保留支持；空行或不受支持的行不会获得协议。已保存的关闭选择继续关闭。
+
+历史名称快照只在 schema 66 升到 67 时执行一次。刷新与迁移导入会保留这些已保存名称；新发现和删除后重新出现的行按目录生成名称。再次打开 schema 67 不会重放迁移或另写备份。迁移失败时，名称、证据和 schema 版本一起回滚。旧二进制拒绝 schema 67；回退需恢复经校验的 pre-v67 数据库及匹配的混淆密钥，或恢复升级前完整数据目录。便携 payload 仍为 V12；schema 67 是内部存储版本，不是产品发布版本。
+
 ## Schema v66 — GOAT Key 本地计划窗口
 
 v66 增量增加可空 `credentials.goat_plan_cooldowns_json`。`migrate_to_v66` 接受 schema v64 或 v65，添加该 TEXT 列，再写入 `schema_version` 66。既有行保持 NULL。已经是 v66 的打开直接返回，不改写该列。不改写 credentials 表，也不写 pre-v66 快照。普通冷却列、凭据 ID、路由顺序和 Key 密文保持原样。
@@ -93,7 +99,7 @@ GUI 或 CLI 启动时会原地执行 SQLite 迁移。打开新版二进制前：
 
 ## Schema v27 与 pre-v3 快照
 
-`CURRENT_SCHEMA_VERSION = 66`（`crates/ocg-core/src/db.rs`）。下文保留 v1–v57 的历史迁移细节。v58 新增 `destinations.model_resolution`，回填 `adapter_defined` / `public_only` / `public_and_upstream`，把遗留 Custom 目的地改为不限制凭据数量，保留全部目的地与凭据 ID，并在修改非全新规范 v57 源之前写入经校验的 pre-v58 SQLite 备份。v60 增量保存 `credentials.quota_recovery_json`（见上文）。v66 增量保存 `credentials.goat_plan_cooldowns_json`（见上文）。
+`CURRENT_SCHEMA_VERSION = 67`（`crates/ocg-core/src/db.rs`）。下文保留 v1–v57 的历史迁移细节。v58 新增 `destinations.model_resolution`，回填 `adapter_defined` / `public_only` / `public_and_upstream`，把遗留 Custom 目的地改为不限制凭据数量，保留全部目的地与凭据 ID，并在修改非全新规范 v57 源之前写入经校验的 pre-v58 SQLite 备份。v60 增量保存 `credentials.quota_recovery_json`（见上文）。v66 增量保存 `credentials.goat_plan_cooldowns_json`（见上文）。
 
 ## Schema v45 — 身份 / 凭据 / 绑定附属表
 

@@ -15,7 +15,7 @@ or `OCG_MANAGER_ENCRYPTION_KEY`.
 
 The CLI has `serve`, `key`, `status`, and `skill sync`. Run the installed
 binary's `--help` and each subcommand's `--help` for its exact version.
-`key add` and `key ping` are OpenCode Go-only. `key list` and `status` count
+`key add` and `key ping` target OpenCode Go accounts. `key list` and `status` count
 API-key accounts across Providers; `key remove/enable/disable` act on an
 account ID even for other Providers. Confirm its Provider in the dashboard
 before changing it. Dashboard Keys, Custom destinations, per-model protocol
@@ -43,7 +43,9 @@ auto-sync on `serve`, and the Docker build does not install a skill into the
 container or the Docker host.
 
 `key add` stores a ready, enabled OpenCode Go account; confirm it with
-`key ping` before you rely on it.
+`key ping` before you rely on it. `key ping` chooses a deterministic routable
+saved model and its saved supported preferred protocol; pass `--model <id>` to
+select a supported saved model explicitly.
 
 Start the headless Gateway, then add the upstream Key in its local dashboard:
 
@@ -57,9 +59,10 @@ After saving the account, a second terminal can run `key list` and
 `serve --port <port>` writes the port to SQLite; later runs without the flag
 reuse it.
 
-`key ping` decrypts the selected key, sends a tiny chat completion through it,
-and prints the real upstream status code with a short body excerpt — a quick
-way to surface `401`/`403`/`429`/`200` without opening the dashboard. Treat
+`key ping` decrypts the selected key, sends a tiny request through the selected
+saved model and protocol, and prints the real upstream status code with a short
+body excerpt — a quick way to surface `401`/`403`/`429`/`200` without opening
+the dashboard. Treat
 that upstream-provided excerpt as sensitive when you share diagnostics.
 
 ---

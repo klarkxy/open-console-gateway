@@ -12,6 +12,104 @@ use std::path::Path;
 pub struct ZcodeAdapter;
 
 impl FormatAdapter for ZcodeAdapter {
+    fn raw_default(&self, bytes: Option<&[u8]>) -> ByokResult<Option<String>> {
+        let _ = bytes;
+        bytes
+            .map(parse_json)
+            .transpose()
+            .map(|root| root.as_ref().and_then(selection_string))
+    }
+
+    fn managed(&self, target_bytes: Option<&[u8]>, _catalog: Option<&[u8]>) -> ByokResult<Value> {
+        let root = match target_bytes {
+            Some(bytes) => parse_json(bytes)?,
+            None => empty_document(),
+        };
+        if let Some(reason) = unsupported_schema(&root) {
+            return Err(ByokError::invalid(reason));
+        }
+        Ok(owned_from_root(&root))
+    }
+    fn replace_managed(&self, target_bytes: Option<&[u8]>, owned: &Value) -> ByokResult<Vec<u8>> {
+        let mut root = match target_bytes {
+            Some(bytes) => parse_json(bytes)?,
+            None => empty_document(),
+        };
+        for (provider, model) in manual_identities(&root) {
+            let retained = owned["providers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|row| row["providerId"].as_str() == Some(provider));
+            let collision = owned["models"].as_array().into_iter().flatten().any(|row| {
+                row["providerId"].as_str() == Some(provider)
+                    && row["modelId"].as_str() == Some(model)
+            });
+            if collision
+                || (super::is_managed_provider(provider)
+                    && provider_rule_exists(&root, provider)
+                    && !retained)
+            {
+                return Err(ByokError::conflict(
+                    "A manual ZCode rule would collide or lose its provider after restoration",
+                ));
+            }
+        }
+        remove_managed(&mut root);
+        let providers = provider_rules_mut(&mut root)?;
+        providers.extend(owned["providers"].as_array().into_iter().flatten().cloned());
+        let cfg = config_mut(&mut root)
+            .ok_or_else(|| ByokError::invalid("ZCode config must be an object"))?;
+        let order = cfg.entry("providerOrder").or_insert_with(|| json!([]));
+        order
+            .as_array_mut()
+            .ok_or_else(|| ByokError::invalid("providerOrder must be an array"))?
+            .extend(
+                owned["providerOrder"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
+        let rules = cfg.entry("modelConfigRules").or_insert_with(|| json!({}));
+        let list = rules
+            .as_object_mut()
+            .ok_or_else(|| ByokError::invalid("modelConfigRules must be an object"))?
+            .entry("providerModelRules")
+            .or_insert_with(|| json!([]));
+        list.as_array_mut()
+            .ok_or_else(|| ByokError::invalid("providerModelRules must be an array"))?
+            .extend(owned["models"].as_array().into_iter().flatten().cloned());
+        encode(&root)
+    }
+    fn restore_selection(
+        &self,
+        target_bytes: &[u8],
+        original: Option<&[u8]>,
+        receipt: &Receipt,
+    ) -> ByokResult<Vec<u8>> {
+        let mut root = parse_json(target_bytes)?;
+        let current = selection_string(&root);
+        if receipt.last_applied_default == current {
+            let prior = original.map(parse_json).transpose()?;
+            let value = prior
+                .as_ref()
+                .and_then(config)
+                .and_then(|cfg| cfg.get("defaultModelSelection"))
+                .cloned();
+            if let Some(value) = value {
+                set_selection(&mut root, value);
+            } else if let Some(cfg) = config_mut(&mut root) {
+                cfg.remove("defaultModelSelection");
+            }
+        } else if ocg_selection_id(current.as_deref()).is_some() {
+            return Err(ByokError::conflict(
+                "The current default changed after takeover",
+            ));
+        }
+        encode(&root)
+    }
+
     fn inspect_bytes(
         &self,
         target_bytes: Option<&[u8]>,
@@ -34,7 +132,7 @@ impl FormatAdapter for ZcodeAdapter {
             collision: present && receipt.is_none(),
             configured_model_ids: ocg_model_ids(&root),
             current_default: ocg_default(&root),
-            user_changed_owned: ownership_conflict(receipt, true, &owned),
+            user_changed_owned: ownership_conflict(ByokClient::Zcode, receipt, true, &owned),
         }
     }
 
@@ -63,7 +161,12 @@ impl FormatAdapter for ZcodeAdapter {
                 "An unowned managed ZCode provider already exists",
             ));
         }
-        if ownership_conflict(receipt, target_bytes.is_some(), &owned_from_root(&root)) {
+        if ownership_conflict(
+            ByokClient::Zcode,
+            receipt,
+            target_bytes.is_some(),
+            &owned_from_root(&root),
+        ) {
             return Err(ByokError::conflict(
                 "Owned ZCode fields changed outside OCG",
             ));
@@ -128,7 +231,12 @@ impl FormatAdapter for ZcodeAdapter {
             return Ok(removal_plan(target_path, receipt));
         };
         let mut root = parse_json(bytes)?;
-        if ownership_conflict(Some(receipt), true, &owned_from_root(&root)) {
+        if ownership_conflict(
+            ByokClient::Zcode,
+            Some(receipt),
+            true,
+            &owned_from_root(&root),
+        ) {
             return Err(ByokError::conflict(
                 "Owned ZCode fields changed outside OCG",
             ));
@@ -247,7 +355,9 @@ fn unsupported_schema(root: &Value) -> Option<String> {
         }
         _ => return Some("ZCode provider config schemaVersion is invalid".into()),
     }
-    let config = object.get("config")?.as_object()?;
+    let Some(config) = object.get("config").and_then(Value::as_object) else {
+        return Some("ZCode config must be an object".into());
+    };
     if config
         .get("providerConfigRules")
         .is_some_and(|value| !value.is_object())

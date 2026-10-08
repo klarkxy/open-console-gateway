@@ -62,6 +62,10 @@ fn carry(plan: &ApplyPlan) -> Receipt {
         last_applied_default: plan.last_applied_default.clone(),
         first_owned: plan.first_owned.clone(),
         last_managed: plan.managed.clone(),
+        adopted: false,
+        copilot_token_budget: None,
+        adopted_secret_hashes: serde_json::Value::Null,
+        last_generated: serde_json::Value::Null,
         pending: None,
     }
 }
@@ -406,7 +410,8 @@ fn codex_owned_provider_leaf_and_catalog_bytes_conflict_before_rewrite() {
         .unwrap();
     assert_eq!(again.first_owned, first.first_owned);
     let mut provider_doc = toml(role_bytes(&first, FileRole::Target).unwrap().as_slice());
-    provider_doc["model_providers"]["ocg"]["request_max_retries"] = toml_edit::value(4);
+    provider_doc["model_providers"]["ocg"]["base_url"] =
+        toml_edit::value("http://other.invalid/v1");
     let edited = provider_doc.to_string();
     assert_conflict(CodexAdapter.configure(
         &target,
@@ -425,14 +430,18 @@ fn codex_owned_provider_leaf_and_catalog_bytes_conflict_before_rewrite() {
     ));
     let mut catalog_bytes = role_bytes(&first, FileRole::Catalog).unwrap();
     catalog_bytes.extend_from_slice(b" ");
-    assert_conflict(CodexAdapter.configure(
-        &target,
-        Some(&catalog),
-        role_bytes(&first, FileRole::Target).as_deref(),
-        Some(&catalog_bytes),
-        Some(&receipt),
-        input(&models, None),
-    ));
+    assert!(
+        CodexAdapter
+            .configure(
+                &target,
+                Some(&catalog),
+                role_bytes(&first, FileRole::Target).as_deref(),
+                Some(&catalog_bytes),
+                Some(&receipt),
+                input(&models, None),
+            )
+            .is_ok()
+    );
     let kept = String::from_utf8(role_bytes(&first, FileRole::Target).unwrap())
         .unwrap()
         .replace("keep = \"yes\"", "keep = \"no\"");
@@ -774,7 +783,7 @@ model = \"moonshot-v1\"\n";
         )
         .unwrap();
     let mut doc = toml(role_bytes(&first, FileRole::Target).unwrap().as_slice());
-    doc["models"]["ocg/org/model.v1"]["temperature"] = toml_edit::value(0.2);
+    doc["models"]["ocg/org/model.v1"]["model"] = toml_edit::value("changed-identity");
     let edited = doc.to_string();
     assert_conflict(KimiAdapter.configure(
         &target,
@@ -855,7 +864,7 @@ fn minimax_provider_leaf_conflicts_and_root_fields_stay() {
         raw.contains("context: 8192"),
         "MiniMax limit was not serialized as context: 8192: {raw}"
     );
-    let limits = raw.replace("context: 8192", "context: 1000");
+    let limits = raw.replace("api: openai-completions", "api: changed-transport");
     assert_conflict(MinimaxAdapter.configure(
         &target,
         None,
@@ -867,7 +876,8 @@ fn minimax_provider_leaf_conflicts_and_root_fields_stay() {
     let mut root: serde_yaml_ng::Value =
         serde_yaml_ng::from_slice(role_bytes(&first, FileRole::Target).unwrap().as_slice())
             .unwrap();
-    root["custom_provider"]["ocg-chat"]["region"] = serde_yaml_ng::Value::String("eu".into());
+    root["custom_provider"]["ocg-chat"]["options"]["baseURL"] =
+        serde_yaml_ng::Value::String("http://other.invalid/v1".into());
     let dumped = serde_yaml_ng::to_string(&root).unwrap();
     assert_conflict(MinimaxAdapter.configure(
         &target,
@@ -932,8 +942,8 @@ fn zcode_sparse_rules_keep_user_data_and_manual_rules() {
         )
         .unwrap();
     let mut with_note = json_doc(role_bytes(&first, FileRole::Target).unwrap().as_slice());
-    with_note["config"]["modelConfigRules"]["providerModelRules"][0]["config"]["note"] =
-        serde_json::json!("user");
+    with_note["config"]["modelConfigRules"]["providerModelRules"][0]["config"]["enabled"] =
+        serde_json::json!(false);
     let noted = serde_json::to_vec(&with_note).unwrap();
     assert_conflict(ZcodeAdapter.configure(
         &target,
@@ -2688,6 +2698,10 @@ fn owned_receipt(
             owned,
             applied_default: applied.map(str::to_string),
         },
+        adopted: false,
+        copilot_token_budget: None,
+        adopted_secret_hashes: serde_json::Value::Null,
+        last_generated: serde_json::Value::Null,
         pending: None,
     }
 }
@@ -3646,8 +3660,8 @@ fn receipt_matching_fields_follow_a_model_across_configure_update_and_remove() {
         .unwrap();
     let original = role_bytes(&first, FileRole::Target).unwrap();
     let mut foreign: serde_yaml_ng::Value = serde_yaml_ng::from_slice(&original).unwrap();
-    foreign["custom_provider"]["ocg-chat"]["models"]["moved"]["note"] =
-        serde_yaml_ng::Value::String("foreign".into());
+    foreign["custom_provider"]["ocg-chat"]["models"]["moved"]["enabled"] =
+        serde_yaml_ng::Value::Bool(false);
     let foreign_yaml = serde_yaml_ng::to_string(&foreign).unwrap();
     assert_conflict(MinimaxAdapter.configure(
         mini_target,
@@ -3784,8 +3798,8 @@ fn receipt_matching_fields_follow_a_model_across_configure_update_and_remove() {
         )
         .unwrap();
     let mut z_foreign = json_doc(role_bytes(&z_first, FileRole::Target).unwrap().as_slice());
-    z_foreign["config"]["modelConfigRules"]["providerModelRules"][0]["config"]["note"] =
-        serde_json::json!("foreign");
+    z_foreign["config"]["modelConfigRules"]["providerModelRules"][0]["config"]["enabled"] =
+        serde_json::json!(false);
     assert_conflict(ZcodeAdapter.configure(
         z_target,
         None,

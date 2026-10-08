@@ -4,9 +4,6 @@
 //! persistence, HTTP, or gateway execution. Custom capability matching lives
 //! here so alias overlay and provider contracts can stay I/O-free.
 
-/// Default model for dashboard account ping and CLI `ping`.
-pub const DEFAULT_ACCOUNT_TEST_MODEL: &str = "mimo-v2.5";
-
 pub const OPENCODE_PROVIDER_ID: &str = "opencode";
 pub const COMMAND_CODE_PROVIDER_ID: &str = "command-code";
 pub const OPENCODE_ZEN_FREE_PROVIDER_ID: &str = "opencode-zen-free";

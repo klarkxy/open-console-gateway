@@ -55,17 +55,19 @@
       <p v-if="view.configureSupported" class="byok-hint">
         {{ t("将使用 Key {name} 及其全部已发布模型。", { name: keyName }) }}
       </p>
+      <p v-if="client === 'copilot'" class="byok-hint">
+        {{ t("用于 VS Code 聊天和 Agent。Agent 只显示已知支持工具调用的模型；行内自动补全使用独立模型。保存后重新打开 VS Code，在模型选择器中选择 Open Console Gateway。") }}
+      </p>
       <p v-if="view.detail" class="byok-detail">{{ view.detail }}</p>
 
       <div class="byok-target">
         <label :for="`byok-target-${client}`" class="byok-paths-title">{{ t("目标配置文件") }}</label>
         <div class="byok-target-row">
           <n-input
-            :id="`byok-target-${client}`"
+            :input-props="{ id: `byok-target-${client}`, 'aria-label': t('目标配置文件') }"
             :value="targetDraft"
             :disabled="busy"
             :placeholder="view.configPath ?? ''"
-            :aria-label="t('目标配置文件')"
             @update:value="targetDraft = $event"
           />
           <n-button secondary size="small" :loading="entry?.loading" :disabled="busy" @click="applyTarget">
@@ -86,14 +88,15 @@
         <p class="byok-paths-title">
           {{ t("已保存的 OCG 模型（{count}）", { count: view.configuredModelIds.length }) }}
         </p>
-        <p class="byok-hint">
+        <p v-if="client !== 'copilot'" class="byok-hint">
           {{ t("默认模型") }}: <code>{{ view.defaultModelId ?? t("未设置") }}</code>
         </p>
       </div>
 
       <div v-if="!view.configureSupported" class="byok-manual">
         <p class="byok-paths-title">{{ t("手动配置") }}</p>
-        <p class="byok-hint">{{ t("在 {client} 中添加 OpenAI 兼容供应商，使用以下网关地址：", { client: label }) }}</p>
+        <p v-if="client === 'copilot'" class="byok-hint">{{ t("在 VS Code 中打开管理语言模型，添加 Custom Endpoint；填写每个模型的完整 API 地址、模型 ID 和客户端预算，并使用 OCG Key 鉴权。") }}</p>
+        <p v-else class="byok-hint">{{ t("在 {client} 中添加 OpenAI 兼容供应商，使用以下网关地址：", { client: label }) }}</p>
         <code class="byok-selected-path">{{ view.gatewayV1Url }}</code>
         <p class="byok-hint">{{ t("使用控制台中任一已启用的 Key 作为 API Key；明文只保存在客户端本机。") }}</p>
       </div>
@@ -121,7 +124,7 @@
           :disabled="busy"
           @click="removeShown = true"
         >
-          {{ t("移除 OCG 配置") }}
+          {{ view.adopted ? t("撤销接管") : t("移除 OCG 配置") }}
         </n-button>
       </div>
     </div>
@@ -197,9 +200,9 @@ const busy = computed(() => Boolean(entry.value?.loading || entry.value?.mutatin
 const initialLoading = computed(() => !entry.value || (entry.value.loading && !entry.value.view));
 const presentation = computed(() => byokStatusPresentation(view.value?.status ?? "not_detected"));
 const displayTarget = computed(() => byokDisplayTarget(view.value));
-const configureAction = computed(() => (busy.value ? "unavailable" : byokConfigureAction(view.value)));
-const removeAvailable = computed(() => !busy.value && byokRemoveAvailable(view.value));
-const recoverAvailable = computed(() => !busy.value && byokRecoverAvailable(view.value));
+const configureAction = computed(() => byokConfigureAction(view.value));
+const removeAvailable = computed(() => byokRemoveAvailable(view.value));
+const recoverAvailable = computed(() => byokRecoverAvailable(view.value));
 
 async function load(options: { retain?: boolean } = {}): Promise<void> {
   const target = appliedTarget.value;
@@ -213,7 +216,6 @@ async function load(options: { retain?: boolean } = {}): Promise<void> {
 
 function ensureLoaded(): void {
   const current = store.peek(props.client, appliedTarget.value);
-  if (current?.view && !current.loading) return;
   void load(current?.view ? { retain: true } : {});
 }
 
@@ -221,6 +223,7 @@ function applyTarget(): void {
   if (busy.value) return;
   const next = targetDraft.value.trim() || undefined;
   actionError.value = "";
+  configureShown.value = false; removeShown.value = false; recoverShown.value = false;
   if (next === appliedTarget.value) {
     void load({ retain: true });
     return;
@@ -230,7 +233,7 @@ function applyTarget(): void {
 }
 
 function openConfigure(): void {
-  if (!view.value || configureAction.value === "unavailable") return;
+  if (busy.value || !view.value || configureAction.value === "unavailable") return;
   actionError.value = "";
   configureShown.value = true;
 }
@@ -242,9 +245,9 @@ function onConfigured(result: ByokApplicationView): void {
     : t("配置已保存。"));
 }
 
-function onRemoved(): void {
+function onRemoved(_result: ByokApplicationView, adopted: boolean): void {
   removeShown.value = false;
-  message.success(t("已移除 OCG 配置。"));
+  message.success(t(adopted ? "已撤销配置接管。" : "已移除 OCG 配置。"));
 }
 
 function onRecovered(): void {

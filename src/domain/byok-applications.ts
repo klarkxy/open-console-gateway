@@ -9,7 +9,7 @@ import type { MessageKey } from "../i18n/index.ts";
  * literal UI wording.
  */
 
-export const BYOK_CLIENTS = ["codex", "kimi", "minimax", "zcode"] as const;
+export const BYOK_CLIENTS = ["codex", "kimi", "minimax", "zcode", "copilot"] as const;
 export type ByokClientId = (typeof BYOK_CLIENTS)[number];
 
 /** Brand names are proper nouns and stay untranslated. */
@@ -18,6 +18,7 @@ export const BYOK_CLIENT_LABELS: Record<ByokClientId, string> = {
   kimi: "Kimi Code",
   minimax: "MiniMax Code",
   zcode: "ZCode",
+  copilot: "VS Code Copilot",
 };
 
 export type ApplicationsTab = "dsh" | ByokClientId;
@@ -33,6 +34,7 @@ export const HARNESS_DEFAULT_KEY_NAMES: Record<ApplicationsTab, string> = {
   kimi: "kimi-code",
   minimax: "minimax-code",
   zcode: "zcode",
+  copilot: "copilot",
 };
 
 export function normalizeByokClient(raw: string | null | undefined): ByokClientId | null {
@@ -80,7 +82,7 @@ const BYOK_STATUS_PRESENTATIONS: Record<string, ByokStatusPresentation> = {
   conflict: {
     tone: "warning",
     labelKey: "存在冲突",
-    hintKey: "检测到非 OCG 管理的同名配置，或托管配置被外部修改。OCG 不会覆盖；请先在客户端配置中手动处理，再刷新状态。",
+    hintKey: "检测到同名配置或外部改动。可用操作会先展示更新预览，需要确认后才会写入。",
   },
   incompatible: {
     tone: "error",
@@ -171,3 +173,34 @@ export async function refreshConnectionAfterHarnessMutation(
     // Ignore: callers treat the mutation result as authoritative.
   }
 }
+
+/** Explicit client budgets; never inferred upstream capability. */
+export const COPILOT_DEFAULT_TOKEN_BUDGET = { maxInputTokens: 100_000, maxOutputTokens: 8_192 } as const;
+export function copilotTokenBudgetValid(input: number | null, output: number | null): boolean {
+  return [input, output].every((value) => typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 4_294_967_295);
+}
+
+export type ByokReviewGate = "ready" | "unprepared" | "closed_client" | "takeover" | "overwrite" | "removal";
+export const BYOK_REVIEW_GATE_KEYS: Record<ByokReviewGate, MessageKey> = {
+  ready: "确认保存",
+  unprepared: "正在准备更新预览…",
+  closed_client: "请先确认客户端已关闭。",
+  takeover: "请确认接管同名配置。",
+  overwrite: "请确认覆盖托管字段的外部改动。",
+  removal: "请确认整行移除带有自定义字段的模型。",
+};
+export function byokReviewGate(
+  view: ByokApplicationView | null,
+  ack: { closed: boolean; takeover: boolean; overwrite: boolean; removal: boolean },
+): ByokReviewGate {
+  if (!view?.configureSupported || !view.fingerprint || !view.preview?.planFingerprint) return "unprepared";
+  if (view.requiresClosedClient && !ack.closed) return "closed_client";
+  if (view.preview.requiresTakeover && !ack.takeover) return "takeover";
+  if (view.preview.requiresOverwrite && !ack.overwrite) return "overwrite";
+  if (view.preview.removedModelsWithCustomizations.length && !ack.removal) return "removal";
+  return "ready";
+}
+export type ByokDeltaKind = "added" | "removed" | "updated";
+export const BYOK_DELTA_KEYS: Record<ByokDeltaKind, MessageKey> = {
+  added: "新增模型", removed: "移除模型", updated: "更新路由与元数据",
+};

@@ -62,8 +62,13 @@ These reads use saved local state. Catalog refreshes are explicit actions on
 | Authenticated `GET /v1/models` | Currently qualified public names (code-owned Aliases, saved Zen/Command/CN mappings, saved user-defined Provider public models, and eligible Custom declared IDs) that carry a validated derived protocol profile from the same snapshot used to enrich the row |
 | `GET /dashboard/api/v4/application-models` | Go names that resolve in the saved catalog and have an enabled protocol; it does not consult a price snapshot. Excludes Custom API, user-defined Providers, and CN Plans |
 
-Command ids that contain `/` publish a unique last-segment lowercase kebab Alias;
-other unmatched catalog rows keep exact raw pins until code assigns an Alias. A Custom ID
+Fresh MiniMax CN, Kimi CN, and GOAT catalog rows publish unique normalized
+last-segment lowercase kebab aliases from the complete saved catalog, including
+IDs without `/`; saved legacy aliases remain unchanged. The legacy Nemotron
+short name is retained only for an upgraded saved alias, while a fresh verbose
+leaf stays verbose. Kimi rolling saved names remain unchanged, and fresh `k3`
+uses `k3`. Normalization collisions and names reserved to raw-only Go rows stay
+unpublished; every row retains its exact raw upstream ID. A Custom ID
 that collides with a published built-in Alias is excluded from publication.
 
 ## Protocol Conversion

@@ -60,13 +60,13 @@
 
 可刷新范围都在 **刷新模型目录** 时从该供应商官方 `/models` 取模型列表；协议来自官方文档，或来自通用 HTTP 连接已保存的路由。**OpenCode Go** 读取公开、无 Key 的 `https://opencode.ai/zen/go/v1/models`，并使用 `https://opencode.ai/docs/go/` 的逐模型端点表；`mimo-v2.6-flash` 只支持 Chat Completions。**Command Code GOAT** 读取公开 `https://api.commandcode.ai/provider/v1/models` 目录。每个模型的 `supported_endpoints` 和官方文档为准；`xiaomi/mimo-v2.6-flash` 当前只有 Chat Completions 与 Responses 证据，不能推断 Messages 或未列能力。
 
-轻量来源信息、刷新动作与模型列表共用同一块内容区域。目录刷新是控制面动作：保留既有开关和探测观察，绝不扩大授权；目录需要 Key 时也只能使用已授权的就绪 Key。密封 MiniMax CN 的推理/目录路由使用 `https://api.minimax.cn/v1` 和文档化的 `/anthropic` 路径，旧用量端点不变。Kimi 用就绪 Key 刷新 `https://api.kimi.com/coding/v1/models`。Kimi 的滚动产品 ID `kimi-for-coding` 与 `kimi-for-coding-highspeed` 保持原名发布，OCG 不再将它们标成固定模型版本。它们保存的模型只激活代码内的密封映射；无法匹配的模型保留为精确 raw ID。
+轻量来源信息、刷新动作与模型列表共用同一块内容区域。目录刷新是控制面动作：保留既有开关和探测观察，绝不扩大授权；目录需要 Key 时也只能使用已授权的就绪 Key。密封 MiniMax CN 的推理/目录路由使用 `https://api.minimax.cn/v1` 和文档化的 `/anthropic` 路径，旧用量端点不变。Kimi 用就绪 Key 刷新 `https://api.kimi.com/coding/v1/models`。Kimi 的滚动产品 ID `kimi-for-coding` 与 `kimi-for-coding-highspeed` 保持原名发布，OCG 不再将它们标成固定模型版本。新增模型的别名从完整已保存目录生成，已保存旧别名保持不变，每一行都保留精确 raw ID。
 
-首次成功刷新前目录为空。刷新成功后，保存的官方快照是权威目录。新发现模型按官方已知或已配置协议默认启用，但 GOAT 首次快照仅启用套餐包含的模型；该次快照中的其他模型先保持关闭，可以手动开启。以后刷新中新出现的 GOAT 模型按普通规则自然开启。已有模型保留保存的开关状态；没有协议证据的模型等待官方资料，刷新补充该声明后可以启用。仍留在目录中的首选、覆盖与探测结果会保留；刷新失败或结果为空时继续保留旧快照。
+首次成功刷新前目录为空。刷新成功后，保存的官方快照是权威目录。新增 GOAT 行只有在官方协议证据授权时才默认启用，与它来自首次还是后续刷新、是否命中套餐名称列表无关；没有该证据的行不会推断协议，也不会自动启用。已有行保存的 ForceOff 会在刷新后继续关闭。仍留在目录中的首选、覆盖与探测结果会保留；刷新失败或结果为空时继续保留旧快照。
 
-迁移后的 Custom API 连接保留公开名称 → 上游 ID 映射，发现结果不会静默替换。既有连接只按公开名称解析；普通新建可配置 HTTP 连接也允许唯一的精确上游 ID。Command Code 使用官方公开的 `/models` 目录：首次刷新只默认开启 GOAT 套餐模型，以后刷新中新出现且有文档化支持端点的模型默认开启；已有模型保留保存的开关状态，没有协议证据的模型等待官方资料。
+迁移后的 Custom API 连接保留公开名称 → 上游 ID 映射，发现结果不会静默替换。既有连接只按公开名称解析；普通新建可配置 HTTP 连接也允许唯一的精确上游 ID。Command Code 使用官方公开的 `/models` 目录：GOAT 新行按每行的官方协议证据决定是否默认开启，与首次刷新、后续刷新或套餐名称列表无关；已有模型保留保存的开关状态，ForceOff 继续生效，没有协议证据的模型不会推断协议或自动开启。
 
-本地目录会进入解析，请求时不会再访问上游。内置 Alias 权威是静态且由代码持有：最早 OpenCode Go 表提供 Go 名称，密封 MiniMax CN、Kimi CN 与选定 GOAT 长名称映射表提供供应商 Alias，但不会据此新增 Go 路由。Command 会先去掉 Provider 命名空间并复用已有代码持有的 Alias；只有短名已获授权时才去掉已知套餐后缀。例如 `nvidia/nemotron-3-ultra-550b-a55b` 使用 Alias `nemotron-3-ultra`。保存的 CN 行只激活其精确密封映射。含 `/` 的 Command id 会公布唯一的最后一节小写 kebab Alias（例如 `google/gemini-3.5-flash` → `gemini-3.5-flash`）。不含 `/` 且无法匹配的 Command 行，以及无法匹配的 MiniMax/Kimi 模型，保留为精确 raw ID，不会作为新 Alias 公布；CN 映射仍保留上游 ID 的准确拼写。Zen Free 按官方 `-free` 后缀公布去掉后缀后的 Alias，原始 `-free` ID 始终可作为精确 raw pin 使用，见 [Zen Free 模型](routing.zh-CN.md#zen-free-模型)。
+本地目录会进入解析，请求时不会再访问上游。Go 种子由代码持有；新发现的 MiniMax CN、Kimi CN 与 GOAT 别名从完整已保存目录生成，使用归一化后的最后一节。已保存旧别名保持不变；升级过的 Nemotron 只保留旧短别名，新增目录行使用完整的最后一节名称。保存的 Kimi 滚动名称保持不变，新发现的 `k3` 使用 `k3`。Command 会先去掉 Provider 命名空间，只有短名已获授权时才去掉已知套餐后缀。命名结果与目录顺序无关。同一供应商内，已保存的自定义或兼容名称保留原目标；新增行生成的名称与它冲突时，保留精确原始 ID，并需设置不同的公开名称。归一化后重名或占用 Go 原始名称的行不公布别名；每一行都保留精确 raw ID。Zen Free 按官方 `-free` 后缀公布去掉后缀后的 Alias，原始 `-free` ID 始终可作为精确 raw pin 使用，见 [Zen Free 模型](routing.zh-CN.md#zen-free-模型)。
 
 当某个供应商的全部模型都关闭时，该供应商不再产生路由。带鉴权的下游 `GET /v1/models` 只公布合格的公开名称，且每行都带与 enrich 同一快照推导并校验过的协议配置；raw-only 身份和 raw 名称冲突都会排除。歧义 raw 身份以 `ambiguous_model_id` 失败，绝不请求上游。
 
@@ -78,7 +78,7 @@
 - Command Code GOAT 账号卡可显式 **刷新额度**，从 Command Code 第一方 `/alpha/billing/credits` 端点读取官方百分比窗口，并同时刷新 GOAT 模型目录。官方 CLI 使用该端点，但公开 Provider API 文档未列出。读数里有百分比时，窗口按该百分比相对 100 显示，并保留该重置时间。金额不会被改写成百分比。之后仍可以手工保存一个百分比。既没有官方读数、也没有手工百分比时，窗口保持不可用，不会显示成 0。GOAT 不做自动用量同步。
 - Zen Free 使用按出口 IP 共享的 free 额度。成功请求会记录 token，不记一笔本地价格。
 - Custom API 没有记录到的费用保持未知，不会显示成零或免费，也不会扣计时额度。手工积分余额单独记录，不会因这次请求被扣减。没有通用官方用量窗口；已知主机的当前余额读取（DeepSeek / Moonshot / StepFun API）只用于展示。
-- Ollama Cloud 刷新公开且无需鉴权的目录 `https://ollama.com/v1/models`，不选择账号。发现的行立即启用 Chat Completions；Responses 与 Messages 不受支持，也没有协议探测入口。目录刷新仅在剥离 `:` 标签后恰好命中一个目录 id 时，才向 Go 拥有的别名追加一个可路由 Ollama 映射。带日期标签的快照 id 来自运行时目录。Ollama 在本产品中没有官方用量 API。Gateway 不会拉取价格表，也不会按请求价格估算每月积分。账号表单仍显示 Pro、Max 或 Team，以及购买日期。手工百分比不要求填写价格。月百分比可以在选定档位之前保存。周百分比不被接受。没有官方或手工用量观测时，用量保持不可用。既有账号仍可路由。以前保存的计费行留在本机，不会重算。
+- Ollama Cloud 刷新公开且无需鉴权的目录 `https://ollama.com/v1/models`，不选择账号。发现的行立即启用 Chat Completions；Responses 与 Messages 不受支持，也没有协议探测入口。每个目录模型都按去掉 `:标签` 的词干生成归一化别名；同词干有多个标签时使用把 `:` 换成 `-` 的完整标签别名区分，只有恰好一个标签被管理员固定时，才将短名称指向它。原始上游 ID 始终是精确 pin。带日期标签的快照 id 来自运行时目录。Ollama 在本产品中没有官方用量 API。Gateway 不会拉取价格表，也不会按请求价格估算每月积分。账号表单仍显示 Pro、Max 或 Team，以及购买日期。手工百分比不要求填写价格。月百分比可以在选定档位之前保存。周百分比不被接受。没有官方或手工用量观测时，用量保持不可用。既有账号仍可路由。以前保存的计费行留在本机，不会重算。
 - MiniMax CN 与 Kimi Code CN 在 OCG 内不为请求定价，但账号卡可手工读取官方订阅窗口（`/token_plan/remains` 与 `/usages`）。这些快照只用于展示，不影响推理资格。
 - Custom API 与用户定义 Provider 账号，若保存的 Endpoint 主机恰好是 `api.deepseek.com`、`api.moonshot.cn` 或 `api.moonshot.ai`，可手工读取官方当前余额。其他 Custom 主机不会被探测。
 

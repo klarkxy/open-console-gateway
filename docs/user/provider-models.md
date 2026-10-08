@@ -14,14 +14,14 @@ MiniMax CN Token Plan, Kimi Code CN, OpenCode Go, Zen Free, Command Code GOAT, a
 
 The public alias participates in client model lists and routing; the outbound model remains the exact upstream ID. A custom alias replaces that model's generated public name without removing another provider's mapping under a shared name. Exact raw IDs keep the existing ambiguity checks.
 
-New built-in rows start disabled; enable routing explicitly in the form if desired. Protocol selections must fit the sealed adapter's capabilities. Endpoints and authentication remain fixed. Saving sends no upstream request, grants no Key access, and does not expand model scopes. Check a Key's scope after renaming if it was restricted to the old alias.
+Manually added built-in rows start disabled; catalog refresh uses the Provider's documented evidence and preserves saved ForceOff choices. Protocol selections must fit the sealed adapter's capabilities. Endpoints and authentication remain fixed. Saving sends no upstream request, grants no Key access, and does not expand model scopes. Check a Key's scope after renaming if it was restricted to the old alias.
 
-Saved aliases, protocol selections, preferences, and switches survive restart. **Refresh model catalog** rebuilds the snapshot from the official response: upstream models still present retain these settings; absent manual IDs may be removed. A manually created catalog is labeled as such without a fabricated official refresh timestamp.
+Saved aliases, protocol selections, preferences, and switches survive restart. **Refresh model catalog** rebuilds the snapshot from the official response: upstream models still present retain these settings; fresh MiniMax CN, Kimi CN, and GOAT aliases derive from the complete saved catalog, while absent manual IDs may be removed. Kimi's `kimi-for-coding` and `kimi-for-coding-highspeed` IDs remain unchanged. A manually created catalog is labeled as such without a fabricated official refresh timestamp.
 
 ## Model Fields
 
 - **Upstream model ID** is the exact model identifier sent to the supplier. It is required.
-- **Public model name** is the callable alias clients put in their `model` field, not just a display label. Leave it blank to use the upstream ID verbatim. Names must be unique within this supplier, ignoring ASCII case and surrounding whitespace. Multiple distinct public names may point to one upstream ID.
+- **Public model name** is the callable alias clients put in their `model` field, not just a display label. For built-in catalog rows, the generated name comes from the complete saved catalog's normalized final slash-separated leaf; an explicit name replaces that generated name. Names must be unique within this supplier, ignoring ASCII case and surrounding whitespace. Multiple distinct public names may point to one upstream ID.
 - **Upstream protocols** selects the configured upstream routes this model may use. **Preferred protocol** must be one of those selections. These settings do not reject a client protocol that the gateway can convert. For HTTP suppliers, add or change endpoint URLs in **Edit connection**, not in this model form.
 - **Allow routing** enables the mapping. An enabled model needs at least one selected protocol; disabling a model does not delete it. Actual eligibility still depends on the destination, its Keys, model scopes, grants, and upstream availability.
 

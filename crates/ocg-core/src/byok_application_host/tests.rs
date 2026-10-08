@@ -47,6 +47,7 @@ fn harness(name: &str) -> Harness {
             client,
             path,
             discovery_source: "default".into(),
+            store_identity_hint: None,
         }
     };
     let paths = DiscoveredPaths {
@@ -55,6 +56,10 @@ fn harness(name: &str) -> Harness {
         kimi: target(ByokClient::Kimi, &[".kimi-code", "config.toml"]),
         minimax: target(ByokClient::Minimax, &[".minimax", "config.yaml"]),
         zcode: target(ByokClient::Zcode, &[".zcode", "v2", "provider_config.json"]),
+        copilot: target(
+            ByokClient::Copilot,
+            &["Code", "User", "chatLanguageModels.json"],
+        ),
     };
     let policy = LockPolicy {
         minimax_max_wait: Duration::from_millis(120),
@@ -170,18 +175,19 @@ fn target_file(host: &ByokNativeHost, client: ByokClient) -> PathBuf {
     host.paths.default_for(client).path.clone()
 }
 
-fn all_clients() -> [ByokClient; 4] {
+fn all_clients() -> [ByokClient; 5] {
     [
         ByokClient::Codex,
         ByokClient::Kimi,
         ByokClient::Minimax,
         ByokClient::Zcode,
+        ByokClient::Copilot,
     ]
 }
 
 fn output_for(client: ByokClient) -> Option<u64> {
     match client {
-        ByokClient::Minimax | ByokClient::Zcode => Some(8192),
+        ByokClient::Minimax | ByokClient::Zcode | ByokClient::Copilot => Some(8192),
         _ => None,
     }
 }
@@ -199,13 +205,14 @@ fn inspect_missing_files_in_isolated_homes() {
             ByokClient::Codex | ByokClient::Kimi => "config.toml",
             ByokClient::Minimax => "config.yaml",
             ByokClient::Zcode => "provider_config.json",
+            ByokClient::Copilot => "chatLanguageModels.json",
         }));
         assert!(view.fingerprint.is_some());
     }
 }
 
 #[test]
-fn configure_update_remove_all_four_formats() {
+fn configure_update_remove_all_native_formats() {
     let h = harness("roundtrip");
     for client in all_clients() {
         let first = inspect(&h.host, client);
@@ -234,7 +241,14 @@ fn configure_update_remove_all_four_formats() {
                 .contains(&"org/model.v1".into())
         );
         assert!(configured.configured_model_ids.contains(&"gpt-4.1".into()));
-        assert_eq!(configured.default_model_id.as_deref(), Some("org/model.v1"));
+        assert_eq!(
+            configured.default_model_id.as_deref(),
+            if client == ByokClient::Copilot {
+                None
+            } else {
+                Some("org/model.v1")
+            }
+        );
         let text = read_text(&target_file(&h.host, client));
         let catalog = super::paths::catalog_path(h.host.paths.default_for(client))
             .and_then(|path| fs::read_to_string(path).ok())
@@ -263,7 +277,14 @@ fn configure_update_remove_all_four_formats() {
             updated.configured_model_ids,
             vec!["org/model.v1".to_string()]
         );
-        assert_eq!(updated.default_model_id.as_deref(), Some("org/model.v1"));
+        assert_eq!(
+            updated.default_model_id.as_deref(),
+            if client == ByokClient::Copilot {
+                None
+            } else {
+                Some("org/model.v1")
+            }
+        );
 
         let removed = remove(
             &h.host,
@@ -466,7 +487,14 @@ fn automatic_default_keeps_a_published_choice_and_replaces_a_removed_choice() {
             None,
         )
         .unwrap();
-        assert_eq!(kept.default_model_id.as_deref(), Some("b"));
+        assert_eq!(
+            kept.default_model_id.as_deref(),
+            if client == ByokClient::Copilot {
+                None
+            } else {
+                Some("b")
+            }
+        );
         let updated = configure(
             &h.host,
             client,
@@ -475,7 +503,14 @@ fn automatic_default_keeps_a_published_choice_and_replaces_a_removed_choice() {
             None,
         )
         .unwrap();
-        assert_eq!(updated.default_model_id.as_deref(), Some("a"));
+        assert_eq!(
+            updated.default_model_id.as_deref(),
+            if client == ByokClient::Copilot {
+                None
+            } else {
+                Some("a")
+            }
+        );
     }
 }
 
@@ -532,7 +567,7 @@ fn stale_fingerprint_is_rejected() {
 }
 
 #[test]
-fn client_must_be_closed_for_codex_and_kimi() {
+fn unlocked_clients_require_closed_confirmation() {
     let h = harness("closed");
     let view = inspect(&h.host, ByokClient::Codex);
     let err = h
@@ -617,70 +652,77 @@ fn minimax_lock_directory_blocks_writes() {
 #[test]
 fn crash_journal_recovers_matching_new_state_and_refuses_changed_files() {
     let h = harness("journal");
-    let client = ByokClient::Kimi;
-    let first = inspect(&h.host, client);
-    configure(
-        &h.host,
-        client,
-        first.fingerprint.as_deref().unwrap(),
-        vec![model("one", 1000, None)],
-        None,
-    )
-    .unwrap();
-    let path = target_file(&h.host, client);
-    let old_bytes = fs::read(&path).unwrap();
-    let second = inspect(&h.host, client);
-    configure(
-        &h.host,
-        client,
-        second.fingerprint.as_deref().unwrap(),
-        vec![model("two", 2000, None)],
-        None,
-    )
-    .unwrap();
-    let new_bytes = fs::read(&path).unwrap();
-    let target = ResolvedTarget {
-        client,
-        path: PathBuf::from(inspect(&h.host, client).config_path),
-        discovery_source: "default".into(),
-    };
-    let store = Store::open(&h.host.data_dir, &target).unwrap();
-    let receipt = store.load().unwrap().expect("receipt after configure");
-    let old_hash = hex::encode(Sha256::digest(&old_bytes));
-    let new_hash = hex::encode(Sha256::digest(&new_bytes));
-    fs::create_dir_all(store.backup_dir()).unwrap();
-    fs::write(store.backup_dir().join("old-target.bin"), &old_bytes).unwrap();
-    fs::write(store.backup_dir().join("new-target.bin"), &new_bytes).unwrap();
-    let journal = Journal {
-        prior_receipt: Some(receipt.clone()),
-        kind: PendingKind::Configure,
-        files: vec![PendingFile {
-            role: FileRole::Target,
-            old_hash: old_hash.clone(),
-            new_hash: new_hash.clone(),
-        }],
-    };
-    fs::write(
-        store.journal_path(),
-        serde_json::to_vec_pretty(&journal).unwrap(),
-    )
-    .unwrap();
-    let recovering = inspect(&h.host, client);
-    assert_eq!(recovering.status, ByokStatus::RecoveryRequired);
-    assert!(recovering.recovery_supported);
-    recover(&h.host, client, recovering.fingerprint.as_deref().unwrap()).unwrap();
-    assert_eq!(fs::read(&path).unwrap(), old_bytes);
+    for client in [ByokClient::Kimi, ByokClient::Copilot] {
+        let first = inspect(&h.host, client);
+        configure(
+            &h.host,
+            client,
+            first.fingerprint.as_deref().unwrap(),
+            vec![model("one", 10_000, Some(100))],
+            None,
+        )
+        .unwrap();
+        let path = target_file(&h.host, client);
+        let old_bytes = fs::read(&path).unwrap();
+        let second = inspect(&h.host, client);
+        configure(
+            &h.host,
+            client,
+            second.fingerprint.as_deref().unwrap(),
+            vec![model("two", 10_000, Some(100))],
+            None,
+        )
+        .unwrap();
+        let new_bytes = fs::read(&path).unwrap();
+        let target = ResolvedTarget {
+            client,
+            path: PathBuf::from(inspect(&h.host, client).config_path),
+            discovery_source: "default".into(),
+            store_identity_hint: None,
+        };
+        let store = Store::open(&h.host.data_dir, &target).unwrap();
+        let receipt = store.load().unwrap().expect("receipt after configure");
+        assert!(
+            !serde_json::to_string(&receipt)
+                .unwrap()
+                .contains("sk-test-secret-do-not-leak-xyz")
+        );
+        let old_hash = hex::encode(Sha256::digest(&old_bytes));
+        let new_hash = hex::encode(Sha256::digest(&new_bytes));
+        fs::create_dir_all(store.backup_dir()).unwrap();
+        fs::write(store.backup_dir().join("old-target.bin"), &old_bytes).unwrap();
+        fs::write(store.backup_dir().join("new-target.bin"), &new_bytes).unwrap();
+        let journal = Journal {
+            prior_receipt: Some(receipt.clone()),
+            kind: PendingKind::Configure,
+            files: vec![PendingFile {
+                role: FileRole::Target,
+                old_hash: old_hash.clone(),
+                new_hash: new_hash.clone(),
+            }],
+        };
+        fs::write(
+            store.journal_path(),
+            serde_json::to_vec_pretty(&journal).unwrap(),
+        )
+        .unwrap();
+        let recovering = inspect(&h.host, client);
+        assert_eq!(recovering.status, ByokStatus::RecoveryRequired);
+        assert!(recovering.recovery_supported);
+        recover(&h.host, client, recovering.fingerprint.as_deref().unwrap()).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), old_bytes);
 
-    fs::write(
-        store.journal_path(),
-        serde_json::to_vec_pretty(&journal).unwrap(),
-    )
-    .unwrap();
-    fs::write(&path, b"user-changed-after-crash").unwrap();
-    let refused = inspect(&h.host, client);
-    let err = recover(&h.host, client, refused.fingerprint.as_deref().unwrap()).unwrap_err();
-    assert_eq!(err.kind, crate::byok_application::ByokErrorKind::Conflict);
-    assert_eq!(read_text(&path), "user-changed-after-crash");
+        fs::write(
+            store.journal_path(),
+            serde_json::to_vec_pretty(&journal).unwrap(),
+        )
+        .unwrap();
+        fs::write(&path, b"user-changed-after-crash").unwrap();
+        let refused = inspect(&h.host, client);
+        let err = recover(&h.host, client, refused.fingerprint.as_deref().unwrap()).unwrap_err();
+        assert_eq!(err.kind, crate::byok_application::ByokErrorKind::Conflict);
+        assert_eq!(read_text(&path), "user-changed-after-crash");
+    }
 }
 
 #[test]
@@ -729,6 +771,7 @@ fn invalid_codex_catalog_parent_is_rejected_before_writing() {
             client,
             path: path.clone(),
             discovery_source: "default".into(),
+            store_identity_hint: None,
         },
     )
     .unwrap();
@@ -816,12 +859,19 @@ fn unicode_public_model_ids_are_exported_exactly_for_every_client() {
             &h.host,
             client,
             before.fingerprint.as_deref().unwrap(),
-            vec![model(&id, 1000, None)],
+            vec![model(&id, 10_000, output_for(client))],
             None,
         )
         .unwrap();
         assert_eq!(result.configured_model_ids, vec![id.clone()]);
-        assert_eq!(result.default_model_id.as_deref(), Some(id.as_str()));
+        assert_eq!(
+            result.default_model_id.as_deref(),
+            if client == ByokClient::Copilot {
+                None
+            } else {
+                Some(id.as_str())
+            }
+        );
     }
 }
 
@@ -842,6 +892,7 @@ fn failed_first_adoption_restores_absent_receipt() {
         client: ByokClient::Kimi,
         path: target_file(&h.host, ByokClient::Kimi),
         discovery_source: "default".into(),
+        store_identity_hint: None,
     };
     let store = Store::open(&h.host.data_dir, &target).unwrap();
     assert!(store.load().unwrap().is_none());
@@ -879,6 +930,7 @@ fn mixed_codex_interruption_rolls_each_file_to_old() {
             client,
             path: path.clone(),
             discovery_source: "default".into(),
+            store_identity_hint: None,
         },
     )
     .unwrap();
@@ -961,7 +1013,7 @@ fn kimi_unowned_model_alias_is_rejected() {
 }
 
 #[test]
-fn minimax_user_model_metadata_edit_conflicts() {
+fn minimax_user_model_budget_is_preserved() {
     let h = harness("mm-edit");
     let first = inspect(&h.host, ByokClient::Minimax);
     configure(
@@ -974,19 +1026,19 @@ fn minimax_user_model_metadata_edit_conflicts() {
     .unwrap();
     let path = target_file(&h.host, ByokClient::Minimax);
     let mut text = read_text(&path);
-    text = text.replace("context: 1000", "context: 2000");
+    text = text.replace("context: 1000", "context: 500");
     fs::write(&path, text).unwrap();
     let view = inspect(&h.host, ByokClient::Minimax);
-    assert_eq!(view.status, ByokStatus::Conflict);
-    let err = configure(
+    assert_eq!(view.status, ByokStatus::Configured);
+    configure(
         &h.host,
         ByokClient::Minimax,
         view.fingerprint.as_deref().unwrap(),
         vec![model("m1", 1000, Some(100))],
         None,
     )
-    .unwrap_err();
-    assert_eq!(err.kind, crate::byok_application::ByokErrorKind::Conflict);
+    .unwrap();
+    assert!(read_text(&path).contains("context: 500"));
 }
 
 #[test]
@@ -1108,6 +1160,7 @@ fn origin_backup_survives_update() {
             client: ByokClient::Kimi,
             path: path.clone(),
             discovery_source: "default".into(),
+            store_identity_hint: None,
         },
     )
     .unwrap();
@@ -1369,6 +1422,7 @@ fn journal_survives_when_prior_restore_fails() {
         client: ByokClient::Kimi,
         path: target.clone(),
         discovery_source: "default".into(),
+        store_identity_hint: None,
     };
     let store = Store::open(&data, &resolved).unwrap();
     store
@@ -1406,6 +1460,7 @@ fn apply_uses_plan_baseline_each_configure_and_keeps_created_flags() {
         client: ByokClient::Kimi,
         path: target.clone(),
         discovery_source: "default".into(),
+        store_identity_hint: None,
     };
     let store = Store::open(&data, &resolved).unwrap();
     let first = store
@@ -1451,6 +1506,7 @@ fn origin_backup_is_rewritten_after_successful_remove() {
         client: ByokClient::Kimi,
         path: target.clone(),
         discovery_source: "default".into(),
+        store_identity_hint: None,
     };
     let store = Store::open(&data, &resolved).unwrap();
     let receipt = store
@@ -1710,6 +1766,7 @@ fn recover_refuses_mismatched_prior_receipt_without_touching_files() {
         client: ByokClient::Kimi,
         path: target.clone(),
         discovery_source: "default".into(),
+        store_identity_hint: None,
     };
     let store = Store::open(&data, &resolved).unwrap();
     let receipt = store
@@ -1951,6 +2008,7 @@ fn located_target(host: &ByokNativeHost, client: ByokClient) -> ResolvedTarget {
         client,
         path: PathBuf::from(inspect(host, client).config_path),
         discovery_source: "default".into(),
+        store_identity_hint: None,
     }
 }
 
@@ -2021,6 +2079,10 @@ fn legacy_kimi_receipt(target_path: &str, owned: serde_json::Value) -> Receipt {
             owned,
             applied_default: Some("ocg/legacy".into()),
         },
+        adopted: false,
+        copilot_token_budget: None,
+        adopted_secret_hashes: serde_json::Value::Null,
+        last_generated: serde_json::Value::Null,
         pending: None,
     }
 }
@@ -2176,7 +2238,7 @@ fn unowned_managed_provider_ids_conflict_before_any_write() {
             assert!(detail.contains(managed), "{id} detail was {detail}");
         }
         assert!(!detail.contains("named ocg"), "{detail}");
-        assert!(!view.configure_supported);
+        assert!(view.configure_supported);
         let error = configure(
             &h.host,
             ByokClient::Kimi,
@@ -2396,19 +2458,15 @@ fn unrecorded_legacy_model_field_is_not_silently_dropped() {
         ))
         .unwrap();
     let view = inspect(&h.host, client);
-    assert_eq!(view.status, ByokStatus::Conflict);
-    assert!(view.detail.unwrap_or_default().contains("no longer match"));
-    let error = configure(
+    assert_eq!(view.status, ByokStatus::Configured);
+    configure(
         &h.host,
         client,
         view.fingerprint.as_deref().unwrap(),
         vec![model("legacy", 8192, None)],
         None,
     )
-    .unwrap_err();
-    assert_eq!(error.kind, crate::byok_application::ByokErrorKind::Conflict);
-    assert!(error.message.contains("Owned fields changed"));
-    assert_eq!(read_text(&path), original);
+    .unwrap();
     assert!(read_text(&path).contains("only-in-file"));
 }
 
@@ -2704,3 +2762,6 @@ fn zcode_manual_collision_leaves_the_file_unchanged() {
     assert_eq!(fs::read(&path).unwrap(), frozen);
     assert!(read_text(&path).contains("extraUser"));
 }
+
+#[path = "review/tests.rs"]
+mod reviewed_updates;

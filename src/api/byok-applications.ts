@@ -15,8 +15,14 @@ import type {
   ByokApplication,
   ByokConfigureRequest,
   ByokMutationRequest,
+  ByokPreview,
+  ByokPreviewRequest,
+  CopilotTokenBudget,
 } from "./generated/dashboard-v4.ts";
 
+export type ByokUpdatePreview = ByokPreview;
+export type CopilotBudget = CopilotTokenBudget;
+export type ByokPreviewInput = ByokPreviewRequest;
 export type ByokApplicationView = ByokApplication;
 export type ByokConfigureInput = WithoutExpectation<ByokConfigureRequest>;
 export type ByokMutationInput = WithoutExpectation<ByokMutationRequest>;
@@ -26,6 +32,8 @@ function byokPath(client: string, suffix = ""): string {
 }
 
 export const byokApplicationsApi = {
+  preview: (client: string, input: ByokPreviewInput): Promise<ByokApplicationView> =>
+    requestV4<ByokApplicationView>(byokPath(client, "/preview"), { method: "POST", body: JSON.stringify(input) }),
   inspect: (client: string, targetPath?: string): Promise<ByokApplicationView> => {
     const query = targetPath ? `?targetPath=${encodeURIComponent(targetPath)}` : "";
     return requestV4<ByokApplicationView>(`${byokPath(client)}${query}`);

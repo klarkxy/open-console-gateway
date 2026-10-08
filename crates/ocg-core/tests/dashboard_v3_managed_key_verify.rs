@@ -10,8 +10,6 @@ use ocg_core::dashboard_v3::{
     ERROR_CONFLICT, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION,
     ERROR_NOT_FOUND, ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED,
 };
-#[cfg(debug_assertions)]
-use ocg_core::models::DEFAULT_ACCOUNT_TEST_MODEL;
 use ocg_core::models::{
     Account as ModelAccount, AccountSetupStep as ModelSetupStep, AccountType as ModelAccountType,
 };
@@ -207,6 +205,11 @@ fn managed_waiting(id: &str) -> ModelAccount {
 }
 
 fn insert_managed_waiting(harness: &V3Harness, id: &str) {
+    seed_go_catalog(
+        harness,
+        "verification-test-model",
+        ocg_core::provider::UpstreamProtocolKind::ChatCompletions,
+    );
     // Verification is loopback-only, including the post-429 usage refresh.
     harness.state.usage_sync.set_fetch_for_test(|_, _| {
         Box::pin(async { Err(ocg_core::go_usage::GoUsageError::Timeout) })
@@ -217,6 +220,264 @@ fn insert_managed_waiting(harness: &V3Harness, id: &str) {
         .lock()
         .create_account(&managed_waiting(id))
         .unwrap();
+}
+
+fn seed_go_catalog(
+    harness: &V3Harness,
+    model: &str,
+    protocol: ocg_core::provider::UpstreamProtocolKind,
+) {
+    use ocg_core::provider_contracts::{CATALOG_SOURCE_OPENCODE_MODELS, ContractScope};
+    let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
+    let models = vec![model.to_string()];
+    let db = harness.state.db.lock();
+    db.refresh_contract_catalog_preserving_settings(
+        &scope,
+        &models,
+        Utc::now(),
+        CATALOG_SOURCE_OPENCODE_MODELS,
+        "https://example.test/models",
+    )
+    .unwrap();
+    db.apply_official_protocol_baseline(
+        &scope,
+        &models,
+        &ocg_core::goat::OfficialProtocolBaseline::mapped([(model, protocol)]),
+        Utc::now(),
+    )
+    .unwrap();
+    harness.state.reload_provider_contracts_locked(&db).unwrap();
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn managed_verification_uses_saved_non_chat_protocol_without_mimo() {
+    for (protocol, path, expected) in [
+        (
+            ocg_core::provider::UpstreamProtocolKind::Responses,
+            "/v1/responses",
+            json!({"model":"future-responder", "input":"ping", "max_output_tokens":16, "store":false, "stream":false}),
+        ),
+        (
+            ocg_core::provider::UpstreamProtocolKind::Messages,
+            "/v1/messages",
+            json!({"model":"future-responder", "messages":[{"role":"user", "content":"ping"}], "max_tokens":1, "stream":false}),
+        ),
+    ] {
+        let harness = start_loopback("verify-saved-protocol").await;
+        insert_managed_waiting(&harness, "managed");
+        seed_go_catalog(&harness, "future-responder", protocol);
+        let origin = start_origin(StatusCode::OK, "{}").await;
+        let _target = install_managed_key_verify_target_for_tests(
+            harness.state.process_generation(),
+            origin.url.clone(),
+        );
+        let response = send_json(
+            &harness,
+            Method::POST,
+            &verify_path("managed"),
+            &cas(&harness, json!({"key":OPAQUE_KEY})),
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::OK, "{}", response.1);
+        let calls = origin.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path, path);
+        if protocol == ocg_core::provider::UpstreamProtocolKind::Messages {
+            assert_eq!(calls[0].x_api_key.as_deref(), Some(OPAQUE_KEY));
+            assert_eq!(calls[0].anthropic_version.as_deref(), Some("2023-06-01"));
+            assert!(calls[0].authorization.is_none());
+        } else {
+            assert_eq!(
+                calls[0].authorization.as_deref(),
+                Some(format!("Bearer {OPAQUE_KEY}").as_str())
+            );
+            assert!(calls[0].x_api_key.is_none());
+            assert!(calls[0].anthropic_version.is_none());
+        }
+        assert_eq!(
+            serde_json::from_str::<Value>(&calls[0].body).unwrap(),
+            expected
+        );
+    }
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn fresh_managed_verification_discovers_keylessly_and_sends_one_documented_model() {
+    let harness = start_loopback("verify-fresh-discovery").await;
+    // OpenCode Go directory discovery supplies IDs only. Its supported protocol
+    // facts come from the official Go docs fetch, not supported_endpoints JSON.
+    let _docs = ocg_core::dashboard_v3::install_official_protocol_fetch_for_tests(
+        harness.state.process_generation(),
+        |provider_id| {
+            assert_eq!(provider_id, OPENCODE_PROVIDER_ID);
+            ocg_core::goat::OfficialProtocolBaseline::mapped([(
+                "future-only",
+                ocg_core::provider::UpstreamProtocolKind::Responses,
+            )])
+        },
+    );
+    harness
+        .state
+        .db
+        .lock()
+        .create_account(&managed_waiting("fresh"))
+        .unwrap();
+    let origin = start_origin(
+        StatusCode::OK,
+        json!({"data":[{"id":"future-only"}]}).to_string(),
+    )
+    .await;
+    let _target = install_managed_key_verify_target_for_tests(
+        harness.state.process_generation(),
+        origin.url.clone(),
+    );
+    let response = send_json(
+        &harness,
+        Method::POST,
+        &verify_path("fresh"),
+        &cas(&harness, json!({"key":OPAQUE_KEY})),
+    )
+    .await;
+    assert_eq!(response.0, StatusCode::OK, "{}", response.1);
+    let calls = origin.calls.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].method, "GET");
+    assert_eq!(calls[0].path, "/v1/models");
+    assert!(calls[0].authorization.is_none());
+    assert!(calls[0].x_api_key.is_none());
+    assert!(calls[0].body.is_empty());
+    assert_eq!(calls[1].method, "POST");
+    assert_eq!(calls[1].path, "/v1/responses");
+    assert_eq!(
+        serde_json::from_str::<Value>(&calls[1].body).unwrap(),
+        json!({"model":"future-only", "input":"ping", "max_output_tokens":16, "store":false, "stream":false})
+    );
+    assert!(
+        harness
+            .state
+            .provider_contracts()
+            .provider_offering(OPENCODE_PROVIDER_ID)
+            .unwrap()
+            .catalog
+            .models
+            .is_empty()
+    );
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn fresh_empty_unsupported_or_failed_discovery_sends_no_inference() {
+    for (status, catalog) in [
+        (StatusCode::OK, json!({"data":[]})),
+        (
+            StatusCode::OK,
+            json!({"data":[{"id":"mimo-v2.5", "supported_endpoints":["/v1/responses"]}]}),
+        ),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error":"directory unavailable"}),
+        ),
+    ] {
+        let harness = start_loopback("verify-no-discovery-evidence").await;
+        harness
+            .state
+            .db
+            .lock()
+            .create_account(&managed_waiting("fresh"))
+            .unwrap();
+        let _docs = ocg_core::dashboard_v3::install_official_protocol_fetch_unavailable_for_tests(
+            harness.state.process_generation(),
+        );
+        let origin = start_origin(status, catalog.to_string()).await;
+        let _target = install_managed_key_verify_target_for_tests(
+            harness.state.process_generation(),
+            origin.url.clone(),
+        );
+        let before = harness.state.settings_revision();
+        let response = send_json(
+            &harness,
+            Method::POST,
+            &verify_path("fresh"),
+            &cas(&harness, json!({"key":OPAQUE_KEY})),
+        )
+        .await;
+        assert!(!response.0.is_success(), "{}", response.1);
+        assert_still_pending(&harness, "fresh", before);
+        let calls = origin.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "GET");
+        assert!(calls[0].authorization.is_none());
+    }
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn stale_account_during_directory_discovery_sends_no_inference() {
+    let harness = start_loopback("verify-discovery-stale").await;
+    let _docs = ocg_core::dashboard_v3::install_official_protocol_fetch_for_tests(
+        harness.state.process_generation(),
+        |provider_id| {
+            assert_eq!(provider_id, OPENCODE_PROVIDER_ID);
+            ocg_core::goat::OfficialProtocolBaseline::mapped([(
+                "future-only",
+                ocg_core::provider::UpstreamProtocolKind::Responses,
+            )])
+        },
+    );
+    harness
+        .state
+        .db
+        .lock()
+        .create_account(&managed_waiting("fresh"))
+        .unwrap();
+    let hold = Hold::new();
+    let origin = start_origin_with(OriginSpec {
+        status: StatusCode::OK,
+        body: json!({"data":[{"id":"future-only"}]}).to_string(),
+        location: None,
+        hold: Some(hold.clone()),
+        delay: Duration::ZERO,
+    })
+    .await;
+    let _target = install_managed_key_verify_target_for_tests(
+        harness.state.process_generation(),
+        origin.url.clone(),
+    );
+    let expectation = cas(&harness, json!({"key":OPAQUE_KEY}));
+    let request = harness
+        .client
+        .post(format!("{}{}", harness.v3_base, verify_path("fresh")))
+        .json(&expectation)
+        .send();
+    let mutate = async {
+        hold.wait_until_received().await;
+        harness
+            .state
+            .db
+            .lock()
+            .set_account_auth_error("fresh", Some("changed during discovery"))
+            .unwrap();
+        // DB writes can occur without the dashboard revision changing.
+        harness
+            .state
+            .db
+            .lock()
+            .update_account(
+                "fresh",
+                &Default::default(),
+                Some("replacement-cipher"),
+                None,
+            )
+            .unwrap();
+        hold.release();
+    };
+    let (response, ()) = tokio::join!(request, mutate);
+    assert_eq!(response.unwrap().status(), StatusCode::CONFLICT);
+    let calls = origin.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].method, "GET");
 }
 
 fn stored_account(harness: &V3Harness, id: &str) -> ModelAccount {
@@ -265,6 +526,7 @@ struct CapturedCall {
     path: String,
     authorization: Option<String>,
     x_api_key: Option<String>,
+    anthropic_version: Option<String>,
     x_goog_api_key: Option<String>,
     cookie: Option<String>,
     body: String,
@@ -387,10 +649,30 @@ async fn start_origin_with_retry_after(
                     path: uri.0.path().to_string(),
                     authorization: header_value(&headers, "authorization"),
                     x_api_key: header_value(&headers, "x-api-key"),
+                    anthropic_version: header_value(&headers, "anthropic-version"),
                     x_goog_api_key: header_value(&headers, "x-goog-api-key"),
                     cookie: header_value(&headers, "cookie"),
                     body: String::from_utf8_lossy(&payload).into_owned(),
                 });
+                // This stub rejects mismatched protocol authentication instead
+                // of treating a permissive 200 as verification evidence.
+                if method == HttpMethod::POST {
+                    let correct_auth = if uri.0.path().ends_with("/messages") {
+                        headers.get("authorization").is_none()
+                            && headers.get("x-api-key").is_some()
+                            && header_value(&headers, "anthropic-version").as_deref()
+                                == Some("2023-06-01")
+                    } else {
+                        header_value(&headers, "authorization")
+                            .is_some_and(|value| value.starts_with("Bearer "))
+                            && headers.get("x-api-key").is_none()
+                            && headers.get("anthropic-version").is_none()
+                    };
+                    if !correct_auth {
+                        return (StatusCode::UNAUTHORIZED, "protocol authentication rejected")
+                            .into_response();
+                    }
+                }
                 if let Some(location) = spec_location {
                     return (
                         StatusCode::FOUND,
@@ -869,7 +1151,7 @@ async fn dashboard_v3_managed_key_verify_success_401_429_5xx_network_and_oversiz
         assert!(captured.x_goog_api_key.is_none());
         assert!(captured.cookie.is_none());
         let ping: Value = serde_json::from_str(&captured.body).unwrap();
-        assert_eq!(ping["model"], DEFAULT_ACCOUNT_TEST_MODEL);
+        assert_eq!(ping["model"], "verification-test-model");
         assert_eq!(ping["stream"], false);
         assert_eq!(ping["max_tokens"], 1);
         assert_secret_free(&response, &[OPAQUE_KEY, BODY_SECRET]);

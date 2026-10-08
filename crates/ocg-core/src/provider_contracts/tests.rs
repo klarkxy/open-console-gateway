@@ -1603,3 +1603,82 @@ fn select_enabled_upstream_prefers_enabled_preferred_without_adding_protocols() 
         "an enabled protocol outside preferred, client, and fallback is not added"
     );
 }
+
+#[test]
+fn goat_constructable_bounds_admit_saved_responses_without_inventing_support() {
+    let id = "fixture/arbitrary-saved-model";
+    let scope = ContractScope::provider(COMMAND_CODE_PROVIDER_ID);
+    let probe = probe_for(COMMAND_CODE_PROVIDER_ID);
+    assert_eq!(
+        safety_ceiling_protocols(probe, id),
+        vec![
+            UpstreamProtocolKind::ChatCompletions,
+            UpstreamProtocolKind::Responses
+        ]
+    );
+    assert!(safety_ceiling_protocols(probe, "stealth/ox-alpha").is_empty());
+    assert_eq!(
+        safety_ceiling_protocols(probe, "anthropic/claude-fixture"),
+        vec![UpstreamProtocolKind::Messages]
+    );
+    for source in [
+        ContractEvidenceSource::Preset,
+        ContractEvidenceSource::ProbeConfirmed,
+        ContractEvidenceSource::ProbeObserved,
+    ] {
+        let mut persisted = empty_persisted();
+        persist_catalog(&mut persisted, COMMAND_CODE_PROVIDER_ID, &[id]);
+        persisted.evidence.insert(
+            scope.clone(),
+            vec![
+                PersistedModelProtocol {
+                    scope: scope.clone(),
+                    model_id: id.into(),
+                    protocol: UpstreamProtocolKind::Responses,
+                    source,
+                    verified_at: Some(Utc::now()),
+                    observed_at: None,
+                    last_probe_result: Some(ProbeResultKind::Success),
+                    last_probe_at: None,
+                    last_probe_error: None,
+                },
+                PersistedModelProtocol {
+                    scope: scope.clone(),
+                    model_id: id.into(),
+                    protocol: UpstreamProtocolKind::Messages,
+                    source: ContractEvidenceSource::ProbeConfirmed,
+                    verified_at: None,
+                    observed_at: None,
+                    last_probe_result: None,
+                    last_probe_at: None,
+                    last_probe_error: None,
+                },
+            ],
+        );
+        let set = build_effective_contracts(&zen_seed(), &[], persisted.clone());
+        let model = set.providers[COMMAND_CODE_PROVIDER_ID].model(id).unwrap();
+        assert_eq!(
+            model.protocols["responses"].enabled,
+            source.confers_support()
+        );
+        assert!(!model.protocols["chat_completions"].enabled);
+        assert!(!model.protocols.contains_key("messages"));
+        persisted.overrides.insert(
+            scope.clone(),
+            vec![PersistedModelProtocolOverride {
+                scope: scope.clone(),
+                model_id: id.into(),
+                protocol: UpstreamProtocolKind::Responses,
+                state: ProtocolOverrideState::ForceOff,
+                updated_at: Utc::now(),
+            }],
+        );
+        let set = build_effective_contracts(&zen_seed(), &[], persisted);
+        assert!(
+            !set.providers[COMMAND_CODE_PROVIDER_ID]
+                .model(id)
+                .unwrap()
+                .has_enabled_protocol()
+        );
+    }
+}

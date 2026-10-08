@@ -15,6 +15,98 @@ pub struct MinimaxAdapter;
 const CUSTOM_PROVIDER_PREFIX: &str = "custom_provider:";
 
 impl FormatAdapter for MinimaxAdapter {
+    fn raw_default(&self, bytes: Option<&[u8]>) -> ByokResult<Option<String>> {
+        let _ = bytes;
+        bytes.map(parse_yaml).transpose().map(|root| {
+            root.as_ref()
+                .and_then(as_mapping)
+                .and_then(|map| string_entry(map, "defaultModel"))
+        })
+    }
+
+    fn managed(&self, target_bytes: Option<&[u8]>, _catalog: Option<&[u8]>) -> ByokResult<Value> {
+        let root = match target_bytes {
+            Some(bytes) => parse_yaml(bytes)?,
+            None => serde_yaml_ng::Value::Mapping(Mapping::new()),
+        };
+        let map = as_mapping(&root)
+            .ok_or_else(|| ByokError::invalid("MiniMax config must be a mapping"))?;
+        Ok(owned_from_mapping(map))
+    }
+    fn replace_managed(&self, target_bytes: Option<&[u8]>, owned: &Value) -> ByokResult<Vec<u8>> {
+        let mut root = match target_bytes {
+            Some(bytes) => parse_yaml(bytes)?,
+            None => serde_yaml_ng::Value::Mapping(Mapping::new()),
+        };
+        let map = as_mapping_mut(&mut root)
+            .ok_or_else(|| ByokError::invalid("MiniMax config must be a mapping"))?;
+        if map.get(yaml_key("custom_provider")).is_none() {
+            map.insert(
+                yaml_key("custom_provider"),
+                serde_yaml_ng::Value::Mapping(Mapping::new()),
+            );
+        }
+        let custom = map
+            .get_mut(yaml_key("custom_provider"))
+            .and_then(as_mapping_mut)
+            .ok_or_else(|| ByokError::invalid("custom_provider must be a mapping"))?;
+        for id in super::MANAGED_PROVIDER_IDS {
+            match json_to_yaml(&owned["providers"][id]) {
+                Some(value) => {
+                    custom.insert(yaml_key(id), value);
+                }
+                None => {
+                    custom.remove(yaml_key(id));
+                }
+            }
+        }
+        dump_yaml(&root)
+    }
+    fn restore_selection(
+        &self,
+        target_bytes: &[u8],
+        original: Option<&[u8]>,
+        receipt: &Receipt,
+    ) -> ByokResult<Vec<u8>> {
+        let mut root = parse_yaml(target_bytes)?;
+        let map = as_mapping_mut(&mut root)
+            .ok_or_else(|| ByokError::invalid("MiniMax config must be a mapping"))?;
+        let current = string_entry(map, "defaultModel");
+        if receipt.last_applied_default == current {
+            let prior = original.map(parse_yaml).transpose()?;
+            match prior
+                .as_ref()
+                .and_then(as_mapping)
+                .and_then(|map| map.get(yaml_key("defaultModel")))
+            {
+                Some(value) => {
+                    map.insert(yaml_key("defaultModel"), value.clone());
+                }
+                None => {
+                    map.remove(yaml_key("defaultModel"));
+                }
+            }
+        } else if current
+            .as_deref()
+            .is_some_and(|id| split_managed_default(id).is_some())
+        {
+            return Err(ByokError::conflict(
+                "The current default changed after takeover",
+            ));
+        }
+        let prior = original.map(parse_yaml).transpose()?;
+        if let Some(prior) = prior.as_ref().and_then(as_mapping) {
+            for key in PREFERENCE_KEYS {
+                if map.get(yaml_key(key)).is_none() {
+                    if let Some(value) = prior.get(yaml_key(key)) {
+                        map.insert(yaml_key(key), value.clone());
+                    }
+                }
+            }
+        }
+        dump_yaml(&root)
+    }
+
     fn inspect_bytes(
         &self,
         target_bytes: Option<&[u8]>,
@@ -317,9 +409,7 @@ fn minimax_conflict(receipt: Option<&Receipt>, present: bool, current: &Value) -
 }
 
 fn minimax_view(stripped: &Value) -> Value {
-    json!({
-        "providers": super::managed_provider_object(stripped),
-    })
+    super::semantic::projection(ByokClient::Minimax, stripped)
 }
 
 fn string_entry(mapping: &Mapping, key: &str) -> Option<String> {

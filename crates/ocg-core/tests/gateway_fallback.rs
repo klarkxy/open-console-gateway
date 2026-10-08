@@ -27,6 +27,9 @@ mod fallback_fix;
 
 use fallback_fix::*;
 
+#[path = "gateway_fallback/tests.rs"]
+mod tests;
+
 fn create_keyed_plan_account(
     state: &Arc<CoreStateInner>,
     id: &str,
@@ -303,12 +306,12 @@ async fn model_discovery_publishes_saved_sealed_cn_public_names() {
         "minimax-m2.1",
         "minimax-m2.1-highspeed",
         "kimi-for-coding-highspeed",
-        "kimi-k3",
-        "kimi-k3-256k",
+        "k3",
+        "k3-256k",
     ] {
         assert!(ids.contains(alias), "missing {alias}: {body}");
     }
-    for raw in ["MiniMax-M2", "MiniMax-M2.1", "k3", "k3-256k"] {
+    for raw in ["MiniMax-M2", "MiniMax-M2.1"] {
         assert!(!ids.contains(raw), "raw ID leaked into /v1/models: {body}");
     }
     assert!(
@@ -321,7 +324,7 @@ async fn model_discovery_publishes_saved_sealed_cn_public_names() {
 #[tokio::test]
 async fn model_discovery_publishes_enabled_goat_short_alias_without_raw_id() {
     const RAW: &str = "nvidia/nemotron-3-ultra-550b-a55b";
-    const ALIAS: &str = "nemotron-3-ultra";
+    const ALIAS: &str = "nemotron-3-ultra-550b-a55b";
 
     let p = PreparedFallback::go(&[], &[]).await;
     p.state
@@ -340,6 +343,21 @@ async fn model_discovery_publishes_enabled_goat_short_alias_without_raw_id() {
     );
     force_enable_unroutable_account_for_loopback_test(&p.dir, "goat-pub");
     persist_goat_verified_catalog(&p.state, "goat-pub", &[RAW]);
+    let baseline = ocg_core::dashboard_v3::OfficialProtocolBaseline::mapped_protocols([(
+        RAW,
+        vec![ocg_core::provider::UpstreamProtocolKind::ChatCompletions],
+    )]);
+    p.state
+        .db
+        .lock()
+        .apply_official_protocol_baseline(
+            &ocg_core::provider_contracts::ContractScope::provider(COMMAND_CODE_PROVIDER_ID),
+            &[RAW.to_string()],
+            &baseline,
+            Utc::now(),
+        )
+        .unwrap();
+    p.state.reload_provider_contracts().unwrap();
     let h = p.bind().await;
 
     let (status, body) = h.models().await;
@@ -3002,7 +3020,7 @@ async fn enabled_goat_without_loopback_is_not_selected() {
 }
 
 #[tokio::test]
-async fn goat_only_anthropic_model_stays_raw_and_converts_client_responses() {
+async fn goat_only_anthropic_model_has_a_catalog_alias_and_converts_client_responses() {
     let (h, _) = start_goat(
         &[("goat-key", &[ok_messages(), ok_messages()])],
         &["claude-sonnet-4-6"],
@@ -3026,8 +3044,8 @@ async fn goat_only_anthropic_model_stays_raw_and_converts_client_responses() {
         .filter_map(|item| item["id"].as_str().map(str::to_string))
         .collect::<Vec<_>>();
     assert!(
-        !ids.iter().any(|id| id == "claude-sonnet-4-6"),
-        "a GOAT-only ID must not expand the static Go Alias namespace: {ids:?}"
+        ids.iter().any(|id| id == "claude-sonnet-4-6"),
+        "a saved GOAT model must publish its catalog-derived alias: {ids:?}"
     );
     assert!(
         !ids.iter()

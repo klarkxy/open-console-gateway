@@ -19,7 +19,7 @@ pub use crate::billing_types::{
     BillingStatus, CreditBalanceCorrection, CreditCalibrationRequest, CreditConfigurationWrite,
     CreditConfigureRequest, CreditGrantRequest,
 };
-pub use crate::byok_application::{ByokClient, ByokInspection, ByokStatus};
+pub use crate::byok_application::{ByokClient, ByokInspection, ByokPreview, ByokStatus};
 pub use crate::db::routing_cards::RoutingCard;
 pub use crate::model_metadata::ModelMetadata;
 
@@ -39,12 +39,27 @@ pub struct ByokApplication {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ByokPreviewRequest {
+    pub target_path: Option<String>,
+    pub copilot_token_budget: Option<crate::byok_application::CopilotTokenBudget>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ByokConfigureRequest {
     pub expected_revision: u64,
     pub process_generation: u64,
     pub target_path: Option<String>,
     pub expected_fingerprint: String,
     pub client_closed: bool,
+    pub preview_fingerprint: Option<String>,
+    #[serde(default)]
+    pub acknowledge_takeover: bool,
+    #[serde(default)]
+    pub acknowledge_overwrite: bool,
+    #[serde(default)]
+    pub acknowledge_removal: bool,
+    pub copilot_token_budget: Option<crate::byok_application::CopilotTokenBudget>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -111,6 +126,8 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "ByokClient",
     "ByokStatus",
     "ByokInspection",
+    "ByokPreview",
+    "ByokPreviewRequest",
     "ByokApplication",
     "ByokConfigureRequest",
     "ByokMutationRequest",
@@ -2025,6 +2042,7 @@ pub fn contract_schema() -> Value {
     include_type::<ByokClient>(&mut serialize);
     include_type::<ByokStatus>(&mut serialize);
     include_type::<ByokInspection>(&mut serialize);
+    include_type::<ByokPreview>(&mut serialize);
     include_type::<ByokApplication>(&mut serialize);
     include_type::<DshApplicationOutcome>(&mut serialize);
     include_type::<DshApplication>(&mut serialize);
@@ -2112,6 +2130,7 @@ pub fn contract_schema() -> Value {
     include_type::<CatalogModelsRemoveRequest>(&mut deserialize);
     include_type::<AliasPublicationUpdate>(&mut deserialize);
     include_type::<DshApplicationInstallRequest>(&mut deserialize);
+    include_type::<ByokPreviewRequest>(&mut deserialize);
     include_type::<ByokConfigureRequest>(&mut deserialize);
     include_type::<ByokMutationRequest>(&mut deserialize);
     include_type::<DshApplicationUninstallRequest>(&mut deserialize);

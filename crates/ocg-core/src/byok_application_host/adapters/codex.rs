@@ -2,8 +2,7 @@ use super::super::fs::content_hash;
 use super::{
     ConfigureInput, FormatAdapter, PROVIDER_ID, PROVIDER_NAME, ParsedStatus, default_plan_defaults,
     display_name, ensure_default_selected, ensure_retained_ocg_default, first_owned, has_image,
-    ownership_conflict, planned_catalog, planned_target, preserve_created, snapshot,
-    toml_item_json, validate_models,
+    planned_catalog, planned_target, preserve_created, snapshot, toml_item_json, validate_models,
 };
 use crate::byok_application::{ByokClient, ByokError, ByokModel, ByokResult};
 use crate::byok_application_host::receipt::{ApplyPlan, Receipt};
@@ -14,6 +13,95 @@ use toml_edit::{DocumentMut, Item, Table, value};
 pub struct CodexAdapter;
 
 impl FormatAdapter for CodexAdapter {
+    fn raw_default(&self, bytes: Option<&[u8]>) -> ByokResult<Option<String>> {
+        let _ = bytes;
+        bytes
+            .map(parse_toml)
+            .transpose()
+            .map(|doc| doc.as_ref().and_then(|doc| string_key(doc, "model")))
+    }
+
+    fn managed(
+        &self,
+        target_bytes: Option<&[u8]>,
+        catalog_bytes: Option<&[u8]>,
+    ) -> ByokResult<Value> {
+        let doc = match target_bytes {
+            Some(bytes) => parse_toml(bytes)?,
+            None => DocumentMut::new(),
+        };
+        if !root_shape_ok(&doc) {
+            return Err(ByokError::invalid("Malformed Codex provider shape"));
+        }
+        if let Some(bytes) = catalog_bytes {
+            serde_json::from_slice::<Value>(bytes)
+                .map_err(|_| ByokError::invalid("Codex catalog is not valid JSON"))?;
+        }
+        Ok(owned_from_doc(&doc, catalog_bytes))
+    }
+    fn replace_managed(&self, target_bytes: Option<&[u8]>, owned: &Value) -> ByokResult<Vec<u8>> {
+        let mut doc = match target_bytes {
+            Some(bytes) => parse_toml(bytes)?,
+            None => DocumentMut::new(),
+        };
+        if doc.get("model_providers").is_none() {
+            doc["model_providers"] = Item::Table(Table::new());
+        }
+        let table = doc
+            .get_mut("model_providers")
+            .and_then(Item::as_table_like_mut)
+            .ok_or_else(|| ByokError::invalid("Codex providers must be a table"))?;
+        let provider = &owned["provider"];
+        if provider.is_null() {
+            table.remove(PROVIDER_ID);
+        } else {
+            if table.get(PROVIDER_ID).is_none() {
+                table.insert(PROVIDER_ID, Item::Table(Table::new()));
+            }
+            super::replace_toml_fields(
+                table
+                    .get_mut(PROVIDER_ID)
+                    .and_then(Item::as_table_like_mut)
+                    .ok_or_else(|| ByokError::invalid("Codex provider must be a table"))?,
+                provider,
+            );
+        }
+        Ok(doc.to_string().into_bytes())
+    }
+    fn restore_selection(
+        &self,
+        target_bytes: &[u8],
+        original: Option<&[u8]>,
+        receipt: &Receipt,
+    ) -> ByokResult<Vec<u8>> {
+        let mut doc = parse_toml(target_bytes)?;
+        if receipt.last_applied_default.as_deref() == doc.get("model").and_then(Item::as_str) {
+            let expected_catalog = receipt
+                .first_owned
+                .get("applied_catalog")
+                .and_then(Value::as_str);
+            if doc.get("model_provider").and_then(Item::as_str) != Some(PROVIDER_ID)
+                || !doc
+                    .get("model_catalog_json")
+                    .and_then(Item::as_str)
+                    .zip(expected_catalog)
+                    .is_some_and(|(current, expected)| same_catalog(current, Path::new(expected)))
+            {
+                return Err(ByokError::conflict(
+                    "Codex provider or catalog selection changed after takeover",
+                ));
+            }
+        }
+        super::restore_toml_selection(
+            &mut doc,
+            original,
+            receipt,
+            &["model", "model_provider", "model_catalog_json"],
+            "model",
+        )?;
+        Ok(doc.to_string().into_bytes())
+    }
+
     fn inspect_bytes(
         &self,
         target_bytes: Option<&[u8]>,
@@ -59,7 +147,7 @@ impl FormatAdapter for CodexAdapter {
                 .filter(|_| present)
                 .unwrap_or_default(),
             current_default: ocg_default(&doc),
-            user_changed_owned: ownership_conflict(receipt, true, &owned),
+            user_changed_owned: codex_conflict(receipt, true, &owned),
         }
     }
 
@@ -100,7 +188,7 @@ impl FormatAdapter for CodexAdapter {
                 "An unowned Codex model catalog already exists",
             ));
         }
-        if ownership_conflict(
+        if codex_conflict(
             receipt,
             target_bytes.is_some(),
             &owned_from_doc(&doc, catalog_bytes),
@@ -175,7 +263,7 @@ impl FormatAdapter for CodexAdapter {
             return Ok(removal_plan(target_path, catalog_path, receipt, None, None));
         };
         let mut doc = parse_toml(bytes)?;
-        if ownership_conflict(Some(receipt), true, &owned_from_doc(&doc, catalog_bytes)) {
+        if codex_conflict(Some(receipt), true, &owned_from_doc(&doc, catalog_bytes)) {
             return Err(ByokError::conflict(
                 "Owned Codex fields changed outside OCG",
             ));
@@ -269,7 +357,8 @@ fn string_key(doc: &DocumentMut, key: &str) -> Option<String> {
 }
 
 fn catalog_unowned(catalog_bytes: Option<&[u8]>, receipt: Option<&Receipt>) -> bool {
-    catalog_bytes.is_some() && !receipt.is_some_and(|receipt| receipt.created_catalog)
+    catalog_bytes.is_some()
+        && !receipt.is_some_and(|receipt| receipt.created_catalog || receipt.adopted)
 }
 
 fn selection_captured(receipt: &Receipt) -> bool {
@@ -497,6 +586,7 @@ fn owned_from_doc(doc: &DocumentMut, catalog_bytes: Option<&[u8]>) -> Value {
     json!({
         "provider": provider,
         "catalog_sha256": content_hash(catalog_bytes),
+        "catalog": catalog_bytes.and_then(|bytes|serde_json::from_slice::<Value>(bytes).ok()),
     })
 }
 
@@ -577,4 +667,24 @@ fn wire_efforts(
         emitted.push((spelling.clone(), level.clone()));
     }
     emitted
+}
+
+fn codex_conflict(receipt: Option<&Receipt>, present: bool, current: &Value) -> bool {
+    if !present {
+        return false;
+    }
+    let Some(receipt) = receipt else {
+        return false;
+    };
+    let mut previous = receipt.last_managed.owned.clone();
+    let mut current = current.clone();
+    if previous.get("catalog").is_none() {
+        if super::legacy_codex_catalog_matches(receipt, &current) {
+            current["catalog_sha256"] = previous["catalog_sha256"].clone();
+        }
+        previous.as_object_mut().map(|map| map.remove("catalog"));
+        current.as_object_mut().map(|map| map.remove("catalog"));
+    }
+    super::semantic::projection(ByokClient::Codex, &previous)
+        != super::semantic::projection(ByokClient::Codex, &current)
 }

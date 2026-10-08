@@ -15,8 +15,8 @@ use ocg_core::gateway::free_models::resolve_upstream_base;
 use ocg_core::kernel::protocol::supported_model_protocol_profiles;
 use ocg_core::models::{AppConfig, UpstreamChannel};
 use ocg_core::provider::{
-    COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS, COMMAND_CODE_PROVIDER_ID,
-    OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
+    COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_PROVIDER_ID, OPENCODE_PROVIDER_ID,
+    OPENCODE_ZEN_FREE_PROVIDER_ID,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
@@ -229,10 +229,8 @@ async fn main() -> anyhow::Result<()> {
             OPENCODE_PROVIDER_ID => supported_model_protocol_profiles()
                 .map(|(model, _, _)| model.to_string())
                 .collect(),
-            COMMAND_CODE_PROVIDER_ID => COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS
-                .iter()
-                .map(|model| (*model).to_string())
-                .collect(),
+            // GOAT probes require a saved current catalog, never a live whitelist.
+            COMMAND_CODE_PROVIDER_ID => Vec::new(),
             _ => Vec::new(),
         }))
     };

@@ -16,23 +16,23 @@ use futures_util::StreamExt;
 use parking_lot::Mutex;
 use std::time::Duration;
 
-use crate::custom;
 use crate::db::{
     ManagedKeyVerificationCas, ManagedKeyVerificationCommit, ManagedKeyVerificationRateLimit,
     ManagedKeyVerificationWrite,
 };
 use crate::gateway::failure::decode::temporary_429_until;
 use crate::http_client;
-use crate::kernel::protocol::{ApiFormat, supported_model_protocol_profiles};
 use crate::models::{
     Account as ModelAccount, AccountSetupStep as ModelSetupStep, AccountType as ModelAccountType,
-    AppConfig, DEFAULT_ACCOUNT_TEST_MODEL,
+    AppConfig,
 };
-use crate::provider::{self, ProviderBindingError, UpstreamProtocolKind};
+use crate::provider::{self, ProviderBindingError};
+use crate::provider_contracts::{EffectiveScopeContract, PersistedContracts};
 use crate::redaction::{
     redact_known_secret, redact_text, sanitize_upstream_error_value_with_known_secret,
 };
 use crate::state::CoreState;
+use crate::verification_models::select_verification_model;
 
 use super::types::{
     Account, AccountCustomConfig, AccountManagedKeyVerify, AccountModelCapability, AccountMutation,
@@ -200,7 +200,7 @@ pub(super) async fn verify_managed_account_key(
         }
     };
 
-    let prepared = {
+    let mut prepared = {
         let _settings_update = state.settings_update.lock();
         match check_expectation(&state, &input.expectation)
             .and_then(|()| prepare_managed_key_verify(&state, &id, key, key_cipher))
@@ -219,6 +219,20 @@ pub(super) async fn verify_managed_account_key(
             }
         }
     };
+
+    if let Err(error) = resolve_verification_request(&state, &mut prepared)
+        .await
+        .and_then(|()| recheck_prepared(&state, &id, &input.expectation, &prepared))
+    {
+        return super::settings::record_after(
+            op,
+            &state,
+            &[],
+            (None, None, None),
+            None,
+            Err(error),
+        );
+    }
 
     op.accepted(super::settings::metadata_for(
         &state,
@@ -266,6 +280,10 @@ struct PreparedVerify {
     config: AppConfig,
     target_url: String,
     body: Vec<u8>,
+    send_headers: reqwest::header::HeaderMap,
+    saved_scope: EffectiveScopeContract,
+    persisted: PersistedContracts,
+    projection: crate::destination_projection::DestinationProjection,
 }
 
 enum VerifyOutcome {
@@ -296,7 +314,6 @@ fn prepare_managed_key_verify(
     let account = load_waiting_managed_account(state, id)?;
     ensure_managed_registration(state, &account)?;
     ensure_plan_can_enable(state, &account)?;
-    let (_protocol, path, body) = go_verification_request()?;
     let config = state.config();
     let base = verification_base_url(
         state.process_generation(),
@@ -304,6 +321,19 @@ fn prepare_managed_key_verify(
     );
     validate_upstream_url(&base)
         .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
+    let saved_scope = state
+        .provider_contracts()
+        .provider_offering(provider::OPENCODE_PROVIDER_ID)
+        .cloned()
+        .ok_or_else(|| V3ApiError::internal("OpenCode Go contract is unavailable"))?;
+    let (persisted, projection) = {
+        let db = state.db.lock();
+        (
+            db.load_persisted_contracts()
+                .map_err(V3ApiError::internal)?,
+            crate::destination_projection::load_runtime(&db).map_err(V3ApiError::internal)?,
+        )
+    };
     Ok(PreparedVerify {
         account_name: account.name.clone(),
         account_cas: ManagedKeyVerificationCas::from_account(&account),
@@ -311,9 +341,96 @@ fn prepare_managed_key_verify(
         key,
         key_cipher,
         config,
-        target_url: join_upstream(&base, path),
-        body,
+        target_url: base,
+        body: Vec::new(),
+        send_headers: reqwest::header::HeaderMap::new(),
+        saved_scope,
+        persisted,
+        projection,
     })
+}
+
+/// Discovery is public and transient: verification never changes model controls.
+async fn resolve_verification_request(
+    state: &CoreState,
+    prepared: &mut PreparedVerify,
+) -> Result<(), V3ApiError> {
+    let scope = if prepared.saved_scope.catalog.models.is_empty() {
+        let discovery = crate::goat::refresh_opencode_go_catalog_discovery(&prepared.config, &prepared.target_url)
+            .await.map_err(|_| V3ApiError::outbound_failed(state, "OpenCode Go directory discovery failed; refresh its model directory and retry Key verification"))?;
+        let docs = if matches!(
+            discovery.protocol_baseline,
+            crate::goat::OfficialProtocolBaseline::Unavailable
+        ) {
+            crate::official_protocols::fetch_official_protocol_baseline(
+                &prepared.config,
+                provider::OPENCODE_PROVIDER_ID,
+                state.process_generation(),
+            )
+            .await
+        } else {
+            crate::goat::OfficialProtocolBaseline::Unavailable
+        };
+        let baseline = discovery.protocol_baseline.prefer_catalog(docs);
+        crate::verification_models::discovered_go_contract(
+            discovery.models,
+            &baseline,
+            &prepared.saved_scope,
+            &prepared.persisted,
+            &prepared.projection,
+            &prepared.target_url,
+        )
+        .map_err(|message| V3ApiError::outbound_failed(state, message))?
+    } else {
+        prepared.saved_scope.clone()
+    };
+    let selected = select_verification_model(&scope, None)
+        .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
+    prepared.body = selected.body("ping", 1).map_err(V3ApiError::internal)?;
+    prepared.send_headers = selected
+        .go_headers(&prepared.key)
+        .map_err(V3ApiError::internal)?;
+    prepared.target_url = join_upstream(&prepared.target_url, selected.path());
+    Ok(())
+}
+
+fn validate_prepared(
+    state: &CoreState,
+    id: &str,
+    expectation: &MutationExpectation,
+    prepared: &PreparedVerify,
+) -> Result<(), V3ApiError> {
+    check_expectation(state, expectation)?;
+    let current = load_waiting_managed_account(state, id)?;
+    ensure_plan_can_enable(state, &current)?;
+    ensure_managed_registration(state, &current)?;
+    if ManagedKeyVerificationCas::from_account(&current) != prepared.account_cas {
+        return Err(key_changed_conflict(state));
+    }
+    let config_changed = serde_json::to_value(state.config()).map_err(V3ApiError::internal)?
+        != serde_json::to_value(&prepared.config).map_err(V3ApiError::internal)?;
+    if config_changed
+        || state
+            .provider_contracts()
+            .provider_offering(provider::OPENCODE_PROVIDER_ID)
+            != Some(&prepared.saved_scope)
+    {
+        return Err(V3ApiError::conflict_at(
+            state,
+            "configuration changed while preparing Key verification; retry verification",
+        ));
+    }
+    Ok(())
+}
+
+fn recheck_prepared(
+    state: &CoreState,
+    id: &str,
+    expectation: &MutationExpectation,
+    prepared: &PreparedVerify,
+) -> Result<(), V3ApiError> {
+    let _settings_update = state.settings_update.lock();
+    validate_prepared(state, id, expectation, prepared)
 }
 
 fn load_waiting_managed_account(state: &CoreState, id: &str) -> Result<ModelAccount, V3ApiError> {
@@ -368,34 +485,6 @@ fn map_enablement_error(state: &CoreState, error: ProviderBindingError) -> V3Api
     }
 }
 
-fn go_verification_request() -> Result<(UpstreamProtocolKind, &'static str, Vec<u8>), V3ApiError> {
-    let Some((canonical, preferred, _)) = supported_model_protocol_profiles()
-        .find(|(model_id, _, _)| *model_id == DEFAULT_ACCOUNT_TEST_MODEL)
-    else {
-        return Err(V3ApiError::internal(
-            "default OpenCode Go verification model is missing from the protocol catalog",
-        ));
-    };
-    let protocol = upstream_protocol_for_api(preferred).ok_or_else(|| {
-        V3ApiError::internal("default OpenCode Go verification model has no upstream protocol")
-    })?;
-    let path = preferred.upstream_path().ok_or_else(|| {
-        V3ApiError::internal("default OpenCode Go verification model has no upstream path")
-    })?;
-    let body = custom::minimal_verification_body(protocol, canonical)
-        .map_err(|error| V3ApiError::internal(error.message))?;
-    Ok((protocol, path, body))
-}
-
-fn upstream_protocol_for_api(format: ApiFormat) -> Option<UpstreamProtocolKind> {
-    match format {
-        ApiFormat::ChatCompletions => Some(UpstreamProtocolKind::ChatCompletions),
-        ApiFormat::Responses => Some(UpstreamProtocolKind::Responses),
-        ApiFormat::Messages => Some(UpstreamProtocolKind::Messages),
-        ApiFormat::Gemini => None,
-    }
-}
-
 fn join_upstream(base: &str, path: &str) -> String {
     format!("{}{path}", base.trim_end_matches('/'))
 }
@@ -441,8 +530,7 @@ async fn execute_managed_key_verify(prepared: &PreparedVerify) -> VerifyOutcome 
 
     let response = match client
         .post(&prepared.target_url)
-        .bearer_auth(&prepared.key)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .headers(prepared.send_headers.clone())
         .body(prepared.body.clone())
         .timeout(Duration::from_secs(prepared.config.non_stream_timeout_secs))
         .send()
@@ -568,7 +656,7 @@ fn commit_managed_key_verify(
 
     let (result, refresh_usage) = {
         let _settings_update = state.settings_update.lock();
-        check_expectation(state, expectation)?;
+        validate_prepared(state, id, expectation, prepared)?;
         let account = load_waiting_managed_account(state, id)?;
         ensure_plan_can_enable(state, &account)?;
 
@@ -878,59 +966,4 @@ fn redact_verify_detail(text: &str, key: &str, config: &AppConfig) -> String {
 }
 
 #[cfg(all(test, debug_assertions))]
-mod target_override_tests {
-    use super::{
-        debug_managed_key_verify_target, install_managed_key_verify_target_for_tests,
-        parse_loopback_http_url,
-    };
-
-    fn unique_generation() -> u64 {
-        uuid::Uuid::new_v4().as_u128() as u64
-    }
-
-    #[test]
-    fn parse_loopback_http_url_requires_exact_host_without_userinfo_query_or_fragment() {
-        assert_eq!(
-            parse_loopback_http_url("http://127.0.0.1:9/").as_deref(),
-            Some("http://127.0.0.1:9/")
-        );
-        assert_eq!(
-            parse_loopback_http_url("http://localhost:9/").as_deref(),
-            Some("http://localhost:9/")
-        );
-        assert_eq!(
-            parse_loopback_http_url("http://[::1]:9/").as_deref(),
-            Some("http://[::1]:9/")
-        );
-        assert!(parse_loopback_http_url("http://127.0.0.1:9/?x=1").is_none());
-        assert!(parse_loopback_http_url("http://127.0.0.1:9/#frag").is_none());
-        assert!(parse_loopback_http_url("http://user@127.0.0.1:9/").is_none());
-        assert!(parse_loopback_http_url("https://opencode.ai/zen/go").is_none());
-        assert!(parse_loopback_http_url("http://127.0.0.2:9/").is_none());
-    }
-
-    #[test]
-    fn overrides_are_isolated_by_process_generation_and_reject_ambiguous_urls() {
-        let first = unique_generation();
-        let second = unique_generation();
-        let _guard_a = install_managed_key_verify_target_for_tests(first, "http://127.0.0.1:11/");
-        let _guard_b = install_managed_key_verify_target_for_tests(second, "http://127.0.0.1:12/");
-        assert_eq!(
-            debug_managed_key_verify_target(first).as_deref(),
-            Some("http://127.0.0.1:11/")
-        );
-        assert_eq!(
-            debug_managed_key_verify_target(second).as_deref(),
-            Some("http://127.0.0.1:12/")
-        );
-
-        drop(_guard_a);
-        let _cleared =
-            install_managed_key_verify_target_for_tests(first, "http://127.0.0.1:11@example.com/");
-        assert!(debug_managed_key_verify_target(first).is_none());
-        assert_eq!(
-            debug_managed_key_verify_target(second).as_deref(),
-            Some("http://127.0.0.1:12/")
-        );
-    }
-}
+mod tests;

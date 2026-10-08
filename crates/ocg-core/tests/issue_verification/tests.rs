@@ -18,8 +18,7 @@ use ocg_core::gateway::provider_adapter::{
 use ocg_core::goat::install_goat_catalog_origin_for_test;
 use ocg_core::models::{Account, RoutingMode, UsageWindowKind};
 use ocg_core::provider::{
-    COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS as MODEL, COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS,
-    COMMAND_CODE_PROVIDER_ID,
+    COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS as MODEL, COMMAND_CODE_PROVIDER_ID,
 };
 use ocg_core::state::CoreStateInner;
 use serde_json::{Value, json};
@@ -593,10 +592,11 @@ async fn wait_arrived(arrived: tokio::sync::oneshot::Receiver<()>) {
 }
 
 fn command_catalog_body() -> String {
-    let mut data: Vec<Value> = COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS
-        .iter()
-        .map(|id| json!({ "id": id }))
-        .collect();
+    let mut data: Vec<Value> =
+        [ocg_core::kernel::ids::COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM]
+            .iter()
+            .map(|id| json!({ "id": id }))
+            .collect();
     data.push(json!({ "id": "future-command-model" }));
     json!({ "object": "list", "data": data }).to_string()
 }

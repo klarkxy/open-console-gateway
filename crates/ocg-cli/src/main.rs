@@ -150,9 +150,9 @@ enum KeyAction {
     Ping {
         /// Account ID; omit to ping every enabled key
         id: Option<String>,
-        /// Model to send (default: mimo-v2.5)
-        #[arg(long, default_value = ocg_core::models::DEFAULT_ACCOUNT_TEST_MODEL)]
-        model: String,
+        /// Model to send; defaults to an enabled model in the saved Go catalog
+        #[arg(long)]
+        model: Option<String>,
         /// User message (default: "ping")
         #[arg(long, default_value = "ping")]
         message: String,
@@ -590,7 +590,14 @@ async fn key_command(
             max_tokens,
         } => {
             drop(db);
-            ping_keys(&state, id.as_deref(), &model, &message, max_tokens).await?;
+            ping_keys(
+                &state,
+                id.as_deref(),
+                model.as_deref(),
+                &message,
+                max_tokens,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -705,12 +712,12 @@ async fn status_command(
     Ok(())
 }
 
-/// One-shot ping: decrypts the key, sends a tiny chat completion, prints real upstream status.
+/// One-shot ping using the selected saved upstream protocol.
 /// Used to surface real 401/403/429/200 — what each key actually does upstream, no inference.
 async fn ping_one(
     state: &Arc<CoreStateInner>,
     account: &Account,
-    model: &str,
+    model: &ocg_core::verification_models::VerificationModel,
     message: &str,
     max_tokens: u32,
 ) -> (u16, String) {
@@ -720,20 +727,24 @@ async fn ping_one(
     };
     let (config, client) = state.upstream_context();
     let url = format!(
-        "{}/v1/chat/completions",
+        "{}{}",
         ocg_core::gateway::free_models::opencode_go_base_url(&config.upstream_base_url)
+            .trim_end_matches('/'),
+        model.path()
     );
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": message}],
-        "max_tokens": max_tokens,
-        "stream": false });
+    let body = match model.body(message, max_tokens) {
+        Ok(body) => body,
+        Err(error) => return (0, error),
+    };
+    let headers = match model.go_headers(&key) {
+        Ok(headers) => headers,
+        Err(error) => return (0, error),
+    };
     let started = std::time::Instant::now();
     let resp = client
         .post(&url)
-        .header("Authorization", format!("Bearer {key}"))
-        .header("Content-Type", "application/json")
-        .json(&body)
+        .headers(headers)
+        .body(body)
         .timeout(std::time::Duration::from_secs(
             config.non_stream_timeout_secs,
         ))
@@ -771,7 +782,7 @@ async fn ping_one(
 async fn ping_keys(
     state: &Arc<CoreStateInner>,
     id: Option<&str>,
-    model: &str,
+    model: Option<&str>,
     message: &str,
     max_tokens: u32,
 ) -> Result<()> {
@@ -809,16 +820,32 @@ async fn ping_keys(
         println!("no keys to ping");
         return Ok(());
     }
+    let selection = state
+        .provider_contracts()
+        .provider_offering(ocg_core::provider::OPENCODE_PROVIDER_ID)
+        .ok_or_else(|| "OpenCode Go contract is unavailable".to_string())
+        .and_then(|scope| ocg_core::verification_models::select_verification_model(scope, model));
+    let selected = match selection {
+        Ok(selected) => selected,
+        Err(error) => {
+            operation.complete(
+                OperationOutcome::Rejected,
+                Some("invalid"),
+                OperationMetadata::default(),
+            );
+            return Err(anyhow::anyhow!(error));
+        }
+    };
     println!(
         "pinging {} key(s) with model={} message={:?}",
         targets.len(),
-        model,
+        selected.model,
         message
     );
     let mut completed = 0_u32;
     let mut failed = 0_u32;
     for account in &targets {
-        let (status, body) = ping_one(state, account, model, message, max_tokens).await;
+        let (status, body) = ping_one(state, account, &selected, message, max_tokens).await;
         if status == 200 {
             completed = completed.saturating_add(1);
         } else {

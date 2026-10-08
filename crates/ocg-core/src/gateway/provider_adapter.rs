@@ -6,8 +6,7 @@ use crate::custom_http::{join_inference_endpoint, resolve_custom_endpoints};
 use crate::gateway::attempt::{AttemptSpec, CredentialHandle, ProxyRoutingModel};
 use crate::gateway::free_models::resolve_upstream_base;
 use crate::gateway::protocol::{
-    ApiFormat, CustomRouteSpec, RequestPlan, command_code_supports_upstream,
-    command_code_upstream_path, opencode_supports_upstream,
+    ApiFormat, CustomRouteSpec, RequestPlan, command_code_upstream_path, opencode_supports_upstream,
 };
 use crate::gateway::wire::WireNormalization;
 use crate::kernel::ids::{OLLAMA_CLOUD_BASE_URL, OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH};
@@ -853,14 +852,18 @@ fn require_opencode_protocol_policy(
             Ok(())
         }
         RoutePolicy::AccountTest => {
+            // Accounts selects the saved GOAT protocol and revalidates its
+            // exact catalog mapping before both secret authorization and send.
+            // The static table cannot admit or reject newly discovered IDs.
+            if descriptor.kind == ProviderAdapterKind::CommandCodeGoat {
+                return Ok(());
+            }
             let opencode_ok = matches!(
                 descriptor.kind,
                 ProviderAdapterKind::OpenCodeGo | ProviderAdapterKind::ZenFree
             ) && opencode_supports_upstream(&plan.model, plan.upstream);
             let statically_ok = static_verified.contains(&protocol)
                 || opencode_ok
-                || (descriptor.kind == ProviderAdapterKind::CommandCodeGoat
-                    && command_code_supports_upstream(&plan.model, plan.upstream))
                 || (descriptor.kind == ProviderAdapterKind::OllamaCloud
                     && crate::kernel::protocol::ollama_cloud_supports_upstream(
                         &plan.model,

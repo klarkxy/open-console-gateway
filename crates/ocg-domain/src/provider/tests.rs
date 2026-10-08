@@ -46,24 +46,6 @@ fn builtin_providers_derive_credential_and_quota_scope() {
 }
 
 #[test]
-fn goat_included_model_set_is_exact_unique_and_mode_gated() {
-    let mut unique = std::collections::HashSet::new();
-    for model in COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS {
-        assert!(
-            unique.insert(model.to_ascii_lowercase()),
-            "duplicate GOAT model {model}"
-        );
-    }
-    assert!(command_code_goat_includes_model(
-        "deepseek/deepseek-v4-flash"
-    ));
-    assert!(command_code_goat_includes_model("XAI/GROK-4.6"));
-    assert!(!command_code_goat_includes_model(
-        "anthropic/claude-opus-4.1"
-    ));
-}
-
-#[test]
 fn singleton_and_provider_validation_is_fail_closed() {
     assert!(
         validate_account_binding(

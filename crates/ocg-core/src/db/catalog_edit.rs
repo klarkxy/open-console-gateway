@@ -111,14 +111,59 @@ impl Database {
                     .ok_or_else(|| anyhow::anyhow!("original catalog model no longer exists"))
             })
             .transpose()?;
-        let go_ids = self
-            .load_persisted_scope(&ContractScope::provider(OPENCODE_PROVIDER_ID))?
-            .map(|s| s.catalog_models)
-            .unwrap_or_default();
-        let zen_ids = self
-            .load_persisted_scope(&ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID))?
-            .map(|s| s.catalog_models)
-            .unwrap_or_default();
+        let contracts = crate::provider_contracts::build_effective_contracts(
+            &self.zen_free_model_catalog()?.unwrap_or_default(),
+            &[],
+            self.load_persisted_contracts()?,
+        );
+        let ids = |provider: &str| {
+            contracts
+                .providers
+                .get(provider)
+                .map(|scope| scope.catalog.models.as_slice())
+                .unwrap_or_default()
+        };
+        let provider_ids = catalog
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| Some(*index) != original)
+            .map(|(_, row)| row.upstream_model.clone())
+            .chain(std::iter::once(model.upstream_model.clone()))
+            .collect::<Vec<_>>();
+        let mut pinned = crate::provider_contracts::ollama_cloud_pinned_model_ids(&contracts);
+        if scope.id() == OLLAMA_PROVIDER_ID {
+            pinned.retain(|id| {
+                !id.eq_ignore_ascii_case(&model.upstream_model)
+                    && original_id.is_none_or(|old| !id.eq_ignore_ascii_case(old))
+            });
+            if model.enabled
+                && model
+                    .protocols
+                    .contains(&UpstreamProtocolKind::ChatCompletions)
+            {
+                pinned.push(model.upstream_model.clone());
+            }
+        }
+        let catalog_ids = |provider: &str| {
+            if provider == scope.id() {
+                provider_ids.as_slice()
+            } else {
+                ids(provider)
+            }
+        };
+        let aliases = crate::alias::catalog_aliases(
+            scope.id(),
+            crate::alias::RuntimeCatalogs {
+                go: catalog_ids(OPENCODE_PROVIDER_ID),
+                zen_free: catalog_ids(OPENCODE_ZEN_FREE_PROVIDER_ID),
+                command_code: catalog_ids(COMMAND_CODE_PROVIDER_ID),
+                minimax: catalog_ids(MINIMAX_PROVIDER_ID),
+                kimi: catalog_ids(KIMI_PROVIDER_ID),
+                ollama: catalog_ids(OLLAMA_PROVIDER_ID),
+                ollama_pinned: &pinned,
+                ..crate::alias::RuntimeCatalogs::default()
+            },
+        );
         for (index, other) in catalog.iter().enumerate() {
             if Some(index) == original {
                 continue;
@@ -126,12 +171,10 @@ impl Database {
             let effective_public = if other.public_model != other.upstream_model {
                 other.public_model.clone()
             } else {
-                crate::alias::canonical_alias_for_provider_model(
-                    scope.id(),
-                    &other.upstream_model,
-                    &go_ids,
-                    &zen_ids,
-                )
+                aliases
+                    .get(&other.upstream_model)
+                    .cloned()
+                    .unwrap_or_default()
             };
             anyhow::ensure!(
                 effective_public.is_empty()
@@ -248,3 +291,6 @@ impl Database {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

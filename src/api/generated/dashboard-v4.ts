@@ -46,6 +46,8 @@ export type DashboardApiV4 =
   | ByokClient
   | ByokStatus
   | ByokInspection
+  | ByokPreview
+  | ByokPreviewRequest
   | ByokApplication
   | ByokConfigureRequest
   | ByokMutationRequest
@@ -414,7 +416,7 @@ export type ContractScopeKind = "provider" | "custom_endpoint";
  */
 export type ProviderDefinitionAuthKind = "bearer" | "x-api-key" | "api-key" | "none";
 export type AccountPageRefreshMode = "automatic" | "manual";
-export type ByokClient = "codex" | "kimi" | "minimax" | "zcode";
+export type ByokClient = "codex" | "kimi" | "minimax" | "zcode" | "copilot";
 export type ByokStatus =
   "unsupported_runtime" | "not_detected" | "ready" | "configured" | "incompatible" | "conflict" | "recovery_required";
 export type TemplateSource = "builtin" | "preset";
@@ -2113,35 +2115,63 @@ export interface AccountPageRefreshRequest {
 }
 export interface ByokInspection {
   activationRequired: boolean;
+  adopted: boolean;
   backupPath: string | null;
   client: ByokClient;
   configPath: string;
   configureSupported: boolean;
   configuredModelIds: string[];
+  copilotTokenBudget: CopilotTokenBudget | null;
   defaultModelId: string | null;
   detail: string | null;
   detected: boolean;
   discoverySource: string;
   fingerprint: string | null;
+  preview?: ByokPreview | null;
   recoverySupported: boolean;
   removeSupported: boolean;
   requiresClosedClient: boolean;
   status: ByokStatus;
   targetPaths: string[];
 }
+/**
+ * Local Copilot request budgets, not declarations about upstream capability.
+ */
+export interface CopilotTokenBudget {
+  maxInputTokens: number;
+  maxOutputTokens: number;
+}
+export interface ByokPreview {
+  addedModelIds: string[];
+  defaultModelId: string | null;
+  planFingerprint: string;
+  previousDefaultModelId: string | null;
+  removedModelIds: string[];
+  removedModelsWithCustomizations: string[];
+  requiresOverwrite: boolean;
+  requiresTakeover: boolean;
+  updatedModelIds: string[];
+}
+export interface ByokPreviewRequest {
+  copilotTokenBudget?: CopilotTokenBudget | null;
+  targetPath?: string | null;
+}
 export interface ByokApplication {
   activationRequired: boolean;
+  adopted: boolean;
   backupPath: string | null;
   client: ByokClient;
   configPath: string;
   configureSupported: boolean;
   configuredModelIds: string[];
+  copilotTokenBudget: CopilotTokenBudget | null;
   defaultModelId: string | null;
   detail: string | null;
   detected: boolean;
   discoverySource: string;
   fingerprint: string | null;
   gatewayV1Url: string;
+  preview?: ByokPreview | null;
   recoverySupported: boolean;
   removeSupported: boolean;
   requiresClosedClient: boolean;
@@ -2150,9 +2180,14 @@ export interface ByokApplication {
   targetPaths: string[];
 }
 export interface ByokConfigureRequest {
+  acknowledgeOverwrite?: boolean;
+  acknowledgeRemoval?: boolean;
+  acknowledgeTakeover?: boolean;
   clientClosed: boolean;
+  copilotTokenBudget?: CopilotTokenBudget | null;
   expectedFingerprint: string;
   expectedRevision: number;
+  previewFingerprint?: string | null;
   processGeneration: number;
   targetPath?: string | null;
 }

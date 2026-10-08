@@ -14145,82 +14145,72 @@ fn zen_official_static_preference_saves_responses_and_messages_not_probe_rows() 
 }
 
 #[test]
-fn command_first_refresh_enables_goat_cohort_then_new_discoveries() {
-    let dir = temp_data_dir("command-first-refresh-goat-cohort");
+fn command_first_refresh_enables_arbitrary_official_models_and_keeps_saved_off() {
+    let dir = temp_data_dir("command-first-refresh-official");
     let db = Database::open(dir.clone()).unwrap();
     let now = Utc::now();
     let scope = ContractScope::provider(COMMAND_CODE_PROVIDER_ID);
-    let included = "gpt-6-luna".to_string();
-    let premium = "vendor/premium-model".to_string();
-    let preenabled = "vendor/saved-on".to_string();
-    let later = "vendor/new-model".to_string();
+    let official = "fixture/arbitrary-official-model".to_string();
+    let saved_off = "fixture/operator-disabled-model".to_string();
+    let unknown = "fixture/no-protocol-evidence".to_string();
+    let models = vec![official.clone(), saved_off.clone(), unknown.clone()];
+    db.set_model_protocol_overrides(
+        &scope,
+        &[(
+            saved_off.clone(),
+            UpstreamProtocolKind::ChatCompletions,
+            ProtocolOverrideState::ForceOff,
+        )],
+        now,
+    )
+    .unwrap();
+    db.refresh_contract_catalog_preserving_settings(
+        &scope,
+        &models,
+        now,
+        CATALOG_SOURCE_COMMAND_CODE_MODELS,
+        COMMAND_CODE_GOAT_BASE_URL,
+    )
+    .unwrap();
     let baseline = crate::official_protocols::OfficialProtocolBaseline::mapped([
-        (included.as_str(), UpstreamProtocolKind::ChatCompletions),
-        (premium.as_str(), UpstreamProtocolKind::ChatCompletions),
-        (preenabled.as_str(), UpstreamProtocolKind::ChatCompletions),
-        (later.as_str(), UpstreamProtocolKind::ChatCompletions),
+        (official.as_str(), UpstreamProtocolKind::Responses),
+        (saved_off.as_str(), UpstreamProtocolKind::ChatCompletions),
     ]);
-    set_model_protocol_override_on(
-        &db.conn,
-        &scope,
-        &preenabled,
-        UpstreamProtocolKind::ChatCompletions,
-        ProtocolOverrideState::ForceOn,
-        now,
-    )
-    .unwrap();
-
-    db.refresh_contract_catalog_preserving_settings(
-        &scope,
-        &[included.clone(), premium.clone(), preenabled.clone()],
-        now,
-        CATALOG_SOURCE_COMMAND_CODE_MODELS,
-        COMMAND_CODE_GOAT_BASE_URL,
-    )
-    .unwrap();
-    db.apply_official_protocol_baseline(
-        &scope,
-        &[included.clone(), premium.clone(), preenabled.clone()],
-        &baseline,
-        now,
-    )
-    .unwrap();
-    let initial = effective_from_db(&db)
+    db.apply_official_protocol_baseline(&scope, &models, &baseline, now)
+        .unwrap();
+    for reopen in [false, true] {
+        let persisted = db.load_persisted_contracts().unwrap();
+        assert!(
+            persisted.overrides[&scope]
+                .iter()
+                .all(|row| row.model_id == saved_off)
+        );
+        let goat = effective_from_db(&db)
+            .providers
+            .remove(COMMAND_CODE_PROVIDER_ID)
+            .unwrap();
+        assert!(goat.model(&official).unwrap().protocols["responses"].enabled);
+        assert!(!goat.model(&unknown).unwrap().has_enabled_protocol());
+        assert!(!goat.model(&saved_off).unwrap().has_enabled_protocol());
+        if !reopen {
+            db.refresh_contract_catalog_preserving_settings(
+                &scope,
+                &models,
+                now,
+                CATALOG_SOURCE_COMMAND_CODE_MODELS,
+                COMMAND_CODE_GOAT_BASE_URL,
+            )
+            .unwrap();
+        }
+    }
+    drop(db);
+    let db = Database::open(dir.clone()).unwrap();
+    let goat = effective_from_db(&db)
         .providers
         .remove(COMMAND_CODE_PROVIDER_ID)
         .unwrap();
-    assert!(initial.model(&included).unwrap().has_enabled_protocol());
-    assert!(!initial.model(&premium).unwrap().has_enabled_protocol());
-    assert!(initial.model(&preenabled).unwrap().has_enabled_protocol());
-
-    db.refresh_contract_catalog_preserving_settings(
-        &scope,
-        &[
-            included.clone(),
-            premium.clone(),
-            preenabled.clone(),
-            later.clone(),
-        ],
-        now,
-        CATALOG_SOURCE_COMMAND_CODE_MODELS,
-        COMMAND_CODE_GOAT_BASE_URL,
-    )
-    .unwrap();
-    db.apply_official_protocol_baseline(
-        &scope,
-        &[included, premium.clone(), preenabled.clone(), later.clone()],
-        &baseline,
-        now,
-    )
-    .unwrap();
-    let refreshed = effective_from_db(&db)
-        .providers
-        .remove(COMMAND_CODE_PROVIDER_ID)
-        .unwrap();
-    assert!(!refreshed.model(&premium).unwrap().has_enabled_protocol());
-    assert!(refreshed.model(&preenabled).unwrap().has_enabled_protocol());
-    assert!(refreshed.model(&later).unwrap().has_enabled_protocol());
-
+    assert!(goat.model(&official).unwrap().has_enabled_protocol());
+    assert!(!goat.model(&saved_off).unwrap().has_enabled_protocol());
     drop(db);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -14231,7 +14221,7 @@ fn command_catalog_reappearing_preset_returns_to_auto_enabled() {
     let db = Database::open(dir.clone()).unwrap();
     let now = Utc::now();
     let scope = ContractScope::provider(COMMAND_CODE_PROVIDER_ID);
-    let preset = COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS[0].to_string();
+    let preset = COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.to_string();
     let extra = "vendor/future-command-model".to_string();
 
     db.set_contract_catalog(
@@ -16905,7 +16895,7 @@ fn log_ledger_v65_reopen_and_fresh_open_follow_backup_rules() {
     let fresh = temp_data_dir("v65-fresh");
     let db = Database::open(fresh.clone()).unwrap();
     assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
-    assert_eq!(CURRENT_SCHEMA_VERSION, 66);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 67);
     assert!(request_group_column_exists(&db.conn));
     assert!(sqlite_table_exists(&db.conn, "operation_logs"));
     assert!(backup_paths_with_prefix(&fresh, PRE_V65_BACKUP_FILE_PREFIX).is_empty());
@@ -17767,7 +17757,7 @@ fn goat_declared_window_stays_on_the_receiving_key() {
     );
     drop(db);
     let db = open_with_host_cipher(dir.clone()).unwrap();
-    assert_eq!(schema_version_on(&db.conn).unwrap(), 66);
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
     assert_eq!(
         db.get_account("goat-a")
             .unwrap()
@@ -18554,7 +18544,7 @@ fn goat_v66_migration_preserves_reserved_v65_data() {
         .unwrap();
     drop(db);
     let db = open_with_host_cipher(dir.clone()).unwrap();
-    assert_eq!(schema_version_on(&db.conn).unwrap(), 66);
+    assert_eq!(schema_version_on(&db.conn).unwrap(), CURRENT_SCHEMA_VERSION);
     assert!(table_has_column(&db.conn, "credentials", "goat_plan_cooldowns_json").unwrap());
     assert!(goat_json(&db, "goat-v65").is_none());
     let value: String = db
@@ -18566,4 +18556,66 @@ fn goat_v66_migration_preserves_reserved_v65_data() {
     assert_eq!(value, "preserved");
     drop(db);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn migrated_builtin_names_survive_node_import_and_reopen() {
+    let source_dir = temp_data_dir("v67-alias-transfer-source");
+    let source = open_with_host_cipher(source_dir.clone()).unwrap();
+    let scope = ContractScope::provider(KIMI_PROVIDER_ID);
+    let now = Utc::now();
+    source
+        .set_contract_catalog(
+            &scope,
+            &["k3".into(), "k3-256k".into()],
+            Some(now),
+            "fixture",
+            "",
+            now,
+        )
+        .unwrap();
+    source
+        .conn
+        .execute_batch("DELETE FROM schema_version; INSERT INTO schema_version VALUES (66);")
+        .unwrap();
+    drop(source);
+    let source = open_with_host_cipher(source_dir.clone()).unwrap();
+    let id = ocg_domain::destination::destination_id_for_builtin(KIMI_PROVIDER_ID);
+    let destination = crate::destination_projection::load_persisted(&source)
+        .unwrap()
+        .destinations
+        .into_iter()
+        .find(|destination| destination.id == id)
+        .unwrap();
+    assert_eq!(destination.catalog[0].public_model, "kimi-k3");
+    assert_eq!(destination.catalog[1].public_model, "kimi-k3-256k");
+    let mut record = node_import_record(&source, Vec::new(), Vec::new(), Vec::new());
+    record.provider_contracts = source.load_persisted_contracts().unwrap();
+    record.destination_controls = vec![destination.clone()];
+    let target_dir = temp_data_dir("v67-alias-transfer-target");
+    let target = open_with_host_cipher(target_dir.clone()).unwrap();
+    target.import_node_state(&record, |_| Ok(())).unwrap();
+    assert_eq!(
+        destination_store::load_destination_catalog(&target.conn, &id).unwrap(),
+        destination.catalog
+    );
+    drop(target);
+    let target = open_with_host_cipher(target_dir.clone()).unwrap();
+    target
+        .refresh_contract_catalog_preserving_settings(
+            &scope,
+            &["k3".into(), "k3-256k".into()],
+            Utc::now(),
+            "fixture",
+            "",
+        )
+        .unwrap();
+    assert_eq!(
+        destination_store::load_destination_catalog(&target.conn, &id).unwrap(),
+        destination.catalog
+    );
+    drop(target);
+    drop(source);
+    fs::remove_dir_all(source_dir).unwrap();
+    fs::remove_dir_all(target_dir).unwrap();
 }

@@ -154,23 +154,6 @@ fn published_routeable_aliases_with_all_catalogs(
     ))
 }
 
-fn published_routeable_aliases_with_extended_catalogs(
-    go_model_ids: &[String],
-    zen_free_models: &[String],
-    goat_model_ids: &[String],
-    minimax_model_ids: &[String],
-    kimi_model_ids: &[String],
-) -> Vec<PublishedAlias> {
-    published_routeable_aliases_with_runtime_catalogs(catalogs(
-        go_model_ids,
-        zen_free_models,
-        NO_IDS,
-        goat_model_ids,
-        minimax_model_ids,
-        kimi_model_ids,
-    ))
-}
-
 fn routeable_aliases_for_with_extended_catalogs(
     provider_id: &str,
     zen_free_models: &[String],
@@ -400,14 +383,15 @@ fn command_catalog_uses_go_canonical_aliases_and_keeps_raw_ids_pinned() {
 
 #[test]
 fn command_catalog_shortens_code_owned_and_unique_slash_leaves() {
-    let nemotron_upstream = COMMAND_CODE_GOAT_ALIASES[0].0.to_string();
+    let nemotron_upstream = "nvidia/nemotron-3-ultra-550b-a55b".to_string();
     let command = vec![nemotron_upstream.clone()];
 
-    match resolve_with_all_catalogs("nemotron-3-ultra", &[], &[], &[], &command).unwrap() {
+    match resolve_with_all_catalogs("nemotron-3-ultra-550b-a55b", &[], &[], &[], &command).unwrap()
+    {
         ResolvedModel::Alias {
             alias, mappings, ..
         } => {
-            assert_eq!(alias, "nemotron-3-ultra");
+            assert_eq!(alias, "nemotron-3-ultra-550b-a55b");
             assert!(mappings.iter().any(|mapping| {
                 mapping.is_command_code_goat() && mapping.upstream_model == nemotron_upstream
             }));
@@ -422,12 +406,12 @@ fn command_catalog_shortens_code_owned_and_unique_slash_leaves() {
     ));
     assert_eq!(
         canonical_alias_for_provider_model(COMMAND_CODE_PROVIDER_ID, &nemotron_upstream, &[], &[],),
-        "nemotron-3-ultra"
+        "nemotron-3-ultra-550b-a55b"
     );
     assert!(
         published_routeable_aliases_with_all_catalogs(&[], &[], &command)
             .iter()
-            .any(|item| item.alias == "nemotron-3-ultra"
+            .any(|item| item.alias == "nemotron-3-ultra-550b-a55b"
                 && item.owned_by == COMMAND_CODE_PROVIDER_ID)
     );
     assert_eq!(
@@ -438,12 +422,12 @@ fn command_catalog_shortens_code_owned_and_unique_slash_leaves() {
             &[],
             &[],
         ),
-        vec!["nemotron-3-ultra".to_string()]
+        vec!["nemotron-3-ultra-550b-a55b".to_string()]
     );
     assert!(
         !published_routeable_aliases_with_all_catalogs(&[], &[], &[])
             .iter()
-            .any(|item| item.alias == "nemotron-3-ultra")
+            .any(|item| item.alias == "nemotron-3-ultra-550b-a55b")
     );
 
     let future = vec!["vendor/future-model-with-a-very-long-name".to_string()];
@@ -477,7 +461,7 @@ fn command_catalog_shortens_code_owned_and_unique_slash_leaves() {
     );
     assert_eq!(
         canonical_alias_for_provider_model(COMMAND_CODE_PROVIDER_ID, "claude-sonnet-4-6", &[], &[],),
-        ""
+        "claude-sonnet-4-6"
     );
     let colliding = vec![
         "deepseek/deepseek-v4-flash-fast".to_string(),
@@ -488,6 +472,131 @@ fn command_catalog_shortens_code_owned_and_unique_slash_leaves() {
             .iter()
             .any(|item| item.alias == "deepseek-v4-flash-fast"),
         "ambiguous last-segment names stay raw pins"
+    );
+}
+
+#[test]
+fn command_new_catalog_names_publish_without_a_model_allowlist() {
+    let command = (0..32)
+        .map(|n| format!("next-catalog-model-{n}"))
+        .collect::<Vec<_>>();
+    let index = RuntimeCatalogIndex::from_catalogs(RuntimeCatalogs {
+        command_code: &command,
+        ..Default::default()
+    });
+    let aliases = command_catalog_aliases(&command, &[], &[]);
+    for upstream in &command {
+        assert_eq!(aliases.get(upstream), Some(upstream));
+        assert!(
+            index
+                .published_models()
+                .iter()
+                .any(|row| row.alias == *upstream && row.owned_by == COMMAND_CODE_PROVIDER_ID)
+        );
+        assert!(
+            matches!(index.resolve(upstream), Ok(ResolvedModel::Alias { mappings, .. })
+            if mappings == vec![goat_mapping(upstream, true)])
+        );
+    }
+    let empty = RuntimeCatalogIndex::from_catalogs(RuntimeCatalogs::default());
+    assert!(empty.resolve(&command[0]).is_err());
+    assert!(
+        !empty
+            .published_models()
+            .iter()
+            .any(|row| command.contains(&row.alias))
+    );
+}
+
+#[test]
+fn command_generated_names_do_not_authorize_suffix_stripping_and_ignore_catalog_order() {
+    let command = vec![
+        "next-model-paid".into(),
+        "next-model".into(),
+        "next-model-free".into(),
+    ];
+    let mut reversed = command.clone();
+    reversed.reverse();
+    let aliases = command_catalog_aliases(&command, &[], &[]);
+    assert_eq!(aliases, command_catalog_aliases(&reversed, &[], &[]));
+    for ids in [&command, &reversed] {
+        let index = RuntimeCatalogIndex::from_catalogs(RuntimeCatalogs {
+            command_code: ids,
+            ..Default::default()
+        });
+        for upstream in &command {
+            assert_eq!(aliases.get(upstream), Some(upstream));
+            assert!(
+                matches!(index.resolve(upstream), Ok(ResolvedModel::Alias { alias, mappings, .. })
+                if alias == *upstream && mappings == vec![goat_mapping(upstream, true)])
+            );
+        }
+    }
+}
+
+#[test]
+fn command_catalog_aliases_reject_normalization_collisions_and_reserved_go_names() {
+    let command = vec![
+        "vendor/Next_Model".into(),
+        "next-model".into(),
+        "future-go".into(),
+    ];
+    let go = vec!["future-go".into()];
+    assert!(command_catalog_aliases(&command, &go, &[]).is_empty());
+    let index = RuntimeCatalogIndex::from_catalogs(RuntimeCatalogs {
+        command_code: &command,
+        go: &go,
+        ..Default::default()
+    });
+    assert!(
+        !index
+            .published_models()
+            .iter()
+            .any(|row| row.alias == "next-model" || row.alias == "future-go")
+    );
+    assert!(
+        matches!(index.resolve("vendor/Next_Model"), Ok(ResolvedModel::PinnedRaw { mapping, .. })
+        if mapping == goat_mapping("vendor/Next_Model", true))
+    );
+    assert!(matches!(
+        index.resolve("future-go"),
+        Err(ResolveError::Ambiguous { .. })
+    ));
+    let unique = ["Vendor/Next_Model".to_string()];
+    assert_eq!(
+        command_catalog_aliases(&unique, &[], &[])
+            .get(&unique[0])
+            .map(String::as_str),
+        Some("next-model")
+    );
+}
+
+#[test]
+fn command_generated_aliases_keep_saved_custom_names_and_exact_raw_pins() {
+    let upstream = "next-model-77";
+    let command = [upstream.to_string()];
+    let overrides = [ExtraProviderCatalog {
+        provider_id: COMMAND_CODE_PROVIDER_ID.into(),
+        mappings: vec![("my-next-model".into(), upstream.into())],
+    }];
+    let index = RuntimeCatalogIndex::from_catalogs(RuntimeCatalogs {
+        command_code: &command,
+        builtin_aliases: &overrides,
+        ..Default::default()
+    });
+    assert!(
+        !index
+            .published_models()
+            .iter()
+            .any(|row| row.alias == upstream)
+    );
+    assert!(
+        matches!(index.resolve("my-next-model"), Ok(ResolvedModel::Alias { mappings, .. })
+        if mappings == vec![goat_mapping(upstream, true)])
+    );
+    assert!(
+        matches!(index.resolve(upstream), Ok(ResolvedModel::PinnedRaw { mapping, .. })
+        if mapping == goat_mapping(upstream, true))
     );
 }
 
@@ -703,7 +812,7 @@ fn slash_prefixed_goat_raw_pins_to_command_code_and_does_not_steal_go() {
 }
 
 #[test]
-fn eligible_goat_catalog_joins_static_aliases_and_keeps_other_ids_raw() {
+fn eligible_goat_catalog_joins_static_aliases_and_publishes_new_names() {
     let goat_ids = vec![
         COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.to_string(),
         "claude-sonnet-4-6".into(),
@@ -723,11 +832,10 @@ fn eligible_goat_catalog_joins_static_aliases_and_keeps_other_ids_raw() {
         other => panic!("expected routeable GOAT pin, got {other:?}"),
     }
     match resolve_with_catalogs("claude-sonnet-4-6", &[], &[], &goat_ids).unwrap() {
-        ResolvedModel::PinnedRaw { mapping, .. } => {
-            assert!(mapping.is_command_code_goat());
-            assert!(mapping.routeable);
+        ResolvedModel::Alias { mappings, .. } => {
+            assert_eq!(mappings, vec![goat_mapping("claude-sonnet-4-6", true)]);
         }
-        other => panic!("expected raw-only GOAT pin, got {other:?}"),
+        other => panic!("expected catalog-derived GOAT alias, got {other:?}"),
     }
     match resolve_with_catalogs("deepseek-v4-flash", &[], &[], &goat_ids).unwrap() {
         ResolvedModel::Alias { mappings, .. } => {
@@ -746,10 +854,10 @@ fn eligible_goat_catalog_joins_static_aliases_and_keeps_other_ids_raw() {
     }
     let published = published_routeable_aliases_with_catalogs(&[], &goat_ids);
     assert!(
-        !published
+        published
             .iter()
             .any(|item| item.alias == "claude-sonnet-4-6"),
-        "slash-free unmatched Command ids stay unpublished raw pins"
+        "slash-free Command ids derive their public aliases from the catalog"
     );
     assert!(
         published
@@ -1109,185 +1217,132 @@ fn refreshed_go_catalog_adds_raw_pins_without_expanding_alias_authority() {
 }
 
 #[test]
-fn sealed_cn_catalogs_join_static_aliases_and_preserve_raw_ambiguity() {
-    let minimax = MINIMAX_CN_ALIASES
-        .iter()
-        .map(|(upstream, _)| (*upstream).to_string())
-        .collect::<Vec<_>>();
-    let kimi = KIMI_CN_ALIASES
-        .iter()
-        .map(|(upstream, _)| (*upstream).to_string())
-        .collect::<Vec<_>>();
-
-    for (upstream, alias) in MINIMAX_CN_ALIASES {
-        let resolved =
-            resolve_with_extended_catalogs(alias, &[], &[], &[], &[], &minimax, &kimi).unwrap();
+fn cn_catalog_names_are_data_driven_and_collisions_keep_exact_pins() {
+    let minimax = vec![
+        "MiniMax-Future-99".to_string(),
+        "vendor/shared_leaf".to_string(),
+        "shared-leaf".to_string(),
+    ];
+    let kimi = vec![
+        "kimi-for-coding".to_string(),
+        "kimi-for-coding-highspeed".to_string(),
+        "k3".to_string(),
+        "kimi-future-99".to_string(),
+    ];
+    let catalogs = RuntimeCatalogs {
+        minimax: &minimax,
+        kimi: &kimi,
+        ..RuntimeCatalogs::default()
+    };
+    let index = RuntimeCatalogIndex::from_catalogs(catalogs);
+    for (provider, upstream, alias) in [
+        (
+            MINIMAX_PROVIDER_ID,
+            "MiniMax-Future-99",
+            "minimax-future-99",
+        ),
+        (KIMI_PROVIDER_ID, "kimi-future-99", "kimi-future-99"),
+        (KIMI_PROVIDER_ID, "kimi-for-coding", "kimi-for-coding"),
+        (
+            KIMI_PROVIDER_ID,
+            "kimi-for-coding-highspeed",
+            "kimi-for-coding-highspeed",
+        ),
+        (KIMI_PROVIDER_ID, "k3", "k3"),
+    ] {
+        assert_eq!(
+            catalog_aliases(provider, catalogs)
+                .get(upstream)
+                .map(String::as_str),
+            Some(alias)
+        );
         assert!(
-            resolved
+            index
+                .published_models()
+                .iter()
+                .any(|row| row.alias == alias)
+        );
+        assert!(
+            index
+                .resolve(alias)
+                .unwrap()
                 .routeable_mappings()
                 .iter()
-                .any(|mapping| { mapping.is_minimax_cn() && mapping.upstream_model == *upstream })
-        );
-        assert!(matches!(
-            resolve_with_extended_catalogs(
-                upstream, &[], &[], &[], &[], &minimax, &kimi,
-            ),
-            Ok(ResolvedModel::PinnedRaw { mapping, .. })
-                if mapping.is_minimax_cn() && mapping.upstream_model == *upstream
-        ));
-        assert_eq!(
-            canonical_alias_for_provider_model(MINIMAX_PROVIDER_ID, upstream, &[], &[]),
-            *alias
+                .any(
+                    |mapping| mapping.provider_id == provider && mapping.upstream_model == upstream
+                )
         );
     }
-
-    for (upstream, alias) in KIMI_CN_ALIASES {
-        let resolved =
-            resolve_with_extended_catalogs(alias, &[], &[], &[], &[], &minimax, &kimi).unwrap();
-        assert!(
-            resolved
-                .routeable_mappings()
-                .iter()
-                .any(|mapping| { mapping.is_kimi_cn() && mapping.upstream_model == *upstream })
-        );
-        let exact =
-            resolve_with_extended_catalogs(upstream, &[], &[], &[], &[], &minimax, &kimi).unwrap();
-        if upstream == alias {
-            assert!(matches!(
-                exact,
-                ResolvedModel::Alias {
-                    alias: resolved_alias,
-                    mappings,
-                    ..
-                } if resolved_alias == *alias
-                    && mappings.iter().any(|mapping| {
-                        mapping.is_kimi_cn() && mapping.upstream_model == *upstream
-                    })
-            ));
-        } else {
-            assert!(matches!(
-                exact,
-                ResolvedModel::PinnedRaw { mapping, .. }
-                    if mapping.is_kimi_cn() && mapping.upstream_model == *upstream
-            ));
-        }
-        assert_eq!(
-            canonical_alias_for_provider_model(KIMI_PROVIDER_ID, upstream, &[], &[]),
-            *alias
-        );
-    }
-
+    assert!(!catalog_aliases(MINIMAX_PROVIDER_ID, catalogs).contains_key("vendor/shared_leaf"));
+    assert!(
+        matches!(index.resolve("vendor/shared_leaf"), Ok(ResolvedModel::PinnedRaw { mapping, .. }) if mapping.is_minimax_cn())
+    );
+    assert!(
+        matches!(index.resolve("MiniMax-Future-99"), Ok(ResolvedModel::PinnedRaw { mapping, .. }) if mapping.is_minimax_cn())
+    );
     for fixed_version in ["kimi-k2.7-code", "kimi-k2.7-code-highspeed"] {
-        match resolve_with_extended_catalogs(fixed_version, &[], &[], &[], &[], &minimax, &kimi) {
-            Ok(resolved) => assert!(
+        if let Ok(resolved) = index.resolve(fixed_version) {
+            assert!(
                 resolved
                     .routeable_mappings()
                     .iter()
-                    .all(|mapping| !mapping.is_kimi_cn()),
-                "fixed K2.7 aliases must not route through Kimi's rolling model IDs"
-            ),
-            Err(ResolveError::Unknown { .. }) => {}
-            Err(other) => panic!("unexpected fixed-version resolution error: {other:?}"),
+                    .all(|mapping| !mapping.is_kimi_cn())
+            );
         }
     }
-
-    let published =
-        published_routeable_aliases_with_extended_catalogs(&[], &[], &[], &minimax, &kimi);
-    for (_, alias) in MINIMAX_CN_ALIASES.iter().chain(KIMI_CN_ALIASES) {
-        assert!(published.iter().any(|item| item.alias == *alias));
-    }
-    let mut expected_minimax = MINIMAX_CN_ALIASES
-        .iter()
-        .map(|(_, alias)| (*alias).to_string())
-        .collect::<Vec<_>>();
-    expected_minimax.sort();
-    assert_eq!(
-        routeable_aliases_for_with_extended_catalogs(
-            MINIMAX_PROVIDER_ID,
-            &[],
-            &[],
-            &minimax,
-            &kimi,
-        ),
-        expected_minimax
-    );
-    let mut expected_kimi = KIMI_CN_ALIASES
-        .iter()
-        .map(|(_, alias)| (*alias).to_string())
-        .collect::<Vec<_>>();
-    expected_kimi.sort();
-    assert_eq!(
-        routeable_aliases_for_with_extended_catalogs(KIMI_PROVIDER_ID, &[], &[], &minimax, &kimi,),
-        expected_kimi
-    );
-
-    let without_m2 = minimax
-        .iter()
-        .filter(|model| model.as_str() != "MiniMax-M2")
-        .cloned()
-        .collect::<Vec<_>>();
-    let published_without_m2 =
-        published_routeable_aliases_with_extended_catalogs(&[], &[], &[], &without_m2, &kimi);
-    assert!(
-        !published_without_m2
-            .iter()
-            .any(|item| item.alias == "minimax-m2")
-    );
-
-    let unknown_minimax = vec!["MiniMax-Future".to_string()];
-    assert!(matches!(
-        resolve_with_extended_catalogs(
-            "MiniMax-Future",
-            &[],
-            &[],
-            &[],
-            &[],
-            &unknown_minimax,
-            &[],
-        ),
-        Ok(ResolvedModel::PinnedRaw { mapping, .. }) if mapping.is_minimax_cn()
-    ));
-    assert!(matches!(
-        resolve_with_extended_catalogs("minimax-future", &[], &[], &[], &[], &unknown_minimax, &[],),
-        Err(ResolveError::Unknown { .. })
-    ));
-    assert_eq!(
-        canonical_alias_for_provider_model(MINIMAX_PROVIDER_ID, "minimax-m3", &[], &[],),
-        ""
-    );
-
-    let minimax_case = vec!["provider-case".to_string()];
-    let kimi_case = vec!["PROVIDER-CASE".to_string()];
-    assert!(matches!(
-        resolve_with_extended_catalogs(
-            "provider-case",
-            &[],
-            &[],
-            &[],
-            &[],
-            &minimax_case,
-            &kimi_case,
-        ),
-        Ok(ResolvedModel::PinnedRaw { mapping, .. }) if mapping.is_minimax_cn()
-    ));
-    assert!(matches!(
-        resolve_with_extended_catalogs(
-            "PROVIDER-CASE",
-            &[],
-            &[],
-            &[],
-            &[],
-            &minimax_case,
-            &kimi_case,
-        ),
-        Ok(ResolvedModel::PinnedRaw { mapping, .. }) if mapping.is_kimi_cn()
-    ));
-
     let shared = vec!["vendor/shared".to_string()];
-    let error =
+    assert_eq!(
         resolve_with_extended_catalogs("vendor/shared", &[], &[], &[], &[], &shared, &shared)
-            .unwrap_err();
-    assert_eq!(error.code(), Some(AMBIGUOUS_MODEL_ID));
+            .unwrap_err()
+            .code(),
+        Some(AMBIGUOUS_MODEL_ID)
+    );
+}
+
+#[test]
+fn arbitrary_ollama_stems_tags_and_pin_selection_are_catalog_driven() {
+    let models = vec![
+        "future-a:2099".to_string(),
+        "future-b:20b".to_string(),
+        "future-b:120b".to_string(),
+    ];
+    let catalogs = RuntimeCatalogs {
+        ollama: &models,
+        ..RuntimeCatalogs::default()
+    };
+    let aliases = catalog_aliases(OLLAMA_PROVIDER_ID, catalogs);
+    assert_eq!(aliases["future-a:2099"], "future-a");
+    assert_eq!(aliases["future-b:20b"], "future-b-20b");
+    assert_eq!(aliases["future-b:120b"], "future-b-120b");
+    assert!(resolve_with_runtime_catalogs("future-b", catalogs).is_err());
+    assert!(
+        matches!(resolve_with_runtime_catalogs("future-b:20b", catalogs), Ok(ResolvedModel::PinnedRaw { mapping, .. }) if mapping.upstream_model == "future-b:20b")
+    );
+    let pinned = [models[1].clone()];
+    let pinned_catalogs = RuntimeCatalogs {
+        ollama_pinned: &pinned,
+        ..catalogs
+    };
+    assert_eq!(
+        catalog_aliases(OLLAMA_PROVIDER_ID, pinned_catalogs)["future-b:20b"],
+        "future-b"
+    );
+    assert!(
+        resolve_with_runtime_catalogs("future-b", pinned_catalogs)
+            .unwrap()
+            .routeable_mappings()
+            .iter()
+            .any(|mapping| mapping.upstream_model == "future-b:20b")
+    );
+    for id in &models {
+        let alias = &aliases[id];
+        assert!(
+            RuntimeCatalogIndex::from_catalogs(catalogs)
+                .published_models()
+                .iter()
+                .any(|row| &row.alias == alias)
+        );
+    }
 }
 
 #[test]
@@ -2380,4 +2435,62 @@ fn publishing_many_go_catalog_ids_builds_the_runtime_registry_once() {
         !published.iter().any(|item| item.alias == "shared/raw"),
         "ambiguous raw public names stay unpublished"
     );
+}
+
+#[test]
+fn new_catalog_aliases_preserve_other_models_saved_names() {
+    let models = vec![
+        "vendor/old-model".to_string(),
+        "vendor/new-model".to_string(),
+    ];
+    for provider in [
+        COMMAND_CODE_PROVIDER_ID,
+        MINIMAX_PROVIDER_ID,
+        KIMI_PROVIDER_ID,
+        OLLAMA_PROVIDER_ID,
+    ] {
+        let saved = [ExtraProviderCatalog {
+            provider_id: provider.to_string(),
+            mappings: vec![("new-model".into(), models[0].clone())],
+        }];
+        let catalogs = RuntimeCatalogs {
+            command_code: if provider == COMMAND_CODE_PROVIDER_ID {
+                &models
+            } else {
+                &[]
+            },
+            minimax: if provider == MINIMAX_PROVIDER_ID {
+                &models
+            } else {
+                &[]
+            },
+            kimi: if provider == KIMI_PROVIDER_ID {
+                &models
+            } else {
+                &[]
+            },
+            ollama: if provider == OLLAMA_PROVIDER_ID {
+                &models
+            } else {
+                &[]
+            },
+            builtin_aliases: &saved,
+            ..RuntimeCatalogs::default()
+        };
+        let resolved = resolve_with_runtime_catalogs("new-model", catalogs).unwrap();
+        let targets = resolved
+            .routeable_mappings()
+            .into_iter()
+            .filter(|mapping| mapping.provider_id == provider)
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1, "{provider}");
+        assert_eq!(targets[0].upstream_model, models[0], "{provider}");
+        assert!(
+            !catalog_aliases(provider, catalogs).contains_key(&models[1]),
+            "{provider}"
+        );
+        assert!(
+            matches!(resolve_with_runtime_catalogs(&models[1], catalogs), Ok(ResolvedModel::PinnedRaw { mapping, .. }) if mapping.provider_id == provider && mapping.upstream_model == models[1])
+        );
+    }
 }

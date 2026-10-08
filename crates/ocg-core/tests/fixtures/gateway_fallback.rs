@@ -634,7 +634,7 @@ pub(crate) fn create_goat_account(
     persist_goat_verified_catalog(
         state,
         account_id,
-        ocg_core::provider::COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS,
+        &[ocg_core::kernel::ids::COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM],
     );
     assert!(
         state
@@ -669,18 +669,18 @@ pub(crate) fn persist_goat_verified_catalog(
     let overrides = models
         .iter()
         .flat_map(|model| {
-            [
-                ocg_core::provider::UpstreamProtocolKind::ChatCompletions,
-                ocg_core::provider::UpstreamProtocolKind::Messages,
-            ]
-            .into_iter()
-            .map(move |protocol| {
-                (
-                    model.clone(),
-                    protocol,
-                    ocg_core::provider_contracts::ProtocolOverrideState::ForceOn,
-                )
-            })
+            ocg_domain::protocol::command_code_constructable_formats(model)
+                .iter()
+                .copied()
+                .filter_map(ocg_core::provider_contracts::protocol_from_api)
+                .filter(|protocol| *protocol != ocg_core::provider::UpstreamProtocolKind::Responses)
+                .map(move |protocol| {
+                    (
+                        model.clone(),
+                        protocol,
+                        ocg_core::provider_contracts::ProtocolOverrideState::ForceOn,
+                    )
+                })
         })
         .collect::<Vec<_>>();
     db.set_model_protocol_overrides(&scope, &overrides, now)

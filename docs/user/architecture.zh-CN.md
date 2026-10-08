@@ -55,7 +55,7 @@ Configurable HTTP。
 | 已鉴权 `GET /v1/models` | 当前合格的公开名称（代码持有 Alias、已保存 Zen/Command/CN 映射、用户定义 Provider 公开模型，以及符合条件的 Custom 声明 ID），每行都带与 enrich 同一快照推导并校验过的协议配置 |
 | `GET /dashboard/api/v4/application-models` | 已保存目录中可解析且协议已启用的 Go 名称；不查阅价格快照。不含 Custom API、用户定义 Provider 与 CN Plan |
 
-含 `/` 的 Command id 会公布唯一的最后一节小写 kebab Alias；其他无法匹配的目录行在代码分配 Alias 前只保留精确 raw pin。与已公布内置 Alias 冲突的
+新发现的 MiniMax CN、Kimi CN 与 GOAT 目录行从完整已保存目录的最后一节生成唯一归一化小写 kebab Alias，包括不含 `/` 的 ID；已保存旧别名保持不变。升级过的 Nemotron 只保留旧的短别名，新增目录行使用完整的最后一节名称。保存的 Kimi 滚动名称保持不变，新发现的 `k3` 使用 `k3`。归一化后重名或占用 Go 原始名称的行不公布别名；每一行都保留精确 raw ID。与已公布内置 Alias 冲突的
 Custom ID 不会进入公布列表。
 
 ## 协议转换

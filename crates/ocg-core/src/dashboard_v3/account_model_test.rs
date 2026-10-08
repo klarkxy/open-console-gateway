@@ -76,6 +76,7 @@ pub(super) async fn test_account_model(
             config: &prepared.config,
             account: &prepared.account,
             adapter: prepared.adapter,
+            requested_model: &prepared.requested_model,
             public_model: &prepared.public_model,
             model_id: &prepared.upstream_model,
             protocol: prepared.protocol,
@@ -119,6 +120,7 @@ struct PreparedAccountModelTest {
     account: ModelAccount,
     config: crate::models::AppConfig,
     adapter: ProviderAdapterKind,
+    requested_model: String,
     public_model: String,
     upstream_model: String,
     protocol: UpstreamProtocolKind,
@@ -176,7 +178,43 @@ fn prepare_account_model_test(
     let contract = contracts
         .scope(&scope)
         .ok_or_else(|| V3ApiError::invalid_request_at(state, "unknown provider offering"))?;
-    if !contract.model(model_id).is_some_and(|model| model.routable) {
+    let resolved_upstream = {
+        let runtime = crate::gateway::handler::runtime_catalog_snapshot(state)
+            .map_err(V3ApiError::internal)?;
+        let resolved = runtime
+            .resolve(model_id)
+            .map_err(|error| V3ApiError::invalid_request_at(state, error.message()))?;
+        let candidates = resolved.routeable_mappings();
+        let mut provider_mappings = candidates
+            .into_iter()
+            .filter(|mapping| mapping.provider_id == account.provider_id);
+        let selected_mapping = provider_mappings.next().ok_or_else(|| {
+            V3ApiError::invalid_request_at(state, "model is not routable for this provider")
+        })?;
+        if provider_mappings.next().is_some() {
+            return Err(V3ApiError::invalid_request_at(
+                state,
+                crate::alias::AMBIGUOUS_MODEL_ID,
+            ));
+        }
+        selected_mapping.upstream_model.clone()
+    };
+    let mapping = destination
+        .and_then(|destination| {
+            destination
+                .catalog
+                .iter()
+                .find(|model| model.upstream_model == resolved_upstream)
+        })
+        .ok_or_else(|| {
+            V3ApiError::invalid_request_at(state, "model is not routable for this provider")
+        })?;
+    let upstream_model = mapping.upstream_model.as_str();
+    if !mapping.enabled
+        || !contract
+            .model(upstream_model)
+            .is_some_and(|model| model.routable)
+    {
         return Err(V3ApiError::invalid_request_at(
             state,
             "model is not routable for this provider",
@@ -187,7 +225,7 @@ fn prepare_account_model_test(
     } else {
         ApiFormat::Gemini
     };
-    let selected = select_upstream_protocol(contract, client, model_id)
+    let selected = select_upstream_protocol(contract, client, upstream_model)
         .map_err(|error| V3ApiError::invalid_request_at(state, error.message))?;
     let protocol = protocol_from_api(selected).ok_or_else(|| {
         V3ApiError::invalid_request_at(state, "model is not routable for this provider")
@@ -197,8 +235,9 @@ fn prepare_account_model_test(
         account,
         config: state.config(),
         adapter,
-        public_model: model_id.to_string(),
-        upstream_model: model_id.to_string(),
+        requested_model: model_id.to_string(),
+        public_model: mapping.public_model.clone(),
+        upstream_model: mapping.upstream_model.clone(),
         protocol,
         custom_route: None,
     })
@@ -228,6 +267,7 @@ fn prepare_http_destination_model_test(
         account,
         config: state.config(),
         adapter: ProviderAdapterKind::ConfigurableHttp,
+        requested_model: model_id.to_string(),
         public_model: mapping.public_model.clone(),
         upstream_model: mapping.upstream_model.clone(),
         protocol,

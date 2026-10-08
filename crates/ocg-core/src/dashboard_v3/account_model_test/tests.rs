@@ -397,3 +397,403 @@ fn sealed_account_prepare_keeps_production_route_without_http_override() {
     drop(state);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+fn persist_goat_model(
+    state: &crate::state::CoreState,
+    account: &Account,
+    model: &str,
+    protocol: UpstreamProtocolKind,
+    alias: &str,
+    official_evidence: bool,
+) {
+    use crate::provider::COMMAND_CODE_PROVIDER_ID;
+    use ocg_domain::connection::{
+        EndpointOperation, LegacyConnectionKind, connection_id_for_legacy, endpoint_id_for,
+    };
+    let scope = ContractScope::provider(COMMAND_CODE_PROVIDER_ID);
+    let now = Utc::now();
+    let db = state.db.lock();
+    db.create_account(account).unwrap();
+    db.set_contract_catalog(
+        &scope,
+        &[model.into()],
+        Some(now),
+        "official_models",
+        "https://api.commandcode.ai/provider/v1/models",
+        now,
+    )
+    .unwrap();
+    if official_evidence {
+        let endpoint = match protocol {
+            UpstreamProtocolKind::ChatCompletions => "/chat/completions",
+            UpstreamProtocolKind::Responses => "/responses",
+            UpstreamProtocolKind::Messages => "/messages",
+        };
+        let payload = serde_json::to_vec(
+            &serde_json::json!({"data":[{"id":model,"supported_endpoints":[endpoint]}]}),
+        )
+        .unwrap();
+        let baseline =
+            crate::official_protocols::parse_catalog_supported_endpoints_baseline(&payload);
+        db.apply_official_protocol_baseline(&scope, &[model.into()], &baseline, now)
+            .unwrap();
+    }
+    let destination_id =
+        ocg_domain::destination::destination_id_for_builtin(COMMAND_CODE_PROVIDER_ID);
+    let mut catalog =
+        crate::db::destination_store::load_destination_catalog(&db.conn, &destination_id).unwrap();
+    catalog
+        .iter_mut()
+        .find(|row| row.upstream_model == model)
+        .unwrap()
+        .public_model = alias.into();
+    crate::db::destination_store::replace_destination_catalog(&db.conn, &destination_id, &catalog)
+        .unwrap();
+    let binding = db
+        .list_inference_bindings()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.account_id == account.id)
+        .unwrap();
+    let endpoint_id = endpoint_id_for(
+        &connection_id_for_legacy(
+            LegacyConnectionKind::BuiltinProvider,
+            COMMAND_CODE_PROVIDER_ID,
+        ),
+        EndpointOperation::from(protocol),
+    )
+    .to_string();
+    db.update_credential_binding(
+        &binding.binding_id,
+        None,
+        None,
+        Some(&[endpoint_id]),
+        Some(&["https://api.commandcode.ai".into()]),
+    )
+    .unwrap();
+    drop(db);
+    state.reload_provider_contracts().unwrap();
+}
+
+async fn execute_prepared(
+    state: &crate::state::CoreState,
+    prepared: &PreparedAccountModelTest,
+) -> Result<u16, (Option<u16>, String)> {
+    let config = crate::models::AppConfig {
+        proxy_mode: crate::models::ProxyMode::Direct,
+        ..prepared.config.clone()
+    };
+    crate::protocol_probe::execute_account_model_test(
+        crate::protocol_probe::AccountModelTestInput {
+            state,
+            config: &config,
+            account: &prepared.account,
+            adapter: prepared.adapter,
+            requested_model: &prepared.requested_model,
+            public_model: &prepared.public_model,
+            model_id: &prepared.upstream_model,
+            protocol: prepared.protocol,
+            custom_route: prepared.custom_route.clone(),
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn saved_official_new_goat_models_use_exact_protocol_and_upstream_with_alias() {
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let hits = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(Mutex::new(Vec::<(String, serde_json::Value)>::new()));
+    let captured = (hits.clone(), requests.clone());
+    let app = axum::Router::new().fallback(axum::routing::post(
+        |axum::extract::State((hits, requests)): axum::extract::State<(Arc<AtomicUsize>, Arc<Mutex<Vec<(String, serde_json::Value)>>>)>, uri: axum::http::Uri, body: axum::body::Bytes| async move {
+            hits.fetch_add(1, Ordering::SeqCst);
+            requests.lock().unwrap().push((uri.path().into(), serde_json::from_slice(&body).unwrap()));
+            let response = if uri.path().ends_with("/responses") {
+                serde_json::json!({"id":"r-test","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]})
+            } else {
+                serde_json::json!({"id":"c-test","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]})
+            };
+            axum::Json(response)
+        }
+    )).with_state(captured);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    for (protocol, path, model, public, requested_alias) in [
+        (
+            UpstreamProtocolKind::ChatCompletions,
+            "/provider/v1/chat/completions",
+            "vendor/new-goat-chat-2026",
+            "my-goat",
+            "my-goat",
+        ),
+        (
+            UpstreamProtocolKind::Responses,
+            "/provider/v1/responses",
+            "vendor/new-goat-responses-2026",
+            "my-goat",
+            "my-goat",
+        ),
+        (
+            UpstreamProtocolKind::Responses,
+            "/provider/v1/responses",
+            "vendor/generated-goat-responses-2026",
+            "vendor/generated-goat-responses-2026",
+            "generated-goat-responses-2026",
+        ),
+    ] {
+        let (dir, state) = state("goat-official");
+        let mut account = custom_account(&state, &uuid::Uuid::new_v4().to_string(), false);
+        account.provider_id = crate::provider::COMMAND_CODE_PROVIDER_ID.into();
+        persist_goat_model(&state, &account, model, protocol, public, true);
+        let _route = crate::gateway::provider_adapter::install_goat_loopback_route_for_test(
+            &account.id,
+            &origin,
+        )
+        .unwrap();
+        for requested in [model, requested_alias] {
+            let prepared = prepare_account_model_test(
+                &state,
+                &account.id,
+                AccountModelTestRequest {
+                    model_id: requested.into(),
+                },
+            )
+            .unwrap();
+            assert_eq!(prepared.public_model, public);
+            assert_eq!(prepared.requested_model, requested);
+            assert_eq!(prepared.upstream_model, model);
+            assert_eq!(prepared.protocol, protocol);
+            assert_eq!(execute_prepared(&state, &prepared).await.unwrap(), 200);
+            let request = requests.lock().unwrap().last().unwrap().clone();
+            assert_eq!(request.0, path);
+            assert_eq!(request.1["model"], model);
+        }
+        if public == model {
+            let scope = ocg_domain::credential::ModelScope::Only {
+                models: vec![requested_alias.into()],
+            };
+            {
+                let db = state.db.lock();
+                let binding = db
+                    .list_inference_bindings()
+                    .unwrap()
+                    .into_iter()
+                    .find(|row| row.account_id == account.id)
+                    .unwrap();
+                db.update_credential_binding(&binding.binding_id, Some(&scope), None, None, None)
+                    .unwrap();
+            }
+            let prepared = prepare_account_model_test(
+                &state,
+                &account.id,
+                AccountModelTestRequest {
+                    model_id: requested_alias.into(),
+                },
+            )
+            .unwrap();
+            assert_eq!(execute_prepared(&state, &prepared).await.unwrap(), 200);
+            let sends = hits.load(Ordering::SeqCst);
+            let destination_id =
+                ocg_domain::destination::destination_id_for_builtin(&account.provider_id);
+            let original = crate::db::destination_store::load_destination_catalog(
+                &state.db.lock().conn,
+                &destination_id,
+            )
+            .unwrap();
+            for change in ["alias", "upstream"] {
+                let mut catalog = original.clone();
+                if change == "alias" {
+                    catalog[0].public_model = "changed-alias".into();
+                } else {
+                    catalog[0].upstream_model = "changed/upstream".into();
+                }
+                crate::db::destination_store::replace_destination_catalog(
+                    &state.db.lock().conn,
+                    &destination_id,
+                    &catalog,
+                )
+                .unwrap();
+                assert!(
+                    execute_prepared(&state, &prepared).await.is_err(),
+                    "scoped generated alias must reject changed {change}"
+                );
+                assert_eq!(hits.load(Ordering::SeqCst), sends);
+            }
+        }
+        drop(state);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 7);
+    server.abort();
+}
+
+#[tokio::test]
+async fn stale_goat_model_tests_and_missing_evidence_send_nothing() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let hits = Arc::new(AtomicUsize::new(0));
+    let app = axum::Router::new()
+        .fallback(axum::routing::any(
+            |axum::extract::State(hits): axum::extract::State<Arc<AtomicUsize>>| async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                axum::Json(serde_json::json!({}))
+            },
+        ))
+        .with_state(hits.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    for change in [
+        "missing_evidence",
+        "revoked_evidence",
+        "removed",
+        "disabled_model",
+        "disabled_protocol",
+        "changed_alias",
+        "changed_upstream",
+        "revoked_endpoint",
+        "revoked_origin",
+        "disabled_binding",
+        "rotated_key",
+    ] {
+        let (dir, state) = state(change);
+        let mut account = custom_account(&state, &uuid::Uuid::new_v4().to_string(), false);
+        account.provider_id = crate::provider::COMMAND_CODE_PROVIDER_ID.into();
+        let model = "vendor/arbitrary-goat-id";
+        persist_goat_model(
+            &state,
+            &account,
+            model,
+            UpstreamProtocolKind::Responses,
+            "my-goat",
+            change != "missing_evidence",
+        );
+        let _route = crate::gateway::provider_adapter::install_goat_loopback_route_for_test(
+            &account.id,
+            &origin,
+        )
+        .unwrap();
+        let prepared = if change == "missing_evidence" {
+            assert!(
+                prepare_account_model_test(
+                    &state,
+                    &account.id,
+                    AccountModelTestRequest {
+                        model_id: model.into()
+                    }
+                )
+                .is_err()
+            );
+            PreparedAccountModelTest {
+                account: account.clone(),
+                config: state.config(),
+                adapter: ProviderAdapterKind::CommandCodeGoat,
+                requested_model: model.into(),
+                public_model: "my-goat".into(),
+                upstream_model: model.into(),
+                protocol: UpstreamProtocolKind::Responses,
+                custom_route: None,
+            }
+        } else {
+            prepare_account_model_test(
+                &state,
+                &account.id,
+                AccountModelTestRequest {
+                    model_id: model.into(),
+                },
+            )
+            .unwrap()
+        };
+        {
+            let db = state.db.lock();
+            let destination_id =
+                ocg_domain::destination::destination_id_for_builtin(&account.provider_id);
+            let binding = db
+                .list_inference_bindings()
+                .unwrap()
+                .into_iter()
+                .find(|row| row.account_id == account.id)
+                .unwrap();
+            let mut catalog =
+                crate::db::destination_store::load_destination_catalog(&db.conn, &destination_id)
+                    .unwrap();
+            match change {
+                "revoked_evidence" => {
+                    db.conn.execute("DELETE FROM provider_contract_model_protocols WHERE scope_id = ?1 AND model_id = ?2", rusqlite::params![account.provider_id, model]).unwrap();
+                }
+                "removed" => catalog.clear(),
+                "disabled_model" => catalog[0].enabled = false,
+                "disabled_protocol" => catalog[0].protocols.clear(),
+                "changed_alias" => catalog[0].public_model = "different-alias".into(),
+                "changed_upstream" => catalog[0].upstream_model = "different/upstream".into(),
+                "revoked_endpoint" => {
+                    db.update_credential_binding(
+                        &binding.binding_id,
+                        None,
+                        None,
+                        Some(&[]),
+                        Some(&[]),
+                    )
+                    .unwrap();
+                }
+                "disabled_binding" => {
+                    db.update_credential_binding(
+                        &binding.binding_id,
+                        None,
+                        Some(false),
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                }
+                "rotated_key" => {
+                    let cipher = state.encrypt_key("rotated-test-key").unwrap();
+                    db.update_account(
+                        &account.id,
+                        &crate::models::AccountUpdate::default(),
+                        Some(&cipher),
+                        None,
+                    )
+                    .unwrap();
+                }
+                "revoked_origin" => {
+                    db.update_credential_binding(
+                        &binding.binding_id,
+                        None,
+                        None,
+                        Some(&binding.allowed_endpoint_ids),
+                        Some(&["https://unrelated.example".into()]),
+                    )
+                    .unwrap();
+                }
+                _ => {}
+            }
+            crate::db::destination_store::replace_destination_catalog(
+                &db.conn,
+                &destination_id,
+                &catalog,
+            )
+            .unwrap();
+        }
+        assert!(
+            execute_prepared(&state, &prepared).await.is_err(),
+            "{change}"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "{change} sent an upstream request"
+        );
+        drop(state);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    server.abort();
+}

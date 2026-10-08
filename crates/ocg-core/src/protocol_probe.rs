@@ -136,7 +136,7 @@ pub(crate) async fn execute_protocol_probe(
     account: &Account,
     protocol: UpstreamProtocolKind,
 ) -> Result<u16, (Option<u16>, String)> {
-    execute_protocol_request(ctx, account, protocol, false, ctx.model_id).await
+    execute_protocol_request(ctx, account, protocol, false, ctx.model_id, ctx.model_id).await
 }
 
 /// Send the same minimal protocol request used by provider probes, but lock
@@ -147,6 +147,8 @@ pub(crate) struct AccountModelTestInput<'a> {
     pub config: &'a AppConfig,
     pub account: &'a Account,
     pub adapter: ProviderAdapterKind,
+    /// Exact requested client name, retained for model-scoped authorization.
+    pub requested_model: &'a str,
     pub public_model: &'a str,
     pub model_id: &'a str,
     pub protocol: UpstreamProtocolKind,
@@ -171,6 +173,7 @@ pub(crate) async fn execute_account_model_test(
         input.account,
         input.protocol,
         true,
+        input.requested_model,
         input.public_model,
     )
     .await
@@ -179,6 +182,7 @@ pub(crate) async fn execute_account_model_test(
 fn live_send_selection_from_bindings<E: ToString>(
     account: &Account,
     bindings: Result<Vec<StoredInferenceBinding>, E>,
+    requested_model: &str,
     public_model: &str,
     upstream_model: &str,
 ) -> Result<LiveSendSelection, (Option<u16>, String)> {
@@ -189,7 +193,7 @@ fn live_send_selection_from_bindings<E: ToString>(
     Ok(LiveSendSelection::from_binding(
         account,
         binding.as_ref(),
-        public_model,
+        requested_model,
         public_model,
         upstream_model,
     ))
@@ -200,6 +204,7 @@ async fn execute_protocol_request(
     account: &Account,
     protocol: UpstreamProtocolKind,
     account_test: bool,
+    requested_model: &str,
     public_model: &str,
 ) -> Result<u16, (Option<u16>, String)> {
     let format = protocol_to_api(protocol);
@@ -209,7 +214,7 @@ async fn execute_protocol_request(
         client: format,
         upstream: format,
         model: ctx.model_id.to_string(),
-        client_model: public_model.to_string(),
+        client_model: requested_model.to_string(),
         stream: false,
         body: bytes::Bytes::from(body.clone()),
         channel: if ctx.adapter == ProviderAdapterKind::ZenFree {
@@ -218,7 +223,7 @@ async fn execute_protocol_request(
             UpstreamChannel::Go
         },
         upstream_base_override: None,
-        original_model: (public_model != ctx.model_id).then(|| public_model.to_string()),
+        original_model: (requested_model != ctx.model_id).then(|| requested_model.to_string()),
         resolved_alias: (!public_model.is_empty()).then(|| public_model.to_string()),
         custom_route: ctx.custom_route.clone(),
         replay_domain: None,
@@ -241,10 +246,14 @@ async fn execute_protocol_request(
         live_send_selection_from_bindings(
             account,
             db.list_inference_bindings(),
+            requested_model,
             public_model,
             ctx.model_id,
         )?
     };
+    if account_test {
+        confirm_saved_account_test_route(ctx, account, public_model, protocol, &plan, &route)?;
+    }
     let secret = authorize_live_send_secret(
         ctx.state,
         &selection,
@@ -306,6 +315,9 @@ async fn execute_protocol_request(
             ));
         }
     };
+    if account_test {
+        confirm_saved_account_test_route(ctx, account, public_model, protocol, &plan, &route)?;
+    }
     confirm_live_send_secret(
         ctx.state,
         &selection,
@@ -390,6 +402,99 @@ async fn execute_protocol_request(
     crate::custom::prove_verified_protocol_response(status, &bytes, protocol)
         .map_err(|failure| (Some(status_code), failure.message))?;
     Ok(status_code)
+}
+
+/// GOAT tests use saved official evidence, never the static model-name table.
+/// Reload persisted routing facts at both pre-send checks so stale preparation
+/// cannot keep a removed mapping or disabled protocol alive. Key and grant
+/// identity remain guarded by authorize/confirm_live_send_secret.
+fn confirm_saved_account_test_route(
+    ctx: &ProtocolProbeContext<'_>,
+    account: &Account,
+    public_model: &str,
+    protocol: UpstreamProtocolKind,
+    plan: &RequestPlan,
+    route: &crate::gateway::attempt::AttemptSpec,
+) -> Result<(), (Option<u16>, String)> {
+    if ctx.adapter != ProviderAdapterKind::CommandCodeGoat {
+        return Ok(());
+    }
+    let invalid = || {
+        (
+            None,
+            "saved account model route changed or is disabled".to_string(),
+        )
+    };
+    let db = ctx.state.db.lock();
+    let snapshot = crate::routing_snapshot::RoutingSnapshot::load(&db)
+        .map_err(|error| (None, error.to_string()))?;
+    let contracts = provider_contracts::build_effective_contracts(
+        &db.zen_free_model_catalog()
+            .map_err(|error| (None, error.to_string()))?
+            .unwrap_or_default(),
+        &[],
+        db.load_persisted_contracts()
+            .map_err(|error| (None, error.to_string()))?,
+    );
+    if !contracts.production_protocol_allowed(account, &plan.model, protocol) {
+        return Err(invalid());
+    }
+    let credential = snapshot
+        .credentials
+        .iter()
+        .find(|credential| {
+            credential.id == account.id && credential.provider_id == account.provider_id
+        })
+        .ok_or_else(invalid)?;
+    let destination = snapshot
+        .projection
+        .destinations
+        .iter()
+        .find(|destination| {
+            destination.id == credential.destination_id
+                && destination.adapter == ocg_domain::destination::AdapterKind::Goat
+        })
+        .ok_or_else(invalid)?;
+    let mapping = destination
+        .catalog
+        .iter()
+        .find(|model| model.public_model == public_model && model.upstream_model == plan.model)
+        .ok_or_else(invalid)?;
+    if !credential.ready
+        || !destination.enabled
+        || !mapping.enabled
+        || !mapping.protocols.contains(&protocol)
+    {
+        return Err(invalid());
+    }
+    let official_origin =
+        ocg_domain::credential::normalize_origin(crate::provider::COMMAND_CODE_GOAT_BASE_URL)
+            .ok_or_else(invalid)?;
+    if !credential.grants.allowed_origins.iter().any(|origin| {
+        ocg_domain::credential::normalize_origin(origin).as_ref() == Some(&official_origin)
+    }) {
+        return Err((
+            None,
+            "refusing to send credentials: the endpoint origin is not authorized for this Key"
+                .to_string(),
+        ));
+    }
+    let current = crate::gateway::provider_adapter::resolve_execution_transport(
+        credential,
+        destination,
+        &ctx.state.config(),
+        &crate::gateway::provider_adapter::ExecutionTransportFacts {
+            upstream: plan.upstream,
+            channel: plan.channel,
+            upstream_base_override: plan.upstream_base_override.clone(),
+            custom_route: plan.custom_route.clone(),
+        },
+    )
+    .map_err(|error| (None, error))?;
+    if &current != route {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 fn non_null_probe_error(value: &serde_json::Value) -> Option<&serde_json::Value> {

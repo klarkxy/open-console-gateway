@@ -6,7 +6,6 @@ use serde_json::Value;
 
 use crate::provider::{ConnectionVerificationStatus, OPENCODE_GO_BASE_URL, UpstreamProtocolKind};
 
-pub use crate::kernel::ids::DEFAULT_ACCOUNT_TEST_MODEL;
 pub use ocg_domain::account::{
     Account, AccountSetupStep, AccountType, DEFAULT_INFERENCE_BINDING_ENABLED,
     NEW_READY_KEY_ACCOUNT_ENABLED, UpstreamChannel,

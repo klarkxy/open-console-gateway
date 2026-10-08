@@ -30,6 +30,64 @@ pub fn canonical_lexical_path(path: &Path) -> ByokResult<PathBuf> {
     Ok(normalized)
 }
 
+/// Resolve a present regular file after every link boundary has been rejected.
+/// Filesystem canonicalization preserves case-sensitive directories; no casing
+/// rule is guessed from the operating system.
+pub fn identity_path(path: &Path) -> ByokResult<PathBuf> {
+    let path = canonical_lexical_path(path)?;
+    reject_symlink_ancestors(&path)?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if !metadata.is_file() || is_link_or_reparse(&path) {
+                return Err(ByokError::conflict("BYOK target is not a regular file"));
+            }
+            let canonical = fs::canonicalize(&path).map_err(io_internal)?;
+            #[cfg(windows)]
+            {
+                let text = canonical.to_string_lossy();
+                if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+                    return Ok(PathBuf::from(format!(r"\\{rest}")));
+                }
+                if let Some(rest) = text.strip_prefix(r"\\?\") {
+                    return Ok(PathBuf::from(rest));
+                }
+            }
+            Ok(canonical)
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            let mut cursor = path.clone();
+            let mut missing = Vec::new();
+            while !cursor.exists() {
+                let Some(name) = cursor.file_name().map(|name| name.to_os_string()) else {
+                    return Ok(path);
+                };
+                missing.push(name);
+                if !cursor.pop() {
+                    return Ok(path);
+                }
+            }
+            let canonical = fs::canonicalize(&cursor).map_err(io_internal)?;
+            #[cfg(windows)]
+            let canonical = {
+                let text = canonical.to_string_lossy();
+                if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+                    PathBuf::from(format!(r"\\{rest}"))
+                } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+                    PathBuf::from(rest)
+                } else {
+                    canonical
+                }
+            };
+            let mut canonical = canonical;
+            for segment in missing.into_iter().rev() {
+                canonical.push(segment);
+            }
+            Ok(canonical)
+        }
+        Err(error) => Err(io_internal(error)),
+    }
+}
+
 pub fn ensure_safe_directory_chain(target: &Path) -> ByokResult<()> {
     let target = canonical_lexical_path(target)?;
     let mut missing = Vec::new();

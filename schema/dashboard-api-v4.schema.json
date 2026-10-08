@@ -2189,6 +2189,10 @@
         "activationRequired": {
           "type": "boolean"
         },
+        "adopted": {
+          "default": false,
+          "type": "boolean"
+        },
         "backupPath": {
           "type": [
             "string",
@@ -2209,6 +2213,16 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "copilotTokenBudget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CopilotTokenBudget"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "defaultModelId": {
           "type": [
@@ -2236,6 +2250,16 @@
         },
         "gatewayV1Url": {
           "type": "string"
+        },
+        "preview": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ByokPreview"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "recoverySupported": {
           "type": "boolean"
@@ -2276,6 +2300,8 @@
         "defaultModelId",
         "backupPath",
         "detail",
+        "adopted",
+        "copilotTokenBudget",
         "gatewayV1Url",
         "revision"
       ],
@@ -2286,15 +2312,38 @@
         "codex",
         "kimi",
         "minimax",
-        "zcode"
+        "zcode",
+        "copilot"
       ],
       "type": "string"
     },
     "ByokConfigureRequest": {
       "additionalProperties": false,
       "properties": {
+        "acknowledgeOverwrite": {
+          "default": false,
+          "type": "boolean"
+        },
+        "acknowledgeRemoval": {
+          "default": false,
+          "type": "boolean"
+        },
+        "acknowledgeTakeover": {
+          "default": false,
+          "type": "boolean"
+        },
         "clientClosed": {
           "type": "boolean"
+        },
+        "copilotTokenBudget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CopilotTokenBudget"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "expectedFingerprint": {
           "type": "string"
@@ -2303,6 +2352,12 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "previewFingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "processGeneration": {
           "format": "uint64",
@@ -2329,6 +2384,10 @@
         "activationRequired": {
           "type": "boolean"
         },
+        "adopted": {
+          "default": false,
+          "type": "boolean"
+        },
         "backupPath": {
           "type": [
             "string",
@@ -2349,6 +2408,16 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "copilotTokenBudget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CopilotTokenBudget"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "defaultModelId": {
           "type": [
@@ -2372,6 +2441,16 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "preview": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ByokPreview"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "recoverySupported": {
@@ -2409,7 +2488,9 @@
         "configuredModelIds",
         "defaultModelId",
         "backupPath",
-        "detail"
+        "detail",
+        "adopted",
+        "copilotTokenBudget"
       ],
       "type": "object"
     },
@@ -2445,6 +2526,89 @@
         "expectedFingerprint",
         "clientClosed"
       ],
+      "type": "object"
+    },
+    "ByokPreview": {
+      "properties": {
+        "addedModelIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "defaultModelId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "planFingerprint": {
+          "type": "string"
+        },
+        "previousDefaultModelId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "removedModelIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "removedModelsWithCustomizations": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "requiresOverwrite": {
+          "type": "boolean"
+        },
+        "requiresTakeover": {
+          "type": "boolean"
+        },
+        "updatedModelIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "planFingerprint",
+        "addedModelIds",
+        "removedModelIds",
+        "updatedModelIds",
+        "previousDefaultModelId",
+        "defaultModelId",
+        "requiresTakeover",
+        "requiresOverwrite",
+        "removedModelsWithCustomizations"
+      ],
+      "type": "object"
+    },
+    "ByokPreviewRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "copilotTokenBudget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CopilotTokenBudget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "targetPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     },
     "ByokStatus": {
@@ -3009,6 +3173,27 @@
         "revision",
         "processGeneration",
         "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "CopilotTokenBudget": {
+      "additionalProperties": false,
+      "description": "Local Copilot request budgets, not declarations about upstream capability.",
+      "properties": {
+        "maxInputTokens": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxOutputTokens": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "maxInputTokens",
+        "maxOutputTokens"
       ],
       "type": "object"
     },
@@ -11259,6 +11444,12 @@
     },
     {
       "$ref": "#/$defs/ByokInspection"
+    },
+    {
+      "$ref": "#/$defs/ByokPreview"
+    },
+    {
+      "$ref": "#/$defs/ByokPreviewRequest"
     },
     {
       "$ref": "#/$defs/ByokApplication"

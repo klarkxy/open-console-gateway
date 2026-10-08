@@ -12,20 +12,28 @@ pub enum ByokClient {
     Kimi,
     Minimax,
     Zcode,
+    Copilot,
 }
 
 impl ByokClient {
-    pub const ALL: [Self; 4] = [Self::Codex, Self::Kimi, Self::Minimax, Self::Zcode];
+    pub const ALL: [Self; 5] = [
+        Self::Codex,
+        Self::Kimi,
+        Self::Minimax,
+        Self::Zcode,
+        Self::Copilot,
+    ];
     pub fn id(self) -> &'static str {
         match self {
             Self::Codex => "codex",
             Self::Kimi => "kimi",
             Self::Minimax => "minimax",
             Self::Zcode => "zcode",
+            Self::Copilot => "copilot",
         }
     }
     pub fn requires_closed_client(self) -> bool {
-        matches!(self, Self::Codex | Self::Kimi)
+        matches!(self, Self::Codex | Self::Kimi | Self::Copilot)
     }
     pub fn key_name(self) -> &'static str {
         match self {
@@ -33,6 +41,7 @@ impl ByokClient {
             Self::Kimi => "kimi-code",
             Self::Minimax => "minimax-code",
             Self::Zcode => "zcode",
+            Self::Copilot => "copilot",
         }
     }
 }
@@ -68,6 +77,33 @@ pub struct ByokInspection {
     pub default_model_id: Option<String>,
     pub backup_path: Option<String>,
     pub detail: Option<String>,
+    #[serde(default)]
+    pub adopted: bool,
+    pub copilot_token_budget: Option<CopilotTokenBudget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<ByokPreview>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ByokPreview {
+    pub plan_fingerprint: String,
+    pub added_model_ids: Vec<String>,
+    pub removed_model_ids: Vec<String>,
+    pub updated_model_ids: Vec<String>,
+    pub previous_default_model_id: Option<String>,
+    pub default_model_id: Option<String>,
+    pub requires_takeover: bool,
+    pub requires_overwrite: bool,
+    pub removed_models_with_customizations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ByokReview {
+    pub preview_fingerprint: Option<String>,
+    pub acknowledge_takeover: bool,
+    pub acknowledge_overwrite: bool,
+    pub acknowledge_removal: bool,
 }
 
 impl ByokInspection {
@@ -88,6 +124,9 @@ impl ByokInspection {
             configured_model_ids: vec![],
             default_model_id: None,
             backup_path: None,
+            adopted: false,
+            copilot_token_budget: None,
+            preview: None,
             detail: Some(
                 "Use a native OCG host on the client computer to configure this application."
                     .into(),
@@ -126,6 +165,34 @@ pub enum ByokHostRequest {
     Inspect {
         client: ByokClient,
         target_path: Option<String>,
+    },
+    Preview {
+        client: ByokClient,
+        target_path: Option<String>,
+        gateway_v1_url: String,
+        models: Vec<ByokModel>,
+        copilot_token_budget: Option<CopilotTokenBudget>,
+    },
+    ValidateReviewed {
+        client: ByokClient,
+        target_path: Option<String>,
+        expected_fingerprint: String,
+        gateway_v1_url: String,
+        models: Vec<ByokModel>,
+        client_closed: bool,
+        copilot_token_budget: Option<CopilotTokenBudget>,
+        review: ByokReview,
+    },
+    ConfigureReviewed {
+        client: ByokClient,
+        target_path: Option<String>,
+        expected_fingerprint: String,
+        gateway_v1_url: String,
+        secret: ByokSecret,
+        models: Vec<ByokModel>,
+        client_closed: bool,
+        copilot_token_budget: Option<CopilotTokenBudget>,
+        review: ByokReview,
     },
     Configure {
         client: ByokClient,
@@ -198,3 +265,66 @@ impl std::error::Error for ByokError {}
 pub type ByokResult<T> = Result<T, ByokError>;
 pub type ByokApplicationHost =
     Arc<dyn Fn(ByokHostRequest) -> ByokResult<ByokInspection> + Send + Sync + 'static>;
+
+/// Local Copilot request budgets, not declarations about upstream capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CopilotTokenBudget {
+    pub max_input_tokens: u32,
+    pub max_output_tokens: u32,
+}
+impl Default for CopilotTokenBudget {
+    fn default() -> Self {
+        Self {
+            max_input_tokens: 100_000,
+            max_output_tokens: 8_192,
+        }
+    }
+}
+
+/// Apply only to this export snapshot. Published metadata and saved catalogs
+/// remain unchanged. Known limits constrain the operator's client budgets.
+pub fn with_copilot_token_budget(
+    mut models: Vec<ByokModel>,
+    budget: CopilotTokenBudget,
+) -> ByokResult<Vec<ByokModel>> {
+    if budget.max_input_tokens == 0 || budget.max_output_tokens == 0 {
+        return Err(ByokError::invalid(
+            "Copilot token budgets must be positive integers",
+        ));
+    }
+    for model in &mut models {
+        let context = model.metadata.context_window;
+        let mut output = model
+            .metadata
+            .max_output_tokens
+            .unwrap_or(u64::from(budget.max_output_tokens))
+            .min(u64::from(budget.max_output_tokens));
+        let mut input = u64::from(budget.max_input_tokens);
+        if let Some(context) = context {
+            if context < 2 {
+                return Err(ByokError::precondition(
+                    "A published model has no positive Copilot input/output budget; check its token metadata",
+                ));
+            }
+            if input + output > context {
+                // Keep both sides usable when a known context is smaller than
+                // the requested envelope, rather than reserving all for output.
+                output = ((u128::from(context) * u128::from(output)) / u128::from(input + output))
+                    .max(1) as u64;
+                input = (context - output).min(input);
+            }
+        }
+        if input == 0 || output == 0 {
+            return Err(ByokError::precondition(
+                "A published model has no positive Copilot input/output budget; check its token metadata",
+            ));
+        }
+        model.metadata.context_window = Some(input + output);
+        model.metadata.max_output_tokens = Some(output);
+    }
+    Ok(models)
+}
+
+#[cfg(test)]
+mod tests;

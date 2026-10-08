@@ -83,6 +83,10 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
                 .delete(byok_applications::remove),
         )
         .route(
+            "/applications/byok/{client}/preview",
+            post(byok_applications::preview),
+        )
+        .route(
             "/applications/byok/{client}/recover",
             post(byok_applications::recover),
         )

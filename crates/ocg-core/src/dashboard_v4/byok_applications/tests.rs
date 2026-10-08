@@ -109,12 +109,30 @@ struct Observed {
     tool_calling: Vec<Option<bool>>,
     default_model_id: Option<String>,
     client_closed: Option<bool>,
+    copilot_token_budget: Option<crate::byok_application::CopilotTokenBudget>,
     debug: String,
 }
 
 fn observe(request: &ByokHostRequest) -> Observed {
     let debug = format!("{request:?}");
     match request {
+        ByokHostRequest::Preview {
+            client,
+            target_path,
+            ..
+        }
+        | ByokHostRequest::ValidateReviewed {
+            client,
+            target_path,
+            ..
+        } => {
+            let mut observed = observe(&ByokHostRequest::Inspect {
+                client: *client,
+                target_path: target_path.clone(),
+            });
+            observed.kind = "preview";
+            observed
+        }
         ByokHostRequest::Inspect {
             client,
             target_path,
@@ -131,6 +149,7 @@ fn observe(request: &ByokHostRequest) -> Observed {
             tool_calling: Vec::new(),
             default_model_id: None,
             client_closed: None,
+            copilot_token_budget: None,
             debug,
         },
         ByokHostRequest::Configure {
@@ -164,6 +183,42 @@ fn observe(request: &ByokHostRequest) -> Observed {
                 .collect(),
             default_model_id: default_model_id.clone(),
             client_closed: Some(*client_closed),
+            copilot_token_budget: None,
+            debug,
+        },
+        ByokHostRequest::ConfigureReviewed {
+            client,
+            target_path,
+            expected_fingerprint,
+            gateway_v1_url,
+            secret,
+            models,
+            client_closed,
+            copilot_token_budget,
+            ..
+        } => Observed {
+            kind: "configure",
+            client: *client,
+            target_path: target_path.clone(),
+            fingerprint: Some(expected_fingerprint.clone()),
+            secret: Some(secret.expose_to_host().to_string()),
+            gateway_v1_url: Some(gateway_v1_url.clone()),
+            model_ids: models.iter().map(|model| model.id.clone()).collect(),
+            context_windows: models
+                .iter()
+                .map(|model| model.metadata.context_window)
+                .collect(),
+            max_output_tokens: models
+                .iter()
+                .map(|model| model.metadata.max_output_tokens)
+                .collect(),
+            tool_calling: models
+                .iter()
+                .map(|model| model.metadata.tool_calling)
+                .collect(),
+            default_model_id: None,
+            client_closed: Some(*client_closed),
+            copilot_token_budget: *copilot_token_budget,
             debug,
         },
         ByokHostRequest::Remove {
@@ -184,6 +239,7 @@ fn observe(request: &ByokHostRequest) -> Observed {
             tool_calling: Vec::new(),
             default_model_id: None,
             client_closed: Some(*client_closed),
+            copilot_token_budget: None,
             debug,
         },
         ByokHostRequest::Recover {
@@ -204,6 +260,7 @@ fn observe(request: &ByokHostRequest) -> Observed {
             tool_calling: Vec::new(),
             default_model_id: None,
             client_closed: Some(*client_closed),
+            copilot_token_budget: None,
             debug,
         },
     }
@@ -225,6 +282,9 @@ impl Probe {
     fn install(self: &Arc<Self>, state: &CoreState) {
         let probe = Arc::clone(self);
         state.set_byok_application_host(Arc::new(move |request| {
+            if let ByokHostRequest::ValidateReviewed { client, .. } = &request {
+                return Ok(inspection(*client, ByokStatus::Ready));
+            }
             let observed = observe(&request);
             probe.calls.lock().unwrap().push(observed);
             probe
@@ -267,6 +327,9 @@ fn inspection(client: ByokClient, status: ByokStatus) -> ByokInspection {
         default_model_id: Some(EXACT_MODEL.into()),
         backup_path: None,
         detail: Some("host-prepared".into()),
+        adopted: false,
+        copilot_token_budget: None,
+        preview: None,
     }
 }
 
@@ -835,4 +898,131 @@ fn malformed_published_metadata_stays_a_metadata_error() {
     })])
     .unwrap_err();
     assert_eq!(error, CatalogReadError::Metadata);
+}
+
+#[tokio::test]
+async fn copilot_exports_operator_budgets_without_changing_published_metadata() {
+    let (dir, state) = open_state("copilot-budgets");
+    publish_exact_model(&state);
+    let probe = Probe::new();
+    probe.install(&state);
+    probe.push_ok(inspection(ByokClient::Copilot, ByokStatus::Configured));
+    let mut body = configure_body(&state);
+    body["copilotTokenBudget"] = json!({"maxInputTokens": 6000, "maxOutputTokens": 2000});
+    let _ = configure(
+        State(state.clone()),
+        Path("copilot".into()),
+        body_bytes(&body),
+    )
+    .await
+    .unwrap();
+    let calls = probe.calls();
+    assert_eq!(calls[0].context_windows, vec![None]);
+    assert_eq!(
+        calls[0].copilot_token_budget,
+        Some(crate::byok_application::CopilotTokenBudget {
+            max_input_tokens: 6000,
+            max_output_tokens: 2000
+        })
+    );
+    assert_eq!(calls[0].max_output_tokens, vec![None]);
+    assert_eq!(calls[0].tool_calling, vec![None]);
+    let published = available_models_locked(&state).unwrap();
+    assert_eq!(published[0].metadata.context_window, None);
+    assert_eq!(published[0].metadata.max_output_tokens, None);
+    close_state(dir, state);
+}
+#[tokio::test]
+async fn invalid_copilot_budgets_fail_before_key_creation_or_native_write() {
+    let (dir, state) = open_state("copilot-invalid-budgets");
+    publish_exact_model(&state);
+    let probe = Probe::new();
+    probe.install(&state);
+    for (client, input, output) in [
+        ("copilot", 0, 2000),
+        ("copilot", 6000, 0),
+        ("codex", 6000, 2000),
+    ] {
+        let mut body = configure_body(&state);
+        body["copilotTokenBudget"] = json!({"maxInputTokens": input, "maxOutputTokens": output});
+        let result = configure(State(state.clone()), Path(client.into()), body_bytes(&body)).await;
+        assert!(result.is_err());
+        assert!(probe.calls().is_empty());
+        assert!(
+            state
+                .db
+                .lock()
+                .list_active_sub_gateway_keys()
+                .unwrap()
+                .is_empty()
+        );
+    }
+    close_state(dir, state);
+}
+
+#[cfg(feature = "dsh-local-host")]
+#[tokio::test]
+async fn native_preview_closed_client_and_stale_plan_refuse_before_key_creation() {
+    let (dir, state) = open_state("native-preview-preflight");
+    publish_exact_model(&state);
+    crate::byok_application_host::register(&state);
+    let target = dir.join("isolated-native").join("config.toml");
+    let before = state.settings_revision();
+    let Json(view) = preview(
+        State(state.clone()),
+        Path("codex".into()),
+        body_bytes(&json!({"targetPath":target.to_string_lossy()})),
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.settings_revision(), before);
+    assert!(!target.parent().unwrap().exists());
+    assert!(
+        state
+            .db
+            .lock()
+            .list_active_sub_gateway_keys()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(super::super::applications::operation_receipts(&state).is_empty());
+    let mut body = configure_body(&state);
+    body["targetPath"] = json!(target.to_string_lossy());
+    body["expectedFingerprint"] = json!(view.inspection.fingerprint);
+    body["previewFingerprint"] = json!(view.inspection.preview.unwrap().plan_fingerprint);
+    body["clientClosed"] = json!(false);
+    let result = configure(
+        State(state.clone()),
+        Path("codex".into()),
+        body_bytes(&body),
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(
+        state
+            .db
+            .lock()
+            .list_active_sub_gateway_keys()
+            .unwrap()
+            .is_empty()
+    );
+    body["clientClosed"] = json!(true);
+    body["previewFingerprint"] = json!("stale-reviewed-plan");
+    let result = configure(
+        State(state.clone()),
+        Path("codex".into()),
+        body_bytes(&body),
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(
+        state
+            .db
+            .lock()
+            .list_active_sub_gateway_keys()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!target.exists());
+    close_state(dir, state);
 }

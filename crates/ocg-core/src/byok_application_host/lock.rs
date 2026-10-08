@@ -52,7 +52,7 @@ enum LockKind {
 impl CrossProcessLock {
     pub fn acquire(client: ByokClient, target: &Path, policy: &LockPolicy) -> ByokResult<Self> {
         match client {
-            ByokClient::Codex | ByokClient::Kimi => Ok(Self {
+            ByokClient::Codex | ByokClient::Kimi | ByokClient::Copilot => Ok(Self {
                 kind: LockKind::None,
             }),
             ByokClient::Minimax => acquire_minimax(target, policy),

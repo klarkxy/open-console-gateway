@@ -1935,6 +1935,46 @@ pub(crate) fn provider_contracts_from_capture(
     saved_projection: &crate::destination_projection::DestinationProjection,
 ) -> Result<ProviderContracts, V3ApiError> {
     let revision = ControlRevision::from_state(state);
+    let ids = |provider: &str| {
+        contracts
+            .providers
+            .get(provider)
+            .map(|scope| scope.catalog.models.as_slice())
+            .unwrap_or_default()
+    };
+    let pinned = provider_contracts::ollama_cloud_pinned_model_ids(contracts);
+    let overrides = saved_projection
+        .destinations
+        .iter()
+        .filter_map(|destination| {
+            let ocg_domain::destination::LegacyDestinationRef::Builtin(provider_id) =
+                &destination.legacy
+            else {
+                return None;
+            };
+            let mappings = destination
+                .catalog
+                .iter()
+                .filter(|row| row.public_model != row.upstream_model)
+                .map(|row| (row.public_model.clone(), row.upstream_model.clone()))
+                .collect::<Vec<_>>();
+            (!mappings.is_empty()).then(|| crate::alias::ExtraProviderCatalog {
+                provider_id: provider_id.clone(),
+                mappings,
+            })
+        })
+        .collect::<Vec<_>>();
+    let alias_catalogs = crate::alias::RuntimeCatalogs {
+        go: ids(OPENCODE_PROVIDER_ID),
+        zen_free: ids(OPENCODE_ZEN_FREE_PROVIDER_ID),
+        command_code: ids(COMMAND_CODE_PROVIDER_ID),
+        minimax: ids(MINIMAX_PROVIDER_ID),
+        kimi: ids(KIMI_PROVIDER_ID),
+        ollama: ids(OLLAMA_PROVIDER_ID),
+        ollama_pinned: &pinned,
+        builtin_aliases: &overrides,
+        ..crate::alias::RuntimeCatalogs::default()
+    };
     let mut providers = Vec::new();
     for scope_id in provider_contracts::builtin_provider_scope_ids() {
         let Some(contract) = contracts.providers.get(scope_id) else {
@@ -1950,10 +1990,16 @@ pub(crate) fn provider_contracts_from_capture(
             .map(|account| account_choice(account, statuses))
             .collect();
         let mut catalog = catalog_from_domain(&contract.catalog);
+        let aliases = crate::alias::catalog_aliases(descriptor.provider_id, alias_catalogs);
         let mut models: Vec<EffectiveModelContract> = contract
             .models
             .values()
-            .map(|model| model_contract_from_provider(descriptor.provider_id, model, contracts))
+            .map(|model| {
+                model_contract_from_domain(
+                    model,
+                    aliases.get(&model.model_id).cloned().unwrap_or_default(),
+                )
+            })
             .collect();
         if let Some(destination) = saved_projection.destinations.iter().find(|d| {
             d.id == ocg_domain::destination::destination_id_for_builtin(descriptor.provider_id)
@@ -2104,30 +2150,6 @@ fn catalog_from_domain(catalog: &provider_contracts::EffectiveCatalog) -> Effect
         models: catalog.models.clone(),
         refresh_supported: catalog.refresh_supported,
     }
-}
-
-fn model_contract_from_provider(
-    provider_id: &str,
-    model: &DomainModelContract,
-    contracts: &EffectiveContractSet,
-) -> EffectiveModelContract {
-    let go_models = contracts
-        .providers
-        .get(OPENCODE_PROVIDER_ID)
-        .map(|scope| scope.catalog.models.as_slice())
-        .unwrap_or_default();
-    let zen_models = contracts
-        .providers
-        .get(OPENCODE_ZEN_FREE_PROVIDER_ID)
-        .map(|scope| scope.catalog.models.as_slice())
-        .unwrap_or_default();
-    let alias = crate::alias::canonical_alias_for_provider_model(
-        provider_id,
-        &model.model_id,
-        go_models,
-        zen_models,
-    );
-    model_contract_from_domain(model, alias)
 }
 
 fn model_contract_from_domain(

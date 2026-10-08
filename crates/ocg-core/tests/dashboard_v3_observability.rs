@@ -210,7 +210,7 @@ async fn dashboard_summary_counts_routable_goat_and_custom_accounts() {
     refreshed_go_catalog::persist_provider_catalog(
         &harness.state,
         COMMAND_CODE_PROVIDER_ID,
-        ocg_core::provider::COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS,
+        &[ocg_core::kernel::ids::COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM],
     );
     let (_, before_body) = harness
         .get_json(&format!("{}/dashboard/summary", harness.v3_base))

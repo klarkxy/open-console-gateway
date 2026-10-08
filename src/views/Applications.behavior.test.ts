@@ -34,6 +34,7 @@ type DshApi = {
 
 type ByokApi = {
   inspect: (client: string, targetPath?: string) => Promise<ByokApplicationView>;
+  preview: (client: string, input: Record<string, unknown>) => Promise<ByokApplicationView>;
   configure: (client: string, input: Record<string, unknown>, expectation: unknown) => Promise<ByokApplicationView>;
   remove: (client: string, input: Record<string, unknown>, expectation: unknown) => Promise<ByokApplicationView>;
   recover: (client: string, input: Record<string, unknown>, expectation: unknown) => Promise<ByokApplicationView>;
@@ -82,6 +83,9 @@ function applicationsHarnessPlugin() {
       export const NSelect = pass;
       export const NInput = defineComponent({ inheritAttrs: false, props: { value: String }, setup(props, { attrs }) {
         return () => h("input", { ...attrs, value: props.value });
+      } });
+      export const NInputNumber = defineComponent({ inheritAttrs: false, props: { value: Number, inputProps: Object }, setup(props, { attrs }) {
+        return () => h("input", { ...attrs, ...props.inputProps, type: "number", value: props.value });
       } });
       export const NCheckbox = defineComponent({ inheritAttrs: false, props: { checked: Boolean }, setup(props, { attrs, slots }) {
         return () => h("label", { ...attrs, "data-checked": props.checked }, slots.default?.());
@@ -222,6 +226,8 @@ function dshApp(overrides: Partial<DshApplicationView> = {}): DshApplicationView
 function byokView(overrides: Record<string, unknown> = {}): ByokApplicationView {
   return {
     client: "codex",
+    adopted: false,
+    copilotTokenBudget: null,
     status: "ready",
     detected: true,
     configPath: "C:\\Users\\author\\.codex\\config.toml",
@@ -273,6 +279,7 @@ function errorAlertCount(root: HostNode): number {
 
 function defaultByokApi(): ByokApi {
   return {
+    preview: async (client) => byokView({ client, preview: { planFingerprint: "plan-1", addedModelIds: ["new-model"], removedModelIds: [], updatedModelIds: [], previousDefaultModelId: null, defaultModelId: null, requiresTakeover: false, requiresOverwrite: false, removedModelsWithCustomizations: [] } }),
     inspect: async (client) => byokView({ client }),
     configure: async () => { throw new Error("configure not stubbed"); },
     remove: async () => { throw new Error("remove not stubbed"); },
@@ -779,7 +786,7 @@ test("unchanged runtime URL blur does not inspect; a changed target still does",
   }
 });
 
-test("all five tabs switch with pending inspects and explicit Refresh still works", async () => {
+test("all native tabs switch with pending inspects and explicit Refresh still works", async () => {
   const dshPending = deferred<DshApplicationView>();
   let dshLoads = 0;
   const byokInspects: string[] = [];
@@ -804,14 +811,14 @@ test("all five tabs switch with pending inspects and explicit Refresh still work
   });
   try {
     const tabs = () => walkHostNodes(mounted.root).filter((node) => node.props.role === "tab");
-    assert.equal(tabs().length, 5);
+    assert.equal(tabs().length, 6);
     assert.equal(dshLoads, 1);
 
-    for (const index of [1, 2, 3, 4]) {
+    for (const index of [1, 2, 3, 4, 5]) {
       (tabs()[index]!.props.onClick as () => void)();
       await settle();
     }
-    assert.deepEqual(byokInspects, ["codex", "kimi", "minimax", "zcode"]);
+    assert.deepEqual(byokInspects, ["codex", "kimi", "minimax", "zcode", "copilot"]);
 
     (tabs()[0]!.props.onClick as () => void)();
     await settle();
@@ -821,7 +828,7 @@ test("all five tabs switch with pending inspects and explicit Refresh still work
     assert.equal(byokInspects.filter((id) => id === "codex").length, 1);
 
     dshPending.resolve(dshApp());
-    for (const client of ["codex", "kimi", "minimax", "zcode"]) {
+    for (const client of ["codex", "kimi", "minimax", "zcode", "copilot"]) {
       byokPending.get(client)?.resolve(byokView({ client }));
     }
     await settle();
@@ -844,7 +851,7 @@ test("client tabs expose tab semantics and switching syncs the app query", async
   const mounted = await mount({ shell: true, api: { getDshApplication: async () => dshApp() } });
   try {
     const tabs = () => walkHostNodes(mounted.root).filter((node) => node.props.role === "tab");
-    assert.equal(tabs().length, 5);
+    assert.equal(tabs().length, 6);
     assert.equal(
       walkHostNodes(mounted.root).find((node) => "data-activation-mode" in node.props)?.props["data-activation-mode"],
       "manual",
@@ -863,4 +870,51 @@ test("client tabs expose tab semantics and switching syncs the app query", async
   } finally {
     mounted.app.unmount();
   }
+});
+
+
+test("Copilot confirmation gates closed-client acknowledgement and sends adjustable budgets", async () => {
+  const writes: Array<{ client: string; input: Record<string, unknown> }> = [];
+  const mounted = await mount({ shell: true,
+    api: { getDshApplication: async () => dshApp() },
+    byokApi: {
+      inspect: async (client) => byokView({ client }),
+      configure: async (client, input) => { writes.push({ client, input }); return byokView({ client, status: "configured", configuredModelIds: ["new-model"], defaultModelId: null }); },
+    },
+  });
+  try {
+    await mounted.router.push({ query: { app: "copilot" } });
+    await settle(40);
+    const actions = walkHostNodes(mounted.root).find((node) => node.props.class === "byok-actions")!;
+    const open = walkHostNodes(actions).find((node) => node.type === "button" && node.props.type === "primary")!;
+    (open.props.onClick as () => void)();
+    await settle();
+    const dialog = () => walkHostNodes(mounted.root).find((node) => node.props.role === "dialog")!;
+    const confirm = () => walkHostNodes(dialog()).find((node) => node.type === "button" && node.props.type === "primary")!;
+    assert.equal(confirm().props.disabled, true);
+    const input = walkHostNodes(dialog()).find((node) => node.props.id === "copilot-input-copilot")!;
+    const output = walkHostNodes(dialog()).find((node) => node.props.id === "copilot-output-copilot")!;
+    (input.props["onUpdate:value"] as (value: number | null) => void)(6000);
+    (output.props["onUpdate:value"] as (value: number | null) => void)(2000);
+    const ack = walkHostNodes(dialog()).find((node) => "data-checked" in node.props)!;
+    (ack.props["onUpdate:checked"] as (value: boolean) => void)(true);
+    await settle();
+    assert.equal(confirm().props.disabled, false);
+    (input.props["onUpdate:value"] as (value: number | null) => void)(null);
+    await settle();
+    assert.equal(confirm().props.disabled, true);
+    (input.props["onUpdate:value"] as (value: number | null) => void)(6000);
+    await settle();
+    (walkHostNodes(dialog()).find((node) => node.props["data-ack"] === "closed")!.props["onUpdate:checked"] as (value: boolean) => void)(true);
+    await settle();
+    (confirm().props.onClick as () => void)();
+    await settle(40);
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0]!.client, "copilot");
+    assert.equal(writes[0]!.input.clientClosed, true);
+    assert.deepEqual(writes[0]!.input.copilotTokenBudget, { maxInputTokens: 6000, maxOutputTokens: 2000 });
+    assert.equal("models" in writes[0]!.input, false);
+    assert.equal("key" in writes[0]!.input, false);
+    assert.equal(dialog(), undefined);
+  } finally { mounted.app.unmount(); }
 });

@@ -13,6 +13,75 @@ use toml_edit::{Array, DocumentMut, Item, Table, value};
 pub struct KimiAdapter;
 
 impl FormatAdapter for KimiAdapter {
+    fn raw_default(&self, bytes: Option<&[u8]>) -> ByokResult<Option<String>> {
+        let _ = bytes;
+        bytes.map(parse_toml).transpose().map(|doc| {
+            doc.as_ref()
+                .and_then(|doc| string_key(doc, "default_model"))
+        })
+    }
+
+    fn managed(&self, target_bytes: Option<&[u8]>, _catalog: Option<&[u8]>) -> ByokResult<Value> {
+        let doc = match target_bytes {
+            Some(bytes) => parse_toml(bytes)?,
+            None => DocumentMut::new(),
+        };
+        if !root_shape_ok(&doc) {
+            return Err(ByokError::invalid("Malformed Kimi provider shape"));
+        }
+        Ok(owned_from_doc(&doc))
+    }
+    fn replace_managed(&self, target_bytes: Option<&[u8]>, owned: &Value) -> ByokResult<Vec<u8>> {
+        let mut doc = match target_bytes {
+            Some(bytes) => parse_toml(bytes)?,
+            None => DocumentMut::new(),
+        };
+        let providers = ensure_table(&mut doc, "providers")?;
+        for id in super::MANAGED_PROVIDER_IDS {
+            let field = &owned["providers"][id];
+            if field.is_null() {
+                providers.remove(id);
+            } else {
+                if providers.get(id).is_none() {
+                    providers.insert(id, Item::Table(Table::new()));
+                }
+                super::replace_toml_fields(
+                    providers
+                        .get_mut(id)
+                        .and_then(Item::as_table_like_mut)
+                        .ok_or_else(|| ByokError::invalid("Kimi provider must be a table"))?,
+                    field,
+                );
+            }
+        }
+        remove_managed_models(&mut doc);
+        let models = ensure_table(&mut doc, "models")?;
+        if let Some(rows) = owned["models"].as_object() {
+            for (id, row) in rows {
+                let mut table = Table::new();
+                super::replace_toml_fields(&mut table, row);
+                models.insert(id, Item::Table(table));
+            }
+        }
+        Ok(doc.to_string().into_bytes())
+    }
+    fn restore_selection(
+        &self,
+        target_bytes: &[u8],
+        original: Option<&[u8]>,
+        receipt: &Receipt,
+    ) -> ByokResult<Vec<u8>> {
+        let mut doc = parse_toml(target_bytes)?;
+        super::restore_toml_selection(
+            &mut doc,
+            original,
+            receipt,
+            &["default_model"],
+            "default_model",
+        )?;
+        Ok(doc.to_string().into_bytes())
+    }
+
     fn inspect_bytes(
         &self,
         target_bytes: Option<&[u8]>,
@@ -213,14 +282,7 @@ fn kimi_conflict(receipt: Option<&Receipt>, present: bool, current: &Value) -> b
 }
 
 fn kimi_view(stripped: &Value) -> Value {
-    let models = match stripped.get("models") {
-        Some(models) if models.is_object() => models.clone(),
-        _ => json!({}),
-    };
-    json!({
-        "providers": super::managed_provider_object(stripped),
-        "models": models,
-    })
+    super::semantic::projection(ByokClient::Kimi, stripped)
 }
 
 fn alias_for(model_id: &str) -> String {

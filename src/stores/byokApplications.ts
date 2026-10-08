@@ -5,6 +5,7 @@ import {
   type ByokApplicationView,
   type ByokConfigureInput,
   type ByokMutationInput,
+  type ByokPreviewInput,
 } from "../api/byok-applications.ts";
 import type { MutationExpectation } from "../api/generated/dashboard-v3.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
@@ -147,6 +148,31 @@ export const useByokApplicationsStore = defineStore("byokApplications", () => {
     return pending;
   }
 
+  /** Read-only preparation shares the same view and invalidates earlier reads. */
+  async function preview(client: string, input: ByokPreviewInput): Promise<boolean> {
+    const key = keyOf(client, input.targetPath);
+    const entry = ensureEntry(key);
+    const generation = beginLoad(key, entry);
+    try {
+      const result = await byokApplicationsApi.preview(client, input);
+      if (!isCurrent(key, generation)) return false;
+      commit(entry, result);
+      return true;
+    } catch (reason) {
+      if (isCurrent(key, generation)) entry.error = dashboardErrorDetail(reason);
+      throw reason;
+    } finally {
+      endLoad(key, entry, generation);
+    }
+  }
+
+  function discardPreview(client: string, targetPath?: string | null): void {
+    const key = keyOf(client, targetPath);
+    generations.set(key, ++sequence);
+    const entry = entries.get(key);
+    if (entry?.view?.preview) entry.view = { ...entry.view, preview: null };
+  }
+
   async function runMutation<TInput extends { targetPath?: string | null }>(
     client: string,
     input: TInput,
@@ -212,6 +238,8 @@ export const useByokApplicationsStore = defineStore("byokApplications", () => {
     entries: computed(() => entries),
     peek,
     inspect,
+    preview,
+    discardPreview,
     configure,
     remove,
     recover,

@@ -102,7 +102,7 @@ window names are humanized without changing stored wire values.
 
 Custom API and user-defined Provider cards whose stored Endpoint host is exactly `api.deepseek.com`, `api.moonshot.cn`, or `api.moonshot.ai` can also **Refresh quota** to read that official current balance. DeepSeek and Zhipu official API cards show the observed remaining balance. It is not a quota bar, and it is not a price-based monthly or lifetime spend. A New API / Sub2API parent card shows the site's Balance, This month, and Lifetime from the site wallet and consume log. Those three figures are not a local price and not a request cost. A missing balance stays unavailable and is not shown as 0. Known-host official balances keep a remaining figure. **Refresh quota** on ordinary quota/balance accounts completes independently of model discovery. Use the row menu’s **Refresh model catalog** for the official Provider catalog or Custom / known-host `/v1/models` discovery. Model-only accounts keep their manual model-refresh fallback; platform Keys keep their existing platform synchronization.
 
-Built-in catalog rows follow each Provider's documented default policy; GOAT's first snapshot starts only its plan-included models on. Usage snapshots stay display-only: a bar at 100%, unknown, or failed never marks a Key exhausted and never changes routing. Other Custom destinations have no balance endpoint in this product.
+Built-in catalog rows follow each Provider's documented default policy. Fresh GOAT rows require official protocol evidence for default enablement regardless of first or later refresh; saved ForceOff remains preserved. Usage snapshots stay display-only: a bar at 100%, unknown, or failed never marks a Key exhausted and never changes routing. Other Custom destinations have no balance endpoint in this product.
 Account rows and saved quota snapshots load independently of catalog metadata. Same-session, same-binding snapshots remain visible while revalidating, including after a failed upstream refresh. Ordinary quota observations share a pool of at most four requests and publish per account; a slow account does not block completed peers. Duplicate requests for one account share completion, and queued manual requests take priority over background requests. Platform synchronization and model catalog writes remain exclusive to preserve CAS. Automatic refresh still runs only while the Accounts page is active and visible, respects freshness and server retry deadlines, and reconciles the destination projection once per pass. It is not a new server-wide background poller.
 
 GOAT cards offer **Refresh quota** to read the official 5-hour, weekly, and monthly windows. When that reading includes a percentage, the window uses it against a full window of 100 and keeps its reset. The endpoint is used by the official CLI but is not documented in the public Provider API. Later requests do not add a price onto the percentage, and a dollar amount is not relabeled as a percentage. You can save a manual percentage. With no official reading and no manual percentage, the window stays unavailable and is not shown as 0. The monthly reset still uses the configured purchase date when the upstream does not provide one. Ollama Cloud exposes no official usage API in this product and does not estimate a monthly credit meter from request prices. The account form still presents Pro, Max, or Team and a purchase date. A manual percentage does not require a price. A month percentage can be saved before a tier is chosen. A week percentage is not accepted. Without an official or manual usage observation, usage stays unavailable. Existing accounts remain routeable. Previously stored billing rows stay on disk and are not recalculated.
@@ -113,7 +113,7 @@ The Adapter Registry is sealed. Built-in Provider families are:
 | --- | --- | --- | --- |
 | OpenCode Go | `opencode` | Yes | One officially distributable API Key per account; managed signup remains Beta |
 | Zen Free | `opencode-zen-free` | Yes | One credentialless, anonymous singleton; sortable and enableable, not deletable; quota shared by egress IP |
-| Command Code GOAT | `command-code` | Yes | Public Provider catalog; the first snapshot starts only GOAT plan models on. Models first discovered later default on with documented endpoints. Saved switches persist; models with no protocol evidence wait for official documentation. No account-level GOAT/All or Max mode. |
+| Command Code GOAT | `command-code` | Yes | Public Provider catalog; fresh rows default on only with official protocol evidence, independent of first or later refresh and plan-name lists. Saved ForceOff persists; rows without evidence do not infer a protocol. No account-level GOAT/All or Max mode. |
 | MiniMax CN Token Plan | `minimax` | Yes | Dedicated `sk-cp` Key; fixed official Chat, Responses, and Messages routes, authenticated model directory, and manual official Token Plan usage refresh |
 | Kimi Code CN | `kimi` | Yes | Dedicated Kimi Code Key; fixed official Chat and Messages routes, authenticated model directory, and manual official weekly/rate-window usage refresh |
 | Ollama Cloud | `ollama` | Yes | Fixed-origin Chat Completions only (`https://ollama.com`, Bearer); public keyless catalog refresh. No official usage API in this product, and no monthly credit meter estimated from request prices. The form still presents Pro, Max, or Team and a purchase date. A manual percentage does not require a price. A month percentage can be saved before a tier is chosen. A week percentage is not accepted. Without an official or manual usage observation, usage stays unavailable. Existing accounts stay routeable |
@@ -213,11 +213,11 @@ yet refreshed** quota bar; official windows replace it after refresh.
 
 Command Code's official `GET /models` is public and refreshes one
 Provider-level catalog. **Refresh quota** on the account card also runs that
-catalog refresh. The Providers matrix remains the model-supply control: GOAT
-plan-included rows start on in the first catalog snapshot. Other rows in that
-snapshot start off; models first discovered in later refreshes default on with
-documented supported endpoints. Saved switches persist, and models without
-protocol evidence wait for official documentation.
+catalog refresh. The Providers matrix remains the model-supply control: fresh
+GOAT rows default on only when their documented protocol evidence supports
+them, independent of refresh timing or plan-name lists. Saved ForceOff switches
+persist, and rows without protocol evidence do not infer a protocol or enable
+automatically.
 
 Custom API is a live trusted-administrator destination. **Providers** edits its mappings: each row pairs a public model name (what the client requests) with the exact upstream model ID (what OCG sends). A connection stores either its legacy route or one to three explicit Chat Completions, Responses, and/or Messages routes, each with its endpoint and authentication. Each mapping inherits the route for its protocol unless it has a single explicit upstream override. **Accounts** edits only attached Keys and bindings. Existing complete endpoints remain exact. **Fetch models** uses the saved directory route; non-standard routes remain exact for inference and retain manual model entry instead of guessing a directory URL. Discovery returns upstream IDs only. Choosing one imports a row with the public name and upstream ID exactly equal. Fetching does not save, verify, enable, or grant a Key.
 
@@ -294,7 +294,9 @@ clicks, no automatic key extraction):
 3. **Payment.** Confirm the plan and amount in the console; only you complete
    payment on the page.
 4. **Verify Key.** Copy the key from the console, paste it, and run a real
-   upstream probe.
+   upstream probe. The managed Go verifier chooses a deterministic routable
+   saved model and its saved supported preferred protocol; it does not try a
+   fixed model or a paid fallback.
 
 Click an earlier finished step in the step bar to **rewind**; forward progress
 still uses each step's primary button. A `2xx` verification completes and enables

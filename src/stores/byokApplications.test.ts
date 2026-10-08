@@ -47,6 +47,8 @@ async function waitForCalls(calls: DeferredCall[], count: number): Promise<void>
 function viewBody(overrides: Record<string, unknown> = {}): ByokApplicationView {
   return {
     client: "codex",
+    adopted: false,
+    copilotTokenBudget: null,
     status: "ready",
     detected: true,
     configPath: "C:\\Users\\author\\.codex\\config.toml",
@@ -316,4 +318,45 @@ test("BYOK store: a load started during a mutation still clears both busy flags"
   await pendingLoad;
   assert.equal(store.peek("codex")?.loading, false);
   assert.equal(store.peek("codex")?.view?.fingerprint, "fp-2");
+});
+
+
+test("BYOK preview is read-only, keeps content visible, and latest budget response wins", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore();
+  const store = useByokApplicationsStore();
+  const calls = installDeferredFetch();
+  const load = store.inspect("copilot");
+  await waitForCalls(calls, 1);
+  calls[0]!.resolve(viewBody({ client: "copilot", fingerprint: "saved" }));
+  await load;
+  const first = store.preview("copilot", { targetPath: null });
+  const latest = store.preview("copilot", { copilotTokenBudget: { maxInputTokens: 6000, maxOutputTokens: 2000 } });
+  await waitForCalls(calls, 3);
+  assert.ok(calls[1]!.url.endsWith("/copilot/preview"));
+  assert.equal(calls[1]!.method, "POST");
+  assert.deepEqual(calls[1]!.body, { targetPath: null });
+  assert.equal(store.peek("copilot")?.view?.fingerprint, "saved");
+  assert.equal(store.peek("copilot")?.loading, true);
+  calls[2]!.resolve(viewBody({ fingerprint: "new-budget", preview: { planFingerprint: "new-plan" } }));
+  assert.equal(await latest, true);
+  calls[1]!.resolve(viewBody({ fingerprint: "old-budget", preview: { planFingerprint: "old-plan" } }));
+  assert.equal(await first, false);
+  assert.equal(store.peek("copilot")?.view?.preview?.planFingerprint, "new-plan");
+  assert.equal(store.peek("copilot")?.loading, false);
+});
+
+test("discard or session teardown prevents a pending preview from committing", async () => {
+  for (const cancel of ["discard", "logout"] as const) {
+    setActivePinia(createPinia()); useControlPlaneStore();
+    const store = useByokApplicationsStore();
+    const calls = installDeferredFetch();
+    const pending = store.preview("codex", { targetPath: null });
+    await waitForCalls(calls, 1);
+    if (cancel === "discard") store.discardPreview("codex");
+    else useSessionStore().dropSession();
+    calls[0]!.resolve(viewBody({ preview: { planFingerprint: "cancelled" } }));
+    assert.equal(await pending, false);
+    assert.equal(store.peek("codex")?.view?.preview, undefined);
+  }
 });

@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   BYOK_CLIENTS,
+  byokReviewGate,
+  BYOK_REVIEW_GATE_KEYS,
+  copilotTokenBudgetValid,
   BYOK_CLIENT_LABELS,
   BYOK_STATUS_FALLBACK,
   HARNESS_DEFAULT_KEY_NAMES,
@@ -16,8 +19,8 @@ import {
   refreshConnectionAfterHarnessMutation,
 } from "./byok-applications.ts";
 
-test("client ids are the fixed four and labels are brand names", () => {
-  assert.deepEqual([...BYOK_CLIENTS], ["codex", "kimi", "minimax", "zcode"]);
+test("client ids include the supported native applications and labels are brand names", () => {
+  assert.deepEqual([...BYOK_CLIENTS], ["codex", "kimi", "minimax", "zcode", "copilot"]);
   for (const client of BYOK_CLIENTS) {
     assert.equal(typeof BYOK_CLIENT_LABELS[client], "string");
     assert.equal(normalizeByokClient(client), client);
@@ -34,12 +37,14 @@ test("each harness has a named ordinary Key and never a picker id", () => {
     kimi: "kimi-code",
     minimax: "minimax-code",
     zcode: "zcode",
+    copilot: "copilot",
   });
 });
 
 test("applications tab deep link: byok clients and dsh, unknown falls back to dsh", () => {
   assert.equal(readApplicationsTab("?view=applications&app=codex"), "codex");
   assert.equal(readApplicationsTab("?view=applications&app=zcode"), "zcode");
+  assert.equal(readApplicationsTab("?view=applications&app=copilot"), "copilot");
   assert.equal(readApplicationsTab("?view=applications&app=dsh"), "dsh");
   assert.equal(readApplicationsTab("?view=applications&app=nope"), "dsh");
   assert.equal(readApplicationsTab("?view=applications"), "dsh");
@@ -118,4 +123,28 @@ test("connection reload still runs when the captured session is unchanged", asyn
     ran = true;
   }, { captured: 4, current: () => 4 });
   assert.equal(ran, true);
+});
+
+test("Copilot budgets accept positive integer wire values only", () => {
+  assert.equal(copilotTokenBudgetValid(100_000, 8_192), true);
+  for (const invalid of [null, 0, -1, 0.5, NaN, Infinity, 4_294_967_296]) {
+    assert.equal(copilotTokenBudgetValid(invalid, 8_192), false);
+    assert.equal(copilotTokenBudgetValid(100_000, invalid), false);
+  }
+});
+
+
+test("preview acknowledgements independently gate takeover, overwritten fields and customized row removal", () => {
+  const view = {
+    configureSupported: true, fingerprint: "file", requiresClosedClient: true,
+    preview: { planFingerprint: "plan", requiresTakeover: true, requiresOverwrite: true, removedModelsWithCustomizations: ["m"] },
+  } as unknown as import("../api/byok-applications.ts").ByokApplicationView;
+  const ack = { closed: false, takeover: false, overwrite: false, removal: false };
+  assert.equal(byokReviewGate(null, ack), "unprepared");
+  assert.equal(byokReviewGate(view, ack), "closed_client");
+  ack.closed = true; assert.equal(byokReviewGate(view, ack), "takeover");
+  ack.takeover = true; assert.equal(byokReviewGate(view, ack), "overwrite");
+  ack.overwrite = true; assert.equal(byokReviewGate(view, ack), "removal");
+  ack.removal = true; assert.equal(byokReviewGate(view, ack), "ready");
+  assert.deepEqual(Object.keys(BYOK_REVIEW_GATE_KEYS).sort(), ["ready", "unprepared", "closed_client", "takeover", "overwrite", "removal"].sort());
 });

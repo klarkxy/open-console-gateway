@@ -19,6 +19,7 @@ import {
 
 type ByokApi = {
   inspect: (client: string, targetPath?: string) => Promise<ByokApplicationView>;
+  preview: (client: string, input: Record<string, unknown>) => Promise<ByokApplicationView>;
   configure: (client: string, input: Record<string, unknown>, expectation: unknown) => Promise<ByokApplicationView>;
   remove: (client: string, input: Record<string, unknown>, expectation: unknown) => Promise<ByokApplicationView>;
   recover: (client: string, input: Record<string, unknown>, expectation: unknown) => Promise<ByokApplicationView>;
@@ -66,6 +67,9 @@ function byokHarnessPlugin() {
       export const NSelect = pass;
       export const NInput = defineComponent({ inheritAttrs: false, props: { value: String }, setup(props, { attrs }) {
         return () => h("input", { ...attrs, value: props.value });
+      } });
+      export const NInputNumber = defineComponent({ inheritAttrs: false, props: { value: Number, inputProps: Object }, setup(props, { attrs }) {
+        return () => h("input", { ...attrs, ...props.inputProps, value: props.value });
       } });
       export const NCheckbox = defineComponent({ inheritAttrs: false, props: { checked: Boolean }, setup(props, { attrs, slots }) {
         return () => h("label", { ...attrs, "data-checked": props.checked }, slots.default?.());
@@ -141,6 +145,8 @@ function byokHarnessPlugin() {
 function byokView(overrides: Record<string, unknown> = {}): ByokApplicationView {
   return {
     client: "codex",
+    adopted: false,
+    copilotTokenBudget: null,
     status: "ready",
     detected: true,
     configPath: "C:\\Users\\author\\.codex\\config.toml",
@@ -160,6 +166,12 @@ function byokView(overrides: Record<string, unknown> = {}): ByokApplicationView 
     revision: { revision: 7, processGeneration: 3, pricingRevision: "p" },
     ...overrides,
   } as ByokApplicationView;
+}
+
+function updatePreview(overrides: Record<string, unknown> = {}) {
+  return { planFingerprint: "plan-1", addedModelIds: ["ocg/model-a"], removedModelIds: [], updatedModelIds: [],
+    previousDefaultModelId: null, defaultModelId: "ocg/model-a", requiresTakeover: false, requiresOverwrite: false,
+    removedModelsWithCustomizations: [], ...overrides };
 }
 
 function requestError(message: string, status: number): Error {
@@ -255,6 +267,7 @@ async function mount(options: {
     }) as ByokApi[K];
   const api: ByokApi = {
     inspect: record("inspect", options.inspect),
+    preview: record("preview", async (client) => byokView({ client, preview: updatePreview() })),
     configure: record("configure", async () => { throw new Error("configure not stubbed"); }),
     remove: record("remove", async () => { throw new Error("remove not stubbed"); }),
     recover: record("recover", async () => { throw new Error("recover not stubbed"); }),
@@ -416,9 +429,9 @@ test("logout during configure does not start a connection reload after the recei
     pendingConfigure.resolve(byokView({ status: "configured", configuredModelIds: ["ocg/model-a"] }));
     await pendingSave;
     await settle();
-    assert.equal(dialogOf(mounted.root), undefined, "successful save still closes");
+    assert.equal(dialogOf(mounted.root), undefined, "session change closes the old confirmation");
     const messages = (globalThis as unknown as { __byokMessages: Array<{ type: string }> }).__byokMessages;
-    assert.equal(messages.some((entry) => entry.type === "success"), true);
+    assert.equal(messages.some((entry) => entry.type === "success"), false);
     assert.equal(mounted.connection.reloadCount, 0, "logout must skip the delayed plaintext reload");
   } finally {
     mounted.app.unmount();
@@ -473,7 +486,7 @@ test("remove works without a current Key or model and sends no keyId", async () 
   }
 });
 
-test("a 409 configure closes the dialog, surfaces an error and reloads the status", async () => {
+test("a 409 configure prepares a new plan and never replays the write", async () => {
   let inspections = 0;
   const mounted = await mount({
     inspect: async () => {
@@ -488,8 +501,11 @@ test("a 409 configure closes the dialog, surfaces an error and reloads the statu
     (closedClientCheckbox(dialogOf(mounted.root)!).props["onUpdate:checked"] as (value: boolean) => void)(true);
     await settle();
     await click(confirmButton(dialogOf(mounted.root)!));
-    assert.equal(dialogOf(mounted.root), undefined, "dialog closes on conflict");
-    assert.equal(inspections, 2, "status reloads after the conflict");
+    assert.ok(dialogOf(mounted.root), "new preview remains available for review");
+    assert.equal(confirmButton(dialogOf(mounted.root)!).props.disabled, true, "acknowledgements reset on conflict");
+    assert.equal(mounted.calls.filter((entry) => entry.method === "configure").length, 1);
+    assert.equal(mounted.calls.filter((entry) => entry.method === "preview").length, 2);
+    assert.equal(inspections, 1);
     const errors = walkHostNodes(mounted.root).filter(
       (node) => node.props.type === "error" && typeof node.props.title === "string",
     );
@@ -499,7 +515,7 @@ test("a 409 configure closes the dialog, surfaces an error and reloads the statu
   }
 });
 
-test("revisit renders cached inspection without a second fetch; Refresh inspects again", async () => {
+test("revisit refreshes inspection and Refresh inspects again", async () => {
   let inspections = 0;
   const inspect = async () => {
     inspections += 1;
@@ -510,10 +526,10 @@ test("revisit renders cached inspection without a second fetch; Refresh inspects
   first.app.unmount();
   const second = await mount({ inspect, pinia: first.pinia, connection: first.connection });
   try {
-    assert.equal(inspections, 1, "cached revisit must not inspect again");
+    assert.equal(inspections, 2, "revisit refreshes the cached status");
     assert.ok(findByClass(second.root, "byok-actions"));
     await click(refreshButton(second.root));
-    assert.equal(inspections, 2, "explicit Refresh inspects again");
+    assert.equal(inspections, 3, "explicit Refresh inspects again");
   } finally {
     second.app.unmount();
   }
@@ -539,4 +555,175 @@ test("remount while inspect is pending joins the in-flight request", async () =>
   } finally {
     second.app.unmount();
   }
+});
+
+
+function configureAction(root: HostNode): HostNode {
+  return walkHostNodes(findByClass(root, "byok-actions")!).find((node) => node.type === "button" && node.props.type === "primary")!;
+}
+function acknowledge(dialog: HostNode, kind: string): void {
+  const box = walkHostNodes(dialog).find((node) => node.props["data-ack"] === kind)!;
+  (box.props["onUpdate:checked"] as (value: boolean) => void)(true);
+}
+function cancelButton(dialog: HostNode): HostNode {
+  return walkHostNodes(dialog).find((node) => node.type === "button" && node.props.quaternary !== undefined)!;
+}
+
+test("all five clients prepare fresh plans and separately require takeover, overwrite and customized removal acknowledgement", async () => {
+  for (const client of ["codex", "kimi", "minimax", "zcode", "copilot"]) {
+    const mounted = await mount({ client, inspect: async () => byokView({ client, status: "conflict" }), api: {
+      preview: async () => byokView({ client, fingerprint: "fresh-file", revision: { revision: 22, processGeneration: 8, pricingRevision: "p" },
+        preview: updatePreview({ requiresTakeover: true, requiresOverwrite: true, removedModelIds: ["custom-row"], removedModelsWithCustomizations: ["custom-row"], updatedModelIds: ["route-row"] }) }),
+      configure: async () => byokView({ client, status: "configured" }),
+    } });
+    try {
+      await click(configureAction(mounted.root));
+      assert.equal(mounted.calls.filter((entry) => entry.method === "preview").length, 1);
+      for (const kind of ["closed", "takeover", "overwrite", "removal"]) {
+        assert.equal(confirmButton(dialogOf(mounted.root)!).props.disabled, true);
+        acknowledge(dialogOf(mounted.root)!, kind); await settle();
+      }
+      assert.equal(confirmButton(dialogOf(mounted.root)!).props.disabled, false);
+      assert.deepEqual(walkHostNodes(dialogOf(mounted.root)!).filter((node) => node.props["data-delta"]).map((node) => node.props["data-delta"]), ["added", "removed", "updated", "default"]);
+      await click(confirmButton(dialogOf(mounted.root)!));
+      const call = mounted.calls.find((entry) => entry.method === "configure")!;
+      assert.deepEqual(call.args[2], { expectedRevision: 22, processGeneration: 8 });
+      const input = call.args[1] as Record<string, unknown>;
+      assert.equal(input.expectedFingerprint, "fresh-file"); assert.equal(input.previewFingerprint, "plan-1");
+      assert.equal(input.acknowledgeTakeover, true); assert.equal(input.acknowledgeOverwrite, true); assert.equal(input.acknowledgeRemoval, true);
+      assert.equal("copilotTokenBudget" in input, false, "unchanged per-model budgets remain backend-owned");
+    } finally { mounted.app.unmount(); }
+  }
+});
+
+test("cancel during preparation has no durable effects and late preview cannot reopen the modal", async () => {
+  const pending = deferred<ByokApplicationView>();
+  const mounted = await mount({ inspect: async () => byokView(), api: { preview: () => pending.promise } });
+  try {
+    await click(configureAction(mounted.root));
+    assert.equal(confirmButton(dialogOf(mounted.root)!).props.disabled, true);
+    await click(cancelButton(dialogOf(mounted.root)!));
+    pending.resolve(byokView({ preview: updatePreview() })); await settle();
+    assert.equal(dialogOf(mounted.root), undefined);
+    assert.equal(mounted.calls.filter((entry) => ["configure", "remove", "recover"].includes(entry.method)).length, 0);
+    await click(configureAction(mounted.root));
+    assert.equal(mounted.calls.filter((entry) => entry.method === "preview").length, 2);
+  } finally { mounted.app.unmount(); }
+});
+
+test("Copilot restores saved budgets on reopen and edits prepare a new plan without an implicit write", async () => {
+  const budget = { maxInputTokens: 24000, maxOutputTokens: 4000 };
+  const mounted = await mount({ client: "copilot", inspect: async () => byokView({ client: "copilot", copilotTokenBudget: budget }),
+    api: { preview: async (_client, input) => byokView({ client: "copilot", copilotTokenBudget: input.copilotTokenBudget ?? budget, preview: updatePreview() }) } });
+  try {
+    await click(configureAction(mounted.root));
+    const numberInput = () => walkHostNodes(dialogOf(mounted.root)!).find((node) => node.props.id === "copilot-input-copilot")!;
+    assert.equal(numberInput().props.value, 24000);
+    acknowledge(dialogOf(mounted.root)!, "closed"); await settle();
+    (numberInput().props["onUpdate:value"] as (value: number) => void)(32000); await settle();
+    assert.equal(confirmButton(dialogOf(mounted.root)!).props.disabled, true, "new plan resets previous acknowledgement");
+    assert.equal(mounted.calls.filter((entry) => entry.method === "preview").length, 2);
+    assert.deepEqual(mounted.calls.filter((entry) => entry.method === "preview")[1]!.args[1], { targetPath: null, copilotTokenBudget: { maxInputTokens: 32000, maxOutputTokens: 4000 } });
+    await click(cancelButton(dialogOf(mounted.root)!));
+    await click(configureAction(mounted.root));
+    assert.equal(numberInput().props.value, 24000, "reopen restores the saved budget supplied by fresh preparation");
+    assert.equal(mounted.calls.filter((entry) => entry.method === "configure").length, 0);
+  } finally { mounted.app.unmount(); }
+});
+
+test("remove and recovery inspect again before confirmation and capture the fresh fingerprint", async () => {
+  for (const mode of ["remove", "recover"] as const) {
+    let inspections = 0;
+    const mounted = await mount({ inspect: async () => byokView({ fingerprint: `file-${++inspections}`, removeSupported: mode === "remove", recoverySupported: mode === "recover", adopted: true }),
+      api: { [mode]: async () => byokView() } });
+    try {
+      const secondary = walkHostNodes(findByClass(mounted.root, "byok-actions")!).find((node) => node.type === "button" && node.props.secondary !== undefined)!;
+      await click(secondary);
+      assert.equal(inspections, 2);
+      acknowledge(dialogOf(mounted.root)!, "closed"); await settle();
+      await click(confirmButton(dialogOf(mounted.root)!));
+      const call = mounted.calls.find((entry) => entry.method === mode)!;
+      assert.equal((call.args[1] as Record<string, unknown>).expectedFingerprint, "file-2");
+    } finally { mounted.app.unmount(); }
+  }
+});
+
+
+test("a failed write invalidates its plan and refreshes recovery status while retaining the review", async () => {
+  let inspections = 0;
+  const mounted = await mount({ inspect: async () => byokView({ status: ++inspections === 1 ? "ready" : "recovery_required", configureSupported: inspections === 1, recoverySupported: inspections > 1 }),
+    api: { configure: async () => { throw new Error("disk write interrupted"); } } });
+  try {
+    await click(configureAction(mounted.root));
+    acknowledge(dialogOf(mounted.root)!, "closed"); await settle();
+    await click(confirmButton(dialogOf(mounted.root)!));
+    assert.ok(dialogOf(mounted.root));
+    assert.equal(confirmButton(dialogOf(mounted.root)!).props.disabled, true);
+    assert.equal(inspections, 2);
+    assert.equal(mounted.connection.reloadCount, 1);
+    assert.equal(mounted.calls.filter((entry) => entry.method === "configure").length, 1);
+    await click(cancelButton(dialogOf(mounted.root)!));
+    assert.equal(walkHostNodes(findByClass(mounted.root, "byok-actions")!).filter((node) => node.type === "button").length, 1, "only recovery remains available");
+  } finally { mounted.app.unmount(); }
+});
+
+test("a 409 refresh captures new file, plan and CAS tokens only after another manual confirmation", async () => {
+  let preparations = 0;
+  let writes = 0;
+  const mounted = await mount({ inspect: async () => byokView(), api: {
+    preview: async () => { const n = ++preparations; return byokView({ fingerprint: `file-${n}`, revision: { revision: 10 + n, processGeneration: 4, pricingRevision: "p" }, preview: updatePreview({ planFingerprint: `plan-${n}`, addedModelIds: [`model-${n}`] }) }); },
+    configure: async () => { if (++writes === 1) throw requestError("plan stale", 409); return byokView({ status: "configured" }); },
+  } });
+  try {
+    await click(configureAction(mounted.root));
+    acknowledge(dialogOf(mounted.root)!, "closed"); await settle();
+    await click(confirmButton(dialogOf(mounted.root)!));
+    assert.equal(writes, 1); assert.equal(preparations, 2);
+    assert.equal(confirmButton(dialogOf(mounted.root)!).props.disabled, true);
+    acknowledge(dialogOf(mounted.root)!, "closed"); await settle();
+    await click(confirmButton(dialogOf(mounted.root)!));
+    const latest = mounted.calls.filter((entry) => entry.method === "configure")[1]!;
+    assert.equal((latest.args[1] as Record<string, unknown>).expectedFingerprint, "file-2");
+    assert.equal((latest.args[1] as Record<string, unknown>).previewFingerprint, "plan-2");
+    assert.deepEqual(latest.args[2], { expectedRevision: 12, processGeneration: 4 });
+    assert.equal(writes, 2);
+  } finally { mounted.app.unmount(); }
+});
+
+test("session change during preview prevents confirmation and does not cause a write", async () => {
+  const pending = deferred<ByokApplicationView>();
+  const mounted = await mount({ inspect: async () => byokView(), api: { preview: () => pending.promise } });
+  try {
+    await click(configureAction(mounted.root));
+    mounted.connection.sessionEpoch += 1;
+    pending.resolve(byokView({ preview: updatePreview() })); await settle();
+    acknowledge(dialogOf(mounted.root)!, "closed"); await settle();
+    assert.equal(confirmButton(dialogOf(mounted.root)!).props.disabled, true);
+    await click(confirmButton(dialogOf(mounted.root)!));
+    assert.equal(mounted.calls.filter((entry) => entry.method === "configure").length, 0);
+  } finally { mounted.app.unmount(); }
+});
+
+
+test("Copilot budget typing remains available during preparation and an older response cannot enable confirm", async () => {
+  const earlier = deferred<ByokApplicationView>();
+  const later = deferred<ByokApplicationView>();
+  let previews = 0;
+  const mounted = await mount({ client: "copilot", inspect: async () => byokView({ client: "copilot" }), api: {
+    preview: async () => ++previews === 1 ? byokView({ client: "copilot", preview: updatePreview() }) : previews === 2 ? earlier.promise : later.promise,
+  } });
+  try {
+    await click(configureAction(mounted.root));
+    const input = () => walkHostNodes(dialogOf(mounted.root)!).find((node) => node.props.id === "copilot-input-copilot")!;
+    (input().props["onUpdate:value"] as (value: number) => void)(6); await settle();
+    assert.equal(input().props.disabled, false, "a read-only request must not interrupt typing");
+    (input().props["onUpdate:value"] as (value: number) => void)(6000); await settle();
+    assert.equal(confirmButton(dialogOf(mounted.root)!).props.disabled, true);
+    later.resolve(byokView({ client: "copilot", preview: updatePreview({ planFingerprint: "latest-budget" }) })); await settle();
+    earlier.resolve(byokView({ client: "copilot", preview: updatePreview({ planFingerprint: "older-budget" }) })); await settle();
+    assert.equal(confirmButton(dialogOf(mounted.root)!).props.disabled, true, "the new plan still needs manual acknowledgement");
+    acknowledge(dialogOf(mounted.root)!, "closed"); await settle();
+    assert.equal(confirmButton(dialogOf(mounted.root)!).props.disabled, false);
+    assert.equal(input().props.value, 6000);
+  } finally { mounted.app.unmount(); }
 });

@@ -142,29 +142,27 @@ Underlying static, preset, and probe evidence remains in the contract, but is no
 
 Every refreshable scope takes its model list from that Provider's official `/models` catalog when you **Refresh model catalog**. Protocols come from official documentation or, for configurable HTTP connections, from the saved routes. **OpenCode Go** reads public `https://opencode.ai/zen/go/v1/models` without a Key and uses the per-model endpoint table at `https://opencode.ai/docs/go/`; `mimo-v2.6-flash` is Chat Completions only. **Command Code GOAT** reads its public `https://api.commandcode.ai/provider/v1/models` directory. Its per-model `supported_endpoints` and the official documentation are authoritative; `xiaomi/mimo-v2.6-flash` currently has Chat Completions and Responses evidence only. Do not infer an omitted capability.
 
-The compact source line, refresh action, and model list share one content panel. A catalog refresh is a control-plane action. It preserves existing switches and probe observations, never expands grants, and uses an already authorized ready Key only when the directory requires one. MiniMax CN sealed inference/catalog routes use `https://api.minimax.cn/v1` plus the documented `/anthropic` path; its older usage endpoint is unchanged. Kimi refreshes `https://api.kimi.com/coding/v1/models` with a ready Key. Kimi's rolling product IDs `kimi-for-coding` and `kimi-for-coding-highspeed` are published unchanged; OCG does not relabel them as fixed model versions. Their saved rows activate only code-owned sealed mappings; unmatched rows remain exact raw model IDs.
+The compact source line, refresh action, and model list share one content panel. A catalog refresh is a control-plane action. It preserves existing switches and probe observations, never expands grants, and uses an already authorized ready Key only when the directory requires one. MiniMax CN sealed inference/catalog routes use `https://api.minimax.cn/v1` plus the documented `/anthropic` path; its older usage endpoint is unchanged. Kimi refreshes `https://api.kimi.com/coding/v1/models` with a ready Key. Kimi's rolling product IDs `kimi-for-coding` and `kimi-for-coding-highspeed` are published unchanged; OCG does not relabel them as fixed model versions. Their fresh aliases derive from the complete saved catalog; saved legacy aliases remain unchanged and every row keeps its exact raw model ID.
 
-Before the first successful refresh the catalog is empty. After success, the saved official snapshot is authoritative. Newly discovered models appear enabled with their official known or configured protocols, except that GOAT's first snapshot enables only models included in its plan. Other GOAT models in that first snapshot stay off until you turn them on; models first discovered in later refreshes use the normal enabled default. An existing model remains off when its saved switch is off; a model with no protocol evidence waits for official documentation and can be enabled when refresh adds that declaration. Existing preferences, overrides, and probe results for surviving models are preserved. A failed or empty refresh keeps the previous snapshot.
+Before the first successful refresh the catalog is empty. After success, the saved official snapshot is authoritative. Fresh GOAT rows are enabled when official protocol evidence authorizes them, regardless of whether the row came from the first or a later refresh or matches a plan-name list; rows without that evidence do not infer a protocol or become enabled automatically. An existing row with a saved ForceOff remains off across refreshes. Existing preferences, overrides, and probe results for surviving models are preserved. A failed or empty refresh keeps the previous snapshot.
 
 Migrated Custom API connections retain public-name → upstream-ID mappings and
 `public_only` lookup; discovery never silently replaces them. Ordinary new
 configurable HTTP connections may also accept a unique exact upstream ID. Command Code uses its public official
-`/models` directory: the initial GOAT cohort follows the plan's included-model
-list, while genuinely new models discovered by later refreshes enable once
-their supported protocol is documented. Saved switches remain in effect.
+`/models` directory. GOAT enablement follows documented protocol evidence for
+each fresh row and is independent of first-refresh timing or a plan-name list;
+saved ForceOff switches remain in effect.
 
 Local catalogs feed resolution without another request-time upstream call.
-Built-in Alias authority is static and code-owned: the original OpenCode Go
-table supplies Go names, while sealed MiniMax CN, Kimi CN, and selected GOAT
-long-name maps supply provider aliases without creating Go routes. Command
-removes the Provider namespace and reuses an existing code-owned Alias; known
-plan suffixes are removed only when the shorter name is already authorized.
-For example, `nvidia/nemotron-3-ultra-550b-a55b` uses Alias
-`nemotron-3-ultra`. Saved CN rows activate only their exact sealed map.
-Command ids that contain `/` publish a unique last-segment lowercase kebab Alias
-(for example `google/gemini-3.5-flash` → `gemini-3.5-flash`). Slash-free unmatched
-Command rows and unmatched MiniMax/Kimi rows remain exact raw model IDs and are
-not advertised as new Aliases; CN mappings keep the upstream ID's exact spelling. A Zen Free row
+Go alias seeds remain code-owned; fresh MiniMax CN, Kimi CN, and GOAT
+aliases derive from the complete saved catalog. A fresh row uses its unique
+normalized final slash-separated leaf, while a saved legacy alias remains as
+stored. The old Nemotron short name is retained only for an upgraded saved
+alias; a fresh verbose catalog leaf stays verbose. Saved Kimi rolling names
+remain unchanged, while a fresh `k3` row uses `k3`. Command removes the
+Provider namespace and strips a known plan suffix only when the shorter name is
+already authorized. Normalization collisions and names reserved to raw-only Go
+rows stay unpublished; every row retains its exact raw upstream ID. Explicit saved names keep their target within the same provider; a later row whose generated name conflicts keeps its exact raw pin and needs a distinct public name. A Zen Free row
 publishes its suffix-stripped Alias from the official `-free` suffix;
 the original `-free` ID remains an exact raw pin,
 as described under
@@ -180,7 +178,7 @@ There is no price table on this page. The gateway does not fetch a provider pric
 - Command Code GOAT account cards can explicitly **Refresh quota** to read official percentage windows from Command Code's first-party `/alpha/billing/credits` endpoint. That action also refreshes the GOAT model catalog. The official CLI uses this endpoint, although the public Provider API does not document it. When the reading includes a percentage, the window uses it against a full window of 100 and keeps its reset. A dollar amount is not relabeled as a percentage. You can save a manual percentage afterwards. With no official reading and no manual percentage, the window stays unavailable and is not shown as 0. There is no automatic GOAT usage sync.
 - Zen Free uses an egress-IP-shared free quota. Successful requests keep token counts and are not given a local price.
 - Custom API keeps a missing cost unknown. It is not shown as zero or free, and it does not debit a timed quota window. A manual credit balance is recorded separately and is not reduced by the request. There is no generic official usage window. Known-host current-balance reads (DeepSeek / Moonshot / StepFun API) are display-only.
-- Ollama Cloud refreshes the public keyless directory `https://ollama.com/v1/models` without selecting an account. Discovered ids enable Chat Completions immediately; Responses and Messages are unsupported, and there is no protocol-probe entry. A refreshed catalog may append one routeable Ollama mapping to a Go-owned alias only when stripping the `:` tag leaves exactly one catalog match. Date-tagged snapshot ids come from the runtime catalog. Ollama has no official usage API in this product. The gateway does not fetch a price list or estimate a monthly credit meter from request prices. The account form still presents Pro, Max, or Team and a purchase date. A manual percentage does not require a price. A month percentage can be saved before a tier is chosen. A week percentage is not accepted. Without an official or manual usage observation, usage stays unavailable. Existing accounts stay routeable. Previously stored billing rows stay on disk and are not recalculated.
+- Ollama Cloud refreshes the public keyless directory `https://ollama.com/v1/models` without selecting an account. Discovered ids enable Chat Completions immediately; Responses and Messages are unsupported, and there is no protocol-probe entry. Every catalog model contributes a normalized alias from its stem without the `:tag`; when several tags share a stem, normalized full-tag aliases (with `:` changed to `-`) distinguish them, and exactly one administrator-pinned tag may own the short stem. Raw upstream IDs remain exact pins. Date-tagged snapshot ids come from the runtime catalog. Ollama has no official usage API in this product. The gateway does not fetch a price list or estimate a monthly credit meter from request prices. The account form still presents Pro, Max, or Team and a purchase date. A manual percentage does not require a price. A month percentage can be saved before a tier is chosen. A week percentage is not accepted. Without an official or manual usage observation, usage stays unavailable. Existing accounts stay routeable. Previously stored billing rows stay on disk and are not recalculated.
 - MiniMax CN and Kimi Code CN do not price requests in OCG, but their account cards can manually read the official subscription windows (`/token_plan/remains` and `/usages`). These snapshots are display-only and do not gate inference.
 - Custom API and user-defined Provider cards whose stored Endpoint host is exactly `api.deepseek.com`, `api.moonshot.cn`, or `api.moonshot.ai` can manually read that official current balance. Other Custom hosts are not probed.
 

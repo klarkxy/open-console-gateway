@@ -1,15 +1,18 @@
 //! BYOK control plane: same model publication, enabled Keys, CAS, and no secret responses.
 use super::applications::{DashboardReceipt, opaque_subject};
-use super::types::{ByokApplication, ByokConfigureRequest, ByokMutationRequest};
+use super::types::{
+    ByokApplication, ByokConfigureRequest, ByokMutationRequest, ByokPreviewRequest,
+};
 use crate::byok_application::ByokStatus;
 use crate::log_types::{OperationMetadata, OperationOutcome};
 use crate::{
     byok_application::{
         ByokClient, ByokError, ByokErrorKind, ByokHostRequest, ByokInspection, ByokModel,
-        ByokSecret,
+        ByokReview, ByokSecret,
     },
     dashboard_v3::{
-        ControlRevision, MutationExpectation, V3ApiError, check_expectation, parse_mutation_json,
+        ControlRevision, MutationExpectation, V3ApiError, check_expectation, parse_json,
+        parse_mutation_json,
     },
     model_metadata::{ModelMetadata, read_published_protocol_profile},
     state::CoreState,
@@ -50,6 +53,37 @@ pub(super) async fn inspect(
     Ok(Json(result))
 }
 
+pub(super) async fn preview(
+    State(state): State<CoreState>,
+    Path(client): Path<String>,
+    body: Bytes,
+) -> Result<Json<ByokApplication>, V3ApiError> {
+    let client = parse_client(&state, &client)?;
+    let input = parse_json::<ByokPreviewRequest>(&body)?;
+    let result = tokio::task::spawn_blocking(move || {
+        let host = state.byok_application_host().ok_or_else(|| {
+            V3ApiError::precondition_failed_at(
+                &state,
+                "Native application configuration is unavailable on this host",
+            )
+        })?;
+        let _guard = state.settings_update.lock();
+        let models = available_models_locked(&state)?;
+        let inspection = host(ByokHostRequest::Preview {
+            client,
+            target_path: clean_target(input.target_path),
+            gateway_v1_url: gateway_url(&state),
+            models,
+            copilot_token_budget: input.copilot_token_budget,
+        })
+        .map_err(|error| host_error(&state, error))?;
+        Ok::<_, V3ApiError>(payload_locked(&state, inspection))
+    })
+    .await
+    .map_err(|_| V3ApiError::internal("BYOK preview failed"))??;
+    Ok(Json(result))
+}
+
 pub(super) async fn configure(
     State(state): State<CoreState>,
     Path(client): Path<String>,
@@ -73,6 +107,7 @@ async fn configure_work(
 ) -> (Result<ByokApplication, V3ApiError>, Option<(String, u64)>) {
     let created = std::sync::Arc::new(std::sync::Mutex::new(None));
     let slot = created.clone();
+    let error_state = state.clone();
     let joined = tokio::task::spawn_blocking(move || {
         let client = parse_client(&state, &client)?;
         let input = parse_mutation_json::<ByokConfigureRequest>(&body)?;
@@ -91,31 +126,54 @@ async fn configure_work(
                 process_generation: input.process_generation,
             },
         )?;
+        if client != ByokClient::Copilot && input.copilot_token_budget.is_some() {
+            return Err(V3ApiError::invalid_request_at(
+                &state,
+                "copilotTokenBudget is only valid for Copilot",
+            ));
+        }
         let models = available_models_locked(&state)?;
+        if let Some(budget)=input.copilot_token_budget {
+            crate::byok_application::with_copilot_token_budget(models.clone(),budget).map_err(|error|host_error(&state,error))?;
+        }
         if models.is_empty() {
             return Err(V3ApiError::precondition_failed_at(
                 &state,
                 "No models are published by this Key yet; configure a model source first",
             ));
         }
+        let review=ByokReview {
+            preview_fingerprint:input.preview_fingerprint,
+            acknowledge_takeover:input.acknowledge_takeover,
+            acknowledge_overwrite:input.acknowledge_overwrite,
+            acknowledge_removal:input.acknowledge_removal,
+        };
+        let target_path=clean_target(input.target_path);
+        host(ByokHostRequest::ValidateReviewed {
+            client,target_path:target_path.clone(),expected_fingerprint:input.expected_fingerprint.clone(),gateway_v1_url:gateway_url(&state),models:models.clone(),client_closed:input.client_closed,copilot_token_budget:input.copilot_token_budget,review:review.clone(),
+        }).map_err(|error|host_error(&state,error))?;
         let effect =
             super::applications::application_gateway_key_effect(&state, client.key_name())?;
         if let (Some(id), Some(revision)) = (effect.created_id, effect.revision) {
             *slot.lock().unwrap_or_else(|poison| poison.into_inner()) = Some((id, revision));
         }
-        let inspection = host(ByokHostRequest::Configure {
+        let inspection = host(ByokHostRequest::ConfigureReviewed {
             client,
-            target_path: clean_target(input.target_path),
+            target_path,
             expected_fingerprint: input.expected_fingerprint,
             gateway_v1_url: gateway_url(&state),
             secret: ByokSecret::new(effect.key),
             models,
-            // The host selects the existing public default or first model while
-            // holding its file lock and checking the inspected fingerprint.
-            default_model_id: None,
             client_closed: input.client_closed,
+            copilot_token_budget:input.copilot_token_budget,
+            review,
         })
-        .map_err(|e| host_error(&state, e))?;
+        .map_err(|mut error| {
+            if slot.lock().unwrap_or_else(|poison|poison.into_inner()).is_some() {
+                error.message.push_str(". The enabled application Key was retained for retry; refresh the application status to check whether native recovery is required");
+            }
+            host_error(&state,error)
+        })?;
         state.bump_settings_revision();
         Ok::<_, V3ApiError>(payload_locked(&state, inspection))
     })
@@ -126,7 +184,14 @@ async fn configure_work(
         .clone();
     let result = match joined {
         Ok(result) => result,
-        Err(_) => Err(V3ApiError::internal("BYOK configuration failed")),
+        Err(_) => Err(V3ApiError::internal_at(
+            &error_state,
+            if created.is_some() {
+                "BYOK configuration failed. The enabled application Key was retained for retry; refresh the application status to check whether native recovery is required"
+            } else {
+                "BYOK configuration failed"
+            },
+        )),
     };
     (result, created)
 }
@@ -238,7 +303,7 @@ fn byok_failed(status: ByokStatus, kind: &ByokKind) -> bool {
         ByokKind::Configure | ByokKind::Recover => {
             !matches!(status, ByokStatus::Configured | ByokStatus::Ready)
         }
-        ByokKind::Remove => !matches!(status, ByokStatus::NotDetected | ByokStatus::Ready),
+        ByokKind::Remove => false,
     }
 }
 

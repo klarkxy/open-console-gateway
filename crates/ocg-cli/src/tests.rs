@@ -340,7 +340,7 @@ async fn key_lifecycle_and_status_cover_cli_account_commands() {
         ping_keys(
             &state,
             Some(pending.id.as_str()),
-            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
             "ping",
             3,
         )
@@ -546,7 +546,7 @@ async fn cli_key_operations_reject_the_provider_owned_zen_singleton() {
         },
         KeyAction::Ping {
             id: Some(ZEN_FREE_ACCOUNT_ID.into()),
-            model: "deepseek-v4-flash-free".into(),
+            model: Some("deepseek-v4-flash-free".into()),
             message: "ping".into(),
             max_tokens: 3,
         },
@@ -653,13 +653,18 @@ async fn ping_keys_hits_configured_upstream_and_handles_empty_targets() {
         .unwrap()
         .id;
 
-    ping_keys(&state, None, "deepseek-v4-flash", "ping", 3)
+    seed_ping_catalog(
+        &state,
+        "deepseek-v4-flash",
+        UpstreamProtocolKind::ChatCompletions,
+    );
+    ping_keys(&state, None, Some("deepseek-v4-flash"), "ping", 3)
         .await
         .unwrap();
     ping_keys(
         &state,
         Some(account_id.as_str()),
-        "deepseek-v4-flash",
+        Some("deepseek-v4-flash"),
         "ping",
         3,
     )
@@ -668,11 +673,11 @@ async fn ping_keys_hits_configured_upstream_and_handles_empty_targets() {
     assert!(hits.load(Ordering::SeqCst) >= 2);
 
     toggle_account(&state, &account_id, false).unwrap();
-    ping_keys(&state, None, "deepseek-v4-flash", "ping", 3)
+    ping_keys(&state, None, Some("deepseek-v4-flash"), "ping", 3)
         .await
         .unwrap();
 
-    let missing = ping_keys(&state, Some("nope"), "deepseek-v4-flash", "ping", 3).await;
+    let missing = ping_keys(&state, Some("nope"), Some("deepseek-v4-flash"), "ping", 3).await;
     assert!(missing.is_err());
 
     let key_cipher_before = state
@@ -1108,7 +1113,7 @@ async fn explicit_cli_mutations_record_terminal_receipts_without_secrets() {
     assert!(!rejected_text.contains("pw-secret"));
     assert!(!rejected_text.contains("name is required"));
 
-    ping_keys(&state, None, "model-needle", "receipt-needle", 1)
+    ping_keys(&state, None, Some("model-needle"), "receipt-needle", 1)
         .await
         .unwrap();
     let empty_ping = operation_items(&state);
@@ -1198,10 +1203,15 @@ async fn explicit_cli_mutations_record_terminal_receipts_without_secrets() {
     config.proxy_mode = ocg_core::models::ProxyMode::Direct;
     config.non_stream_timeout_secs = 5;
     state.set_config(config).unwrap();
+    seed_ping_catalog(
+        &state,
+        "model-needle",
+        UpstreamProtocolKind::ChatCompletions,
+    );
     ping_keys(
         &state,
         Some(account_id.as_str()),
-        "model-needle",
+        Some("model-needle"),
         "receipt-needle",
         1,
     )
@@ -1328,4 +1338,174 @@ async fn serve_bind_failure_records_saved_port_as_partial_without_a_listener() {
 
     drop(occupied);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+fn seed_ping_catalog(
+    state: &ocg_core::state::CoreStateInner,
+    model: &str,
+    protocol: UpstreamProtocolKind,
+) {
+    let scope = ocg_core::provider_contracts::ContractScope::provider(OPENCODE_PROVIDER_ID);
+    let models = vec![model.to_string()];
+    let db = state.db.lock();
+    db.refresh_contract_catalog_preserving_settings(
+        &scope,
+        &models,
+        Utc::now(),
+        ocg_core::provider_contracts::CATALOG_SOURCE_OPENCODE_MODELS,
+        "https://example.test/models",
+    )
+    .unwrap();
+    db.apply_official_protocol_baseline(
+        &scope,
+        &models,
+        &ocg_core::goat::OfficialProtocolBaseline::mapped([(model, protocol)]),
+        Utc::now(),
+    )
+    .unwrap();
+    state.reload_provider_contracts_locked(&db).unwrap();
+}
+
+#[test]
+fn ping_parser_keeps_optional_and_explicit_model_selection() {
+    for (args, expected) in [
+        (vec!["ocg-manager-cli", "key", "ping"], None),
+        (
+            vec![
+                "ocg-manager-cli",
+                "key",
+                "ping",
+                "--model",
+                "future-selected",
+            ],
+            Some("future-selected"),
+        ),
+    ] {
+        let Commands::Key {
+            action: KeyAction::Ping { model, .. },
+        } = Cli::try_parse_from(args).unwrap().command
+        else {
+            panic!("expected ping");
+        };
+        assert_eq!(model.as_deref(), expected);
+    }
+}
+
+#[tokio::test]
+async fn default_ping_requires_saved_evidence_and_sends_exact_selected_protocol() {
+    for (protocol, path, expected) in [
+        (
+            UpstreamProtocolKind::ChatCompletions,
+            "/v1/chat/completions",
+            serde_json::json!({"model":"future-selected", "messages":[{"role":"user", "content":"custom ping"}], "max_tokens":3, "stream":false}),
+        ),
+        (
+            UpstreamProtocolKind::Responses,
+            "/v1/responses",
+            serde_json::json!({"model":"future-selected", "input":"custom ping", "max_output_tokens":16, "store":false, "stream":false}),
+        ),
+        (
+            UpstreamProtocolKind::Messages,
+            "/v1/messages",
+            serde_json::json!({"model":"future-selected", "messages":[{"role":"user", "content":"custom ping"}], "max_tokens":3, "stream":false}),
+        ),
+    ] {
+        let dir = temp_dir("default-ping-protocol");
+        let cipher = test_cipher();
+        let state = build_state(dir.clone(), cipher.clone()).unwrap();
+        key_command(
+            dir.clone(),
+            cipher,
+            KeyAction::Add {
+                name: "pingable".into(),
+                key: "synthetic-ping-key".into(),
+                username: None,
+                password: None,
+            },
+        )
+        .await
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (captured, receive) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let (header_end, content_length) = loop {
+                let mut chunk = [0; 4096];
+                let n = stream.read(&mut chunk).await.unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&chunk[..n]);
+                if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]);
+                    let len = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|len| len.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    break (end + 4, len);
+                }
+            };
+            while request.len() < header_end + content_length {
+                let mut chunk = [0; 4096];
+                let n = stream.read(&mut chunk).await.unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&chunk[..n]);
+            }
+            let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+            if protocol == UpstreamProtocolKind::Messages {
+                assert!(headers.contains("\r\nx-api-key: synthetic-ping-key\r\n"));
+                assert!(headers.contains("\r\nanthropic-version: 2023-06-01\r\n"));
+                assert!(!headers.contains("\r\nauthorization:"));
+            } else {
+                assert!(headers.contains("\r\nauthorization: bearer synthetic-ping-key\r\n"));
+                assert!(!headers.contains("\r\nx-api-key:"));
+                assert!(!headers.contains("\r\nanthropic-version:"));
+            }
+            assert!(headers.contains("\r\ncontent-type: application/json\r\n"));
+            captured.send(request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await
+                .unwrap();
+        });
+        let mut config = state.config();
+        config.upstream_base_url = format!("http://{addr}");
+        config.proxy_mode = ocg_core::models::ProxyMode::Direct;
+        state.set_config(config).unwrap();
+        assert!(
+            ping_keys(&state, None, None, "custom ping", 3)
+                .await
+                .is_err()
+        );
+        seed_ping_catalog(&state, "future-selected", protocol);
+        assert!(
+            ping_keys(&state, None, Some("unlisted-model"), "custom ping", 3)
+                .await
+                .is_err()
+        );
+        ping_keys(&state, None, None, "custom ping", 3)
+            .await
+            .unwrap();
+        let request = receive.await.unwrap();
+        let end = request
+            .windows(4)
+            .position(|bytes| bytes == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        assert!(
+            String::from_utf8_lossy(&request[..end])
+                .starts_with(&format!("POST {path} HTTP/1.1\r\n"))
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&request[end..]).unwrap(),
+            expected
+        );
+        server.await.unwrap();
+        drop(state);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

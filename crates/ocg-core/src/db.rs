@@ -51,6 +51,7 @@ pub struct Database {
 
 pub(crate) mod account_store;
 pub(crate) mod billing;
+mod catalog_compatibility;
 mod catalog_edit;
 pub(crate) mod cpa;
 pub(crate) mod credit_lifecycle;
@@ -349,7 +350,8 @@ pub const PRE_V59_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v59.";
 /// database gains operation receipts and logical request groups.
 pub const PRE_V65_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v65.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
-pub const CURRENT_SCHEMA_VERSION: i32 = 66;
+pub const CURRENT_SCHEMA_VERSION: i32 = 67;
+pub const PRE_V67_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v67.";
 
 pub const V57_SCHEMA_VERSION: i32 = 57;
 /// Canonical source schema for the v48 inert-column / empty-table cleanup.
@@ -4966,6 +4968,7 @@ impl Database {
         migrate_to_v64(&db.conn)?;
         migrate_to_v65(&db.conn, &db_path, is_fresh)?;
         migrate_to_v66(&db.conn)?;
+        catalog_compatibility::migrate_to_v67(&db.conn, &db_path, is_fresh)?;
 
         if let Some(cipher) = cipher {
             repair_legacy_account_ciphertext(&db.conn, cipher)?;
@@ -6575,9 +6578,6 @@ impl Database {
         source_url: &str,
     ) -> Result<PersistedScopeRow> {
         let tx = self.conn.unchecked_transaction()?;
-        let first_goat_refresh = scope.id() == COMMAND_CODE_PROVIDER_ID
-            && scope.kind_str() == SCOPE_KIND_PROVIDER
-            && load_scope_on(&tx, scope)?.is_none_or(|saved| saved.catalog_refreshed_at.is_none());
         preserve_disabled_catalog_models_on(self, scope, refreshed_at)?;
         upsert_contract_catalog_on(
             &tx,
@@ -6588,37 +6588,6 @@ impl Database {
             source_url,
             refreshed_at,
         )?;
-        if first_goat_refresh {
-            // The public Provider directory also lists models outside the GOAT
-            // plan. Seed only the plan's included cohort on the first refresh;
-            // later discoveries keep the normal auto-on behavior. Persist this
-            // as ordinary model switches so a later refresh preserves it.
-            for model in models {
-                if command_code_goat_includes_model(model) {
-                    continue;
-                }
-                for protocol in UpstreamProtocolKind::ALL {
-                    let has_saved_switch: bool = tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM provider_contract_model_protocol_overrides
-                         WHERE scope_kind = ?1 AND scope_id = ?2
-                           AND model_id = ?3 COLLATE NOCASE AND protocol = ?4)",
-                        params![scope.kind_str(), scope.id(), model, protocol.as_str()],
-                        |row| row.get(0),
-                    )?;
-                    if has_saved_switch {
-                        continue;
-                    }
-                    set_model_protocol_override_on(
-                        &tx,
-                        scope,
-                        model,
-                        protocol,
-                        ProtocolOverrideState::ForceOff,
-                        refreshed_at,
-                    )?;
-                }
-            }
-        }
         let row = load_scope_on(&tx, scope)?
             .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
         destination_store::refresh_builtin_catalog(self, scope)?;

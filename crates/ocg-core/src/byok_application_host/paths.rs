@@ -10,6 +10,7 @@ pub struct ResolvedTarget {
     pub client: ByokClient,
     pub path: PathBuf,
     pub discovery_source: String,
+    pub store_identity_hint: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -20,6 +21,7 @@ pub struct DiscoveredPaths {
     pub kimi: ResolvedTarget,
     pub minimax: ResolvedTarget,
     pub zcode: ResolvedTarget,
+    pub copilot: ResolvedTarget,
 }
 
 impl DiscoveredPaths {
@@ -29,6 +31,7 @@ impl DiscoveredPaths {
             kimi: discover_kimi(&user_home),
             minimax: discover_minimax(&user_home),
             zcode: discover_zcode(&user_home),
+            copilot: discover_copilot(&user_home),
             user_home,
         }
     }
@@ -39,6 +42,7 @@ impl DiscoveredPaths {
             ByokClient::Kimi => &self.kimi,
             ByokClient::Minimax => &self.minimax,
             ByokClient::Zcode => &self.zcode,
+            ByokClient::Copilot => &self.copilot,
         }
     }
 
@@ -62,6 +66,7 @@ impl DiscoveredPaths {
                     client,
                     path,
                     discovery_source: "explicit".into(),
+                    store_identity_hint: None,
                 })
             }
         }
@@ -74,11 +79,13 @@ fn discover_codex(user_home: &Path) -> ResolvedTarget {
             client: ByokClient::Codex,
             path: PathBuf::from(home).join("config.toml"),
             discovery_source: "CODEX_HOME".into(),
+            store_identity_hint: None,
         },
         None => ResolvedTarget {
             client: ByokClient::Codex,
             path: user_home.join(".codex").join("config.toml"),
             discovery_source: "default".into(),
+            store_identity_hint: None,
         },
     }
 }
@@ -89,11 +96,13 @@ fn discover_kimi(user_home: &Path) -> ResolvedTarget {
             client: ByokClient::Kimi,
             path: PathBuf::from(home).join("config.toml"),
             discovery_source: "KIMI_CODE_HOME".into(),
+            store_identity_hint: None,
         },
         None => ResolvedTarget {
             client: ByokClient::Kimi,
             path: user_home.join(".kimi-code").join("config.toml"),
             discovery_source: "default".into(),
+            store_identity_hint: None,
         },
     }
 }
@@ -104,6 +113,7 @@ fn discover_minimax(user_home: &Path) -> ResolvedTarget {
             client: ByokClient::Minimax,
             path: PathBuf::from(dir).join("config.yaml"),
             discovery_source: "MINIMAX_DATA_DIR".into(),
+            store_identity_hint: None,
         };
     }
     if let Some(dir) = nonempty_env("MAVIS_DATA_DIR") {
@@ -111,12 +121,14 @@ fn discover_minimax(user_home: &Path) -> ResolvedTarget {
             client: ByokClient::Minimax,
             path: PathBuf::from(dir).join("config.yaml"),
             discovery_source: "MAVIS_DATA_DIR".into(),
+            store_identity_hint: None,
         };
     }
     ResolvedTarget {
         client: ByokClient::Minimax,
         path: user_home.join(".minimax").join("config.yaml"),
         discovery_source: "default".into(),
+        store_identity_hint: None,
     }
 }
 
@@ -126,6 +138,7 @@ fn discover_zcode(user_home: &Path) -> ResolvedTarget {
             client: ByokClient::Zcode,
             path: PathBuf::from(file),
             discovery_source: "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE".into(),
+            store_identity_hint: None,
         };
     }
     let base = match nonempty_env("ZCODE_DATA_BASE_DIR") {
@@ -141,15 +154,62 @@ fn discover_zcode(user_home: &Path) -> ResolvedTarget {
         client: ByokClient::Zcode,
         path: base.join(".zcode").join("v2").join("provider_config.json"),
         discovery_source: source.into(),
+        store_identity_hint: None,
     }
 }
+
+fn discover_copilot(user_home: &Path) -> ResolvedTarget {
+    if let Some(portable) = nonempty_env("VSCODE_PORTABLE") {
+        return ResolvedTarget {
+            client: ByokClient::Copilot,
+            path: PathBuf::from(portable).join("user-data/User/chatLanguageModels.json"),
+            discovery_source: "VSCODE_PORTABLE".into(),
+            store_identity_hint: None,
+        };
+    }
+    if let Some(appdata) = nonempty_env("VSCODE_APPDATA") {
+        return copilot_in_config_base(&PathBuf::from(appdata));
+    }
+    #[cfg(target_os = "windows")]
+    let base = nonempty_env("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| user_home.join("AppData/Roaming"));
+    #[cfg(target_os = "macos")]
+    let base = user_home.join("Library/Application Support");
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let base = nonempty_env("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| user_home.join(".config"));
+    copilot_in_config_base(&base)
+}
+
+fn copilot_in_config_base(base: &Path) -> ResolvedTarget {
+    let stable = base.join("Code/User");
+    let insiders = base.join("Code - Insiders/User");
+    let (directory, source) = if !stable.is_dir() && insiders.is_dir() {
+        (insiders, "vscode-insiders")
+    } else {
+        (stable, "vscode")
+    };
+    ResolvedTarget {
+        client: ByokClient::Copilot,
+        path: directory.join("chatLanguageModels.json"),
+        discovery_source: source.into(),
+        store_identity_hint: None,
+    }
+}
+
+#[cfg(test)]
+mod tests;
 
 fn nonempty_env(name: &str) -> Option<OsString> {
     std::env::var_os(name).filter(|value| !value.is_empty())
 }
 
 fn constrain_filename(client: ByokClient, path: &Path) -> ByokResult<()> {
-    let name = path
+    let canonical = std::fs::canonicalize(path).ok();
+    let selected = canonical.as_deref().unwrap_or(path);
+    let name = selected
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| ByokError::invalid("BYOK target path is missing a file name"))?;
@@ -165,6 +225,13 @@ fn constrain_filename(client: ByokClient, path: &Path) -> ByokResult<()> {
             if name != "config.yaml" {
                 return Err(ByokError::invalid(
                     "This client requires a config.yaml target file",
+                ));
+            }
+        }
+        ByokClient::Copilot => {
+            if name != "chatLanguageModels.json" {
+                return Err(ByokError::invalid(
+                    "VS Code requires a chatLanguageModels.json target file",
                 ));
             }
         }

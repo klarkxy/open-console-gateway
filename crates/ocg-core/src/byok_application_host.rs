@@ -1,6 +1,6 @@
 //! Native-host implementation of BYOK application configuration.
 //!
-//! Four fixed adapters write OCG-owned provider entries. Inspection never
+//! Fixed adapters write OCG-owned provider entries. Inspection never
 //! mutates files. Receipts, backups, and journals live under the Host data
 //! directory and are never serialized onto the wire.
 
@@ -19,9 +19,10 @@ mod fs;
 mod lock;
 mod paths;
 mod receipt;
+mod review;
 
 use adapters::{adapter, validate_models};
-use fs::{canonical_lexical_path, read_regular_file};
+use fs::read_regular_file;
 use lock::{CrossProcessLock, LockPolicy};
 use paths::{DiscoveredPaths, ResolvedTarget, catalog_path, parent_is_safe};
 use receipt::{PendingKind, Receipt, Store, fingerprint, has_backup};
@@ -137,6 +138,76 @@ impl ByokNativeHost {
             } => self.with_target_lock(client, target_path.as_deref(), |target| {
                 self.inspect(client, target)
             }),
+            ByokHostRequest::Preview {
+                client,
+                target_path,
+                gateway_v1_url,
+                models,
+                copilot_token_budget,
+            } => self.with_target_lock(client, target_path.as_deref(), |target| {
+                self.preview_plan(
+                    client,
+                    target,
+                    &gateway_v1_url,
+                    &models,
+                    copilot_token_budget,
+                    "",
+                )
+                .map(|plan| plan.inspection)
+            }),
+            ByokHostRequest::ValidateReviewed {
+                client,
+                target_path,
+                expected_fingerprint,
+                gateway_v1_url,
+                models,
+                client_closed,
+                copilot_token_budget,
+                review,
+            } => self.with_target_lock(client, target_path.as_deref(), |target| {
+                self.validate_reviewed(
+                    client,
+                    target,
+                    &expected_fingerprint,
+                    &gateway_v1_url,
+                    &models,
+                    copilot_token_budget,
+                    client_closed,
+                    &review,
+                )
+            }),
+            ByokHostRequest::ConfigureReviewed {
+                client,
+                target_path,
+                expected_fingerprint,
+                gateway_v1_url,
+                secret,
+                models,
+                client_closed,
+                copilot_token_budget,
+                review,
+            } => {
+                let secret = secret.expose_to_host().to_string();
+                self.mutate(
+                    client,
+                    target_path.as_deref(),
+                    &secret,
+                    "configure",
+                    |target| {
+                        self.configure_reviewed(
+                            client,
+                            target,
+                            &expected_fingerprint,
+                            &gateway_v1_url,
+                            &secret,
+                            &models,
+                            copilot_token_budget,
+                            client_closed,
+                            &review,
+                        )
+                    },
+                )
+            }
             ByokHostRequest::Configure {
                 client,
                 target_path,
@@ -192,7 +263,7 @@ impl ByokNativeHost {
         target_path: Option<&str>,
         op: impl FnOnce(&ResolvedTarget) -> ByokResult<T>,
     ) -> ByokResult<T> {
-        let target = self.paths.resolve(client, target_path)?;
+        let target = normalize_target(&self.paths.resolve(client, target_path)?)?;
         let key = target.path.to_string_lossy().into_owned();
         let lock = {
             let mut map = self
@@ -241,6 +312,15 @@ impl ByokNativeHost {
     fn inspect(&self, client: ByokClient, target: &ResolvedTarget) -> ByokResult<ByokInspection> {
         let target = normalize_target(target)?;
         let store = Store::open(&self.data_dir, &target)?;
+        self.inspect_store(client, &target, &store)
+    }
+
+    fn inspect_store(
+        &self,
+        client: ByokClient,
+        target: &ResolvedTarget,
+        store: &Store,
+    ) -> ByokResult<ByokInspection> {
         let receipt = load_receipt(&store, &target)?;
         let journal = store.journal_bytes()?;
         let target_bytes = read_optional(&target.path)?;
@@ -350,14 +430,18 @@ impl ByokNativeHost {
                 "Owned fields changed outside OCG; the configuration was not overwritten",
             ));
         }
-        let default_model_id = default_model_id.or_else(|| {
-            parsed
-                .current_default
-                .as_deref()
-                .filter(|id| models.iter().any(|model| model.id == *id))
-                .or_else(|| models.first().map(|model| model.id.as_str()))
-        });
-        let plan = adapter(client).configure(
+        let default_model_id = (client != ByokClient::Copilot)
+            .then(|| {
+                default_model_id.or_else(|| {
+                    parsed
+                        .current_default
+                        .as_deref()
+                        .filter(|id| models.iter().any(|model| model.id == *id))
+                        .or_else(|| models.first().map(|model| model.id.as_str()))
+                })
+            })
+            .flatten();
+        let mut plan = adapter(client).configure(
             &target.path,
             catalog.as_deref(),
             target_bytes.as_deref(),
@@ -370,9 +454,34 @@ impl ByokNativeHost {
                 default_model_id,
             },
         )?;
+        let generated = adapters::semantic::generated_projection(client, &plan.managed.owned);
+        let current = adapter(client).managed(target_bytes.as_deref(), catalog_bytes.as_deref())?;
+        review::preserve_plan(
+            client,
+            target_bytes.as_deref(),
+            &current,
+            receipt.as_ref(),
+            &mut plan,
+            false,
+        )?;
         _cross.assert_held()?;
-        store.apply(&target, receipt, plan, PendingKind::Configure)?;
-        self.inspect(client, &target).map(|mut view| {
+        let adopted = receipt.as_ref().is_some_and(|receipt| receipt.adopted);
+        let budget = receipt
+            .as_ref()
+            .and_then(|receipt| receipt.copilot_token_budget);
+        let hashes = if adopted {
+            review::secret_hashes(&plan.managed.owned)
+        } else {
+            serde_json::Value::Null
+        };
+        store.apply_reviewed(
+            &target,
+            receipt,
+            plan,
+            PendingKind::Configure,
+            Some((adopted, budget, hashes, generated)),
+        )?;
+        self.inspect_store(client, &target, &store).map(|mut view| {
             view.activation_required = true;
             view
         })
@@ -423,16 +532,27 @@ impl ByokNativeHost {
                 "Owned fields changed outside OCG; the configuration was not overwritten",
             ));
         }
-        let plan = adapter(client).remove(
-            &target.path,
-            catalog.as_deref(),
-            target_bytes.as_deref(),
-            catalog_bytes.as_deref(),
-            &receipt,
-        )?;
+        let plan = if receipt.adopted {
+            self.undo_takeover(
+                client,
+                &target,
+                &store,
+                &receipt,
+                target_bytes.as_deref(),
+                catalog_bytes.as_deref(),
+            )?
+        } else {
+            adapter(client).remove(
+                &target.path,
+                catalog.as_deref(),
+                target_bytes.as_deref(),
+                catalog_bytes.as_deref(),
+                &receipt,
+            )?
+        };
         _cross.assert_held()?;
         store.apply(&target, Some(receipt), plan, PendingKind::Remove)?;
-        self.inspect(client, &target).map(|mut view| {
+        self.inspect_store(client, &target, &store).map(|mut view| {
             view.activation_required = true;
             view
         })
@@ -466,7 +586,7 @@ impl ByokNativeHost {
                 target.path.display()
             ),
         );
-        self.inspect(client, &target).map(|mut view| {
+        self.inspect_store(client, &target, &store).map(|mut view| {
             view.activation_required = true;
             view
         })
@@ -523,6 +643,7 @@ impl ByokNativeHost {
         activation_required: bool,
     ) -> ByokInspection {
         let parsed = adapter(client).inspect_bytes(target_bytes, catalog_bytes, receipt);
+        let reviewable = review::reviewable(client, target_bytes, catalog_bytes);
         let pending = journal_bytes.is_some() || receipt.is_some_and(|r| r.pending.is_some());
         let detected = target_bytes.is_some();
         let (status, detail, configure_supported, remove_supported, recovery_supported) = if pending
@@ -542,7 +663,7 @@ impl ByokNativeHost {
                 Some(format!(
                     "An unowned managed provider already exists ({MANAGED_PROVIDER_IDS_DIAGNOSTIC})"
                 )),
-                false,
+                reviewable,
                 false,
                 false,
             )
@@ -550,7 +671,7 @@ impl ByokNativeHost {
             (
                 ByokStatus::Conflict,
                 Some("Owned fields changed outside OCG and no longer match".into()),
-                false,
+                reviewable,
                 false,
                 false,
             )
@@ -609,19 +730,29 @@ impl ByokNativeHost {
             default_model_id: parsed.current_default,
             backup_path: has_backup(store).then(|| store.backup_path_display()),
             detail,
+            adopted: receipt.is_some_and(|receipt| receipt.adopted),
+            copilot_token_budget: receipt.and_then(|receipt| receipt.copilot_token_budget),
+            preview: None,
         }
     }
 }
 
 fn normalize_target(target: &ResolvedTarget) -> ByokResult<ResolvedTarget> {
-    let path = canonical_lexical_path(&target.path)?;
+    let path = fs::identity_path(&target.path)?;
     if is_link_or_reparse(&path) {
         return Err(ByokError::conflict("BYOK target path is a link"));
     }
+    let hint = fs::canonical_lexical_path(
+        target
+            .store_identity_hint
+            .as_deref()
+            .unwrap_or(&target.path),
+    )?;
     Ok(ResolvedTarget {
         client: target.client,
         path,
         discovery_source: target.discovery_source.clone(),
+        store_identity_hint: Some(hint),
     })
 }
 

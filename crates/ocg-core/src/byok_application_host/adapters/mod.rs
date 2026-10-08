@@ -1,7 +1,9 @@
 //! Fixed BYOK format adapters. No registry.
 mod codex;
+mod copilot;
 mod kimi;
 mod minimax;
+pub(super) mod semantic;
 mod zcode;
 
 #[cfg(test)]
@@ -13,6 +15,7 @@ use crate::byok_application::{ByokClient, ByokModel};
 use crate::model_metadata::{ModelMetadata, PublishedUpstreamProtocol};
 
 pub use codex::CodexAdapter;
+pub use copilot::CopilotAdapter;
 pub use kimi::KimiAdapter;
 pub use minimax::MinimaxAdapter;
 pub use zcode::ZcodeAdapter;
@@ -214,6 +217,24 @@ pub struct ParsedStatus {
 }
 
 pub trait FormatAdapter {
+    fn raw_default(&self, bytes: Option<&[u8]>) -> ByokResult<Option<String>>;
+    fn managed(
+        &self,
+        target_bytes: Option<&[u8]>,
+        catalog_bytes: Option<&[u8]>,
+    ) -> ByokResult<serde_json::Value>;
+    fn replace_managed(
+        &self,
+        target_bytes: Option<&[u8]>,
+        owned: &serde_json::Value,
+    ) -> ByokResult<Vec<u8>>;
+    fn restore_selection(
+        &self,
+        target_bytes: &[u8],
+        original: Option<&[u8]>,
+        receipt: &Receipt,
+    ) -> ByokResult<Vec<u8>>;
+
     fn inspect_bytes(
         &self,
         target_bytes: Option<&[u8]>,
@@ -247,6 +268,7 @@ pub fn adapter(client: ByokClient) -> &'static dyn FormatAdapter {
         ByokClient::Kimi => &KimiAdapter,
         ByokClient::Minimax => &MinimaxAdapter,
         ByokClient::Zcode => &ZcodeAdapter,
+        ByokClient::Copilot => &CopilotAdapter,
     }
 }
 
@@ -273,27 +295,37 @@ pub fn display_name(model: &ByokModel) -> &str {
         .unwrap_or(model.id.as_str())
 }
 
-pub fn owned_changed(receipt: Option<&Receipt>, current: Option<&serde_json::Value>) -> bool {
-    match (receipt, current) {
-        (Some(receipt), Some(current)) => {
-            // Secret-bearing fields are cleared before a snapshot is persisted,
-            // so both sides are compared without them. A receipt written by an
-            // older version still holds the raw values; stripping them here
-            // keeps that receipt comparable instead of flagging every one as
-            // an external edit.
-            super::receipt::without_secrets(&receipt.last_managed.owned)
-                != super::receipt::without_secrets(current)
-        }
-        (Some(_), None) => true,
-        (None, _) => false,
-    }
-}
-
 /// A receipt means OCG already owns a snapshot. A present target is compared in
 /// full, including when the provider entry itself is gone. A missing target is
 /// not a conflict: the file was removed, so configure may recreate it. Callers
 /// report that case through the absent-bytes branch instead.
+// A v1 Codex receipt kept only the byte hash of OCG's pretty-serialized catalog.
+// Reproducing that exact serialization authenticates rows without guessing metadata.
+pub(super) fn legacy_codex_catalog_matches(receipt: &Receipt, current: &serde_json::Value) -> bool {
+    let Some(expected) = receipt
+        .last_managed
+        .owned
+        .get("catalog_sha256")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    if current
+        .get("catalog_sha256")
+        .and_then(serde_json::Value::as_str)
+        == Some(expected)
+    {
+        return true;
+    }
+    current
+        .get("catalog")
+        .filter(|value| !value.is_null())
+        .and_then(|value| serde_json::to_vec_pretty(value).ok())
+        .is_some_and(|bytes| super::fs::content_hash(Some(&bytes)) == expected)
+}
+
 pub fn ownership_conflict(
+    client: ByokClient,
     receipt: Option<&Receipt>,
     target_present: bool,
     current: &serde_json::Value,
@@ -301,7 +333,10 @@ pub fn ownership_conflict(
     if !target_present {
         return false;
     }
-    owned_changed(receipt, Some(current))
+    receipt.is_some_and(|receipt| {
+        semantic::projection(client, &receipt.last_managed.owned)
+            != semantic::projection(client, current)
+    })
 }
 
 pub fn restore_default(receipt: &Receipt, current_default: Option<&str>) -> Option<Option<String>> {
@@ -492,4 +527,94 @@ pub fn snapshot(
         owned,
         applied_default,
     }
+}
+
+fn replace_toml_fields(table: &mut dyn toml_edit::TableLike, fields: &serde_json::Value) {
+    let Some(map) = fields.as_object() else {
+        return;
+    };
+    let keys: Vec<_> = table.iter().map(|(key, _)| key.to_string()).collect();
+    for key in keys {
+        if !map.contains_key(&key) {
+            table.remove(&key);
+        }
+    }
+    for (key, value) in map {
+        if value.is_object() {
+            if table
+                .get(key)
+                .and_then(toml_edit::Item::as_table_like)
+                .is_none()
+            {
+                table.insert(key, toml_edit::Item::Table(toml_edit::Table::new()));
+            }
+            if let Some(target) = table
+                .get_mut(key)
+                .and_then(toml_edit::Item::as_table_like_mut)
+            {
+                replace_toml_fields(target, value);
+            }
+        } else {
+            table.insert(key, json_toml_item(value));
+        }
+    }
+}
+fn json_toml_item(value: &serde_json::Value) -> toml_edit::Item {
+    use serde_json::Value;
+    match value {
+        Value::String(text) => toml_edit::value(text),
+        Value::Bool(flag) => toml_edit::value(*flag),
+        Value::Number(number) => number
+            .as_i64()
+            .map(toml_edit::value)
+            .unwrap_or_else(|| toml_edit::value(number.as_f64().unwrap_or_default())),
+        Value::Array(items) => {
+            let mut array = toml_edit::Array::new();
+            for item in items {
+                if let toml_edit::Item::Value(value) = json_toml_item(item) {
+                    array.push(value);
+                }
+            }
+            toml_edit::Item::Value(array.into())
+        }
+        Value::Object(map) => {
+            let mut table = toml_edit::InlineTable::new();
+            for (key, value) in map {
+                if let toml_edit::Item::Value(value) = json_toml_item(value) {
+                    table.insert(key, value);
+                }
+            }
+            toml_edit::Item::Value(table.into())
+        }
+        Value::Null => toml_edit::Item::None,
+    }
+}
+fn restore_toml_selection(
+    doc: &mut toml_edit::DocumentMut,
+    original: Option<&[u8]>,
+    receipt: &Receipt,
+    keys: &[&str],
+    current_key: &str,
+) -> ByokResult<()> {
+    let original = original
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .and_then(|text| text.parse::<toml_edit::DocumentMut>().ok());
+    let current = doc.get(current_key).and_then(toml_edit::Item::as_str);
+    if receipt.last_applied_default.as_deref() == current {
+        for key in keys {
+            match original.as_ref().and_then(|doc| doc.get(key)) {
+                Some(value) => {
+                    doc.insert(key, value.clone());
+                }
+                None => {
+                    doc.remove(key);
+                }
+            }
+        }
+    } else if current.is_some_and(|id| id.starts_with("ocg/")) {
+        return Err(ByokError::conflict(
+            "The current default changed after takeover",
+        ));
+    }
+    Ok(())
 }

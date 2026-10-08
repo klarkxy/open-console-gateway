@@ -12,6 +12,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 import { promisify } from "node:util";
+import { exerciseByokUpdates } from "./lib/byok-update-smoke.mjs";
 
 const execFileAsync = promisify(execFile);
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -46,7 +47,7 @@ const defaultExecutable = join(
 const executable = resolve(argumentValue("--cli") ?? defaultExecutable);
 const exactModel = "vendor/model.name";
 const publicModels = [exactModel, "模".repeat(100), ...Array.from({ length: 248 }, (_, index) => `vendor/model.${index}`)];
-const keyNames = { codex: "codex", kimi: "kimi-code", minimax: "minimax-code", zcode: "zcode" };
+const keyNames = { codex: "codex", kimi: "kimi-code", minimax: "minimax-code", zcode: "zcode", copilot: "copilot" };
 const upstreamKey = "sk-ocg-byok-smoke-upstream";
 const encryptionKey = "ocg-byok-smoke-cipher";
 const expectUnsupported = process.argv.includes("--expect-unsupported");
@@ -55,6 +56,7 @@ const clients = [
   ["kimi", "config.toml", true],
   ["minimax", "config.yaml", false],
   ["zcode", "provider_config.json", false],
+  ["copilot", "chatLanguageModels.json", true],
 ];
 
 function comparablePath(value) {
@@ -227,6 +229,7 @@ async function publishModel(endpoint, secrets) {
   });
   const body = await readJson(created, secrets);
   assertNoSecrets(body, secrets);
+  return body.account.id;
 }
 
 async function main() {
@@ -239,6 +242,7 @@ async function main() {
     kimi: join(root, "clients", "kimi"),
     minimax: join(root, "clients", "minimax"),
     zcodeFile: join(root, "clients", "zcode", "provider_config.json"),
+    copilotFile: join(root, "clients", "copilot", "chatLanguageModels.json"),
   };
   await Promise.all([
     mkdir(data, { recursive: true }),
@@ -248,6 +252,7 @@ async function main() {
     mkdir(homes.kimi, { recursive: true }),
     mkdir(homes.minimax, { recursive: true }),
     mkdir(dirname(homes.zcodeFile), { recursive: true }),
+    mkdir(dirname(homes.copilotFile), { recursive: true }),
     mkdir(join(root, "appdata"), { recursive: true }),
     mkdir(join(root, "localappdata"), { recursive: true }),
   ]);
@@ -256,6 +261,7 @@ async function main() {
     kimi: join(homes.kimi, "config.toml"),
     minimax: join(homes.minimax, "config.yaml"),
     zcode: homes.zcodeFile,
+    copilot: homes.copilotFile,
   };
   for (const [client] of clients) {
     await writeFile(join(dirname(targets[client]), "notes.txt"), "user-note\n");
@@ -295,6 +301,7 @@ async function main() {
     await waitForReady(child, output, secrets);
     const endpoint = `http://127.0.0.1:${port}/dashboard/api/v4`;
     const results = [];
+    let publishedAccountId;
 
     for (const [client, , closed] of clients) {
       const inspectStarted = performance.now();
@@ -319,7 +326,7 @@ async function main() {
       }
       assert.equal(inspected.configureSupported, true, inspected.detail ?? inspected.status);
       if (!results.some((item) => item.modelPublished)) {
-        await publishModel(endpoint, secrets);
+        publishedAccountId = await publishModel(endpoint, secrets);
         results.push({ client: "custom", modelPublished: true });
       }
       const refreshed = await readJson(await fetch(
@@ -360,7 +367,8 @@ async function main() {
       }), secrets);
       assert.equal(configured.status, "configured", configured.detail ?? configured.status);
       assert.equal(configured.activationRequired, true);
-      assert.ok(publishedIds.includes(configured.defaultModelId));
+      if (client === "copilot") assert.equal(configured.defaultModelId, null);
+      else assert.ok(publishedIds.includes(configured.defaultModelId));
       assert.deepEqual([...configured.configuredModelIds].sort(), publishedIds);
       assert.equal(typeof configured.fingerprint, "string");
       assert.ok(configured.fingerprint.length > 0);
@@ -368,7 +376,7 @@ async function main() {
       assertNoSecrets(configured, secrets);
       const clientDir = dirname(targets[client]);
       assert.equal(await treeContains(clientDir, exactModel), true, `${client} files omitted the exact model id`);
-      if (client !== "codex") {
+      if (client !== "codex" && client !== "copilot") {
         assert.equal(
           await treeContains(clientDir, "ocg-messages"),
           true,
@@ -379,6 +387,23 @@ async function main() {
           false,
           `${client} files kept a fixed chat provider group`,
         );
+      }
+      if (client === "copilot") {
+        const providers = JSON.parse(await readFile(targets.copilot, "utf8"));
+        assert.equal(providers.length, 1);
+        assert.equal(providers[0].vendor, "customendpoint");
+        assert.equal("url" in providers[0], false);
+        assert.equal("apiKey" in providers[0], false);
+        assert.deepEqual(providers[0].models.map((model) => model.id).sort(), publishedIds);
+        for (const model of providers[0].models) {
+          assert.equal(model.apiType, "messages");
+          assert.equal(model.url, `http://127.0.0.1:${port}/v1/messages`);
+          assert.equal(model.maxInputTokens, 100000);
+          assert.equal(model.maxOutputTokens, 8192);
+          assert.equal(model.toolCalling, false);
+          assert.equal(model.vision, false);
+          assert.equal(typeof model.requestHeaders.Authorization, "string");
+        }
       }
       const connection = await readJson(await fetch(`${endpoint}/connection`), secrets);
       const matching = connection.subKeys.filter((key) => key.name === keyNames[client] && key.enabled);
@@ -407,14 +432,16 @@ async function main() {
       assertNoSecrets(reconfigured, secrets);
       const nextConnection = await readJson(await fetch(`${endpoint}/connection`), secrets);
       assert.deepEqual(nextConnection.subKeys, connection.subKeys, "reconfigure must reuse ordinary Keys");
+      const updateEvidence = await exerciseByokUpdates({ endpoint, client, targetPath: targets[client], data, secrets, assertNoSecrets, accountId: publishedAccountId, publicModels });
+      const finalView = updateEvidence.view;
       const removed = await readJson(await fetch(`${endpoint}/applications/byok/${client}`, {
         method: "DELETE",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          expectedRevision: reconfigured.revision.revision,
-          processGeneration: reconfigured.revision.processGeneration,
+          expectedRevision: finalView.revision.revision,
+          processGeneration: finalView.revision.processGeneration,
           targetPath: targets[client],
-          expectedFingerprint: reconfigured.fingerprint,
+          expectedFingerprint: finalView.fingerprint,
           clientClosed: true,
         }),
       }), secrets);
@@ -426,7 +453,7 @@ async function main() {
         await readFile(join(dirname(targets[client]), "notes.txt"), "utf8"),
         "user-note\n",
       );
-      results.push({ client, status: removed.status, lifecycle: "configure-reconfigure-remove", coldInspectMs, exportedModels: publishedIds.length });
+      results.push({ client, status: removed.status, lifecycle: "configure-update-takeover-undo-remove", updateChecks: updateEvidence.checks, coldInspectMs, exportedModels: publishedIds.length });
     }
 
     if (!expectUnsupported && results.every((item) => item.lifecycle === "unsupported")) {
