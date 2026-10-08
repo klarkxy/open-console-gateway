@@ -4,6 +4,7 @@ import {
   refuseCrossProtocolReplay,
   refuseDegradingReplay,
   refuseUndeclaredMessagesReasoning,
+  chatStreamOptions,
 } from "./model-catalog.js";
 import { randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
@@ -61,7 +62,7 @@ function messagesStreamOptions(model, _context, options) {
 }
 
 const providerApis = {
-  "openai-completions": wrapApi(openAICompletionsApi()),
+  "openai-completions": wrapApi(openAICompletionsApi(), chatStreamOptions),
   "openai-responses": wrapApi(openAIResponsesApi()),
   "anthropic-messages": wrapApi(anthropicMessagesApi(), messagesStreamOptions),
 };

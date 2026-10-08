@@ -360,3 +360,56 @@ export function refuseUndeclaredMessagesReasoning(model, options) {
   error.code = MESSAGES_REASONING_CODE;
   throw error;
 }
+
+// pi-ai 0.87.1 stores SSE reasoning_details with their stream-only index and
+// replays them unchanged. Some Chat endpoints reject OpenRouter's typed text
+// details too. Plain unbound text can use reasoning_content; opaque or
+// provider-specific details must retain their original replay representation.
+function portableReasoningText(detail) {
+  return object(detail) && detail.type === "reasoning.text" && typeof detail.text === "string"
+    && (detail.format === undefined || detail.format === "unknown")
+    && Object.keys(detail).every((key) => ["type", "text", "format", "index"].includes(key));
+}
+
+// Normalize outgoing payloads, including old saved history, without editing
+// the transcript or opaque provider replay fields.
+export function normalizeChatReasoningReplay(payload) {
+  if (!object(payload) || !Array.isArray(payload.messages)) return payload;
+  let changed = false;
+  const messages = payload.messages.map((message) => {
+    if (message?.role !== "assistant" || !Array.isArray(message.reasoning_details)) return message;
+    const savedDetails = message.reasoning_details;
+    if (savedDetails.length > 0 && savedDetails.every(portableReasoningText)) {
+      const text = savedDetails.map((detail) => detail.text).join("");
+      if (message.reasoning_content === undefined || message.reasoning_content === ""
+        || message.reasoning_content === text) {
+        const replay = { ...message, reasoning_content: text };
+        delete replay.reasoning_details;
+        changed = true;
+        return replay;
+      }
+    }
+    let messageChanged = false;
+    const details = message.reasoning_details.map((detail) => {
+      if (!object(detail) || !Object.hasOwn(detail, "index")) return detail;
+      const replay = { ...detail };
+      delete replay.index;
+      messageChanged = true;
+      return replay;
+    });
+    if (!messageChanged) return message;
+    changed = true;
+    return { ...message, reasoning_details: details };
+  });
+  return changed ? { ...payload, messages } : payload;
+}
+
+export function chatStreamOptions(_model, _context, options) {
+  return {
+    ...options,
+    async onPayload(payload, model) {
+      const prepared = await options?.onPayload?.(payload, model);
+      return normalizeChatReasoningReplay(prepared === undefined ? payload : prepared);
+    },
+  };
+}

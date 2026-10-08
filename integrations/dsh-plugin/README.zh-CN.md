@@ -24,6 +24,10 @@ Chat Completions 与 Responses 保留公布的 `/v1` 基址。Messages 去掉末
 
 ## 运行时检查
 
+对于没有供应商元数据、格式缺省或为 `unknown` 的未签名普通文本条目，本插件改用 `reasoning_content` 回传，避免把 OpenRouter 风格的 `reasoning.text` 发给不接受该类型的 Kimi Code 等端点。带签名、加密数据、标识或供应商专有字段的条目仍保留结构化形式。
+
+对于 Chat Completions，本插件在发送前去掉 assistant 的每条 `reasoning_details` 中仅用于流式响应的 `index`。这也适用于 pi-ai 0.87.1 已保存的旧记录，因此重新加载修复后的插件即可继续受影响的会话。已保存的历史、签名、加密数据和其他回放字段保持原样。
+
 在 OCG 源码检出目录中，对已安装的官方 DSH CLI 入口运行隔离安装检查：
 
 ```sh

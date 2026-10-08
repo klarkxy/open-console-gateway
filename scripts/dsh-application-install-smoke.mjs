@@ -122,7 +122,7 @@ function assertWire(records) {
   assert.ok(flippedCatalog);
 
   const chat = records.filter((record) => record.pathname === "/ocg/v1/chat/completions");
-  assert.equal(chat.length, 3);
+  assert.equal(chat.length, 5);
   for (const record of chat) {
     assert.equal(record.body.model, "smoke-chat");
     assert.equal(record.body.stream, true);
@@ -140,8 +140,16 @@ function assertWire(records) {
   const chatTool = chat[1].body.messages.find((message) => message.role === "tool");
   assert.equal(chatTool.tool_call_id, "call_echo");
   assert.equal(chatTool.content, "echoed");
-  assert.equal(chat[2].body.messages.some((message) => message.role === "assistant"), false);
-  assert.ok(records.indexOf(chat[2]) > records.indexOf(flippedCatalog));
+  const oldAssistant = chat[2].body.messages.find((message) => message.role === "assistant");
+  assert.deepEqual(oldAssistant.reasoning_details, [
+    { type: "reasoning.text", text: "saved-plan", format: "unknown", signature: "saved-signature" },
+    { type: "reasoning.encrypted", data: "saved-opaque-data", id: "rs-saved", format: "vendor-v1" },
+  ]);
+  const portableAssistant = chat[3].body.messages.find((message) => message.role === "assistant");
+  assert.equal(portableAssistant.reasoning_content, "saved-plain-plan");
+  assert.equal(Object.hasOwn(portableAssistant, "reasoning_details"), false);
+  assert.equal(chat[4].body.messages.some((message) => message.role === "assistant"), false);
+  assert.ok(records.indexOf(chat[4]) > records.indexOf(flippedCatalog));
 
   const responses = records.filter((record) => record.pathname === "/ocg/v1/responses");
   const reasoned = responses.filter((record) => record.body.model === "smoke-responses");
@@ -438,6 +446,33 @@ function runnerSource(bin, installedIndex, flipUrl) {
       assistant("a-chat", "smoke-chat", chatFirst),
       toolMessage(chatFirst),
     ], "xhigh"), "stop");
+    const savedHistory = replayed("a-chat-saved", "ocg", "smoke-chat", [
+      { type: "reasoning", text: "saved-plan" },
+      { type: "text", text: "saved-answer" },
+    ], envelope("openai-completions", "ocg", "smoke-chat", [
+      { type: "reasoning", thinkingSignature: JSON.stringify([
+        { type: "reasoning.text", text: "saved-plan", format: "unknown", signature: "saved-signature", index: 0 },
+        { type: "reasoning.encrypted", data: "saved-opaque-data", id: "rs-saved", format: "vendor-v1", index: 1 },
+      ]) },
+      { type: "text" },
+    ]));
+    const savedBefore = JSON.stringify(savedHistory);
+    expectKind("chat saved-history continuation", await turn(chatPrepared, "smoke-chat", [
+      user("u-chat-saved", "previous request"), savedHistory, user("u-chat-continue", "continue"),
+    ], "xhigh"), "stop");
+    if (JSON.stringify(savedHistory) !== savedBefore) throw new Error("saved replay history was mutated");
+    const plainHistory = replayed("a-chat-plain", "ocg", "smoke-chat", [
+      { type: "reasoning", text: "saved-plain-plan" }, { type: "text", text: "saved-answer" },
+    ], envelope("openai-completions", "ocg", "smoke-chat", [
+      { type: "reasoning", thinkingSignature: JSON.stringify([
+        { type: "reasoning.text", text: "saved-plain-plan", format: "unknown", index: 0 },
+      ]) }, { type: "text" },
+    ]));
+    const plainBefore = JSON.stringify(plainHistory);
+    expectKind("chat legacy plain-text continuation", await turn(chatPrepared, "smoke-chat", [
+      user("u-chat-plain", "previous request"), plainHistory, user("u-chat-plain-continue", "continue"),
+    ], "xhigh"), "stop");
+    if (JSON.stringify(plainHistory) !== plainBefore) throw new Error("plain replay history was mutated");
     const responsesFirst = expectKind("responses tool", await turn(responsesPrepared, "smoke-responses", [user("u-resp", "use echo")], "xhigh"), "tool-calls");
     const responsesSecond = expectKind("responses final", await turn(responsesPrepared, "smoke-responses", [
       user("u-resp", "use echo"),
@@ -630,6 +665,19 @@ async function main() {
     }
     const protocol = protocolOf(url.pathname);
     if (request.method === "POST" && protocol) {
+      if (protocol === "chat_completions" && body.messages?.some((message) =>
+        message.reasoning_details?.some((detail) => Object.hasOwn(detail, "index")))) {
+        response.writeHead(400, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: { message: "reasoning_details must not contain streaming index" } }));
+        return;
+      }
+      if (protocol === "chat_completions" && body.messages?.some((message) =>
+        message.reasoning_details?.some((detail) => detail.type === "reasoning.text"
+          && detail.format === "unknown" && !detail.signature && !detail.id))) {
+        response.writeHead(400, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: { message: "reasoning_details has an invalid type" } }));
+        return;
+      }
       const seen = turns.get(body.model) ?? 0;
       turns.set(body.model, seen + 1);
       const phase = body.model === "smoke-responses-plain" || seen > 0 ? "final" : "tool";

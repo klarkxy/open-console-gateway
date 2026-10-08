@@ -53,6 +53,17 @@ opaque native data. Missing replay metadata leaves ordinary text and tools
 portable. This preflight belongs to the plugin and runs before the base
 adapter. The gateway cannot apply it to a field the client already dropped.
 
+For Chat Completions, the plugin removes the stream-only `index` from each
+assistant `reasoning_details` entry immediately before sending. This also
+handles entries already saved by pi-ai 0.87.1, so an affected conversation can
+continue after reloading the corrected plugin. Stored history, signatures,
+encrypted data, and other replay fields are preserved.
+Unsigned text entries with an absent or `unknown` format and no provider
+metadata are replayed as `reasoning_content`. This avoids sending
+OpenRouter-style `reasoning.text` entries to endpoints such as Kimi Code that
+reject that type. Signed, encrypted, identified, and vendor-specific entries
+keep their structured representation.
+
 `reasoningEfforts` is the Chat selector-to-wire map of exact categorical
 spellings. The same map may be carried unchanged on Chat Completions and on
 Responses. It is never a Messages thinking budget or an adaptive effort. OCG writes an
