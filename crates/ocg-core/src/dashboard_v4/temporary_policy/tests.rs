@@ -86,23 +86,24 @@ async fn get_returns_builtin_catalog_and_empty_rules() {
     assert_eq!(global.rules.len(), 1);
     assert!(global.rules[0].applicable);
     assert!(!global.rules[0].overridden);
-    let db = state.db.lock();
-    for view in config
-        .effective_views
-        .iter()
-        .filter(|view| view.destination_id.is_some())
     {
-        let adapter: String = db
-            .conn
-            .query_row(
-                "SELECT adapter FROM destinations WHERE id = ?1",
-                [view.destination_id.as_ref().unwrap()],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(view.rules[0].applicable, adapter == "goat");
+        let db = state.db.lock();
+        for view in config
+            .effective_views
+            .iter()
+            .filter(|view| view.destination_id.is_some())
+        {
+            let adapter: String = db
+                .conn
+                .query_row(
+                    "SELECT adapter FROM destinations WHERE id = ?1",
+                    [view.destination_id.as_ref().unwrap()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(view.rules[0].applicable, adapter == "goat");
+        }
     }
-    drop(db);
     let Json(listed) = get_restrictions(State(state.clone())).await.unwrap();
     assert!(listed.restrictions.is_empty());
     assert!(super::super::applications::operation_receipts(&state).is_empty());

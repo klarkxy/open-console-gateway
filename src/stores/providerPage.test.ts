@@ -181,3 +181,34 @@ test("destination receipts carry their revision and remapped models drop unrelat
   assert.equal(store.models?.models[0]?.metadata, null);
   assert.equal(store.models?.models[0]?.metadataSource, null);
 });
+
+test("switching providers drops old model rows even when the new read fails at the same revision", async () => {
+  const store = await selectedPage();
+  const previous = store.models!;
+  const oldRead = deferred<object>();
+  installFetchMock(() => oldRead.promise);
+  const pending = store.loadModels("d:destination", {});
+  installFetchMock(() => ({ revision: previous.revision, readVersion: previous.readVersion,
+    item: { railKey: "d:other", providerId: "other" } }));
+  await store.loadDetail("d:other");
+  assert.equal(store.models, null);
+  installFetchMock(() => { throw new Error("models unavailable"); });
+  await assert.rejects(store.loadModels("d:other", {}), /models unavailable/);
+  oldRead.resolve(previous);
+  await pending;
+  assert.equal(store.detail?.item.railKey, "d:other");
+  assert.equal(store.models, null);
+  assert.equal(store.loading.models, false);
+  assert.match(store.errors.models!, /models unavailable/);
+});
+
+test("same-provider failed model refresh preserves its confirmed rows", async () => {
+  const store = await selectedPage();
+  const previous = store.models;
+  installFetchMock(() => ({ ...store.detail!, readVersion: "page8" }));
+  await store.loadDetail("d:destination");
+  installFetchMock(() => { throw new Error("models unavailable"); });
+  await assert.rejects(store.loadModels("d:destination", {}), /models unavailable/);
+  assert.equal(store.models, previous);
+  assert.equal(store.detail?.item.railKey, "d:destination");
+});
