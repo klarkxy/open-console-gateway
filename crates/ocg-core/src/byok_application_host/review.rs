@@ -219,6 +219,7 @@ impl ByokNativeHost {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn validate_reviewed(
         &self,
         client: ByokClient,
@@ -237,6 +238,7 @@ impl ByokNativeHost {
         Ok(plan.inspection)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn configure_reviewed(
         &self,
         client: ByokClient,
@@ -369,8 +371,8 @@ fn acknowledge(inspection: &ByokInspection, review: &ByokReview) -> ByokResult<(
             "Review and acknowledge overwriting changed OCG fields",
         ));
     }
-    if !preview.removed_models_with_customizations.is_empty()
-        && !(reviewed && review.acknowledge_removal)
+    if !(preview.removed_models_with_customizations.is_empty()
+        || reviewed && review.acknowledge_removal)
     {
         return Err(ByokError::conflict(
             "Review and acknowledge removal of customized models or providers",
@@ -420,18 +422,16 @@ pub(super) fn preserve_plan(
         && !explicit_budget
         && receipt
             .is_some_and(|receipt| receipt.version == 1 && receipt.copilot_token_budget.is_none())
-    {
-        if let Some(rows) = recorded
+        && let Some(rows) = recorded
             .as_mut()
             .and_then(|value| value.get_mut("provider"))
             .and_then(|value| value.get_mut("models"))
             .and_then(Value::as_array_mut)
-        {
-            for row in rows {
-                if let Some(map) = row.as_object_mut() {
-                    map.remove("maxInputTokens");
-                    map.remove("maxOutputTokens");
-                }
+    {
+        for row in rows {
+            if let Some(map) = row.as_object_mut() {
+                map.remove("maxInputTokens");
+                map.remove("maxOutputTokens");
             }
         }
     }

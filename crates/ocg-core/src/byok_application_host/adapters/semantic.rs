@@ -76,7 +76,14 @@ pub(crate) fn projection(client: ByokClient, owned: &Value) -> Value {
             "providerOrder": clean["providerOrder"],
             "models": map_rows(&clean["models"], |row| {
                 let mut out=pick(row,&["providerId","modelId","config.enabled","config.properties.supportsToolCall","config.properties.inputFormat.supportsImage","config.optionSpecs.reasoningLevel.values","config.optionSpecs.reasoningLevel.map"]);
-                if !row.is_null(){if out["config"].get("properties").is_none(){out["config"]["properties"]=json!({});}if out["config"].get("optionSpecs").is_none(){out["config"]["optionSpecs"]=json!({});}}
+                if !row.is_null() {
+                    if out["config"].get("properties").is_none() {
+                        out["config"]["properties"] = json!({});
+                    }
+                    if out["config"].get("optionSpecs").is_none() {
+                        out["config"]["optionSpecs"] = json!({});
+                    }
+                }
                 out
             }),
         }),
@@ -121,39 +128,39 @@ pub(crate) fn preserve(
 ) -> Value {
     let mut result = next.clone();
     let masks = union_mask(projection(client, next), &projection(client, current));
-    if client == ByokClient::Minimax {
-        if let Some(providers) = result["providers"].as_object_mut() {
-            for (provider_id, provider) in providers {
-                if let Some(models) = provider.get_mut("models").and_then(Value::as_object_mut) {
-                    for (id, model) in models {
-                        let find = |owned: &Value| {
-                            owned["providers"]
-                                .as_object()
-                                .into_iter()
-                                .flat_map(|map| map.values())
-                                .find_map(|provider| {
-                                    provider.get("models").and_then(|models| models.get(id))
-                                })
-                                .cloned()
-                        };
-                        if let Some(current) = find(current) {
-                            let old = projection(
-                                client,
-                                &json!({"providers":{"ocg":{"models":{"row":current}}}}),
-                            );
-                            let row_mask = union_mask(
-                                masks["providers"][provider_id]["models"][id].clone(),
-                                &old["providers"]["ocg"]["models"]["row"],
-                            );
-                            preserve_inner(
-                                &current,
-                                &last.and_then(find).unwrap_or(Value::Null),
-                                model,
-                                &row_mask,
-                                explicit_budget,
-                                true,
-                            );
-                        }
+    if client == ByokClient::Minimax
+        && let Some(providers) = result["providers"].as_object_mut()
+    {
+        for (provider_id, provider) in providers {
+            if let Some(models) = provider.get_mut("models").and_then(Value::as_object_mut) {
+                for (id, model) in models {
+                    let find = |owned: &Value| {
+                        owned["providers"]
+                            .as_object()
+                            .into_iter()
+                            .flat_map(|map| map.values())
+                            .find_map(|provider| {
+                                provider.get("models").and_then(|models| models.get(id))
+                            })
+                            .cloned()
+                    };
+                    if let Some(current) = find(current) {
+                        let old = projection(
+                            client,
+                            &json!({"providers":{"ocg":{"models":{"row":current}}}}),
+                        );
+                        let row_mask = union_mask(
+                            masks["providers"][provider_id]["models"][id].clone(),
+                            &old["providers"]["ocg"]["models"]["row"],
+                        );
+                        preserve_inner(
+                            &current,
+                            &last.and_then(find).unwrap_or(Value::Null),
+                            model,
+                            &row_mask,
+                            explicit_budget,
+                            true,
+                        );
                     }
                 }
             }
@@ -167,16 +174,17 @@ pub(crate) fn preserve(
         explicit_budget,
         client != ByokClient::Copilot,
     );
-    if client == ByokClient::Copilot {
-        if let Some(provider) = result["provider"].as_object_mut() {
-            provider.remove("url");
-        }
+    if client == ByokClient::Copilot
+        && let Some(provider) = result["provider"].as_object_mut()
+    {
+        provider.remove("url");
     }
     // The catalog hash belongs to the private snapshot, not client settings.
-    if client == ByokClient::Codex && !result["catalog"].is_null() {
-        if let Ok(bytes) = serde_json::to_vec_pretty(&result["catalog"]) {
-            result["catalog_sha256"] = json!(super::super::fs::content_hash(Some(&bytes)));
-        }
+    if client == ByokClient::Codex
+        && !result["catalog"].is_null()
+        && let Ok(bytes) = serde_json::to_vec_pretty(&result["catalog"])
+    {
+        result["catalog_sha256"] = json!(super::super::fs::content_hash(Some(&bytes)));
     }
     result
 }
@@ -253,47 +261,51 @@ fn preserve_inner(
                 {
                     continue;
                 }
-                let owned = managed.get(key);
-                if owned.is_none() {
-                    let budget = ["maxInputTokens", "maxOutputTokens"].contains(&key.as_str());
-                    let generated_limit = [
-                        "context_window",
-                        "max_context_window",
-                        "max_context_size",
-                        "limit",
-                        "maxInputTokens",
-                        "maxOutputTokens",
-                        "contextWindow",
-                        "max",
-                    ]
-                    .contains(&key.as_str());
-                    if !(explicit_budget && budget)
-                        && (last.get(key) != Some(value)
-                            || (!dst.contains_key(key) && !generated_limit))
-                    {
-                        let mut preserved = if generated_limit && value.is_object() {
-                            preserve_budget(
+                match managed.get(key) {
+                    None => {
+                        let budget = ["maxInputTokens", "maxOutputTokens"].contains(&key.as_str());
+                        let generated_limit = [
+                            "context_window",
+                            "max_context_window",
+                            "max_context_size",
+                            "limit",
+                            "maxInputTokens",
+                            "maxOutputTokens",
+                            "contextWindow",
+                            "max",
+                        ]
+                        .contains(&key.as_str());
+                        if !(explicit_budget && budget)
+                            && (last.get(key) != Some(value)
+                                || (!dst.contains_key(key) && !generated_limit))
+                        {
+                            let mut preserved = if generated_limit && value.is_object() {
+                                preserve_budget(
+                                    value,
+                                    last.get(key).unwrap_or(&Value::Null),
+                                    dst.get(key).unwrap_or(&Value::Null),
+                                )
+                            } else {
+                                value.clone()
+                            };
+                            if generated_limit && clamp_generated {
+                                clamp_limits(&mut preserved, dst.get(key).unwrap_or(&Value::Null));
+                            }
+                            dst.insert(key.clone(), preserved);
+                        }
+                    }
+                    Some(owned) => {
+                        if let Some(next) = dst.get_mut(key) {
+                            preserve_inner(
                                 value,
                                 last.get(key).unwrap_or(&Value::Null),
-                                dst.get(key).unwrap_or(&Value::Null),
-                            )
-                        } else {
-                            value.clone()
-                        };
-                        if generated_limit && clamp_generated {
-                            clamp_limits(&mut preserved, dst.get(key).unwrap_or(&Value::Null));
+                                next,
+                                owned,
+                                explicit_budget,
+                                clamp_generated,
+                            );
                         }
-                        dst.insert(key.clone(), preserved);
                     }
-                } else if let Some(next) = dst.get_mut(key) {
-                    preserve_inner(
-                        value,
-                        last.get(key).unwrap_or(&Value::Null),
-                        next,
-                        owned.expect("owned"),
-                        explicit_budget,
-                        clamp_generated,
-                    );
                 }
             }
         }

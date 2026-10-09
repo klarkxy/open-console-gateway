@@ -505,11 +505,15 @@ async fn saved_official_new_goat_models_use_exact_protocol_and_upstream_with_ali
         Mutex,
         atomic::{AtomicUsize, Ordering},
     };
+    type RequestCapture = (
+        Arc<AtomicUsize>,
+        Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+    );
     let hits = Arc::new(AtomicUsize::new(0));
     let requests = Arc::new(Mutex::new(Vec::<(String, serde_json::Value)>::new()));
     let captured = (hits.clone(), requests.clone());
     let app = axum::Router::new().fallback(axum::routing::post(
-        |axum::extract::State((hits, requests)): axum::extract::State<(Arc<AtomicUsize>, Arc<Mutex<Vec<(String, serde_json::Value)>>>)>, uri: axum::http::Uri, body: axum::body::Bytes| async move {
+        |axum::extract::State((hits, requests)): axum::extract::State<RequestCapture>, uri: axum::http::Uri, body: axum::body::Bytes| async move {
             hits.fetch_add(1, Ordering::SeqCst);
             requests.lock().unwrap().push((uri.path().into(), serde_json::from_slice(&body).unwrap()));
             let response = if uri.path().ends_with("/responses") {

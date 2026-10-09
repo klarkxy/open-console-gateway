@@ -97,10 +97,10 @@ impl FormatAdapter for MinimaxAdapter {
         let prior = original.map(parse_yaml).transpose()?;
         if let Some(prior) = prior.as_ref().and_then(as_mapping) {
             for key in PREFERENCE_KEYS {
-                if map.get(yaml_key(key)).is_none() {
-                    if let Some(value) = prior.get(yaml_key(key)) {
-                        map.insert(yaml_key(key), value.clone());
-                    }
+                if map.get(yaml_key(key)).is_none()
+                    && let Some(value) = prior.get(yaml_key(key))
+                {
+                    map.insert(yaml_key(key), value.clone());
                 }
             }
         }

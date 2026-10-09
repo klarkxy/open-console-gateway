@@ -321,18 +321,18 @@ impl ByokNativeHost {
         target: &ResolvedTarget,
         store: &Store,
     ) -> ByokResult<ByokInspection> {
-        let receipt = load_receipt(&store, &target)?;
+        let receipt = load_receipt(store, target)?;
         let journal = store.journal_bytes()?;
         let target_bytes = read_optional(&target.path)?;
-        let catalog = catalog_path(&target);
+        let catalog = catalog_path(target);
         let catalog_bytes = match &catalog {
             Some(path) => read_optional(path)?,
             None => None,
         };
         Ok(self.view(
             client,
-            &target,
-            &store,
+            target,
+            store,
             receipt.as_ref(),
             target_bytes.as_deref(),
             catalog_bytes.as_deref(),
