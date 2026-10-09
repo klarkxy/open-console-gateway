@@ -3,6 +3,8 @@ Install the OCG-owned VSIX from Applications → VS Code Copilot, then open/relo
 
 The extension fetches authenticated `/v1/models` on discovery and before each request. Context/output limits and capabilities come from OCG. Models with missing token metadata are listed in the OCG application status and **OCG: Refresh Models**; complete their model capabilities in OCG Aliases once. No global context budget is imposed.
 
+Model names in the picker are OCG public aliases, also used in requests. Different aliases remain separate even when they share an upstream display name.
+
 For a manual install, run **OCG: Connect** and enter the OCG `/v1` URL and enabled Key. **OCG: Disconnect** clears this extension's encrypted connection. OCG-managed uninstall first requests a disconnect and waits for acknowledgment; open the selected Profile and retry if it is pending. OCG Keys themselves remain in OCG.
 
 Chat Completions, Responses, and Messages use the published preferred protocol. Text, tool calls/results, and image inputs follow the declared capabilities. Token counting uses o200k text encoding with message/tool overhead and conservative image estimates; non-OpenAI tokenization may differ. These estimates do not change OCG's declared model limits. Private thinking signatures are kept in a bounded in-memory replay cache for matching assistant turns and are never rendered as assistant text. Disconnect, reload, or Key replacement clears this cache. The provider supports Chat/agents, not inline completions or Next Edit Suggestions.

@@ -20,7 +20,8 @@ export function projectCatalog(payload, baseUrl) {
     if (![context, output].every(v => Number.isSafeInteger(v) && v > 0) || output >= context) { metadataMissing.push(id); continue; }
     if (Array.isArray(m.outputModalities) && !m.outputModalities.includes('text')) continue;
     if(m.inputModalities!=null&&!Array.isArray(m.inputModalities))throw new Error('OCG model modality metadata is incompatible.');
-    const name = typeof m.name === 'string' && m.name.trim() ? m.name : id;
+    // Public aliases are the client-facing identity; upstream display names can collide.
+    const name = id;
     models.push({ id, name, family: id, version: '1', maxInputTokens: context - output, maxOutputTokens: output,
       tooltip: 'Limits supplied by Open Console Gateway', detail: 'OCG',
       capabilities: { toolCalling: m.toolCalling === true, imageInput: m.inputModalities?.includes('image') === true },

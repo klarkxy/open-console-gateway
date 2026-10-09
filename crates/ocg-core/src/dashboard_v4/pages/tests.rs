@@ -711,6 +711,66 @@ fn alias_rows_sort_by_complete_serving_rank_before_pagination() {
     assert_eq!(first.groups[0].rows[0].routing_ranks, vec![0]);
 }
 
+#[tokio::test]
+async fn custom_shared_names_match_published_catalog_without_admitting_raw_pins() {
+    use crate::models::{AccountCustomConfigInput, AccountModelCapabilityInput};
+    use crate::provider_contracts::ContractScope;
+    let f = fixture();
+    let state = f.state();
+    let now = Utc::now();
+    let shared = "shared-fixture";
+    let raw = "fixture/raw-fixture";
+    state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &ContractScope::provider(crate::provider::COMMAND_CODE_PROVIDER_ID),
+            &[shared.into(), raw.into()],
+            Some(now),
+            "test",
+            "https://example.test/models",
+            now,
+        )
+        .unwrap();
+    let mut account = state.db.lock().get_account("a1").unwrap().unwrap();
+    account.id = "custom-shared".into();
+    account.provider_id = ocg_domain::ids::CUSTOM_PROVIDER_ID.into();
+    state
+        .db
+        .lock()
+        .create_account_with_contract(
+            &account,
+            Some(&AccountCustomConfigInput {
+                endpoint_url: "https://custom.example.test/v1".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+            }),
+            &[shared, raw].map(|public| AccountModelCapabilityInput {
+                public_model: public.into(),
+                upstream_model: format!("custom-{public}"),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                source: None,
+            }),
+        )
+        .unwrap();
+    let published = crate::gateway::handler::published_models_data_locked(&state).unwrap();
+    assert!(published.iter().any(|r| r["id"] == shared));
+    assert!(!published.iter().any(|r| r["id"] == raw));
+    let s = snapshot(&state).unwrap();
+    let page = aliases::project(&s, &PageQuery::default());
+    let group = page
+        .groups
+        .iter()
+        .find(|g| g.public_model == shared)
+        .unwrap();
+    assert!(
+        group
+            .rows
+            .iter()
+            .any(|r| r.custom_account_id.as_deref() == Some("custom-shared"))
+    );
+    assert!(!page.groups.iter().any(|g| g.public_model == raw));
+}
+
 #[test]
 fn alias_inventory_respects_destination_protocols_and_disabled_binding_ranks() {
     let f = fixture();

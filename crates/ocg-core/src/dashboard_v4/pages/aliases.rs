@@ -137,6 +137,17 @@ fn inventory(s: &PageSnapshot) -> Vec<AliasPageRow> {
         .iter()
         .flat_map(|p| p.models.iter().map(|m| m.model_id.as_str()))
         .collect::<HashSet<_>>();
+    // A raw spelling can also be an authorized shared Alias. Custom mappings
+    // may serve that Alias even when the builtin mapping is disabled. Keep
+    // rejecting raw pins whose public Alias has a different spelling.
+    let shared_names = s
+        .contracts
+        .providers
+        .iter()
+        .flat_map(|p| &p.models)
+        .filter(|m| !m.alias.is_empty())
+        .map(|m| m.alias.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
     let mut rows = Vec::new();
     for p in &s.contracts.providers {
         if !enabled.contains(p.provider_id.as_str()) {
@@ -192,7 +203,9 @@ fn inventory(s: &PageSnapshot) -> Vec<AliasPageRow> {
                     }
                 })
             });
-            let routable = !raw_models.contains(m.public_model.as_str())
+            let raw_shadowed = raw_models.contains(m.public_model.as_str())
+                && !shared_names.contains(&m.public_model.to_ascii_lowercase());
+            let routable = !raw_shadowed
                 && a.setup_step == dashboard_v3::AccountSetupStep::Ready
                 && a.plan_routable
                 && contract.is_some_and(|c| c.routable);

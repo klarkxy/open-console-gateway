@@ -46,6 +46,9 @@ its mapping count, overlap warning, publication state and configured routing
 ranks remain complete facts. Expanding capabilities or following a model
 link loads the corresponding details on demand. The management list can
 include saved mappings that are not currently eligible for `/v1/models`.
+Custom API mappings that use an authorized shared Alias appear in that same
+group, including when the builtin mapping is disabled. A conflicting raw
+upstream ID remains subject to the registry's ambiguity checks.
 
 Clients send **aliases**: stable lowercase kebab-case names from the local registry. Go seeds remain code-owned; fresh MiniMax CN, Kimi CN, GOAT, and Ollama aliases derive from the complete saved catalog. Saved legacy aliases remain unchanged. Case-folded Alias spellings such as `GLM-5.2` are accepted.
 

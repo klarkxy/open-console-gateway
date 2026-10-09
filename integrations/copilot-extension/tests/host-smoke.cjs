@@ -4,7 +4,7 @@ exports.run=async()=>{
  const extension=vscode.extensions.getExtension('open-console-gateway.copilot');assert.ok(extension,'extension discovered');
  const exported=await extension.activate();assert.equal(exported,undefined,'no credential-bearing activation exports');
  const root=process.env.OCG_COPILOT_SMOKE_STORAGE;assert.ok(root,'isolated storage supplied');
- let rows=['chat_completions','responses','messages'].map(p=>({id:'smoke-'+p,ocg:{schemaVersion:2,contextWindow:32000,maxOutputTokens:4000,toolCalling:true,inputModalities:['text'],protocols:{preferred:p,supported:[p]}}}));const requests=[];
+ let rows=['chat_completions','responses','messages'].map(p=>({id:'smoke-'+p,ocg:{schemaVersion:2,name:'Shared upstream display name',contextWindow:32000,maxOutputTokens:4000,toolCalling:true,inputModalities:['text'],protocols:{preferred:p,supported:[p]}}}));const requests=[];
  const server=http.createServer(async(req,res)=>{if(req.url==='/v1/models'){assert.equal(req.headers.authorization,'Bearer synthetic-host-key');res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify({data:rows}));return;}
   for await(const _ of req){}requests.push(req.url);res.writeHead(200,{'content-type':'text/event-stream'});
   const send=e=>res.write(`${e.type?'event: '+e.type+'\n':''}data: ${JSON.stringify(e)}\n\n`);
@@ -23,6 +23,7 @@ exports.run=async()=>{
   }
   const token=new vscode.CancellationTokenSource();
   const registered=await waitForModels(3);assert.equal(registered[0].maxInputTokens,28000,'authoritative native input capacity');
+  assert.deepEqual(registered.map(m=>m.name).sort(),rows.map(r=>r.id).sort(),'native picker retains public aliases');
   for(const model of registered){let text='';const response=await model.sendRequest([vscode.LanguageModelChatMessage.User('ping')],{},token.token);for await(const part of response.stream){if(part instanceof vscode.LanguageModelTextPart)text+=part.value;}assert.equal(text,'HOST-OK');}
   rows=rows.slice(1);await vscode.commands.executeCommand('ocg.refresh');await waitForModels(2);
   await vscode.commands.executeCommand('ocg.disconnect');await waitForModels(0);

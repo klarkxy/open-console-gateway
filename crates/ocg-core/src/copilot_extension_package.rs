@@ -3,7 +3,7 @@ use crate::byok_application::{ByokError, ByokResult};
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Write};
 pub const EXTENSION_ID: &str = "open-console-gateway.copilot";
-pub const EXTENSION_VERSION: &str = "0.1.0";
+pub const EXTENSION_VERSION: &str = "0.1.1";
 pub const RUNTIME: &[u8] =
     include_bytes!("../../../integrations/copilot-extension/dist/extension.cjs");
 const FILES: &[(&str, &[u8])] = &[

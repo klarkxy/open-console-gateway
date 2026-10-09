@@ -47,7 +47,7 @@ MiniMax 的 YAML 配置会在保存时重新排版，保留其他字段值；原
 
 1. 在 VS Code 所在电脑、同一用户下运行 OCG Desktop 或原生 CLI。打开 **应用 > VS Code Copilot**，核对显示的安装、Profile、用户数据目录和扩展目录。**其他安装目标**可选择 Stable/Insiders、已有命名 Profile 或指定目录。命名 Profile 需先在 VS Code 中打开一次；共享默认全局状态的 Profile 应使用默认 Profile 的连接。要求 VS Code 1.141 或更新版本。
 2. 点击 **安装并连接**。OCG 通过官方 VS Code CLI 安装随应用附带、不含 Key 的 VSIX，并将私有一次性交接文件写入该 Profile 的扩展存储。打开或重新加载所选 Profile，再刷新应用状态。**等待 VS Code 激活**与**已连接 OCG**是不同阶段。
-3. 在 Chat 模型选择器的 **Open Console Gateway** 下选择模型。上下文和输出限制直接来自各模型的 OCG 元数据；输入容量为输出上限预留空间。缺少任一限制的模型会显示在应用的元数据提示中。点击**前往模型能力**，在 OCG 补齐一次，再在 VS Code 执行 **OCG: Refresh Models**。未知工具/图像能力保持关闭；Agent 要求已声明工具调用能力。
+3. 在 Chat 模型选择器的 **Open Console Gateway** 下选择模型。显示名称与 OCG **别名**表的对外模型名一致，请求也使用该别名；即使上游展示名相同，不同别名仍分别列出。上下文和输出限制直接来自各模型的 OCG 元数据；输入容量为输出上限预留空间。缺少任一限制的模型会显示在应用的元数据提示中。点击**前往模型能力**，在 OCG 补齐一次，再在 VS Code 执行 **OCG: Refresh Models**。未知工具/图像能力保持关闭；Agent 要求已声明工具调用能力。
 4. 发出请求，并在 OCG **日志**中确认。安装、Key 导入和目录发现均不等于推理成功。扩展提供 Chat 和 Agent 模型，不提供行内代码补全或 Next Edit Suggestions。
 
 实验性的 VS Code Agent Host/Agents Window 桥接还需要在 VS Code 启用

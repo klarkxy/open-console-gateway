@@ -3,7 +3,7 @@
   "publisher": "open-console-gateway",
   "displayName": "Open Console Gateway",
   "description": "Use OCG models in VS Code Chat and agents with a dynamic model catalog.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "license": "SEE LICENSE IN LICENSE",
   "private": true,
   "type": "commonjs",
