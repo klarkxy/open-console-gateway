@@ -146,6 +146,8 @@ impl ByokNativeHost {
         }
         let old_rows = model_rows(client, &current);
         let next_rows = model_rows(client, &plan.managed.owned);
+        let old_routes = route_projection(client, &current);
+        let next_routes = route_projection(client, &plan.managed.owned);
         let old_ids: BTreeSet<_> = old_rows.keys().cloned().collect();
         let next_ids: BTreeSet<_> = models.iter().map(|model| model.id.clone()).collect();
         let removed: Vec<_> = old_ids.difference(&next_ids).cloned().collect();
@@ -156,12 +158,13 @@ impl ByokNativeHost {
                 let old = without_secrets(old_rows.get(*id).expect("old row"));
                 let next = without_secrets(next_rows.get(*id).unwrap_or(&Value::Null));
                 old != next
-                    || route_for_model(client, &current, id)
-                        != route_for_model(client, &plan.managed.owned, id)
+                    || route_for_model(client, &old_routes, old_rows.get(*id))
+                        != route_for_model(client, &next_routes, next_rows.get(*id))
             })
             .cloned()
             .collect();
         let recorded = recorded_generated(client, prior.as_ref(), &current);
+        let recorded_rows = recorded.as_ref().map(|value| model_rows(client, value));
         let legacy_catalog_uncertain = client == ByokClient::Codex
             && prior.as_ref().is_some_and(|receipt| {
                 receipt.version == 1
@@ -173,10 +176,7 @@ impl ByokNativeHost {
             if row_customized(
                 client,
                 old_rows.get(id).expect("old row"),
-                recorded
-                    .as_ref()
-                    .and_then(|generated| model_rows(client, generated).remove(id))
-                    .as_ref(),
+                recorded_rows.as_ref().and_then(|rows| rows.get(id)),
             ) || legacy_catalog_uncertain
             {
                 customized.push(id.clone());
@@ -793,14 +793,29 @@ pub(super) fn secret_hashes(value: &Value) -> Value {
     Value::Object(out)
 }
 
-fn route_for_model(client: ByokClient, owned: &Value, id: &str) -> Value {
-    let projected = semantic::projection(client, owned);
+fn route_projection(client: ByokClient, owned: &Value) -> Value {
+    let mut projected = semantic::projection(client, owned);
+    if client == ByokClient::Minimax {
+        for provider in projected["providers"]
+            .as_object_mut()
+            .into_iter()
+            .flat_map(|map| map.values_mut())
+        {
+            if let Some(provider) = provider.as_object_mut() {
+                provider.remove("models");
+            }
+        }
+    }
+    projected
+}
+
+fn route_for_model(client: ByokClient, projected: &Value, row: Option<&Value>) -> Value {
     match client {
         ByokClient::Codex=>projected["provider"].clone(),
-        ByokClient::Copilot=>model_rows(client,owned).get(id).map(|row|json!({"apiType":row["apiType"],"url":row["url"],"providerUrl":projected["provider"]["url"]})).unwrap_or(Value::Null),
-        ByokClient::Kimi=>model_rows(client,owned).get(id).map(|row|projected["providers"][row["provider"].as_str().unwrap_or("")].clone()).unwrap_or(Value::Null),
-        ByokClient::Minimax=>model_rows(client,owned).get(id).map(|row|{let mut provider=projected["providers"][row["_provider"].as_str().unwrap_or("")].clone();if let Some(map)=provider.as_object_mut(){map.remove("models");}provider}).unwrap_or(Value::Null),
-        ByokClient::Zcode=>model_rows(client,owned).get(id).and_then(|row|projected["providers"].as_array().into_iter().flatten().find(|provider|provider["providerId"]==row["providerId"])).map(|provider|json!({"api":provider["config"]["api"],"accessType":provider["config"]["access"]["type"]})).unwrap_or(Value::Null),
+        ByokClient::Copilot=>row.map(|row|json!({"apiType":row["apiType"],"url":row["url"],"providerUrl":projected["provider"]["url"]})).unwrap_or(Value::Null),
+        ByokClient::Kimi=>row.map(|row|projected["providers"][row["provider"].as_str().unwrap_or("")].clone()).unwrap_or(Value::Null),
+        ByokClient::Minimax=>row.map(|row|projected["providers"][row["_provider"].as_str().unwrap_or("")].clone()).unwrap_or(Value::Null),
+        ByokClient::Zcode=>row.and_then(|row|projected["providers"].as_array().into_iter().flatten().find(|provider|provider["providerId"]==row["providerId"])).map(|provider|json!({"api":provider["config"]["api"],"accessType":provider["config"]["access"]["type"]})).unwrap_or(Value::Null),
     }
 }
 

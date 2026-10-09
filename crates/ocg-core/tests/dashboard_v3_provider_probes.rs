@@ -841,7 +841,9 @@ async fn goat_static_protocol_reset_enables_documented_family_and_preserves_expl
     assert_eq!(future["protocols"]["chat_completions"]["override"], "auto");
     assert_eq!(future["protocols"]["chat_completions"]["source"], "static");
     assert_eq!(future["protocols"]["chat_completions"]["enabled"], true);
-    assert!(future["protocols"]["responses"].is_null());
+    assert_eq!(future["protocols"]["responses"]["override"], "force_off");
+    assert_eq!(future["protocols"]["responses"]["available"], false);
+    assert_eq!(future["protocols"]["responses"]["enabled"], false);
     assert!(future["protocols"]["messages"].is_null());
     let (status, overridden) = send_json(&harness, Method::PUT, "/provider-contracts/provider/command-code/model-protocol-overrides", &cas(&harness, json!({"overrides":[{"modelId":"future-goat-model","protocol":"chat_completions","state":"force_off"}]}))).await;
     assert_eq!(status, StatusCode::OK, "{overridden}");

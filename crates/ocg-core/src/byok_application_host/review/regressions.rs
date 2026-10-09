@@ -127,7 +127,7 @@ fn zcode_takeover_undo_refuses_to_delete_a_provider_still_referenced_by_a_manual
 
 // These fixtures remove every additive v2 field, rather than only changing its version.
 fn true_v1_receipt(h: &Harness, client: ByokClient) -> Store {
-    let target = h.host.paths.resolve(client, None).unwrap();
+    let target = normalize_target(&h.host.paths.resolve(client, None).unwrap()).unwrap();
     let store = Store::open(&h.host.data_dir, &target).unwrap();
     let mut receipt: serde_json::Value =
         serde_json::from_slice(&fs::read(store.receipt_path()).unwrap()).unwrap();
@@ -155,6 +155,57 @@ fn true_v1_receipt(h: &Harness, client: ByokClient) -> Store {
     )
     .unwrap();
     store
+}
+
+#[test]
+fn unchanged_large_codex_catalog_has_no_review_changes_and_preserves_native_bytes() {
+    let h = harness("large-codex-review");
+    let client = ByokClient::Codex;
+    let models = (0..250)
+        .map(|index| model(&format!("vendor/model.{index:03}"), 100_000, Some(8_192)))
+        .collect::<Vec<_>>();
+    configured_reviewed(&h, client, models.clone());
+    let target = normalize_target(&h.host.paths.resolve(client, None).unwrap()).unwrap();
+    let config = fs::read(&target.path).unwrap();
+    let catalog = fs::read(catalog_path(&target).unwrap()).unwrap();
+    let preview = preview_update(&h.host, client, models.clone());
+    let changes = preview.preview.as_ref().unwrap();
+    assert!(changes.added_model_ids.is_empty());
+    assert!(changes.removed_model_ids.is_empty());
+    assert!(changes.updated_model_ids.is_empty());
+    assert!(!changes.requires_overwrite);
+    assert_eq!(fs::read(&target.path).unwrap(), config);
+    assert_eq!(fs::read(catalog_path(&target).unwrap()).unwrap(), catalog);
+    reviewed_update(&h.host, client, &preview, models, false).unwrap();
+    assert_eq!(fs::read(&target.path).unwrap(), config);
+    assert_eq!(fs::read(catalog_path(&target).unwrap()).unwrap(), catalog);
+}
+
+#[test]
+fn provider_route_changes_update_every_retained_model_in_all_clients() {
+    for client in ByokClient::ALL {
+        let h = harness("review-route-change");
+        let models = vec![
+            model("a", 100_000, Some(8_192)),
+            model("b", 100_000, Some(8_192)),
+        ];
+        configured_reviewed(&h, client, models.clone());
+        let preview = h
+            .host
+            .execute(ByokHostRequest::Preview {
+                client,
+                target_path: None,
+                gateway_v1_url: "http://127.0.0.1:9043/v1".into(),
+                models,
+                copilot_token_budget: None,
+            })
+            .unwrap();
+        assert_eq!(
+            preview.preview.unwrap().updated_model_ids,
+            vec!["a", "b"],
+            "{client:?}"
+        );
+    }
 }
 
 #[test]

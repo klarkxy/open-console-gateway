@@ -1073,11 +1073,15 @@ async fn command_code_contract_refresh_leaves_undocumented_rows_unavailable_and_
     assert_eq!(discovered["routable"], false);
     assert_eq!(
         discovered["protocols"]["chat_completions"]["override"],
-        Value::Null
+        "auto"
     );
     assert_eq!(
         discovered["protocols"]["chat_completions"]["enabled"],
-        Value::Null
+        false
+    );
+    assert_eq!(
+        discovered["protocols"]["chat_completions"]["available"],
+        false
     );
 
     let (status, legacy) = send_json(

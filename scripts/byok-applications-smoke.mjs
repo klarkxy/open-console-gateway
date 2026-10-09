@@ -45,6 +45,12 @@ const defaultExecutable = join(
   process.platform === "win32" ? "ocg-manager-cli.exe" : "ocg-manager-cli",
 );
 const executable = resolve(argumentValue("--cli") ?? defaultExecutable);
+// Bound every loopback request so a blocked native operation fails the smoke.
+const nativeFetch = globalThis.fetch;
+globalThis.fetch = (input, init = {}) => nativeFetch(input, {
+  ...init,
+  signal: AbortSignal.timeout(30_000),
+});
 const exactModel = "vendor/model.name";
 const publicModels = [exactModel, "模".repeat(100), ...Array.from({ length: 248 }, (_, index) => `vendor/model.${index}`)];
 const keyNames = { codex: "codex", kimi: "kimi-code", minimax: "minimax-code", zcode: "zcode", copilot: "copilot" };
